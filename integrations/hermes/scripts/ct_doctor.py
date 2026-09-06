@@ -269,62 +269,100 @@ def mcp_tools_list(path, timeout=MCP_TIMEOUT, env=None):
 
 def check_sidecar_reachable(path, timeout=MCP_TIMEOUT, env=None, brain_paths=None):
     """(3) MCP tools/list reachable + tool count → tier classification."""
+    return _probe_sidecar(path, timeout=timeout, env=env, brain_paths=brain_paths)[0]
+
+
+def _probe_sidecar(path, timeout=MCP_TIMEOUT, env=None, brain_paths=None):
+    """Probe the sidecar once. Returns (CheckResult, tool_count).
+
+    The count is handed back structurally rather than scraped from the
+    result's prose. The zero-tool and unreachable details carry no leading
+    count, so a text scrape yields None exactly when the surface is most
+    broken — and the version cross-check then silently skips the comparison
+    that would have caught it.
+
+    `tool_count` is None when no live surface was observed at all (no binary,
+    or the handshake failed) and an integer — including 0 — when the sidecar
+    answered. The distinction matters: 0 is a known-bad surface, not an
+    unknown one.
+    """
     if not path:
-        return CheckResult(
-            "sidecar-mcp",
-            FAIL,
-            "skipped: no sidecar binary found",
-            "Install Curated Thoughts so the MCP surface exists; without it "
-            "the agent has no CT tools at all.",
+        return (
+            CheckResult(
+                "sidecar-mcp",
+                FAIL,
+                "skipped: no sidecar binary found",
+                "Install Curated Thoughts so the MCP surface exists; without "
+                "it the agent has no CT tools at all.",
+            ),
+            None,
         )
     tools, _server_version, error = mcp_tools_list(path, timeout=timeout, env=env)
     if tools is None:
         config_path = (brain_paths or ct_env.resolve_brain_paths()).config_path
-        return CheckResult(
-            "sidecar-mcp",
-            FAIL,
-            f"{SIDECAR_NAME} --mcp did not answer tools/list: {error}",
-            "If it timed out, an old sidecar process may be wedged: kill all "
-            f"{SIDECAR_NAME} processes and retry; if spawn failed, reinstall "
-            f"Curated Thoughts. Check {config_path} is valid JSON.",
+        return (
+            CheckResult(
+                "sidecar-mcp",
+                FAIL,
+                f"{SIDECAR_NAME} --mcp did not answer tools/list: {error}",
+                "If it timed out, an old sidecar process may be wedged: kill "
+                f"all {SIDECAR_NAME} processes and retry; if spawn failed, "
+                f"reinstall Curated Thoughts. Check {config_path} is valid "
+                "JSON.",
+            ),
+            None,
         )
     count = len(tools)
     if count >= FULL_TIER_TOOLS:
-        return CheckResult(
-            "sidecar-mcp",
-            PASS,
-            f"{count} tools listed (v2.5-full tier; write path active)",
+        return (
+            CheckResult(
+                "sidecar-mcp",
+                PASS,
+                f"{count} tools listed (v2.5-full tier; write path active)",
+            ),
+            count,
         )
     if count >= READ_TIER_TOOLS:
         write_tools_present = "curated_add_wisdom" in tools
         extra = (
             "" if not write_tools_present else " (write tools present — unexpected at this count)"
         )
-        return CheckResult(
-            "sidecar-mcp",
-            WARN,
-            f"{count} tools listed — v2.4-read tier; write path dormant{extra}",
-            f"Only {count} tools exposed, so curated_add_wisdom and friends "
-            "are absent and the write path is dormant. This matches the "
-            "v2.4-read tier: upgrade Curated Thoughts to >=2.5 for the full "
-            f"{FULL_TIER_TOOLS}-tool surface. Read-only routing still works.",
+        return (
+            CheckResult(
+                "sidecar-mcp",
+                WARN,
+                f"{count} tools listed — v2.4-read tier; write path dormant{extra}",
+                f"Only {count} tools exposed, so curated_add_wisdom and "
+                "friends are absent and the write path is dormant. This "
+                "matches the v2.4-read tier: upgrade Curated Thoughts to "
+                f">=2.5 for the full {FULL_TIER_TOOLS}-tool surface. "
+                "Read-only routing still works.",
+            ),
+            count,
         )
     if count == 0:
-        return CheckResult(
-            "sidecar-mcp",
-            FAIL,
-            "sidecar answered tools/list with 0 tools — broken install",
-            "The MCP handshake succeeded but the sidecar exposed no tools at "
-            "all. This is a broken install, not an older tier: reinstall "
-            "Curated Thoughts and re-run ct_doctor.",
+        return (
+            CheckResult(
+                "sidecar-mcp",
+                FAIL,
+                "sidecar answered tools/list with 0 tools — broken install",
+                "The MCP handshake succeeded but the sidecar exposed no tools "
+                "at all. This is a broken install, not an older tier: "
+                "reinstall Curated Thoughts and re-run ct_doctor.",
+            ),
+            count,
         )
-    return CheckResult(
-        "sidecar-mcp",
-        WARN,
-        f"{count} tools listed — below every known tier",
-        f"Only {count} tools, fewer than even the v2.4-read tier "
-        f"({READ_TIER_TOOLS}). The sidecar may be partially broken: reinstall "
-        "Curated Thoughts and compare its version with shared/compat.yaml.",
+    return (
+        CheckResult(
+            "sidecar-mcp",
+            WARN,
+            f"{count} tools listed — below every known tier",
+            f"Only {count} tools, fewer than even the v2.4-read tier "
+            f"({READ_TIER_TOOLS}). The sidecar may be partially broken: "
+            "reinstall Curated Thoughts and compare its version with "
+            "shared/compat.yaml.",
+        ),
+        count,
     )
 
 
@@ -472,6 +510,39 @@ def check_embedding():
         )
 
 
+def _plugin_listed_under_enabled(text):
+    """True if PLUGIN_NAME appears under `plugins.enabled` specifically.
+
+    Scope-aware for the same reason install.sh is: an unscoped list-item scan
+    also matches an entry under `plugins.disabled`, reporting a disabled
+    plugin as enabled — the skills and session hook would stay dormant while
+    the doctor said everything was wired up.
+    """
+    m = re.search(r"^plugins:\s*$", text, re.M)
+    if not m:
+        return False
+    section = text[m.end():]
+    nxt = re.search(r"^\S", section, re.M)  # next top-level key ends plugins
+    if nxt:
+        section = section[: nxt.start()]
+    # Narrow again to the `enabled:` sub-block; any sibling key closes it.
+    # [ \t]+ not \s+: \s matches newlines, so the captured "indent" would
+    # include the preceding line break and never match a sibling key.
+    e = re.search(r"^([ \t]+)enabled:[ \t]*$", section, re.M)
+    if not e:
+        return False
+    indent = e.group(1)
+    block = section[e.end():]
+    sib = re.search(r"^" + re.escape(indent) + r"[A-Za-z_][A-Za-z0-9_-]*:", block, re.M)
+    if sib:
+        block = block[: sib.start()]
+    return bool(
+        re.search(
+            r"^[ \t]+-[ \t]+" + re.escape(PLUGIN_NAME) + r"[ \t]*$", block, re.M
+        )
+    )
+
+
 def check_hermes_registration():
     """(7) curated-thoughts registered under mcp_servers, and the plugin
     enabled under plugins. String scan — no yaml dependency."""
@@ -534,7 +605,7 @@ def check_hermes_registration():
             "  enabled:\n"
             f"    - {PLUGIN_NAME}",
         )
-    if not re.search(r"^\s+-\s+" + re.escape(PLUGIN_NAME) + r"\s*$", text, re.M):
+    if not _plugin_listed_under_enabled(text):
         return CheckResult(
             "hermes-registration",
             WARN,
@@ -686,7 +757,18 @@ def check_version_compat(path, tool_count=None):
     check 3 is what determines the capability tier. This check exists to catch
     the case where a discoverable version *disagrees* with the observed tools.
     """
-    observed_tier = _tier_for_tool_count(tool_count) if tool_count is not None else None
+    # None = no live surface observed; an int = observed, and authoritative.
+    # A count that maps to no tier (0, or anything below the read tier) is a
+    # *known* surface, not an unknown one — it must still contradict a
+    # discoverable version rather than fall through to the "undiscoverable"
+    # PASS below.
+    observed = tool_count is not None
+    observed_tier = _tier_for_tool_count(tool_count) if observed else None
+    observed_desc = (
+        observed_tier
+        if observed_tier
+        else (f"below-tier ({tool_count} tools)" if observed else None)
+    )
 
     version = None
     source = None
@@ -711,6 +793,18 @@ def check_version_compat(path, tool_count=None):
             f"sidecar release version not discoverable on this platform; "
             f"tier {observed_tier} determined from the live tool count",
         )
+    if version is None and observed:
+        # Observed a live surface that matches no tier. The version is not
+        # discoverable either, so there is nothing to cross-check — but the
+        # sidecar-mcp check has already failed/warned on it, so stay quiet
+        # here rather than double-reporting the same defect.
+        return CheckResult(
+            "version-compat",
+            PASS,
+            "sidecar release version not discoverable on this platform; the "
+            f"live surface exposed {tool_count} tools — see the sidecar-mcp "
+            "check for that verdict",
+        )
     if version is None:
         return CheckResult(
             "version-compat",
@@ -734,12 +828,12 @@ def check_version_compat(path, tool_count=None):
         )
     name, lo, hi, tools, wp = tier
     rng = f">={lo[0]}.{lo[1]}" + (f",<{hi[0]}.{hi[1]}" if hi else "")
-    if observed_tier and observed_tier != name:
+    if observed and observed_tier != name:
         return CheckResult(
             "version-compat",
             WARN,
             f"version {vtxt} ({source}) implies tier {name}, but the live "
-            f"sidecar exposed a {observed_tier} tool surface",
+            f"sidecar exposed a {observed_desc} tool surface",
             "The installed package and the running sidecar disagree. A stale "
             "sidecar process may still be serving an older binary: kill all "
             f"{SIDECAR_NAME} processes so the next MCP call respawns the "
@@ -766,17 +860,11 @@ def run_checks(timeout=MCP_TIMEOUT, env=None):
     results.append(check_sidecar_binary((path, resolved, source)))
     results.append(check_sidecar_identity(path, resolved))
 
-    mcp_result = check_sidecar_reachable(
+    # One probe, and the count comes back structurally — see _probe_sidecar.
+    mcp_result, tool_count = _probe_sidecar(
         path, timeout=timeout, env=env, brain_paths=brain_paths
     )
     results.append(mcp_result)
-
-    # Reuse the observed tool count for the version cross-check rather than
-    # spawning the sidecar a second time.
-    tool_count = None
-    m = re.match(r"^(\d+) tools listed", mcp_result.detail)
-    if m:
-        tool_count = int(m.group(1))
 
     results.append(check_brain_dir(brain_paths))
     results.append(check_vault(brain_paths))

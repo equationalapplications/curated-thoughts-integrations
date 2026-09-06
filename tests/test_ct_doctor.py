@@ -1119,6 +1119,171 @@ class StatusSnapshotTests(DoctorTestCase):
         self.assertIn(snap["status"], (ct_status.OK, ct_status.DEGRADED, ct_status.UNKNOWN))
 
 
+class ReviewRegressionTests(DoctorTestCase):
+    """Pinned regressions from the PR #5 review."""
+
+    # --- non-string source_ref (TypeError crash) --------------------------
+
+    def test_non_string_source_ref_does_not_crash(self):
+        """SQLite is dynamically typed: an imported DB can hold INTEGER /
+        REAL / BLOB in source_ref. Reaching the token regex with one raised
+        TypeError, which the census did not catch and run_checks had no
+        boundary for — aborting `ct_doctor check` on exactly the imported
+        database this check exists to inspect."""
+        for value in (123, 4.5, b"blob"):
+            self.assertEqual(ct_preflight.classify_source_ref(value), "mangled", value)
+            self.assertFalse(ct_preflight.is_token(value))
+            self.assertFalse(ct_preflight.engine_would_rewrite(value))
+            self.assertIsNone(ct_preflight.recovery_shape(value))
+            self.assertIsNone(ct_preflight.normalize_source_ref(value))
+
+    def test_census_survives_non_text_storage_values(self):
+        import sqlite3
+
+        self.make_brain()
+        db = self.brain_db()
+        conn = sqlite3.connect(db)
+        try:
+            conn.execute(
+                "CREATE TABLE llm_wiki_entries (id TEXT, source_ref, source_type TEXT)"
+            )
+            conn.executemany(
+                "INSERT INTO llm_wiki_entries VALUES (?,?,?)",
+                [
+                    ("e1", 42, "librarian_inferred"),
+                    ("e2", b"\x00blob", "librarian_inferred"),
+                    ("e3", None, "librarian_inferred"),
+                ],
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        census = ct_preflight.census_source_refs(db)  # must not raise
+        self.assertIsNone(census.error)
+        self.assertEqual(census.null_ref_count, 1)
+        self.assertEqual(census.damaged, 2)
+        # And the whole doctor run completes rather than aborting.
+        r = ct_doctor.check_import_preflight()
+        self.assertEqual(r.status, ct_doctor.FAIL)
+
+    # --- tool count passed structurally, not scraped from prose -----------
+
+    def test_probe_returns_tool_count_including_zero(self):
+        result, count = ct_doctor._probe_sidecar(
+            str(self.mock_path), timeout=5, env={**self.with_path(), "MOCK_TOOLS": ""}
+        )
+        # An empty MOCK_TOOLS yields one empty name, not zero; assert the
+        # contract that the count is an int whenever the sidecar answered.
+        self.assertIsInstance(count, int)
+        result, count = ct_doctor._probe_sidecar(None)
+        self.assertIsNone(count, "no live surface observed => None, not 0")
+
+    def test_probe_count_matches_detail_for_real_tiers(self):
+        for mock_tools, expected in ((TIER8, 8), (None, 14)):
+            env = dict(self.with_path())
+            if mock_tools:
+                env["MOCK_TOOLS"] = mock_tools
+            result, count = ct_doctor._probe_sidecar(
+                str(self.mock_path), timeout=5, env=env
+            )
+            self.assertEqual(count, expected, result.detail)
+
+    def test_zero_tool_surface_contradicts_a_v25_package(self):
+        """The scrape returned None for the zero-tool detail, so version-compat
+        skipped the comparison and PASSed on a broken install."""
+        orig = ct_doctor.subprocess.run
+
+        def fake(cmd, *a, **k):
+            if cmd[:2] == ["dpkg-query", "-W"]:
+                return subprocess.CompletedProcess(cmd, 0, "2.5.1", "")
+            return orig(cmd, *a, **k)
+
+        ct_doctor.subprocess.run = fake
+        self.addCleanup(setattr, ct_doctor.subprocess, "run", orig)
+
+        r = ct_doctor.check_version_compat(str(self.mock_path), tool_count=0)
+        self.assertEqual(r.status, ct_doctor.WARN)
+        self.assertIn("below-tier (0 tools)", r.detail)
+        # None still means "nothing observed" and must not warn.
+        r_none = ct_doctor.check_version_compat(str(self.mock_path), tool_count=None)
+        self.assertEqual(r_none.status, ct_doctor.PASS)
+
+    # --- plugins.enabled scoping ------------------------------------------
+
+    def test_plugin_under_disabled_is_not_enabled(self):
+        cases = {
+            "plugins:\n  enabled:\n    - other\n  disabled:\n    - curated-thoughts\n": False,
+            "plugins:\n  enabled:\n    - curated-thoughts\n  disabled:\n    - noisy\n": True,
+            "plugins:\n  enabled:\n    - curated-thoughts\n": True,
+            "plugins:\n  disabled:\n    - curated-thoughts\n": False,
+            "plugins:\n  enabled:\n    - curated-thoughts\n  hook_callback_timeout: 30\n": True,
+            "mcp_servers:\n  curated-thoughts:\n": False,
+        }
+        for cfg, expected in cases.items():
+            self.assertEqual(
+                ct_doctor._plugin_listed_under_enabled(cfg), expected, cfg
+            )
+
+    def test_registration_warns_when_plugin_only_disabled(self):
+        self.write_config(
+            "mcp_servers:\n"
+            "  curated-thoughts:\n"
+            "    command: curated-thoughts-mcp\n"
+            '    args: ["--mcp"]\n'
+            "plugins:\n"
+            "  enabled:\n"
+            "    - other-plugin\n"
+            "  disabled:\n"
+            "    - curated-thoughts\n"
+        )
+        r = ct_doctor.check_hermes_registration()
+        self.assertEqual(r.status, ct_doctor.WARN)
+        self.assertIn("plugins.enabled", r.detail)
+
+
+class PluginConcurrencyTests(unittest.TestCase):
+    """The cached system-prompt section is reachable from concurrent
+    on_session_start callbacks (Hermes runs several sessions per process)."""
+
+    def _load(self):
+        import importlib.util
+
+        root = (HERE / ".." / "integrations" / "hermes").resolve()
+        spec = importlib.util.spec_from_file_location("ct_plugin_test", root / "__init__.py")
+        m = importlib.util.module_from_spec(spec)
+        sys.modules["ct_plugin_test"] = m
+        spec.loader.exec_module(m)
+        return m
+
+    def test_concurrent_session_starts_converge(self):
+        import threading as _t
+
+        m = self._load()
+        errors = []
+
+        def worker():
+            try:
+                for _ in range(20):
+                    m._on_session_start(session_id="s", cwd=".")
+                    m._system_prompt_section()
+            except Exception as exc:  # pragma: no cover
+                errors.append(exc)
+
+        threads = [_t.Thread(target=worker) for _ in range(8)]
+        for th in threads:
+            th.start()
+        for th in threads:
+            th.join(timeout=30)
+        self.assertEqual(errors, [])
+        self.assertIsInstance(m._system_prompt_section(), str)
+
+    def test_lazy_path_is_guarded(self):
+        m = self._load()
+        self.assertTrue(hasattr(m, "_cache_lock"))
+        m._cached_section = None
+        self.assertIsInstance(m._system_prompt_section(), str)
+
+
 def load_suite():
     return unittest.defaultTestLoader.loadTestsFromModule(sys.modules[__name__])
 

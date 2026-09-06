@@ -138,10 +138,22 @@ check_mcp_registration() {
   return 0
 }
 
-# True if the plugin is listed under a top-level "plugins:" key.
+# True if the plugin is listed under plugins.enabled specifically.
+# Scope-aware: a bare list-item scan would also match an entry under
+# plugins.disabled and report a disabled plugin as enabled.
 has_plugin_enabled() {
   [ -f "$CONFIG_FILE" ] || return 1
-  grep -qE "^[[:space:]]+-[[:space:]]+${PLUGIN_NAME}[[:space:]]*$" "$CONFIG_FILE"
+  awk -v name="$PLUGIN_NAME" '
+    /^[[:space:]]*#/ { next }
+    /^plugins:/      { inplugins = 1; inenabled = 0; next }
+    /^[^[:space:]#-]/ { inplugins = 0; inenabled = 0 }
+    inplugins && /^[[:space:]]+enabled:[[:space:]]*$/ { inenabled = 1; next }
+    # any other key at the same level (disabled:, hook_callback_timeout:, ...)
+    # closes the enabled list
+    inplugins && /^[[:space:]]+[A-Za-z_][A-Za-z0-9_-]*:/ { inenabled = 0; next }
+    inenabled && $0 ~ ("^[[:space:]]+-[[:space:]]+" name "[[:space:]]*$") { found = 1 }
+    END { if (found) exit 0; exit 1 }
+  ' "$CONFIG_FILE"
 }
 
 check_plugin_enablement() {
@@ -159,7 +171,7 @@ check_plugin_enablement() {
     return 0
   fi
   if has_plugin_enabled; then
-    say "OK: '${PLUGIN_NAME}' is listed under plugins — nothing changed."
+    say "OK: '${PLUGIN_NAME}' is listed under plugins.enabled — nothing changed."
   else
     say "A 'plugins:' section exists but does not list '${PLUGIN_NAME}'."
     say "Add it under plugins.enabled:"

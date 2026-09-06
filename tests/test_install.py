@@ -332,5 +332,48 @@ class RepoWideContractTests(unittest.TestCase):
         self.assertEqual(offenders, [], f"Linux-only install advice in {offenders}")
 
 
+class PluginEnablementTests(InstallShTestCase):
+    """plugins.enabled scoping — a disabled entry must not read as enabled."""
+
+    def _write_config(self, body):
+        cfg = self.home / ".hermes" / "config.yaml"
+        cfg.parent.mkdir(parents=True, exist_ok=True)
+        cfg.write_text(body)
+        return cfg
+
+    MCP = (
+        "mcp_servers:\n"
+        "  curated-thoughts:\n"
+        "    command: curated-thoughts-mcp\n"
+        '    args: ["--mcp"]\n'
+    )
+
+    def test_entry_under_disabled_is_not_reported_enabled(self):
+        self._write_config(
+            self.MCP + "plugins:\n  enabled:\n    - other\n  disabled:\n"
+            "    - curated-thoughts\n"
+        )
+        proc = run_install(self.home)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("does not list 'curated-thoughts'", proc.stdout)
+        self.assertNotIn("is listed under plugins.enabled", proc.stdout)
+
+    def test_entry_under_enabled_is_reported_enabled(self):
+        self._write_config(
+            self.MCP + "plugins:\n  enabled:\n    - curated-thoughts\n"
+            "  disabled:\n    - noisy\n"
+        )
+        proc = run_install(self.home)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("is listed under plugins.enabled", proc.stdout)
+
+    def test_no_plugins_section_prints_guidance(self):
+        self._write_config(self.MCP)
+        proc = run_install(self.home)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("No 'plugins:' section found", proc.stdout)
+        self.assertIn("enabled:", proc.stdout)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

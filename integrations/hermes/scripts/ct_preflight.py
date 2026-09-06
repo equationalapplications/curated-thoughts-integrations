@@ -101,7 +101,7 @@ ENGINE_PACKAGE = "@equationalapplications/core-llm-wiki"
 
 def normalize_source_ref(value):
     """Faithful port of the engine's normalizeSourceRef."""
-    if value is None:
+    if not isinstance(value, str):
         return None
     return _NORMALIZE_STRIP.sub("", value).strip()[:_NORMALIZE_CAP]
 
@@ -114,7 +114,10 @@ def engine_would_rewrite(value):
     is a legal character, so a whitespace-padded ref clears the GLOB and is
     still selected.
     """
-    if value is None:
+    if not isinstance(value, str):
+        # SQLite columns are dynamically typed: an imported database can hold
+        # an INTEGER, REAL or BLOB here. Nothing non-textual is a value the
+        # engine's text predicates would select.
         return False
     if value.strip() != value:          # TRIM(source_ref) != source_ref
         return True
@@ -129,14 +132,14 @@ def engine_would_rewrite(value):
 
 def is_normalizer_fixed_point(value):
     """True if the engine's rewrite would leave this value unchanged."""
-    if value is None:
+    if not isinstance(value, str):
         return True
     return normalize_source_ref(value) == value
 
 
 def is_token(value):
     """True if the ref is a well-formed post-#188 token (§2.2)."""
-    return value is not None and bool(_TOKEN_RE.match(value))
+    return isinstance(value, str) and bool(_TOKEN_RE.match(value))
 
 
 def recovery_shape(value):
@@ -144,7 +147,7 @@ def recovery_shape(value):
 
     Per §2.5.4 these shapes drive recovery, never detection.
     """
-    if value is None:
+    if not isinstance(value, str):
         return None
     for prefix, spec_path, desc in _RECOVERY_SHAPES:
         if value.startswith(prefix):
@@ -172,6 +175,13 @@ def classify_source_ref(value):
     """
     if value is None:
         return "null"
+    if not isinstance(value, str):
+        # A non-TEXT storage value (INTEGER/REAL/BLOB) is certainly not a
+        # token, and reaching the regex with one would raise TypeError —
+        # which census_source_refs does not catch and run_checks has no
+        # boundary for, so `ct_doctor check` would abort on exactly the
+        # imported-database case this check exists to inspect.
+        return "mangled"
     if is_token(value):
         return "token"
     if engine_would_rewrite(value):

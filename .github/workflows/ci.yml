@@ -31,6 +31,13 @@ jobs:
         python: ["3.9", "3.13"]
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Both jobs execute repository-controlled Python after
+          # checkout. Without this, checkout leaves the job token in
+          # .git/config where that code could read and exfiltrate it;
+          # `contents: read` limits the token's power, not its
+          # disclosure. Nothing here pushes, so no credential is needed.
+          persist-credentials: false
 
       - uses: actions/setup-python@v5
         with:
@@ -72,6 +79,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Both jobs execute repository-controlled Python after
+          # checkout. Without this, checkout leaves the job token in
+          # .git/config where that code could read and exfiltrate it;
+          # `contents: read` limits the token's power, not its
+          # disclosure. Nothing here pushes, so no credential is needed.
+          persist-credentials: false
 
       - uses: actions/setup-python@v5
         with:

@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import logging
 import sys
+import threading
 from pathlib import Path
 
 PLUGIN_ROOT = Path(__file__).resolve().parent
@@ -41,6 +42,20 @@ SKILLS = (
 
 # Cached snapshot, refreshed at session start so the system-prompt section
 # does not re-run filesystem probes on every prompt assembly.
+#
+# Hermes can run several sessions in one process (the gateway does), so this
+# module-level state is reachable from concurrent `on_session_start`
+# callbacks. Reference assignment is atomic under the GIL, so a reader cannot
+# observe a half-written value — but without a lock two sessions racing the
+# lazy path both do the filesystem work, and the state is a latent trap the
+# moment the cached content stops being machine-global. The lock costs
+# nothing here and removes the hazard class rather than the symptom.
+#
+# What the snapshot holds is deliberately process-wide, not per-session: it
+# describes the machine (sidecar present, brain reachable, vault resolvable),
+# so sharing it across sessions is correct. If it ever gains session-scoped
+# content, this cache must become session-keyed instead.
+_cache_lock = threading.Lock()
 _cached_section = None
 
 
@@ -65,7 +80,9 @@ def _on_session_start(**kwargs):
     """
     global _cached_section
     try:
-        _cached_section = _compute_section()
+        section = _compute_section()
+        with _cache_lock:
+            _cached_section = section
     except Exception:  # pragma: no cover - defensive
         logger.debug("curated-thoughts: session-start hook failed", exc_info=True)
 
@@ -73,9 +90,18 @@ def _on_session_start(**kwargs):
 def _system_prompt_section():
     """Return the Curated Thoughts context block, computing it on first use."""
     global _cached_section
-    if _cached_section is None:
-        _cached_section = _compute_section()
-    return _cached_section or ""
+    with _cache_lock:
+        cached = _cached_section
+    if cached is not None:
+        return cached
+    # Computed outside the lock: the probe touches the filesystem and must not
+    # serialize prompt assembly across sessions. A concurrent caller may
+    # duplicate the work once; both produce the same machine-scoped answer.
+    section = _compute_section()
+    with _cache_lock:
+        if _cached_section is None:
+            _cached_section = section
+        return _cached_section or ""
 
 
 def register(ctx):
