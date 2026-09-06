@@ -87,8 +87,13 @@ def _on_session_start(**kwargs):
         logger.debug("curated-thoughts: session-start hook failed", exc_info=True)
 
 
-def _system_prompt_section():
-    """Return the Curated Thoughts context block, computing it on first use."""
+def _system_prompt_section(session_info=None):
+    """Return the Curated Thoughts context block, computing it on first use.
+
+    Hermes calls section callables with a read-only session-info mapping
+    (see plugins.py::register_system_prompt_section), so the signature must
+    accept it even though this machine-scoped section ignores its contents.
+    """
     global _cached_section
     with _cache_lock:
         cached = _cached_section
@@ -112,7 +117,9 @@ def register(ctx):
             logger.warning("curated-thoughts: skill file missing: %s", skill_md)
             continue
         try:
-            ctx.register_skill(skill, str(skill_md))
+            # register_skill requires a Path (it calls path.exists()); the
+            # skills/ SKILL.md paths are built as Paths above — pass as-is.
+            ctx.register_skill(skill, skill_md)
         except Exception:  # pragma: no cover - host API variance
             logger.warning("curated-thoughts: could not register skill %s", skill, exc_info=True)
 
