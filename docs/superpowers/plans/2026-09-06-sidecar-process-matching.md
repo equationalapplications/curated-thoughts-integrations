@@ -47,6 +47,11 @@ no daemons, no data paths.
     '^<abs-path>'`; forbidden → `pgrep -x <name>`, `pkill -x <name>`,
     `killall <name>`, unanchored `pgrep -f <name>`; verification (not
     find/kill) → `readlink /proc/<pid>/exe` + md5 compare.
+  - **Launch-path assumption** — the anchored pattern presumes the sidecar
+    starts via the absolute installed path; symlink / relative-path /
+    relocated-binary / interpreter-launched styles are out of contract
+    (they do not occur for the dpkg-installed sidecar), with
+    `readlink /proc/<pid>/exe` as the launch-independent fallback.
   - **Do NOT truncate to 15 chars** warning (the truncation "fix" is a red
     herring).
 - [ ] Commit: `docs: sidecar process-matching contract`
