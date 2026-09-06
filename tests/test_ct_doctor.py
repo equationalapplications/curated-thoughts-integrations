@@ -428,6 +428,193 @@ class FullRunTests(DoctorTestCase):
         self.assertEqual(before, after)
 
 
+class SelfTestCliTests(unittest.TestCase):
+    """Gap: `ct_doctor.py --self-test` as a real subprocess, from a temp cwd."""
+
+    DOCTOR = (HERE / ".." / "integrations" / "hermes" / "scripts" / "ct_doctor.py").resolve()
+
+    @classmethod
+    def setUpClass(cls):
+        # ct_doctor.py --self-test runs THIS module; without this guard each
+        # spawned child would spawn another --self-test forever.
+        if os.environ.get("CT_DOCTOR_IN_SELF_TEST") == "1":
+            raise unittest.SkipTest("recursion guard: already inside --self-test child")
+
+    def _run_self_test(self):
+        with tempfile.TemporaryDirectory(prefix="ct-selftest-cwd-") as cwd:
+            return subprocess.run(
+                [sys.executable, str(self.DOCTOR), "--self-test"],
+                capture_output=True,
+                text=True,
+                timeout=180,
+                cwd=cwd,  # temp cwd proves the script resolves tests/ from __file__
+                env={**os.environ, "CT_DOCTOR_IN_SELF_TEST": "1"},
+            )
+
+    def test_self_test_exits_zero_with_ok_summary(self):
+        proc = self._run_self_test()
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        # unittest.TextTestRunner writes its summary to stderr.
+        self.assertIn("OK", proc.stderr)
+        self.assertIn("Ran ", proc.stderr)
+
+    def _run_doctor(self, *argv):
+        with tempfile.TemporaryDirectory(prefix="ct-selftest-cwd-") as cwd:
+            return subprocess.run(
+                [sys.executable, str(self.DOCTOR), *argv],
+                capture_output=True,
+                text=True,
+                timeout=180,
+                cwd=cwd,
+                env={**os.environ, "CT_DOCTOR_IN_SELF_TEST": "1"},
+            )
+
+    def test_self_test_accepted_after_subcommand(self):
+        # The regression: `check --self-test` used to exit 2 (unrecognized),
+        # because --self-test lives on the main parser. It must now run the
+        # suite and take precedence over the subcommand.
+        proc = self._run_doctor("check", "--self-test")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("Ran ", proc.stderr)
+
+    def test_self_test_wins_over_subcommand_options(self):
+        # Even alongside a subcommand option, the global flag wins: the
+        # suite runs instead of emitting check's JSON payload.
+        proc = self._run_doctor("check", "--json", "--self-test")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("Ran ", proc.stderr)
+        self.assertNotIn('"exit_code"', proc.stdout)
+
+    def test_self_test_accepted_before_subcommand(self):
+        proc = self._run_doctor("--self-test", "check")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("Ran ", proc.stderr)
+
+    def test_unknown_option_still_errors(self):
+        # Stripping --self-test must not turn the parser permissive:
+        # a typo'd option still exits 2 rather than silently running check.
+        proc = self._run_doctor("check", "--jsno")
+        self.assertEqual(proc.returncode, 2, proc.stdout)
+        self.assertIn("unrecognized arguments", proc.stderr)
+
+
+class CheckJsonCliTests(DoctorTestCase):
+    """Gap: --json shape from the real CLI path (not run_checks directly)."""
+
+    def test_json_cli_parseable_and_contracted(self):
+        self.make_brain()
+        self.write_config()
+        out = subprocess.run(
+            [
+                sys.executable,
+                str(HERE / ".." / "integrations" / "hermes" / "scripts" / "ct_doctor.py"),
+                "check",
+                "--json",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            env={**os.environ, "PATH": str(self.bin_dir) + os.pathsep + os.environ["PATH"]},
+        )
+        data = json.loads(out.stdout)
+        self.assertIn("exit_code", data)
+        self.assertIn("checks", data)
+        self.assertEqual(len(data["checks"]), 8)
+        names = [c["name"] for c in data["checks"]]
+        self.assertIn("version-compat", names)
+        for chk in data["checks"]:
+            self.assertEqual(set(chk), {"name", "status", "detail", "hint"})
+            self.assertIn(chk["status"], ("PASS", "WARN", "FAIL"))
+
+
+class VersionFallbackTests(DoctorTestCase):
+    """Gap: check_version_compat's serverInfo.version sanity-window branch.
+
+    dpkg-query is unavailable/failing in the test env, so the fallback reads
+    serverInfo.version from the (mocked) handshake. We monkeypatch
+    mcp_tools_list to control the reported version deterministically and to
+    avoid real subprocess handshakes.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self._orig_mcp_tools_list = ct_doctor.mcp_tools_list
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        ct_doctor.mcp_tools_list = self._orig_mcp_tools_list
+
+    def _mock_handshake(self, server_version):
+        def fake(path, timeout=ct_doctor.MCP_TIMEOUT, env=None):
+            return (["wiki_context"], server_version, None)
+
+        ct_doctor.mcp_tools_list = fake
+
+    def _patch_no_dpkg(self):
+        """Force the dpkg-query branch to fail so the fallback is exercised."""
+        orig = ct_doctor.subprocess.run
+
+        def fake_run(cmd, *a, **k):
+            if cmd[:2] == ["dpkg-query", "-W"]:
+                raise FileNotFoundError("no dpkg in test env")
+            return orig(cmd, *a, **k)
+
+        ct_doctor.subprocess.run = fake_run
+        self.addCleanup(setattr, ct_doctor.subprocess, "run", orig)
+
+    def test_in_window_low_bound_1_0(self):
+        # 1.0.0 passes the sanity window (so it's reported as a detected
+        # version) but is below every tier → WARN "outside every tier",
+        # NOT the "could not determine" path.
+        self._mock_handshake("1.0.0")
+        self._patch_no_dpkg()
+        r = ct_doctor.check_version_compat(str(self.mock_path))
+        self.assertEqual(r.status, ct_doctor.WARN)
+        self.assertIn("serverInfo.version='1.0.0'", r.detail)
+        self.assertIn("outside every tier", r.detail)
+
+    def test_in_window_high_bound_30_0(self):
+        # (30,0) itself would be in the window, but any full triple like
+        # 30.0.0 compares greater than (30, 0) and is rejected → undetermined
+        # WARN. Effectively the sanity window's usable ceiling is < 30.
+        self._mock_handshake("30.0.0")
+        self._patch_no_dpkg()
+        r = ct_doctor.check_version_compat(str(self.mock_path))
+        self.assertEqual(r.status, ct_doctor.WARN)
+        self.assertIn("could not determine", r.detail)
+
+    def test_in_window_realistic_2_5(self):
+        self._mock_handshake("2.5.0")
+        self._patch_no_dpkg()
+        r = ct_doctor.check_version_compat(str(self.mock_path))
+        self.assertEqual(r.status, ct_doctor.PASS)
+        self.assertIn("v2.5-full", r.detail)
+
+    def test_out_of_window_zero_rejected(self):
+        # 0.x < (1,0): the sanity window must reject it → undetermined WARN.
+        self._mock_handshake("0.9.4")
+        self._patch_no_dpkg()
+        r = ct_doctor.check_version_compat(str(self.mock_path))
+        self.assertEqual(r.status, ct_doctor.WARN)
+        self.assertIn("could not determine", r.detail)
+
+    def test_out_of_window_above_30_rejected(self):
+        # > (30,0) is not a plausible sidecar version (it's a framework
+        # version) → the sanity window rejects it → undetermined WARN.
+        self._mock_handshake("99.99.0")
+        self._patch_no_dpkg()
+        r = ct_doctor.check_version_compat(str(self.mock_path))
+        self.assertEqual(r.status, ct_doctor.WARN)
+        self.assertIn("could not determine", r.detail)
+
+    def test_unparseable_server_version_rejected(self):
+        self._mock_handshake("rmcp-abc-dev")
+        self._patch_no_dpkg()
+        r = ct_doctor.check_version_compat(str(self.mock_path))
+        self.assertEqual(r.status, ct_doctor.WARN)
+        self.assertIn("could not determine", r.detail)
+
+
 def load_suite():
     return unittest.defaultTestLoader.loadTestsFromModule(sys.modules[__name__])
 
