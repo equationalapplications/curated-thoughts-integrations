@@ -46,17 +46,21 @@ jobs:
           sys.path.insert(0, "tools")
           import ct_ci_manifest, ct_ci_package
           tag = os.environ["GITHUB_REF_NAME"]
-          ident, version = ct_ci_package.parse_tag(tag)
-          directory, data = ct_ci_package._manifest(".", ident)
-          if str(data["version"]) != version:
-              raise SystemExit(
-                  f"tag {tag} does not match {directory}/integration.yaml "
-                  f"version {data['version']}"
-              )
+          try:
+              ident, version = ct_ci_package.parse_tag(tag)
+              directory, data = ct_ci_package._manifest(".", ident)
+              if str(data["version"]) != version:
+                  raise SystemExit(
+                      f"tag {tag} does not match {directory}/integration.yaml "
+                      f"version {data['version']}"
+                  )
+              # Fails loudly here, before anything is published, if notes are
+              # missing or empty.
+              ct_ci_package.changelog_section(directory, version)
+          except ValueError as error:
+              raise SystemExit(str(error))
           if data.get("status") != "implemented":
               raise SystemExit(f"{ident} is status={data.get('status')}; nothing to release")
-          # Fails loudly here, before anything is published, if notes are missing.
-          ct_ci_package.changelog_section(directory, version)
           matrix = data["matrix"]
           print(f"id={ident}")
           print(f"version={version}")

@@ -1,7 +1,7 @@
 """Build the release artifact for one integration (spec §4.2).
 
 Tag grammar is `<id>-v<semver>`. The id may contain hyphens (claude-code), so
-the split is on the LAST '-v' that is followed by a digit.
+the split is on the FIRST '-v' that yields a full match.
 """
 from __future__ import annotations
 
@@ -84,23 +84,37 @@ def write_checksums(paths, out_dir):
 
 
 def changelog_section(directory, version):
-    """The '## <version>' section body, for the GitHub Release notes."""
+    """The '## <version>' section body, for the GitHub Release notes.
+
+    The heading must carry this version as its exact first token, so
+    '## 0.2.0 — 2026-09-06' matches '0.2.0' but '## 0.2.0-beta' does not.
+    """
     path = Path(directory) / "CHANGELOG.md"
     if not path.exists():
         raise ValueError(f"{path} does not exist; a release needs release notes")
     lines = path.read_text(encoding="utf-8").splitlines()
-    collected, capturing = [], False
+
+    def section_headings():
+        return [line[3:].strip() for line in lines if line.startswith("## ")]
+
+    def no_section_error():
+        heads = ", ".join(h.split()[0] for h in section_headings() if h) or "none"
+        return ValueError(
+            f"{path}: no '## {version}' section (found: {heads}). Add one "
+            f"before tagging (spec §4.2)."
+        )
+
+    collected = None
     for line in lines:
         if line.startswith("## "):
-            if capturing:
-                break
-            capturing = line[3:].strip().startswith(version)
+            heading = line[3:].strip()
+            if collected is not None:
+                break  # the matched section ended at the next heading
+            if heading.split() and heading.split()[0] == version:
+                collected = []
             continue
-        if capturing:
+        if collected is not None:
             collected.append(line)
-    if not capturing and not collected:
-        raise ValueError(
-            f"{path}: no '## {version}' section. Add one before tagging "
-            f"(spec §4.2)."
-        )
+    if collected is None or not "\n".join(collected).strip():
+        raise no_section_error()
     return "\n".join(collected).strip()

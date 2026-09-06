@@ -1,5 +1,6 @@
 """Release tag parsing, tarball construction and release bodies."""
 import hashlib
+import subprocess
 import sys
 import tarfile
 import tempfile
@@ -77,6 +78,49 @@ class TestChangelogSection(unittest.TestCase):
     def test_missing_section_raises(self):
         with self.assertRaises(ValueError):
             ct_ci_package.changelog_section(REPO / "integrations" / "hermes", "9.9.9")
+
+    def test_dated_heading_matches(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            (directory / "CHANGELOG.md").write_text(
+                "# Changelog\n\n## 0.2.0 — 2026-09-06\n\n- Shipped.\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(ct_ci_package.changelog_section(directory, "0.2.0"), "- Shipped.")
+
+    def test_prefix_match_does_not_return_a_prerelease_section(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            (directory / "CHANGELOG.md").write_text(
+                "# Changelog\n\n## 0.2.0-beta\n\n- Beta notes.\n\n## 0.1.0\n\n- Old.\n",
+                encoding="utf-8",
+            )
+            with self.assertRaises(ValueError):
+                ct_ci_package.changelog_section(directory, "0.2.0")
+
+    def test_empty_section_raises(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            (directory / "CHANGELOG.md").write_text(
+                "# Changelog\n\n## 1.0.0\n\n## 0.9.0\n\n- Something.\n",
+                encoding="utf-8",
+            )
+            with self.assertRaises(ValueError):
+                ct_ci_package.changelog_section(directory, "1.0.0")
+
+
+class TestCmdPackageErrors(unittest.TestCase):
+    def test_malformed_tag_fails_cleanly(self):
+        result = subprocess.run(
+            [sys.executable, "tools/ct_ci.py", "package", "--tag", "hermes-vX.Y.Z"],
+            capture_output=True,
+            text=True,
+            cwd=REPO,
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("FAIL", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertNotIn("Traceback", result.stdout)
 
 
 if __name__ == "__main__":

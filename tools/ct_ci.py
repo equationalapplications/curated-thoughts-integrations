@@ -87,18 +87,22 @@ def cmd_policy(args):
 
 
 def cmd_package(args):
-    integration_id, version = ct_ci_package.parse_tag(args.tag)
-    directory, data = ct_ci_package._manifest(args.repo, integration_id)
-    if str(data.get("version")) != version:
-        print(
-            f"FAIL tag {args.tag} declares {version} but "
-            f"{directory}/integration.yaml says {data.get('version')}",
-            file=sys.stderr,
-        )
+    try:
+        integration_id, version = ct_ci_package.parse_tag(args.tag)
+        directory, data = ct_ci_package._manifest(args.repo, integration_id)
+        if str(data.get("version")) != version:
+            print(
+                f"FAIL tag {args.tag} declares {version} but "
+                f"{directory}/integration.yaml says {data.get('version')}",
+                file=sys.stderr,
+            )
+            return 1
+        tarball = ct_ci_package.build(args.repo, integration_id, args.out)
+        sums = ct_ci_package.write_checksums([tarball], args.out)
+        body = ct_ci_package.changelog_section(directory, version)
+    except ValueError as error:
+        print(f"FAIL {error}", file=sys.stderr)
         return 1
-    tarball = ct_ci_package.build(args.repo, integration_id, args.out)
-    sums = ct_ci_package.write_checksums([tarball], args.out)
-    body = ct_ci_package.changelog_section(directory, version)
     (Path(args.out) / "RELEASE_NOTES.md").write_text(body + "\n", encoding="utf-8")
     print(f"artifact={tarball}")
     print(f"checksums={sums}")
