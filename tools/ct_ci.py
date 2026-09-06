@@ -53,6 +53,7 @@ def cmd_generate(args):
 GATES = {
     "versions": ct_ci_policy.gate_versions,
     "architecture": ct_ci_policy.gate_arch,
+    "compat": ct_ci_policy.gate_compat,
 }
 
 

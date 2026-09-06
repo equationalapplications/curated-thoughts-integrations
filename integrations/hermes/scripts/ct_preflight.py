@@ -80,6 +80,8 @@ import _compat_generated  # noqa: E402
 TOKEN_RE = re.compile(_compat_generated.SOURCE_REF_SHAPE)
 EVIDENCE_TABLE = _compat_generated.EVIDENCE_TABLE
 REQUIRED_TABLES = _compat_generated.REQUIRED_TABLES
+# The wiki entries table leads the required list (PR #188 §2.5.5 export order).
+ENTRIES_TABLE = REQUIRED_TABLES[0]
 
 # The engine's keep-set, verbatim from normalizeSourceRef (7.1.0 dist:4082).
 _NORMALIZE_STRIP = re.compile(r"[^A-Za-z0-9._\- ]")
@@ -304,12 +306,12 @@ def census_source_refs(db_path):
     except sqlite3.Error as exc:
         return CensusResult(error=f"cannot open database read-only: {exc}")
     try:
-        if not _table_exists(conn, "llm_wiki_entries"):
+        if not _table_exists(conn, ENTRIES_TABLE):
             # A brain that has never run the wiki engine has no entries table.
             # That is a legitimate state, not an error.
             return CensusResult(table_present=False)
 
-        cols = _columns(conn, "llm_wiki_entries")
+        cols = _columns(conn, ENTRIES_TABLE)
         scoped = "source_type" in cols
         if scoped:
             sql = (

@@ -19,6 +19,7 @@ from pathlib import Path
 
 import yaml
 
+import ct_ci_generate
 import ct_ci_manifest
 
 # A release exists to change what a user runs. Adding a missing unit test or
@@ -359,5 +360,99 @@ def gate_arch(repo_root):
             rel = path.relative_to(repo_root).as_posix()
             problems.extend(
                 scan_python(path, rel, rel_in_integration in exempt)
+            )
+    return problems
+
+
+def _range_bounds(expression):
+    low, high = None, None
+    for operator, major, minor in re.findall(r"(>=|<)(\d+)\.(\d+)", expression or ""):
+        pair = (int(major), int(minor))
+        if operator == ">=":
+            low = pair
+        else:
+            high = pair
+    return low, high
+
+
+def ranges_intersect(required, tier):
+    """True when two '>=2.5' / '>=2.4,<2.5' style ranges overlap."""
+    req_low, req_high = _range_bounds(required)
+    tier_low, tier_high = _range_bounds(tier)
+    low = max(filter(None, [req_low, tier_low]), default=(0, 0))
+    highs = [h for h in (req_high, tier_high) if h is not None]
+    high = min(highs) if highs else None
+    return high is None or low < high
+
+
+def banned_literals(repo_root):
+    """Compat values that must never be retyped into integration code."""
+    with open(Path(repo_root) / "shared" / "compat.yaml", encoding="utf-8") as handle:
+        compat = yaml.safe_load(handle)["compat"]
+    banned = {}
+    safety = compat["engine"]["data_safety"]
+    banned[safety["source_ref_shape"]] = "compat.engine.data_safety.source_ref_shape"
+    banned[safety["evidence_table"]] = "compat.engine.data_safety.evidence_table"
+    for state in compat["engine"]["states"].values():
+        if state.get("pinned_version"):
+            banned[state["pinned_version"]] = "compat.engine.states[].pinned_version"
+    for table in compat["portability"]["required_tables"]:
+        banned.setdefault(table, "compat.portability.required_tables")
+    return banned
+
+
+def scan_compat_literals(path, rel, banned):
+    """Report compat.yaml values appearing as literals in code (not prose)."""
+    if rel.endswith("_compat_generated.py"):
+        return []
+    problems = []
+    tree = ast.parse(Path(path).read_text(encoding="utf-8"), filename=str(rel))
+    for node, value in _string_constants(tree):
+        if value in banned:
+            problems.append(
+                f"{rel}:{node.lineno}: literal {value!r} duplicates "
+                f"{banned[value]}. shared/compat.yaml is the single source of "
+                f"truth; read it from _compat_generated instead (spec §5.3)."
+            )
+    return problems
+
+
+def gate_compat(repo_root):
+    """compat.yaml drift and generated-file freshness (spec §5.3)."""
+    repo_root = Path(repo_root)
+    if not (repo_root / "shared" / "compat.yaml").exists():
+        return [
+            f"{repo_root / 'shared' / 'compat.yaml'}: missing — the compat "
+            f"matrix is the single source of truth (spec §5.3); add it and "
+            f"run `python tools/ct_ci.py generate`."
+        ]
+    problems = list(ct_ci_generate.check_current(repo_root))
+
+    with open(repo_root / "shared" / "compat.yaml", encoding="utf-8") as handle:
+        compat = yaml.safe_load(handle)["compat"]
+    tiers = compat["tiers"]
+    banned = banned_literals(repo_root)
+
+    for name, directory, data in ct_ci_manifest.discover_manifests(repo_root):
+        manifest_path = f"integrations/{name}/integration.yaml"
+        tier_name = data.get("compat_tier")
+        tier = tiers.get(tier_name)
+        if tier is None:
+            problems.append(
+                f"{manifest_path}: compat_tier {tier_name!r} is not defined in "
+                f"shared/compat.yaml (spec §5.3). Known tiers: {sorted(tiers)}."
+            )
+            continue
+        if not ranges_intersect(data.get("requires_sidecar", ""), tier.get("sidecar", "")):
+            problems.append(
+                f"{manifest_path}: requires_sidecar "
+                f"{data.get('requires_sidecar')!r} cannot be satisfied by tier "
+                f"{tier_name} ({tier.get('sidecar')!r}) (spec §5.3)."
+            )
+        for path in sorted(directory.rglob("*.py")):
+            if "__pycache__" in path.parts:
+                continue
+            problems.extend(
+                scan_compat_literals(path, path.relative_to(repo_root).as_posix(), banned)
             )
     return problems

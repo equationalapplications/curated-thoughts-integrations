@@ -65,6 +65,8 @@ import _compat_generated  # noqa: E402
 COMPAT_TIERS = _compat_generated.TIERS
 FULL_TIER_TOOLS = _compat_generated.FULL_TIER_TOOLS
 READ_TIER_TOOLS = _compat_generated.READ_TIER_TOOLS
+EVIDENCE_TABLE = _compat_generated.EVIDENCE_TABLE
+ENGINE_PINNED_VERSION = _compat_generated.ENGINE_PINNED_VERSION
 
 PASS, WARN, FAIL = "PASS", "WARN", "FAIL"
 
@@ -696,8 +698,8 @@ def check_import_preflight(path=None, brain_paths=None):
             "normalizeSourceRef on every app launch, destroying the evidence. "
             "Do not open this brain with the desktop app until Curated "
             "Thoughts carries the PR #188 structural fix (source_ref becomes "
-            "an engine-proof token and evidence moves to librarian_evidence). "
-            "The current engine pin, 7.1.0, still mangles.",
+            f"an engine-proof token and evidence moves to {EVIDENCE_TABLE}). "
+            f"The current engine pin, {ENGINE_PINNED_VERSION}, still mangles.",
         )
     if tokens and has_evidence is False:
         # The whole table is absent: the export was not brain-complete. This
@@ -706,14 +708,14 @@ def check_import_preflight(path=None, brain_paths=None):
         return CheckResult(
             "import-preflight",
             FAIL,
-            f"{tokens} engine-proof token refs but no librarian_evidence "
+            f"{tokens} engine-proof token refs but no {EVIDENCE_TABLE} "
             f"table ({shape}; {engine_note})",
             "This brain was written by a post-fix Curated Thoughts, but the "
-            "CT-owned librarian_evidence table did not travel with it. The "
+            f"CT-owned {EVIDENCE_TABLE} table did not travel with it. The "
             "wiki entries survived; their provenance did not. PR #188 §2.5.5 "
             "defines a supported export as brain-complete — entries, "
             "evidence, chunks and proposals together. Re-export including "
-            "librarian_evidence; an export copying only llm_wiki_entries "
+            f"{EVIDENCE_TABLE}; an export copying only llm_wiki_entries "
             "silently drops every evidence link.",
         )
     if census.missing_evidence_rows:
@@ -724,7 +726,7 @@ def check_import_preflight(path=None, brain_paths=None):
             "import-preflight",
             WARN,
             f"{census.missing_evidence_rows} of {tokens} token entries have no "
-            f"librarian_evidence row ({shape}; {engine_note})",
+            f"{EVIDENCE_TABLE} row ({shape}; {engine_note})",
             "Per PR #188 §2.3 these entries are treated as still-grounded and "
             "are never auto-purged, so nothing is being deleted — but their "
             "provenance cannot be displayed and retraction cannot resolve "
