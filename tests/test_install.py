@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -30,8 +31,12 @@ PLUGIN_SRC = (REPO / "integrations" / "hermes").resolve()
 SCRIPT_TIMEOUT = 60  # every subprocess gets a hard timeout
 
 
-def run_install(home: Path, extra_env=None, cwd="/"):
-    """Run install.sh with bash, HOME=home, cwd outside the repo tree."""
+def run_install(home: Path, extra_env=None, cwd="/", install_sh=INSTALL_SH):
+    """Run install.sh with bash, HOME=home, cwd outside the repo tree.
+
+    ``install_sh`` lets a test point at a copy of the plugin tree so it can
+    stage fixtures without writing into the shared repository checkout.
+    """
     env = {
         **os.environ,
         "HOME": str(home),
@@ -42,7 +47,7 @@ def run_install(home: Path, extra_env=None, cwd="/"):
     if extra_env:
         env.update(extra_env)
     return subprocess.run(
-        ["bash", str(INSTALL_SH)],
+        ["bash", str(install_sh)],
         capture_output=True,
         text=True,
         timeout=SCRIPT_TIMEOUT,
@@ -198,29 +203,25 @@ class PruneJunkTests(InstallShTestCase):
 
     def setUp(self):
         super().setUp()
-        # Simulate a dirty source checkout. The real checkout has a tracked
-        # __pycache__ under scripts/ (fixture below asserts the prune works
-        # even when it exists in source); a stray .git dir is the other case.
-        self.junk_pycache = PLUGIN_SRC / "scripts" / "__pycache__"
+        # Stage the dirty checkout in an isolated *copy* of the plugin tree.
+        # Writing junk into the shared PLUGIN_SRC would fail on a read-only
+        # checkout and race with parallel test processes.
+        src_tmp = tempfile.TemporaryDirectory(prefix="ct-install-src-")
+        self.addCleanup(src_tmp.cleanup)
+        self.src = Path(src_tmp.name) / "hermes"
+        shutil.copytree(PLUGIN_SRC, self.src)
+        self.install_sh = self.src / "scripts" / "install.sh"
+
+        self.junk_pycache = self.src / "scripts" / "__pycache__"
         self.junk_pycache.mkdir(parents=True, exist_ok=True)
         (self.junk_pycache / "junk.cpython-311.pyc").write_bytes(b"\x00junk")
-        self.junk_git = PLUGIN_SRC / ".git"
-        existed_before = self.junk_git.exists()
-        if not existed_before:
-            self.junk_git.mkdir()
-            (self.junk_git / "HEAD").write_text("ref: fake\n")
-        self._git_preexisted = existed_before
-        self.addCleanup(self._cleanup_junk)
-
-    def _cleanup_junk(self):
-        if not self._git_preexisted:
-            import shutil
-
-            shutil.rmtree(self.junk_git, ignore_errors=True)
+        self.junk_git = self.src / ".git"
+        self.junk_git.mkdir(exist_ok=True)
+        (self.junk_git / "HEAD").write_text("ref: fake\n")
 
     def test_junk_pruned_from_dest_not_from_source(self):
         self.assertTrue(self.junk_pycache.exists(), "fixture needs source junk")
-        proc = run_install(self.home)
+        proc = run_install(self.home, install_sh=self.install_sh)
         self.assertEqual(proc.returncode, 0, proc.stderr)
         # DEST: no __pycache__ or .git anywhere under the installed plugin.
         for p in self.dest.rglob("*"):
@@ -228,12 +229,8 @@ class PruneJunkTests(InstallShTestCase):
         # SOURCE: untouched — pruning must never mutate the checkout.
         self.assertTrue(self.junk_pycache.exists())
         self.assertTrue((self.junk_pycache / "junk.cpython-311.pyc").exists())
-        if self._git_preexisted:
-            self.assertTrue(self.junk_git.exists())
-            self.assertTrue((self.junk_git / "HEAD").exists())
-        else:
-            self.assertTrue(self.junk_git.exists(), "source .git must not be deleted")
-            self.assertTrue((self.junk_git / "HEAD").exists())
+        self.assertTrue(self.junk_git.exists(), "source .git must not be deleted")
+        self.assertTrue((self.junk_git / "HEAD").exists())
         self.assertIn("copied plugin contents", proc.stdout)
 
 

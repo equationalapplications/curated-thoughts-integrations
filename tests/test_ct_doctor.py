@@ -458,21 +458,44 @@ class SelfTestCliTests(unittest.TestCase):
         self.assertIn("OK", proc.stderr)
         self.assertIn("Ran ", proc.stderr)
 
-    def test_self_test_flag_wins_over_subcommand(self):
-        # --self-test lives on the main parser: `check --json --self-test`
-        # would exit 2 (unrecognized), but the documented form
-        # `--self-test check` must run the suite and ignore the subcommand.
+    def _run_doctor(self, *argv):
         with tempfile.TemporaryDirectory(prefix="ct-selftest-cwd-") as cwd:
-            proc = subprocess.run(
-                [sys.executable, str(self.DOCTOR), "--self-test", "check"],
+            return subprocess.run(
+                [sys.executable, str(self.DOCTOR), *argv],
                 capture_output=True,
                 text=True,
                 timeout=180,
                 cwd=cwd,
                 env={**os.environ, "CT_DOCTOR_IN_SELF_TEST": "1"},
             )
+
+    def test_self_test_accepted_after_subcommand(self):
+        # The regression: `check --self-test` used to exit 2 (unrecognized),
+        # because --self-test lives on the main parser. It must now run the
+        # suite and take precedence over the subcommand.
+        proc = self._run_doctor("check", "--self-test")
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn("Ran ", proc.stderr)
+
+    def test_self_test_wins_over_subcommand_options(self):
+        # Even alongside a subcommand option, the global flag wins: the
+        # suite runs instead of emitting check's JSON payload.
+        proc = self._run_doctor("check", "--json", "--self-test")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("Ran ", proc.stderr)
+        self.assertNotIn('"exit_code"', proc.stdout)
+
+    def test_self_test_accepted_before_subcommand(self):
+        proc = self._run_doctor("--self-test", "check")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("Ran ", proc.stderr)
+
+    def test_unknown_option_still_errors(self):
+        # Stripping --self-test must not turn the parser permissive:
+        # a typo'd option still exits 2 rather than silently running check.
+        proc = self._run_doctor("check", "--jsno")
+        self.assertEqual(proc.returncode, 2, proc.stdout)
+        self.assertIn("unrecognized arguments", proc.stderr)
 
 
 class CheckJsonCliTests(DoctorTestCase):

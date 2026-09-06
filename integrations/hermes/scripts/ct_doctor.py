@@ -623,11 +623,15 @@ def main(argv=None):
     p_check = sub.add_parser("check", help="run all checks against the live system")
     p_check.add_argument("--json", action="store_true", help="machine-readable output")
     parser.add_argument("--self-test", action="store_true", help="run the embedded mock-sidecar test suite")
-    # parse_known_args: --self-test is a global flag and must be accepted
-    # in any position, including after the subcommand (`check --self-test`).
-    args, _unknown = parser.parse_known_args(argv)
+    # --self-test is a global flag and must be accepted in any position,
+    # including after the subcommand (`check --self-test`). Strip it out
+    # ourselves rather than using parse_known_args, so every *other*
+    # unrecognized option (e.g. `check --jsno`) still errors out.
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    self_test = "--self-test" in raw_argv
+    args = parser.parse_args([a for a in raw_argv if a != "--self-test"])
 
-    if args.self_test:
+    if self_test:
         return cmd_self_test()
     if args.command == "check":
         return cmd_check(json_output=args.json)
