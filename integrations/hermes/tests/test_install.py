@@ -25,9 +25,10 @@ import unittest
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-REPO = HERE / ".."
-INSTALL_SH = (REPO / "integrations" / "hermes" / "scripts" / "install.sh").resolve()
-PLUGIN_SRC = (REPO / "integrations" / "hermes").resolve()
+INTEGRATION = HERE.parent
+REPO = INTEGRATION.parents[1]
+INSTALL_SH = (INTEGRATION / "scripts" / "install.sh").resolve()
+PLUGIN_SRC = INTEGRATION.resolve()
 SCRIPT_TIMEOUT = 60  # every subprocess gets a hard timeout
 
 

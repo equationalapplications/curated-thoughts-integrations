@@ -916,22 +916,24 @@ def cmd_check(json_output=False):
 # --------------------------------------------------------------------------
 
 def _self_test_suite():
-    # tests/ lives at the repo root; this script is
-    # integrations/hermes/scripts/ct_doctor.py — resolve relative to __file__
-    # so the self-test works from any cwd and any checkout layout.
+    # tests/ lives inside this integration:
+    # integrations/hermes/{scripts/ct_doctor.py, tests/test_ct_doctor.py}.
+    # Resolve relative to __file__ so the self-test works from any cwd.
     import importlib.util
 
-    tests_dir = Path(__file__).resolve().parents[3] / "tests"
+    tests_dir = Path(__file__).resolve().parents[1] / "tests"
     sys.path.insert(0, str(tests_dir))
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     # Loaded via importlib rather than a bare import: a shipped script must
     # not import test modules (CONTRIBUTING rule 4, enforced by gate_arch).
     candidate = tests_dir / "test_ct_doctor.py"
     if not candidate.exists():
-        # allow an alternate layout where tests sit next to the script
-        candidate = Path(__file__).resolve().parent / "test_ct_doctor.py"
-    if not candidate.exists():
-        raise ImportError(f"test_ct_doctor.py not found under {tests_dir}")
+        # With tests inside the integration there is exactly one location,
+        # so a missing suite is a real error, not an alternate layout.
+        raise RuntimeError(
+            f"self-test suite not found at {candidate}; the doctor must ship "
+            f"alongside its tests"
+        )
     spec = importlib.util.spec_from_file_location("test_ct_doctor", candidate)
     module = importlib.util.module_from_spec(spec)
     sys.modules["test_ct_doctor"] = module

@@ -39,6 +39,23 @@ EXEMPT_PATTERNS = (
 )
 
 
+def is_test_file(rel_path):
+    """True when this path is integration test code, not shipped code.
+
+    The architecture and compatibility gates enforce the rules shipped
+    integrations must obey (spec §5.2/§5.3); test suites — including those
+    living inside the integration (`integrations/<a>/tests/`) — use sqlite3
+    censuses and fake absolute paths by design, and the version gate already
+    treats them as non-shipped (spec §5.1). Mirrors the tests entries of
+    EXEMPT_PATTERNS.
+    """
+    return any(
+        fnmatch.fnmatch(rel_path, pattern)
+        for pattern in EXEMPT_PATTERNS
+        if "tests" in pattern or "test_" in pattern or ".test." in pattern
+    )
+
+
 def is_exempt(rel_path):
     """True when this path may change without requiring a version bump."""
     return any(
@@ -356,8 +373,10 @@ def gate_arch(repo_root):
         for path in sorted(directory.rglob("*.py")):
             if "__pycache__" in path.parts:
                 continue
-            rel_in_integration = path.relative_to(directory).as_posix()
             rel = path.relative_to(repo_root).as_posix()
+            if is_test_file(rel):
+                continue
+            rel_in_integration = path.relative_to(directory).as_posix()
             problems.extend(
                 scan_python(path, rel, rel_in_integration in exempt)
             )
@@ -472,7 +491,10 @@ def gate_compat(repo_root):
         for path in sorted(directory.rglob("*.py")):
             if "__pycache__" in path.parts:
                 continue
+            rel = path.relative_to(repo_root).as_posix()
+            if is_test_file(rel):
+                continue
             problems.extend(
-                scan_compat_literals(path, path.relative_to(repo_root).as_posix(), banned)
+                scan_compat_literals(path, rel, banned)
             )
     return problems

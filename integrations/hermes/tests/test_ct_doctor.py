@@ -20,9 +20,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
-# Allow running from any cwd: locate the doctor next to this file.
+# Allow running from any cwd: resolve the integration relative to this file
+# (tests live inside the integration: integrations/hermes/tests/).
 HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(HERE / ".." / "integrations" / "hermes" / "scripts"))
+INTEGRATION = HERE.parent
+sys.path.insert(0, str(INTEGRATION / "scripts"))
 
 import ct_doctor  # noqa: E402
 import ct_env  # noqa: E402
@@ -859,7 +861,7 @@ class CompatTests(DoctorTestCase):
 
     def test_compat_file_agreement(self):
         # The embedded tier matrix must agree with shared/compat.yaml.
-        compat = HERE / ".." / "shared" / "compat.yaml"
+        compat = INTEGRATION.parents[1] / "shared" / "compat.yaml"
         if not compat.exists():
             self.skipTest("shared/compat.yaml not present")
         text = compat.read_text()
@@ -893,7 +895,7 @@ class FullRunTests(DoctorTestCase):
         out = subprocess.run(
             [
                 sys.executable,
-                str(HERE / ".." / "integrations" / "hermes" / "scripts" / "ct_doctor.py"),
+                str(INTEGRATION / "scripts" / "ct_doctor.py"),
                 "check",
                 "--json",
             ],
@@ -922,7 +924,7 @@ class FullRunTests(DoctorTestCase):
 class SelfTestCliTests(unittest.TestCase):
     """Gap: `ct_doctor.py --self-test` as a real subprocess, from a temp cwd."""
 
-    DOCTOR = (HERE / ".." / "integrations" / "hermes" / "scripts" / "ct_doctor.py").resolve()
+    DOCTOR = (INTEGRATION / "scripts" / "ct_doctor.py").resolve()
 
     @classmethod
     def setUpClass(cls):
@@ -998,7 +1000,7 @@ class CheckJsonCliTests(DoctorTestCase):
         out = subprocess.run(
             [
                 sys.executable,
-                str(HERE / ".." / "integrations" / "hermes" / "scripts" / "ct_doctor.py"),
+                str(INTEGRATION / "scripts" / "ct_doctor.py"),
                 "check",
                 "--json",
             ],
@@ -1248,7 +1250,7 @@ class PluginConcurrencyTests(unittest.TestCase):
     def _load(self):
         import importlib.util
 
-        root = (HERE / ".." / "integrations" / "hermes").resolve()
+        root = INTEGRATION.resolve()
         spec = importlib.util.spec_from_file_location("ct_plugin_test", root / "__init__.py")
         m = importlib.util.module_from_spec(spec)
         sys.modules["ct_plugin_test"] = m
