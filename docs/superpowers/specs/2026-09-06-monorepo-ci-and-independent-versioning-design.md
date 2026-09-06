@@ -1,7 +1,7 @@
 # Monorepo CI and Independent Per-Integration Versioning
 
 Date: 2026-09-06
-Status: approved design, not yet implemented
+Status: implemented (branch feat/monorepo-ci-independent-versioning)
 Repo: `curated-thoughts-integrations`
 
 ## 1. Problem
