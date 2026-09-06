@@ -30,7 +30,7 @@ curated-thoughts-integrations/
 │   │   │   ├── hooks.json         # session-start hook registration
 │   │   │   └── session-start.py   # context injection + health snapshot (fast, read-only)
 │   │   ├── skills/
-│   │   │   ├── curated-thoughts/SKILL.md         # usage tier (every CT user)
+│   │   │   ├── curated-thoughts-usage/SKILL.md   # usage tier (every CT user)
 │   │   │   ├── curated-thoughts-ops/SKILL.md     # troubleshooting tier (ops failures)
 │   │   │   └── curated-thoughts-sidecar/SKILL.md # sidecar lifecycle tier
 │   │   ├── scripts/
