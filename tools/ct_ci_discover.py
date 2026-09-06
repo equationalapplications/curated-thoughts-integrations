@@ -22,19 +22,38 @@ def affects_all(changed):
     )
 
 
-def _entry(name, directory, data, repo_root):
+def _entries(name, directory, data, repo_root):
+    """One flat matrix entry per (id, os, interpreter) triple (spec §4.1).
+
+    The workflow consumes these with a single `matrix: entry:` axis. A
+    cross-product over a nested `entry.os` list would instead run every
+    entry on entry[0]'s interpreters, so the expansion happens here, in
+    code a unit test can see.
+    """
     matrix = data.get("matrix") or {}
-    entry = {
-        "id": name,
-        "dir": directory.relative_to(repo_root).as_posix(),
-        "language": data.get("language"),
-        "os": matrix.get("os", ["ubuntu-latest"]),
-        "checks": data.get("checks") or {},
-    }
-    entry["python" if data.get("language") == "python" else "node"] = matrix.get(
-        "python" if data.get("language") == "python" else "node", []
-    )
-    return entry
+    language = data.get("language")
+    key = "python" if language == "python" else "node"
+    interpreters = matrix.get(key) or []
+    oses = matrix.get("os") or []
+    if not oses or not interpreters:
+        raise ValueError(
+            f"integrations/{name}/integration.yaml: implemented integration "
+            f"declares an empty matrix; it would silently vanish from CI"
+        )
+    entries = []
+    for os_name in oses:
+        for interpreter in interpreters:
+            entries.append(
+                {
+                    "id": name,
+                    "dir": directory.relative_to(repo_root).as_posix(),
+                    "language": language,
+                    "os": os_name,
+                    key: interpreter,
+                    "checks": data.get("checks") or {},
+                }
+            )
+    return entries
 
 
 def select(repo_root, base_ref, all_=False):
@@ -57,4 +76,8 @@ def select(repo_root, base_ref, all_=False):
                 for name, directory, data in manifests
                 if any(path.startswith(f"integrations/{name}/") for path in changed)
             ]
-    return [_entry(name, directory, data, repo_root) for name, directory, data in chosen]
+    return [
+        entry
+        for name, directory, data in chosen
+        for entry in _entries(name, directory, data, repo_root)
+    ]

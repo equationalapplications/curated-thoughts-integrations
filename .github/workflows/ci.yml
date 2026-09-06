@@ -63,17 +63,18 @@ jobs:
           echo "selected: $MATRIX"
 
   integration:
-    name: ${{ matrix.entry.id }} (${{ matrix.os }}, py${{ matrix.python }})
+    # `discover` pre-expands each integration into one entry per
+    # (id, os, interpreter) triple, so a single matrix axis is correct for any
+    # number of integrations — a nested os/python cross-product would run
+    # every entry on entry[0]'s interpreters.
+    name: ${{ matrix.entry.id }} (${{ matrix.entry.os }}, ${{ matrix.entry.python || matrix.entry.node }})
     needs: discover
     if: needs.discover.outputs.empty == 'false'
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.entry.os }}
     strategy:
       fail-fast: false
       matrix:
         entry: ${{ fromJson(needs.discover.outputs.matrix) }}
-        # Expanded from each entry's declared matrix by the include below.
-        os: ${{ fromJson(needs.discover.outputs.matrix)[0].os }}
-        python: ${{ fromJson(needs.discover.outputs.matrix)[0].python }}
     defaults:
       run:
         working-directory: ${{ matrix.entry.dir }}
@@ -85,10 +86,12 @@ jobs:
       - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
         if: matrix.entry.language == 'python'
         with:
-          python-version: ${{ matrix.python }}
+          python-version: ${{ matrix.entry.python }}
 
       - name: Tests
-        if: matrix.entry.checks.test != ''
+        # Truthy guard: `!= ''` is true when the key is absent (null != ''),
+        # which would run an empty command.
+        if: matrix.entry.checks.test
         run: ${{ matrix.entry.checks.test }}
 
       - name: Doctor self-test (spec §9.5)
