@@ -57,16 +57,14 @@ OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434")
 # MCP handshake timeout (seconds) — the sidecar must never hang the doctor.
 MCP_TIMEOUT = 10.0
 
-# Tier matrix, mirrored from shared/compat.yaml (that file is the source of
-# truth). Both tiers are verified against curated-thoughts' mcp_server.rs:
-# v2.4.x registers 8 tools, v2.5.x registers 14.
-COMPAT_TIERS = (
-    # (name, min_version, max_version_exclusive, tools, write_path)
-    ("v2.4-read", (2, 4), (2, 5), 8, "dormant"),
-    ("v2.5-full", (2, 5), None, 14, "full"),
-)
-FULL_TIER_TOOLS = 14
-READ_TIER_TOOLS = 8
+# Tier matrix. shared/compat.yaml is the source of truth; _compat_generated.py
+# is compiled from it by `tools/ct_ci.py generate` and verified current in CI,
+# so these values cannot drift from the matrix (spec §3.1, §5.3).
+import _compat_generated  # noqa: E402
+
+COMPAT_TIERS = _compat_generated.TIERS
+FULL_TIER_TOOLS = _compat_generated.FULL_TIER_TOOLS
+READ_TIER_TOOLS = _compat_generated.READ_TIER_TOOLS
 
 PASS, WARN, FAIL = "PASS", "WARN", "FAIL"
 

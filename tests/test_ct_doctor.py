@@ -1284,6 +1284,30 @@ class PluginConcurrencyTests(unittest.TestCase):
         self.assertIsInstance(m._system_prompt_section(), str)
 
 
+class TestCompatConstantsAreGenerated(unittest.TestCase):
+    """The tier matrix must come from shared/compat.yaml, not from literals.
+
+    shared/compat.yaml is the single source of truth (spec §5.3). If these
+    values are ever retyped into the doctor, the compatibility matrix and the
+    doctor can disagree, which is precisely the drift the generated module
+    exists to prevent.
+    """
+
+    def test_doctor_tiers_come_from_the_generated_module(self):
+        import _compat_generated
+
+        self.assertIs(ct_doctor.COMPAT_TIERS, _compat_generated.TIERS)
+        self.assertIs(ct_doctor.FULL_TIER_TOOLS, _compat_generated.FULL_TIER_TOOLS)
+        self.assertIs(ct_doctor.READ_TIER_TOOLS, _compat_generated.READ_TIER_TOOLS)
+
+    def test_generated_tiers_match_the_shipped_expectations(self):
+        import _compat_generated
+
+        by_name = {tier[0]: tier for tier in _compat_generated.TIERS}
+        self.assertEqual(by_name["v2.4-read"][3], 8)
+        self.assertEqual(by_name["v2.5-full"][3], 14)
+
+
 def load_suite():
     return unittest.defaultTestLoader.loadTestsFromModule(sys.modules[__name__])
 
