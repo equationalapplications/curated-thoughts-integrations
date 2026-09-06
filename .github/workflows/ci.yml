@@ -50,7 +50,9 @@ jobs:
         # assets, and main must be ground truth.
         run: |
           if [ "${{ github.event_name }}" = "pull_request" ]; then
-            git fetch --no-tags --depth=0 origin "${{ github.base_ref }}"
+            # fetch-depth: 0 above already has full history; just update the
+            # base ref (a --depth flag here would need a positive value).
+            git fetch --no-tags origin "${{ github.base_ref }}"
             MATRIX=$(python tools/ct_ci.py discover --base "origin/${{ github.base_ref }}")
           else
             MATRIX=$(python tools/ct_ci.py discover --all)
