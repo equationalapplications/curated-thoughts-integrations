@@ -83,12 +83,31 @@ install_plugin_files() {
     say "creating: ${DEST_DIR}"
     mkdir -p "$DEST_DIR"
   fi
+  # A symlinked hooks/ would let both the merge-copy and the prune below
+  # reach outside DEST_DIR. Unlink it first (removes the link only, never
+  # the target's contents) so the real plugin-owned directory lands here.
+  if [ -L "${DEST_DIR}/hooks" ]; then
+    warn "replacing symlinked directory with a real one: ${DEST_DIR}/hooks"
+    warn "(the symlink target and its contents are left untouched)"
+    rm -f "${DEST_DIR}/hooks"
+  fi
   # Merge-copy: overwrites plugin-owned files, never removes anything.
   cp -R "${SCRIPT_SRC}/." "${DEST_DIR}/"
   # Prune build junk that may exist in a source checkout (plugin-owned dir,
   # so pruning here never touches user files).
   find "${DEST_DIR}" \( -name '__pycache__' -o -name '.git' \) -type d \
     -prune -exec rm -rf {} + 2>/dev/null
+  # Prune Claude Code-era manifests left by pre-0.2 installs. Hermes never
+  # read them (the native shape is plugin.yaml + register(ctx)), and a stale
+  # copy at the destination masks the real manifest. The dir is
+  # plugin-owned, so pruning here never touches user files.
+  rm -f "${DEST_DIR}/plugin.json"
+  # hooks/ is guaranteed a real directory here (any symlink was unlinked
+  # above), so this prune cannot escape DEST_DIR.
+  if [ -d "${DEST_DIR}/hooks" ] && [ ! -L "${DEST_DIR}/hooks" ]; then
+    rm -f "${DEST_DIR}/hooks/hooks.json"
+    rmdir "${DEST_DIR}/hooks" 2>/dev/null || true
+  fi
   say "copied plugin contents from: ${SCRIPT_SRC}"
 }
 

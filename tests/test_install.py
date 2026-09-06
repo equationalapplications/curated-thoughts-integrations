@@ -243,6 +243,74 @@ class PruneJunkTests(InstallShTestCase):
         self.assertIn("copied plugin contents", proc.stdout)
 
 
+class StaleManifestPruneTests(InstallShTestCase):
+    """Pre-0.2 installs shipped plugin.json + hooks/hooks.json (Claude Code's
+    format — Hermes never read them). The installer must prune them from the
+    plugin-owned DEST so a stale copy can't mask the real plugin.yaml, the
+    way a stale destination copy misled dogfood debugging on 2026-09-06."""
+
+    def test_upgrade_from_pre_02_install_prunes_stale_claude_code_manifests(self):
+        # Simulate the real upgrade path: a destination that predates the
+        # plugin.yaml era, holding the two stale files (and nothing else —
+        # hooks/hooks.json lives in a hooks/ dir the repo no longer ships).
+        self.dest.mkdir(parents=True)
+        (self.dest / "plugin.json").write_text('{"name": "curated-thoughts"}\n')
+        stale_hooks = self.dest / "hooks"
+        stale_hooks.mkdir()
+        (stale_hooks / "hooks.json").write_text("{}\n")
+        proc = run_install(self.home)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertFalse((self.dest / "plugin.json").exists())
+        self.assertFalse((self.dest / "hooks" / "hooks.json").exists())
+        # hooks/ itself REMAINS — the merge-copy lands the real
+        # hooks/session-start.py; only the stale hooks.json is pruned.
+        self.assertFalse(stale_hooks.exists() and not (stale_hooks / "session-start.py").exists(),
+                         "hooks/ exists but session-start.py did not land")
+        self.assertTrue((stale_hooks / "session-start.py").exists())
+        # The real manifest still landed.
+        self.assertTrue((self.dest / "plugin.yaml").exists())
+
+    def test_stale_manifests_in_source_checkout_are_also_pruned_from_dest(self):
+        # A dirty checkout carrying the old files must not re-pollute DEST.
+        src_tmp = tempfile.TemporaryDirectory(prefix="ct-install-src-")
+        self.addCleanup(src_tmp.cleanup)
+        src = Path(src_tmp.name) / "hermes"
+        shutil.copytree(PLUGIN_SRC, src)
+        (src / "plugin.json").write_text('{"name": "curated-thoughts"}\n')
+        (src / "hooks").mkdir(exist_ok=True)
+        (src / "hooks" / "hooks.json").write_text("{}\n")
+        proc = run_install(self.home, install_sh=src / "scripts" / "install.sh")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertFalse((self.dest / "plugin.json").exists())
+        self.assertFalse((self.dest / "hooks" / "hooks.json").exists())
+        # SOURCE stays untouched — pruning must never mutate the checkout.
+        self.assertTrue((src / "plugin.json").exists())
+        self.assertTrue((src / "hooks" / "hooks.json").exists())
+        self.assertTrue((self.dest / "plugin.yaml").exists())
+
+    def test_symlinked_hooks_dir_is_not_followed_during_prune(self):
+        # If DEST/hooks is a symlink, pruning must refuse it rather than
+        # delete hooks.json out of whatever it points at.
+        outside_tmp = tempfile.TemporaryDirectory(prefix="ct-install-outside-")
+        self.addCleanup(outside_tmp.cleanup)
+        outside = Path(outside_tmp.name)
+        victim = outside / "hooks.json"
+        victim.write_text('{"do": "not delete me"}\n')
+        self.dest.mkdir(parents=True)
+        (self.dest / "hooks").symlink_to(outside, target_is_directory=True)
+        proc = run_install(self.home)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertTrue(victim.exists(), "install reached through the hooks symlink")
+        self.assertEqual(
+            victim.read_text(), '{"do": "not delete me"}\n',
+            "install wrote through the hooks symlink")
+        self.assertIn("replacing symlinked directory", proc.stderr)
+        # The link is replaced by the real plugin-owned directory.
+        self.assertFalse((self.dest / "hooks").is_symlink())
+        self.assertTrue((self.dest / "hooks" / "session-start.py").exists())
+
+
+
 class PluginShapeTests(InstallShTestCase):
     """The plugin must be shaped for Hermes, not for Claude Code."""
 
