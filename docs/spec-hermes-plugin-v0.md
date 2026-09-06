@@ -35,17 +35,17 @@ curated-thoughts-integrations/
 ├── integrations/
 │   └── hermes/                    # ← v0 deliverable
 │       ├── plugin.yaml            # Hermes native plugin manifest (§4)
-│       │   ├── hooks/
-│   │   │   └── session-start.py   # context injection + health snapshot (fast, read-only)
-│   │   ├── skills/
-│   │   │   ├── curated-thoughts-usage/SKILL.md   # usage tier (every CT user)
-│   │   │   ├── curated-thoughts-ops/SKILL.md     # troubleshooting tier (ops failures)
-│   │   │   └── curated-thoughts-sidecar/SKILL.md # sidecar lifecycle tier
-│   │   ├── scripts/
-│   │   │   ├── ct_doctor.py       # install/doctor checks (§5)
-│   │   │   └── install.sh         # idempotent installer (§6)
-│   │   ├── install.md             # manual path + what install.sh changes
-│   │   └── SKILLS_NOTES.md        # skill authoring conventions for this repo
+│       ├── hooks/
+│       │   └── session-start.py   # context injection + health snapshot (fast, read-only)
+│       ├── skills/
+│       │   ├── curated-thoughts-usage/SKILL.md   # usage tier (every CT user)
+│       │   ├── curated-thoughts-ops/SKILL.md     # troubleshooting tier (ops failures)
+│       │   └── curated-thoughts-sidecar/SKILL.md # sidecar lifecycle tier
+│       ├── scripts/
+│       │   ├── ct_doctor.py       # install/doctor checks (§5)
+│       │   └── install.sh         # idempotent installer (§6)
+│       ├── install.md             # manual path + what install.sh changes
+│       └── SKILLS_NOTES.md        # skill authoring conventions for this repo
 └── shared/
     └── compat.yaml                # sidecar versions ↔ plugin versions ↔ tool-count tiers
 ```
@@ -154,6 +154,10 @@ Exit code 0 = all PASS, 1 = any FAIL, 2 = WARNs only (CI-usable).
 - Prunes build junk and stale Claude Code-era manifests (`plugin.json`,
   `hooks/hooks.json`) left by pre-0.2 installs — Hermes never read them;
   a stale copy at the destination masks the real `plugin.yaml`.
+- Neither the copy nor the prune ever follows a symlink out of the
+  plugin-owned destination: a symlinked `hooks/` is unlinked first (the link
+  only — its target's contents are left untouched) and replaced by the real
+  directory, so no write or delete can escape the destination.
 - Merges `mcp_servers.curated-thoughts` block into ~/.hermes/config.yaml only
   if absent; NEVER overwrites an existing entry (prints it for review).
 - Refuses to touch existing loose ~/.hermes/skills/curated-thoughts* copies —

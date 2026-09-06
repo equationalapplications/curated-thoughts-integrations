@@ -288,6 +288,28 @@ class StaleManifestPruneTests(InstallShTestCase):
         self.assertTrue((src / "hooks" / "hooks.json").exists())
         self.assertTrue((self.dest / "plugin.yaml").exists())
 
+    def test_symlinked_hooks_dir_is_not_followed_during_prune(self):
+        # If DEST/hooks is a symlink, pruning must refuse it rather than
+        # delete hooks.json out of whatever it points at.
+        outside_tmp = tempfile.TemporaryDirectory(prefix="ct-install-outside-")
+        self.addCleanup(outside_tmp.cleanup)
+        outside = Path(outside_tmp.name)
+        victim = outside / "hooks.json"
+        victim.write_text('{"do": "not delete me"}\n')
+        self.dest.mkdir(parents=True)
+        (self.dest / "hooks").symlink_to(outside, target_is_directory=True)
+        proc = run_install(self.home)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertTrue(victim.exists(), "install reached through the hooks symlink")
+        self.assertEqual(
+            victim.read_text(), '{"do": "not delete me"}\n',
+            "install wrote through the hooks symlink")
+        self.assertIn("replacing symlinked directory", proc.stderr)
+        # The link is replaced by the real plugin-owned directory.
+        self.assertFalse((self.dest / "hooks").is_symlink())
+        self.assertTrue((self.dest / "hooks" / "session-start.py").exists())
+
+
 
 class PluginShapeTests(InstallShTestCase):
     """The plugin must be shaped for Hermes, not for Claude Code."""
