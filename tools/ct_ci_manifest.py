@@ -68,6 +68,12 @@ def _check_schema(data, schema, path, errors, prefix=""):
             if not isinstance(value, dict):
                 errors.append(f"{path}: field '{where}' must be a mapping")
             else:
+                minimum = rule.get("minProperties")
+                if minimum is not None and len(value) < minimum:
+                    errors.append(
+                        f"{path}: field '{where}' must have at least "
+                        f"{minimum} entr{'y' if minimum == 1 else 'ies'}"
+                    )
                 _check_schema(value, rule, path, errors, prefix=f"{where}.")
         if isinstance(value, str) and "pattern" in rule:
             if not re.match(rule["pattern"], value):

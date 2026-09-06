@@ -406,7 +406,13 @@ def scan_compat_literals(path, rel, banned):
     if rel.endswith("_compat_generated.py"):
         return []
     problems = []
-    tree = ast.parse(Path(path).read_text(encoding="utf-8"), filename=str(rel))
+    try:
+        tree = ast.parse(Path(path).read_text(encoding="utf-8"), filename=str(rel))
+    except SyntaxError as exc:
+        return [
+            f"{rel}:{exc.lineno}: syntax error, cannot audit ({exc.msg}) "
+            f"(spec §5.3)."
+        ]
     for node, value in _string_constants(tree):
         if value in banned:
             problems.append(
@@ -426,10 +432,24 @@ def gate_compat(repo_root):
             f"matrix is the single source of truth (spec §5.3); add it and "
             f"run `python tools/ct_ci.py generate`."
         ]
-    problems = list(ct_ci_generate.check_current(repo_root))
+    # §5.3 bullet 1: the matrix must validate against its schema before any
+    # derived check runs — a malformed matrix would otherwise crash the very
+    # checks (tier lookup, banned literals) that read from it.
+    compat_path = repo_root / "shared" / "compat.yaml"
+    with open(compat_path, encoding="utf-8") as handle:
+        compat_doc = yaml.safe_load(handle) or {}
+    with open(
+        repo_root / "shared" / "compat.schema.json", encoding="utf-8"
+    ) as handle:
+        compat_schema = yaml.safe_load(handle)
+    errors = []
+    problems = []
+    ct_ci_manifest._check_schema(compat_doc, compat_schema, str(compat_path), errors)
+    if errors:
+        return [f"{error} (spec §5.3)." for error in errors]
+    compat = compat_doc["compat"]
 
-    with open(repo_root / "shared" / "compat.yaml", encoding="utf-8") as handle:
-        compat = yaml.safe_load(handle)["compat"]
+    problems.extend(ct_ci_generate.check_current(repo_root))
     tiers = compat["tiers"]
     banned = banned_literals(repo_root)
 

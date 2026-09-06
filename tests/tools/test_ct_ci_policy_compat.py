@@ -74,10 +74,46 @@ class TestBannedLiterals(unittest.TestCase):
         )
         self.assertEqual(problems, [])
 
+    def test_a_syntax_broken_file_is_reported_not_raised(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "broken.py"
+            path.write_text("def broken(:\n", encoding="utf-8")
+            problems = ct_ci_policy.scan_compat_literals(
+                path, "integrations/demo/scripts/broken.py", {}
+            )
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn("integrations/demo/scripts/broken.py:1", problems[0])
+        self.assertIn("syntax error", problems[0])
+        self.assertIn("§5.3", problems[0])
+
 
 class TestCompatGate(unittest.TestCase):
     def test_the_repository_passes_its_own_compat_gate(self):
         self.assertEqual(ct_ci_policy.gate_compat(REPO), [])
+
+    def test_a_compat_yaml_that_fails_its_schema_is_reported(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            shared = root / "shared"
+            shared.mkdir()
+            (shared / "compat.yaml").write_text(
+                textwrap.dedent(
+                    """\
+                    compat:
+                      tiers: {}
+                    """
+                ),
+                encoding="utf-8",
+            )
+            (shared / "compat.schema.json").write_text(
+                (REPO / "shared" / "compat.schema.json").read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+            problems = ct_ci_policy.gate_compat(root)
+        joined = "\n".join(problems)
+        self.assertIn("missing required field", joined, problems)
+        self.assertIn("compat.engine", joined, problems)
+        self.assertIn("§5.3", joined)
 
 
 if __name__ == "__main__":
