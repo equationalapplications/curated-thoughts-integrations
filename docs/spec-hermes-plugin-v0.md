@@ -225,3 +225,20 @@ Hermes offers two mechanisms and the plugin supports both:
 - [ ] Three skills (usage / ops / sidecar), user-generic content
 - [ ] CI: lint + shellcheck + doctor self-test
 - [ ] Dogfood install on maintainer machine; retire bespoke config
+
+## 12. Process-matching contract
+
+Any script in this repo (or shipped by it) that must find, signal, or wait
+on the Curated Thoughts sidecar process uses the path-anchored full-command
+line pattern — never name-based matching (`pgrep -x` / `pkill -x` /
+`killall`), which can never match the sidecar (15-character `/proc/<pid>/comm`
+limit), and never an unanchored `-f` pattern, which also matches supervisor
+wrappers and the invoking shell:
+
+```bash
+pgrep -f '^/usr/bin/curated-thoughts-mcp([[:space:]]|$)'
+pkill -f '^/usr/bin/curated-thoughts-mcp([[:space:]]|$)'
+```
+
+Full contract, forbidden-pattern table, and the launch-path assumption:
+[`docs/process-matching.md`](process-matching.md).
