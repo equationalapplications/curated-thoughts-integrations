@@ -3,19 +3,20 @@
 
 Part of curated-thoughts-integrations (MIT). Python 3 standard library only.
 Read-only diagnostic: it NEVER writes to the vault, the brain, or any config
-file. Runs 8 checks, each resolving to PASS / WARN / FAIL with a specific,
-actionable fix hint.
+file. Each check resolves to PASS / WARN / FAIL with a specific, actionable
+fix hint.
 
 Usage:
     ct_doctor.py check           Run all checks against the live system.
     ct_doctor.py check --json    Same, machine-readable output.
     ct_doctor.py --self-test     Run the embedded mock-sidecar test suite
-                                 (no live sidecar or vault needed).
+                                 (no live sidecar or brain needed).
 
-Exit codes: 0 = all PASS (or only WARN-free success), 1 = any FAIL,
-2 = no FAIL but at least one WARN.
+Exit codes: 0 = all PASS, 1 = any FAIL, 2 = no FAIL but at least one WARN.
 
 Spec: docs/spec-hermes-plugin-v0.md §5. Tier matrix: shared/compat.yaml.
+Environment contract and platform discovery: scripts/ct_env.py.
+Import pre-flight (curated-thoughts PR #188): scripts/ct_preflight.py.
 """
 
 from __future__ import annotations
@@ -24,27 +25,24 @@ import argparse
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
 import unittest
 from pathlib import Path
 
-SIDECAR_NAME = "curated-thoughts-mcp"
-# Dpkg-installed main sidecar location prefix (spec §5.1: disambiguate by path).
-DPKG_BIN_PREFIXES = ("/usr/bin/", "/usr/local/bin/")
-# Fallback location when the sidecar is not on PATH.
-SYSTEM_FALLBACK = "/usr/bin/" + SIDECAR_NAME
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import ct_env  # noqa: E402
+import ct_preflight  # noqa: E402
+
+SIDECAR_NAME = ct_env.SIDECAR_NAME
 
 # Where the Hermes plugin registers the MCP server.
 HERMES_CONFIG = Path(
     os.environ.get("HERMES_CONFIG", str(Path.home() / ".hermes" / "config.yaml"))
 )
 MCP_SERVER_KEY = "curated-thoughts"
-
-# Vault location: CT_VAULT_DIR overrides; default is the brain root that the
-# sidecar manages (docs/architecture.md: sidecar, vault, OKF).
-VAULT_DIR = Path(os.environ.get("CT_VAULT_DIR", str(Path.home() / ".brain")))
+PLUGIN_NAME = "curated-thoughts"
 
 # Embedding backends: cloud keys OR a local Ollama. WARN-only check.
 EMBED_ENV_KEYS = (
@@ -59,15 +57,16 @@ OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434")
 # MCP handshake timeout (seconds) — the sidecar must never hang the doctor.
 MCP_TIMEOUT = 10.0
 
-# Tier matrix, mirrored from shared/compat.yaml (keep in sync; file is the
-# source of truth):
-#   v2.4-read:  sidecar ">=2.4,<2.5"  tools: 8   write_path: dormant
-#   v2.5-full:  sidecar ">=2.5"       tools: 14  write_path: full
+# Tier matrix, mirrored from shared/compat.yaml (that file is the source of
+# truth). Both tiers are verified against curated-thoughts' mcp_server.rs:
+# v2.4.x registers 8 tools, v2.5.x registers 14.
 COMPAT_TIERS = (
     # (name, min_version, max_version_exclusive, tools, write_path)
     ("v2.4-read", (2, 4), (2, 5), 8, "dormant"),
     ("v2.5-full", (2, 5), None, 14, "full"),
 )
+FULL_TIER_TOOLS = 14
+READ_TIER_TOOLS = 8
 
 PASS, WARN, FAIL = "PASS", "WARN", "FAIL"
 
@@ -111,6 +110,21 @@ def _tier_for(version):
     return None
 
 
+def _tier_for_tool_count(count):
+    """Tier implied by an observed tool count — the authoritative signal.
+
+    The sidecar exposes no --version flag, and MCP serverInfo reports the rmcp
+    framework version rather than the Curated Thoughts release. Tool count is
+    what actually determines the capability surface, so it drives tiering and
+    the version check is corroborating metadata only.
+    """
+    if count >= FULL_TIER_TOOLS:
+        return "v2.5-full"
+    if count >= READ_TIER_TOOLS:
+        return "v2.4-read"
+    return None
+
+
 def _read_text_file(path, limit=256 * 1024):
     try:
         return Path(path).read_text(errors="replace")[:limit]
@@ -123,41 +137,33 @@ def _read_text_file(path, limit=256 * 1024):
 # --------------------------------------------------------------------------
 
 def find_sidecar():
-    """Locate the sidecar binary. Returns (path|None, resolved_path|None).
-
-    path is what PATH lookup yields; resolved_path is that entry after
-    symlink resolution, which is how we detect a same-named tools/ crate
-    build shadowing the dpkg-installed main sidecar.
-    """
-    found = shutil.which(SIDECAR_NAME)
-    if found:
-        return found, os.path.realpath(found)
-    if os.path.isfile(SYSTEM_FALLBACK):
-        return SYSTEM_FALLBACK, os.path.realpath(SYSTEM_FALLBACK)
-    return None, None
+    """Locate the sidecar. Returns (path|None, resolved|None, source)."""
+    return ct_env.find_sidecar()
 
 
-def check_sidecar_binary():
-    """(1) sidecar binary present (PATH then /usr/bin fallback)."""
-    path, _resolved = find_sidecar()
+def check_sidecar_binary(found=None):
+    """(1) sidecar binary present (PATH, then platform install locations)."""
+    path, _resolved, source = found if found else find_sidecar()
     if path:
         return CheckResult(
             "sidecar-binary",
             PASS,
-            f"found {SIDECAR_NAME} at {path}",
+            f"found {SIDECAR_NAME} at {path} (via {source})",
         )
+    searched = ", ".join(str(p) for p in ct_env.sidecar_candidates())
     return CheckResult(
         "sidecar-binary",
         FAIL,
-        f"{SIDECAR_NAME} not found on PATH and {SYSTEM_FALLBACK} missing",
-        "Install the curated-thoughts .deb (dpkg -i curated-thoughts_*.deb) "
-        "or add the sidecar's directory to PATH.",
+        f"{SIDECAR_NAME} not found on PATH or in any known install location",
+        "Install Curated Thoughts from the project's releases page for your "
+        "platform, or add the sidecar's directory to PATH. Searched: "
+        f"{searched}",
     )
 
 
 def check_sidecar_identity(path, resolved):
-    """(2) sidecar identity — warn if a same-named tools/ crate build
-    shadows the dpkg one. Disambiguate by path, never by name."""
+    """(2) sidecar identity — warn if a source-checkout build shadows the
+    installed one. Two servers on one brain is a bug; disambiguate by path."""
     if not path:
         return CheckResult(
             "sidecar-identity",
@@ -167,20 +173,23 @@ def check_sidecar_identity(path, resolved):
             "binary.",
         )
     resolved = resolved or os.path.realpath(path)
-    if resolved.startswith(DPKG_BIN_PREFIXES):
+    if ct_env.looks_like_dev_build(resolved):
         return CheckResult(
             "sidecar-identity",
-            PASS,
-            f"{path} resolves to the dpkg-installed sidecar ({resolved})",
+            WARN,
+            f"{path} resolves to a development build ({resolved})",
+            f"'{path}' looks like a build output from a source checkout "
+            "(a target/ or tools/ directory), not an installed Curated "
+            "Thoughts. A same-named dev build shadowing the installed sidecar "
+            "gives two servers on one brain. Remove the stray build, or "
+            "reorder PATH so the installed sidecar wins.",
         )
-    hint = (
-        f"'{path}' does not come from the dpkg install ({resolved}). A same-named "
-        "build from a source checkout (e.g. tools/ or target/ dir) shadows the "
-        "main sidecar — two servers on one brain is a bug. Remove the shadowing "
-        "copy or reorder PATH so the dpkg path wins, e.g. put /usr/bin first "
-        "for this binary or delete the stray build artifact."
+    kind = ct_env.install_kind(resolved)
+    return CheckResult(
+        "sidecar-identity",
+        PASS,
+        f"{path} resolves to an installed sidecar ({resolved}, {kind})",
     )
-    return CheckResult("sidecar-identity", WARN, f"non-dpkg sidecar at {path}", hint)
 
 
 def mcp_tools_list(path, timeout=MCP_TIMEOUT, env=None):
@@ -198,7 +207,7 @@ def mcp_tools_list(path, timeout=MCP_TIMEOUT, env=None):
                 "params": {
                     "protocolVersion": "2024-11-05",
                     "capabilities": {},
-                    "clientInfo": {"name": "ct_doctor", "version": "0.1.0"},
+                    "clientInfo": {"name": "ct_doctor", "version": "0.2.0"},
                 },
             }
         )
@@ -258,34 +267,35 @@ def mcp_tools_list(path, timeout=MCP_TIMEOUT, env=None):
     return tool_names, server_version, error
 
 
-def check_sidecar_reachable(path, timeout=MCP_TIMEOUT, env=None):
+def check_sidecar_reachable(path, timeout=MCP_TIMEOUT, env=None, brain_paths=None):
     """(3) MCP tools/list reachable + tool count → tier classification."""
     if not path:
         return CheckResult(
             "sidecar-mcp",
             FAIL,
             "skipped: no sidecar binary found",
-            "Install the curated-thoughts .deb so the MCP surface exists; "
-            "without it the agent has no CT tools at all.",
+            "Install Curated Thoughts so the MCP surface exists; without it "
+            "the agent has no CT tools at all.",
         )
     tools, _server_version, error = mcp_tools_list(path, timeout=timeout, env=env)
     if tools is None:
+        config_path = (brain_paths or ct_env.resolve_brain_paths()).config_path
         return CheckResult(
             "sidecar-mcp",
             FAIL,
             f"{SIDECAR_NAME} --mcp did not answer tools/list: {error}",
             "If it timed out, an old sidecar process may be wedged: kill all "
             f"{SIDECAR_NAME} processes and retry; if spawn failed, reinstall "
-            "the .deb. Check ~/.brain/config.json is valid JSON.",
+            f"Curated Thoughts. Check {config_path} is valid JSON.",
         )
     count = len(tools)
-    if count >= 14:
+    if count >= FULL_TIER_TOOLS:
         return CheckResult(
             "sidecar-mcp",
             PASS,
-            f"{count} tools listed (full tier; write path active)",
+            f"{count} tools listed (v2.5-full tier; write path active)",
         )
-    if count >= 8:
+    if count >= READ_TIER_TOOLS:
         write_tools_present = "curated_add_wisdom" in tools
         extra = (
             "" if not write_tools_present else " (write tools present — unexpected at this count)"
@@ -293,12 +303,11 @@ def check_sidecar_reachable(path, timeout=MCP_TIMEOUT, env=None):
         return CheckResult(
             "sidecar-mcp",
             WARN,
-            f"{count} tools listed — read-only tier; write path dormant{extra}",
-            f"Only {count} tools exposed, so curated_add_wisdom and friends are "
-            "absent and the write path is dormant. This matches the v2.4-read "
-            "tier of an older (v2.4.x) sidecar: upgrade the curated-thoughts "
-            ".deb to >=2.5 (v2.5-full) for the full 14-tool surface. "
-            "Read-only routing still works.",
+            f"{count} tools listed — v2.4-read tier; write path dormant{extra}",
+            f"Only {count} tools exposed, so curated_add_wisdom and friends "
+            "are absent and the write path is dormant. This matches the "
+            "v2.4-read tier: upgrade Curated Thoughts to >=2.5 for the full "
+            f"{FULL_TIER_TOOLS}-tool surface. Read-only routing still works.",
         )
     if count == 0:
         return CheckResult(
@@ -306,52 +315,129 @@ def check_sidecar_reachable(path, timeout=MCP_TIMEOUT, env=None):
             FAIL,
             "sidecar answered tools/list with 0 tools — broken install",
             "The MCP handshake succeeded but the sidecar exposed no tools at "
-            "all. This is a broken install, not an older tier: reinstall the "
-            "curated-thoughts .deb and re-run ct_doctor.",
+            "all. This is a broken install, not an older tier: reinstall "
+            "Curated Thoughts and re-run ct_doctor.",
         )
     return CheckResult(
         "sidecar-mcp",
         WARN,
         f"{count} tools listed — below every known tier",
-        f"Only {count} tools, fewer than even the v2.4-read tier (8). The "
-        "sidecar may be partially broken: reinstall the curated-thoughts .deb "
-        "and compare `curated-thoughts --version` with shared/compat.yaml.",
+        f"Only {count} tools, fewer than even the v2.4-read tier "
+        f"({READ_TIER_TOOLS}). The sidecar may be partially broken: reinstall "
+        "Curated Thoughts and compare its version with shared/compat.yaml.",
     )
 
 
-def check_vault():
-    """(4) vault path exists and is readable (CT_VAULT_DIR overrides default)."""
-    vault = VAULT_DIR
+def check_brain_dir(brain_paths=None):
+    """(4) brain directory exists and is readable.
+
+    This is the directory holding brain.db and config.json — resolved exactly
+    as Curated Thoughts resolves it (CURATED_BRAIN_DIR, default ~/.brain).
+    It is NOT the vault; see check_vault.
+    """
+    paths = brain_paths or ct_env.resolve_brain_paths()
+    brain = paths.brain_dir
+    env_note = os.environ.get(ct_env.ENV_BRAIN_DIR) or "<unset, default ~/.brain>"
+    if not brain.exists():
+        return CheckResult(
+            "brain-dir",
+            FAIL,
+            f"brain directory {brain} does not exist "
+            f"({ct_env.ENV_BRAIN_DIR}={env_note})",
+            f"Point {ct_env.ENV_BRAIN_DIR} at the real brain directory, or run "
+            "the Curated Thoughts app once to initialize it. When importing a "
+            "brain from another machine, set "
+            f"{ct_env.ENV_BRAIN_DIR} to the imported directory.",
+        )
+    if not brain.is_dir():
+        return CheckResult(
+            "brain-dir",
+            FAIL,
+            f"brain path {brain} exists but is not a directory",
+            f"Move or remove the file at {brain}; the sidecar expects a "
+            "directory containing brain.db and config.json.",
+        )
+    if not os.access(brain, os.R_OK | os.X_OK):
+        return CheckResult(
+            "brain-dir",
+            FAIL,
+            f"brain directory {brain} is not readable by this user",
+            f"Fix permissions: chmod u+rx {brain} (check ownership with ls -ld).",
+        )
+    missing = [n for n, p in (("brain.db", paths.db_path), ("config.json", paths.config_path))
+               if not p.exists()]
+    if missing:
+        return CheckResult(
+            "brain-dir",
+            WARN,
+            f"brain directory {brain} exists but is missing {', '.join(missing)}",
+            "Run the Curated Thoughts app once to initialize the brain, or "
+            "run `curated-thoughts --onboard` to create config.json. An "
+            "imported brain must carry brain.db and config.json together.",
+        )
+    return CheckResult(
+        "brain-dir",
+        PASS,
+        f"brain at {brain} (db + config present)",
+    )
+
+
+def check_vault(brain_paths=None):
+    """(5) the vault the brain actually points at.
+
+    The vault is the documents tree, and its path lives in config.json under
+    `vault_path` — it is machine-specific, so it is the first thing that
+    breaks when a brain is imported from another machine.
+    """
+    paths = brain_paths or ct_env.resolve_brain_paths()
+    config, err = ct_env.read_brain_config(paths.config_path)
+    if config is None:
+        return CheckResult(
+            "vault",
+            FAIL,
+            f"cannot read vault_path: {paths.config_path} {err}",
+            "Run `curated-thoughts --onboard` to create a valid config.json, "
+            "or repair it by hand. `curated-thoughts --doctor` reports the "
+            "config problem in more detail.",
+        )
+    vault, verr = ct_env.resolve_vault_path(config)
+    if vault is None:
+        return CheckResult(
+            "vault",
+            FAIL,
+            f"{verr} ({paths.config_path})",
+            "Set vault_path in config.json to the documents directory this "
+            "brain indexes, or run `curated-thoughts --onboard --vault <dir>`.",
+        )
     if not vault.exists():
         return CheckResult(
             "vault",
             FAIL,
-            f"vault path {vault} does not exist (CT_VAULT_DIR={os.environ.get('CT_VAULT_DIR', '<unset>')})",
-            "Create/restore the brain directory, or point CT_VAULT_DIR at the "
-            "real one. If CT never ran on this machine, run the curated-thoughts "
-            "app once to initialize it.",
+            f"vault {vault} (from {paths.config_path}) does not exist",
+            "This is the usual symptom of a brain imported from another "
+            "machine: vault_path is an absolute path that only existed on the "
+            "source machine. Re-point it at this machine's documents "
+            "directory (`curated-thoughts --onboard --vault <dir>`).",
         )
     if not vault.is_dir():
         return CheckResult(
             "vault",
             FAIL,
             f"vault path {vault} exists but is not a directory",
-            f"Move or remove the file at {vault}; the sidecar expects a "
-            "directory (brain.db + config.json) there.",
+            f"vault_path in {paths.config_path} must name a directory.",
         )
     if not os.access(vault, os.R_OK | os.X_OK):
         return CheckResult(
             "vault",
             FAIL,
-            f"vault path {vault} exists but is not readable by this user",
-            f"Fix permissions: chmod u+rx {vault} (and check ownership with "
-            "ls -ld) so the sidecar — and only the sidecar — can read it.",
+            f"vault {vault} is not readable by this user",
+            f"Fix permissions: chmod u+rx {vault}.",
         )
     return CheckResult("vault", PASS, f"vault at {vault} exists and is readable")
 
 
 def check_embedding():
-    """(5) embedding backend hint — env keys present or Ollama reachable.
+    """(6) embedding backend hint — env keys present or Ollama reachable.
     WARN-only: never fails, since local fastembed works without either."""
     present = [k for k in EMBED_ENV_KEYS if os.environ.get(k)]
     if present:
@@ -387,20 +473,18 @@ def check_embedding():
 
 
 def check_hermes_registration():
-    """(6) curated-thoughts key present under mcp_servers in config.yaml.
-    String scan — no yaml dependency."""
+    """(7) curated-thoughts registered under mcp_servers, and the plugin
+    enabled under plugins. String scan — no yaml dependency."""
     text = _read_text_file(HERMES_CONFIG)
     if text is None:
         return CheckResult(
             "hermes-registration",
             FAIL,
             f"Hermes config not found at {HERMES_CONFIG}",
-            "Run the Hermes onboarding once (hermes) to create config.yaml, "
-            "or re-run install.sh from the plugin directory to write the "
-            "mcp_servers block.",
+            "Run Hermes onboarding once to create config.yaml, or re-run "
+            "install.sh from the plugin directory to print the mcp_servers "
+            "block.",
         )
-    # Narrow the scan to the mcp_servers section so an unrelated mention of
-    # the plugin name elsewhere doesn't count as registration.
     m = re.search(r"^mcp_servers:\s*$", text, re.M)
     if not m:
         return CheckResult(
@@ -437,42 +521,141 @@ def check_hermes_registration():
             f"The entry in {HERMES_CONFIG} must pass --mcp to start the MCP "
             "server. Edit the args list to ['--mcp'] and restart Hermes.",
         )
+    # The plugins half: Hermes enables plugins via `plugins.enabled`.
+    if not re.search(r"^plugins:\s*$", text, re.M):
+        return CheckResult(
+            "hermes-registration",
+            WARN,
+            f"mcp_servers.{MCP_SERVER_KEY} is registered, but {HERMES_CONFIG} "
+            "has no plugins section",
+            f"The MCP tools will work, but the plugin's skills and "
+            f"session-start hook stay dormant. Add to {HERMES_CONFIG}:\n"
+            "plugins:\n"
+            "  enabled:\n"
+            f"    - {PLUGIN_NAME}",
+        )
+    if not re.search(r"^\s+-\s+" + re.escape(PLUGIN_NAME) + r"\s*$", text, re.M):
+        return CheckResult(
+            "hermes-registration",
+            WARN,
+            f"mcp_servers.{MCP_SERVER_KEY} is registered, but '{PLUGIN_NAME}' "
+            "is not listed under plugins.enabled",
+            f"Add '{PLUGIN_NAME}' to the plugins.enabled list in "
+            f"{HERMES_CONFIG} so its skills and session-start hook load.",
+        )
     return CheckResult(
         "hermes-registration",
         PASS,
-        f"mcp_servers.{MCP_SERVER_KEY} registered with --mcp in {HERMES_CONFIG}",
+        f"mcp_servers.{MCP_SERVER_KEY} registered with --mcp, and plugin "
+        f"'{PLUGIN_NAME}' enabled, in {HERMES_CONFIG}",
     )
 
 
-def check_okf_hygiene():
-    """(7) OKF hygiene pointer — static advisory, always PASS with a hint."""
-    return CheckResult(
-        "okf-hygiene",
-        PASS,
-        "advisory: OKF v0.1 notes need okf_version / profile / entity_type / "
-        "created_at frontmatter; edits must match If-Match updated_at",
-        "When writing vault notes use vault_write_note with OKF v0.1 "
-        "frontmatter (okf_version, profile, entity_type, created_at) and on "
-        "edits pass the exact current updated_at value for If-Match — a "
-        "stale value returns a conflict, not silent loss. Never edit the "
-        "brain's SQLite directly; route through MCP tools.",
+def check_import_preflight(path=None, brain_paths=None):
+    """(8) import pre-flight: is this brain safe for an agent to trust?
+
+    Replaces the old static okf-hygiene advisory with a check that actually
+    inspects the brain. Two failure modes matter, both from curated-thoughts
+    PR #188 (issue #186):
+
+      * the engine's setup() rewrite destroys structured source_ref values,
+        so a brain carrying JSON refs is damaged on the next app launch;
+      * an imported brain brings that exposure with it, and arrives on a
+        machine whose engine version decides what happens next.
+
+    Read-only: the database is opened through a mode=ro URI.
+    """
+    paths = brain_paths or ct_env.resolve_brain_paths()
+    engine_version, engine_source = ct_preflight.detect_engine_version(sidecar_path=path)
+    engine_note = (
+        f"engine core-llm-wiki {engine_version}"
+        if engine_version
+        else "engine version unknown"
     )
 
-
-def check_version_compat(path):
-    """(8) detected sidecar version vs tier matrix from shared/compat.yaml."""
-    if not path:
+    census = ct_preflight.census_source_refs(paths.db_path)
+    if census.error:
         return CheckResult(
-            "version-compat",
+            "import-preflight",
             WARN,
-            "skipped: no sidecar binary found",
-            "Resolve check 1 first; a missing sidecar has no version to "
-            "compare against shared/compat.yaml.",
+            f"could not census source_ref rows: {census.error} ({engine_note})",
+            "The brain database could not be read for the pre-flight census. "
+            "If the brain is on another volume or still being imported, "
+            f"re-run once {paths.db_path} is in place.",
         )
-    # Prefer the dpkg package database: MCP serverInfo.version reports the
-    # MCP framework (e.g. rmcp) version, not the sidecar release version.
+    if not census.table_present:
+        return CheckResult(
+            "import-preflight",
+            PASS,
+            f"no llm_wiki_entries table yet — nothing to verify ({engine_note})",
+        )
+
+    damaged = census.damaged
+    at_risk = census.at_risk
+    tokens = census.counts.get("token", 0)
+    has_evidence = ct_preflight.has_evidence_table(paths.db_path)
+    shape = census.shape()
+
+    if damaged:
+        return CheckResult(
+            "import-preflight",
+            FAIL,
+            f"{damaged} of {census.total} wiki entries have a mangled "
+            f"source_ref ({shape}; {engine_note})",
+            "These rows lost their evidence JSON to the engine's setup() "
+            "back-rewrite (curated-thoughts issue #186): provenance display "
+            "is empty and proposal-based retraction cannot match them. Do not "
+            "treat this graph's provenance as trustworthy. The repair "
+            "migration in curated-thoughts PR #188 re-derives the evidence "
+            "from curated_proposal_items; run it before relying on this brain.",
+        )
+    if at_risk:
+        return CheckResult(
+            "import-preflight",
+            FAIL,
+            f"{at_risk} of {census.total} wiki entries carry a source_ref the "
+            f"engine will rewrite on next launch ({shape}; {engine_note})",
+            "These rows still hold structured (JSON) source_ref values. "
+            "core-llm-wiki's setup() GLOB-matches them and strips them through "
+            "normalizeSourceRef on every app launch, destroying the evidence. "
+            "Do not open this brain with the desktop app until Curated "
+            "Thoughts carries the PR #188 structural fix (source_ref becomes "
+            "an engine-proof token and evidence moves to librarian_evidence).",
+        )
+    if tokens and has_evidence is False:
+        return CheckResult(
+            "import-preflight",
+            FAIL,
+            f"{tokens} engine-proof token refs but no librarian_evidence table "
+            f"({shape}; {engine_note})",
+            "This brain was written by a post-fix Curated Thoughts, but the "
+            "CT-owned librarian_evidence table did not travel with it. The "
+            "wiki entries survived; their provenance did not. Re-export the "
+            "brain including librarian_evidence — an export that copies only "
+            "llm_wiki_entries silently drops every evidence link.",
+        )
+    return CheckResult(
+        "import-preflight",
+        PASS,
+        f"{census.total} wiki entries, all source_refs engine-proof "
+        f"({shape}; {engine_note})",
+    )
+
+
+def check_version_compat(path, tool_count=None):
+    """(9) sidecar version — corroborating metadata, not the tier authority.
+
+    The sidecar exposes no --version flag and MCP serverInfo reports the rmcp
+    framework version, so on most installs the release version is simply not
+    discoverable. That is informational, never a warning: the tool count in
+    check 3 is what determines the capability tier. This check exists to catch
+    the case where a discoverable version *disagrees* with the observed tools.
+    """
+    observed_tier = _tier_for_tool_count(tool_count) if tool_count is not None else None
+
     version = None
     source = None
+    # dpkg is a Linux-only convenience; its absence is not a problem.
     try:
         out = subprocess.run(
             ["dpkg-query", "-W", "-f=${Version}", "curated-thoughts"],
@@ -485,41 +668,53 @@ def check_version_compat(path):
             source = f"dpkg curated-thoughts {out.stdout.strip()}"
     except (OSError, subprocess.SubprocessError):
         pass
-    if version is None:
-        _tools, server_version, _err = mcp_tools_list(path)
-        if server_version:
-            candidate = _parse_version(server_version)
-            if candidate and candidate >= (1, 0) and candidate <= (30, 0):
-                version = candidate
-                source = f"serverInfo.version={server_version!r}"
-    if version is None:
-        return CheckResult(
-            "version-compat",
-            WARN,
-            f"could not determine {SIDECAR_NAME} version",
-            "Neither MCP serverInfo nor dpkg-query revealed a version. Run "
-            "'dpkg -l curated-thoughts' by hand and compare with "
-            "shared/compat.yaml tiers (v2.4-read: >=2.4,<2.5; v2.5-full: >=2.5).",
-        )
-    tier = _tier_for(version)
-    if tier:
-        name, lo, hi, tools, wp = tier
-        rng = f">={lo[0]}.{lo[1]}" + (f",<{hi[0]}.{hi[1]}" if hi else "")
+
+    if version is None and observed_tier:
         return CheckResult(
             "version-compat",
             PASS,
-            f"sidecar {version[0]}.{version[1]}.{version[2]} ({source}) → "
-            f"tier {name} ({rng}, "
-            f"{tools} tools, write path {wp})",
+            f"sidecar release version not discoverable on this platform; "
+            f"tier {observed_tier} determined from the live tool count",
+        )
+    if version is None:
+        return CheckResult(
+            "version-compat",
+            PASS,
+            "sidecar release version not discoverable and no tool count "
+            "available; see the sidecar-mcp check for the capability tier",
+        )
+
+    tier = _tier_for(version)
+    vtxt = f"{version[0]}.{version[1]}.{version[2]}"
+    if tier is None:
+        return CheckResult(
+            "version-compat",
+            WARN,
+            f"sidecar version {vtxt} ({source}) is outside every tier in "
+            "shared/compat.yaml",
+            "The installed Curated Thoughts predates 2.4 (or is a "
+            "pre-release). Upgrade to the latest release; tiers are v2.4-read "
+            f"(>=2.4,<2.5, {READ_TIER_TOOLS} tools) and v2.5-full (>=2.5, "
+            f"{FULL_TIER_TOOLS} tools).",
+        )
+    name, lo, hi, tools, wp = tier
+    rng = f">={lo[0]}.{lo[1]}" + (f",<{hi[0]}.{hi[1]}" if hi else "")
+    if observed_tier and observed_tier != name:
+        return CheckResult(
+            "version-compat",
+            WARN,
+            f"version {vtxt} ({source}) implies tier {name}, but the live "
+            f"sidecar exposed a {observed_tier} tool surface",
+            "The installed package and the running sidecar disagree. A stale "
+            "sidecar process may still be serving an older binary: kill all "
+            f"{SIDECAR_NAME} processes so the next MCP call respawns the "
+            "upgraded one, then re-run this doctor.",
         )
     return CheckResult(
         "version-compat",
-        WARN,
-        f"sidecar version {version[0]}.{version[1]}.{version[2]} ({source}) "
-        "is outside every tier in shared/compat.yaml",
-        "The running sidecar predates 2.4 (or is a pre-release). Upgrade to "
-        "the latest curated-thoughts .deb; tiers are v2.4-read (>=2.4,<2.5, "
-        "8 tools) and v2.5-full (>=2.5, 14 tools).",
+        PASS,
+        f"sidecar {vtxt} ({source}) → tier {name} ({rng}, {tools} tools, "
+        f"write path {wp})",
     )
 
 
@@ -528,17 +723,32 @@ def check_version_compat(path):
 # --------------------------------------------------------------------------
 
 def run_checks(timeout=MCP_TIMEOUT, env=None):
-    """Run all 8 checks; returns list of CheckResult."""
+    """Run all checks; returns list of CheckResult."""
     results = []
-    path, resolved = find_sidecar()
-    results.append(check_sidecar_binary())
+    path, resolved, source = find_sidecar()
+    brain_paths = ct_env.resolve_brain_paths()
+
+    results.append(check_sidecar_binary((path, resolved, source)))
     results.append(check_sidecar_identity(path, resolved))
-    results.append(check_sidecar_reachable(path, timeout=timeout, env=env))
-    results.append(check_vault())
+
+    mcp_result = check_sidecar_reachable(
+        path, timeout=timeout, env=env, brain_paths=brain_paths
+    )
+    results.append(mcp_result)
+
+    # Reuse the observed tool count for the version cross-check rather than
+    # spawning the sidecar a second time.
+    tool_count = None
+    m = re.match(r"^(\d+) tools listed", mcp_result.detail)
+    if m:
+        tool_count = int(m.group(1))
+
+    results.append(check_brain_dir(brain_paths))
+    results.append(check_vault(brain_paths))
     results.append(check_embedding())
     results.append(check_hermes_registration())
-    results.append(check_okf_hygiene())
-    results.append(check_version_compat(path))
+    results.append(check_import_preflight(path=path, brain_paths=brain_paths))
+    results.append(check_version_compat(path, tool_count=tool_count))
     return results
 
 
@@ -556,7 +766,6 @@ def format_text(results):
         lines.append(f"[{r.status}] {r.name}: {r.detail}")
         if r.hint:
             lines.append(f"       fix: {r.hint}")
-    codes = {FAIL: 1, WARN: 2}
     n_fail = sum(1 for r in results if r.status == FAIL)
     n_warn = sum(1 for r in results if r.status == WARN)
     lines.append(

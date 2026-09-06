@@ -138,6 +138,38 @@ check_mcp_registration() {
   return 0
 }
 
+# True if the plugin is listed under a top-level "plugins:" key.
+has_plugin_enabled() {
+  [ -f "$CONFIG_FILE" ] || return 1
+  grep -qE "^[[:space:]]+-[[:space:]]+${PLUGIN_NAME}[[:space:]]*$" "$CONFIG_FILE"
+}
+
+check_plugin_enablement() {
+  say ""
+  say "== Plugin enablement =="
+  if ! grep -qE '^plugins:' "$CONFIG_FILE" 2>/dev/null; then
+    say "No 'plugins:' section found. Add to ${CONFIG_FILE}:"
+    say ""
+    say "plugins:"
+    say "  enabled:"
+    say "    - ${PLUGIN_NAME}"
+    say ""
+    say "Without this the MCP tools still work, but the plugin's skills and"
+    say "session-start hook stay dormant."
+    return 0
+  fi
+  if has_plugin_enabled; then
+    say "OK: '${PLUGIN_NAME}' is listed under plugins — nothing changed."
+  else
+    say "A 'plugins:' section exists but does not list '${PLUGIN_NAME}'."
+    say "Add it under plugins.enabled:"
+    say ""
+    say "    - ${PLUGIN_NAME}"
+    say ""
+    say "Automatic insertion was skipped to avoid reformatting your config."
+  fi
+}
+
 check_skill_collisions() {
   say ""
   say "== Skill collision check =="
@@ -162,11 +194,16 @@ main() {
   say ""
   install_plugin_files
   check_mcp_registration
+  check_plugin_enablement
   check_skill_collisions
   say ""
   say "== Done =="
   say "Next step — verify the install:"
   say "  python3 ~/.hermes/plugins/${PLUGIN_NAME}/scripts/ct_doctor.py check"
+  say ""
+  say "Importing a brain from another machine? Point CURATED_BRAIN_DIR at it"
+  say "and re-run the doctor — the import pre-flight check reports whether the"
+  say "graph's provenance survived the trip before an agent relies on it."
 }
 
 main "$@"

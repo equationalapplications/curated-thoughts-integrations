@@ -26,6 +26,9 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE / ".." / "integrations" / "hermes" / "scripts"))
 
 import ct_doctor  # noqa: E402
+import ct_env  # noqa: E402
+import ct_preflight  # noqa: E402
+import ct_status  # noqa: E402
 
 
 MOCK_SIDECAR = r'''#!/usr/bin/env python3
@@ -68,6 +71,19 @@ def main():
 main()
 '''
 
+# The check contract, in run order. Consumers of `check --json` rely on it.
+EXPECTED_CHECKS = (
+    "sidecar-binary",
+    "sidecar-identity",
+    "sidecar-mcp",
+    "brain-dir",
+    "vault",
+    "embedding-backend",
+    "hermes-registration",
+    "import-preflight",
+    "version-compat",
+)
+
 # 8-tool read-only tier names (shared/compat.yaml v2.4-read)
 TIER8 = ",".join(
     [
@@ -98,7 +114,11 @@ class DoctorTestCase(unittest.TestCase):
         )
         self._env_patches = {}
         self.patch_env("HOME", str(self.fake_home))
-        self.patch_env("CT_VAULT_DIR", str(self.fake_home / ".brain"))
+        # The environment contract is Curated Thoughts' own: CURATED_BRAIN_DIR.
+        # There is no CT_VAULT_DIR — nothing in Curated Thoughts reads it.
+        self.patch_env("CURATED_BRAIN_DIR", str(self.fake_home / ".brain"))
+        self.patch_env("CURATED_BRAIN_DB", None)
+        self.patch_env("CURATED_BRAIN_CONFIG", None)
         self.patch_env(
             "HERMES_CONFIG", str(self.fake_home / ".hermes" / "config.yaml")
         )
@@ -106,7 +126,6 @@ class DoctorTestCase(unittest.TestCase):
             self.patch_env(key, None)
         self.patch_env("OLLAMA_HOST", "http://127.0.0.1:1")  # nothing listens
         # Re-resolve module-level paths against the fake home.
-        ct_doctor.VAULT_DIR = Path(os.environ["CT_VAULT_DIR"])
         ct_doctor.HERMES_CONFIG = Path(os.environ["HERMES_CONFIG"])
         self.addCleanup(self._cleanup)
 
@@ -116,9 +135,6 @@ class DoctorTestCase(unittest.TestCase):
                 os.environ.pop(key, None)
             else:
                 os.environ[key] = value
-        ct_doctor.VAULT_DIR = Path(
-            os.environ.get("CT_VAULT_DIR", str(Path.home() / ".brain"))
-        )
         ct_doctor.HERMES_CONFIG = Path(
             os.environ.get(
                 "HERMES_CONFIG", str(Path.home() / ".hermes" / "config.yaml")
@@ -146,14 +162,34 @@ class DoctorTestCase(unittest.TestCase):
                 "  curated-thoughts:\n"
                 "    command: curated-thoughts-mcp\n"
                 '    args: ["--mcp"]\n'
+                "plugins:\n"
+                "  enabled:\n"
+                "    - curated-thoughts\n"
             )
         )
         return cfg
 
-    def make_brain(self):
+    def make_brain(self, vault=True, vault_exists=True):
+        """Create a brain dir with brain.db + config.json, and its vault.
+
+        Mirrors the real layout: the brain dir holds the database and the
+        config, and the *vault* is a separate documents tree named by
+        config.json's vault_path.
+        """
         brain = self.fake_home / ".brain"
         brain.mkdir(parents=True, exist_ok=True)
+        (brain / "brain.db").write_bytes(b"")
+        config = {}
+        if vault:
+            vault_dir = self.fake_home / "documents"
+            if vault_exists:
+                vault_dir.mkdir(parents=True, exist_ok=True)
+            config["vault_path"] = str(vault_dir)
+        (brain / "config.json").write_text(json.dumps(config))
         return brain
+
+    def brain_db(self):
+        return self.fake_home / ".brain" / "brain.db"
 
     def results_by_name(self, env=None):
         results = ct_doctor.run_checks(
@@ -199,7 +235,7 @@ class ToolCountTieringTests(DoctorTestCase):
         )
         self.assertEqual(r.status, ct_doctor.WARN)
         self.assertIn("dormant", r.detail)
-        self.assertIn("v2.5", r.hint)  # actionable: upgrade hint
+        self.assertIn(">=2.5", r.hint)  # actionable: upgrade hint
 
     def test_below_tier_warns(self):
         r = ct_doctor.check_sidecar_reachable(
@@ -243,38 +279,116 @@ class ToolCountTieringTests(DoctorTestCase):
     def test_missing_binary_fails_with_hint(self):
         r = ct_doctor.check_sidecar_reachable(None, timeout=3)
         self.assertEqual(r.status, ct_doctor.FAIL)
-        self.assertIn("deb", r.hint)
+        # The hint must be platform-neutral: no .deb, no dpkg, no apt.
+        self.assertNotRegex(r.hint.lower(), r"\bdeb\b|dpkg|apt-get")
+        self.assertIn("Curated Thoughts", r.hint)
 
 
-class VaultTests(DoctorTestCase):
-    def test_vault_missing_fails(self):
-        r = ct_doctor.check_vault()
+class BrainDirTests(DoctorTestCase):
+    """The brain dir holds brain.db + config.json. It is not the vault."""
+
+    def test_missing_brain_dir_fails(self):
+        r = ct_doctor.check_brain_dir()
         self.assertEqual(r.status, ct_doctor.FAIL)
-        self.assertIn("CT_VAULT_DIR", r.detail)
-        self.assertIn("CT_VAULT_DIR", r.hint)
+        self.assertIn("CURATED_BRAIN_DIR", r.detail)
+        self.assertIn("CURATED_BRAIN_DIR", r.hint)
 
-    def test_vault_present_passes(self):
+    def test_present_brain_dir_passes(self):
         self.make_brain()
-        r = ct_doctor.check_vault()
+        r = ct_doctor.check_brain_dir()
         self.assertEqual(r.status, ct_doctor.PASS)
 
-    def test_vault_not_a_directory_fails(self):
-        brain = self.fake_home / ".brain"
-        brain.write_text("not a dir")
-        r = ct_doctor.check_vault()
+    def test_brain_dir_not_a_directory_fails(self):
+        (self.fake_home / ".brain").write_text("not a dir")
+        r = ct_doctor.check_brain_dir()
         self.assertEqual(r.status, ct_doctor.FAIL)
+
+    def test_brain_dir_without_db_or_config_warns(self):
+        (self.fake_home / ".brain").mkdir()
+        r = ct_doctor.check_brain_dir()
+        self.assertEqual(r.status, ct_doctor.WARN)
+        self.assertIn("brain.db", r.detail)
+        self.assertIn("config.json", r.detail)
 
     def test_env_override_respected(self):
         alt = self.fake_home / "elsewhere"
         alt.mkdir()
-        os.environ["CT_VAULT_DIR"] = str(alt)
-        try:
-            ct_doctor.VAULT_DIR = alt
-            r = ct_doctor.check_vault()
-            self.assertEqual(r.status, ct_doctor.PASS)
-            self.assertIn(str(alt), r.detail)
-        finally:
-            ct_doctor.VAULT_DIR = Path(self.fake_home / ".brain")
+        (alt / "brain.db").write_bytes(b"")
+        (alt / "config.json").write_text("{}")
+        self.patch_env("CURATED_BRAIN_DIR", str(alt))
+        r = ct_doctor.check_brain_dir()
+        self.assertEqual(r.status, ct_doctor.PASS)
+        self.assertIn(str(alt), r.detail)
+
+    def test_explicit_db_path_moves_config_beside_it(self):
+        # CURATED_BRAIN_DB without CURATED_BRAIN_CONFIG puts config.json next
+        # to the database, matching curated-thoughts' resolve_brain_paths.
+        alt = self.fake_home / "split"
+        alt.mkdir()
+        db = alt / "brain.db"
+        db.write_bytes(b"")
+        self.patch_env("CURATED_BRAIN_DB", str(db))
+        paths = ct_env.resolve_brain_paths()
+        self.assertEqual(paths.db_path, db)
+        self.assertEqual(paths.config_path, alt / "config.json")
+
+
+class VaultTests(DoctorTestCase):
+    """The vault is config.json's vault_path — machine-specific, and the
+    first thing that breaks when a brain is imported from another machine."""
+
+    def test_missing_config_fails(self):
+        (self.fake_home / ".brain").mkdir()
+        r = ct_doctor.check_vault()
+        self.assertEqual(r.status, ct_doctor.FAIL)
+        self.assertIn("not found", r.detail)
+
+    def test_malformed_config_fails(self):
+        brain = self.fake_home / ".brain"
+        brain.mkdir()
+        (brain / "config.json").write_text("{not json")
+        r = ct_doctor.check_vault()
+        self.assertEqual(r.status, ct_doctor.FAIL)
+        self.assertIn("malformed JSON", r.detail)
+
+    def test_vault_path_absent_from_config_fails(self):
+        brain = self.fake_home / ".brain"
+        brain.mkdir()
+        (brain / "config.json").write_text("{}")
+        r = ct_doctor.check_vault()
+        self.assertEqual(r.status, ct_doctor.FAIL)
+        self.assertIn("vault_path", r.detail)
+
+    def test_vault_path_wrong_type_fails(self):
+        brain = self.fake_home / ".brain"
+        brain.mkdir()
+        (brain / "config.json").write_text('{"vault_path": 42}')
+        r = ct_doctor.check_vault()
+        self.assertEqual(r.status, ct_doctor.FAIL)
+        self.assertIn("not a non-empty string", r.detail)
+
+    def test_present_vault_passes(self):
+        self.make_brain()
+        r = ct_doctor.check_vault()
+        self.assertEqual(r.status, ct_doctor.PASS)
+        self.assertIn("documents", r.detail)
+
+    def test_imported_brain_with_foreign_vault_path_fails(self):
+        # The signature import symptom: config.json names an absolute path
+        # that only ever existed on the machine the brain came from.
+        self.make_brain(vault_exists=False)
+        r = ct_doctor.check_vault()
+        self.assertEqual(r.status, ct_doctor.FAIL)
+        self.assertIn("imported from another", r.hint)
+
+    def test_tilde_in_vault_path_is_expanded(self):
+        brain = self.fake_home / ".brain"
+        brain.mkdir()
+        (brain / "config.json").write_text('{"vault_path": "~/docs-tilde"}')
+        (self.fake_home / "docs-tilde").mkdir()
+        r = ct_doctor.check_vault()
+        self.assertEqual(r.status, ct_doctor.PASS)
+        self.assertNotIn("~", r.detail)
 
 
 class RegistrationTests(DoctorTestCase):
@@ -313,13 +427,28 @@ class RegistrationTests(DoctorTestCase):
 
 
 class IdentityTests(DoctorTestCase):
-    def test_dpkg_path_passes(self):
+    """Identity is decided by 'is this a dev build', not by a Linux prefix."""
+
+    def test_linux_system_path_passes(self):
         r = ct_doctor.check_sidecar_identity("/usr/bin/curated-thoughts-mcp", None)
         self.assertEqual(r.status, ct_doctor.PASS)
 
+    def test_macos_app_bundle_passes(self):
+        # Tauri stages the sidecar inside the .app bundle; that is a normal
+        # install, not a shadowing dev build.
+        p = "/Applications/Curated Thoughts.app/Contents/MacOS/curated-thoughts-mcp"
+        r = ct_doctor.check_sidecar_identity(p, p)
+        self.assertEqual(r.status, ct_doctor.PASS)
+        self.assertIn("macos-app-bundle", r.detail)
+
+    def test_windows_install_path_passes(self):
+        p = r"C:\Users\me\AppData\Local\Programs\Curated Thoughts\curated-thoughts-mcp.exe"
+        r = ct_doctor.check_sidecar_identity(p, p)
+        self.assertEqual(r.status, ct_doctor.PASS)
+
     def test_shadowing_build_warns(self):
-        # A same-named binary resolving outside the dpkg prefixes (e.g. a
-        # cargo target dir) must WARN, with an un-shadow fix hint.
+        # A same-named binary from a cargo target dir must WARN, with an
+        # un-shadow fix hint.
         target = self.fake_home / "proj" / "target" / "debug" / "curated-thoughts-mcp"
         target.parent.mkdir(parents=True)
         target.write_text("#!/bin/sh\n")
@@ -327,6 +456,47 @@ class IdentityTests(DoctorTestCase):
         r = ct_doctor.check_sidecar_identity(str(target), str(target))
         self.assertEqual(r.status, ct_doctor.WARN)
         self.assertIn("PATH", r.hint)
+
+    def test_tools_crate_build_warns(self):
+        p = "/home/me/curated-thoughts/tools/curated-thoughts-mcp"
+        r = ct_doctor.check_sidecar_identity(p, p)
+        self.assertEqual(r.status, ct_doctor.WARN)
+
+    def test_no_dpkg_dependency_anywhere_in_hints(self):
+        # Guards the OS-agnostic requirement: no check may tell a macOS or
+        # Windows user to reach for a Linux package manager.
+        for r in (
+            ct_doctor.check_sidecar_binary((None, None, "none")),
+            ct_doctor.check_sidecar_identity(None, None),
+            ct_doctor.check_sidecar_reachable(None),
+            ct_doctor.check_brain_dir(),
+        ):
+            blob = (r.detail + " " + r.hint).lower()
+            self.assertNotRegex(blob, r"\bdeb\b|dpkg|apt-get|yum |\.deb")
+
+
+class PlatformDiscoveryTests(DoctorTestCase):
+    def test_macos_candidates_are_app_bundles(self):
+        cands = [str(p) for p in ct_env.sidecar_candidates(platform="darwin")]
+        self.assertTrue(any(".app/Contents/MacOS" in c for c in cands), cands)
+
+    def test_windows_candidates_use_exe_and_env_roots(self):
+        env = {"LOCALAPPDATA": r"C:\Users\me\AppData\Local"}
+        cands = [str(p) for p in ct_env.sidecar_candidates(platform="win32", env=env)]
+        self.assertTrue(cands)
+        self.assertTrue(all(c.endswith(".exe") for c in cands), cands)
+
+    def test_linux_candidates_cover_usr_and_local(self):
+        cands = [str(p) for p in ct_env.sidecar_candidates(platform="linux")]
+        self.assertTrue(any(c.startswith("/usr/bin") for c in cands), cands)
+        self.assertTrue(any(".local/bin" in c for c in cands), cands)
+
+    def test_path_lookup_wins_over_bundled(self):
+        path, _resolved, source = ct_env.find_sidecar(
+            env={"PATH": str(self.bin_dir)}
+        )
+        self.assertEqual(path, str(self.mock_path))
+        self.assertEqual(source, "PATH")
 
     def test_no_binary_warns(self):
         r = ct_doctor.check_sidecar_identity(None, None)
@@ -348,12 +518,163 @@ class EmbeddingTests(DoctorTestCase):
             del os.environ["CT_EMBED_API_KEY"]
 
 
-class OkfAndCompatTests(DoctorTestCase):
-    def test_okf_advisory_always_passes_with_hint(self):
-        r = ct_doctor.check_okf_hygiene()
-        self.assertEqual(r.status, ct_doctor.PASS)
-        self.assertIn("If-Match", r.hint)
+class NormalizerPortTests(unittest.TestCase):
+    """The classifier reimplements core-llm-wiki's normalizeSourceRef:
 
+        value.replace(/[^A-Za-z0-9._\\- ]/g, "").trim().slice(0, 255)
+
+    If this port drifts, every pre-flight verdict is wrong, so it is pinned
+    directly rather than only through the census.
+    """
+
+    def test_strips_disallowed_characters(self):
+        self.assertEqual(
+            ct_preflight.normalize_source_ref('{"a":1}'), "a1"
+        )
+
+    def test_keeps_allowed_charset(self):
+        keep = "abcXYZ019._- "
+        self.assertEqual(ct_preflight.normalize_source_ref(keep), keep.strip())
+
+    def test_trims_then_caps_at_255(self):
+        out = ct_preflight.normalize_source_ref("a" * 400)
+        self.assertEqual(len(out), 255)
+
+    def test_glob_selector_matches_exactly_the_rewritable(self):
+        # engine_would_rewrite must agree with the GLOB '*[^-A-Za-z0-9._ ]*'
+        self.assertTrue(ct_preflight.engine_would_rewrite('{"proposal_id":"p1"}'))
+        self.assertTrue(ct_preflight.engine_would_rewrite("has/slash"))
+        self.assertFalse(ct_preflight.engine_would_rewrite("librarian-deadbeef"))
+        self.assertFalse(ct_preflight.engine_would_rewrite("docs_note-1.md"))
+
+    def test_token_is_a_fixed_point(self):
+        token = "librarian-" + "ab12" * 8
+        self.assertTrue(ct_preflight.is_normalizer_fixed_point(token))
+        self.assertEqual(ct_preflight.classify_source_ref(token), "token")
+
+    def test_json_ref_is_at_risk_not_mangled(self):
+        self.assertEqual(
+            ct_preflight.classify_source_ref('{"proposal_id":"p1","evidence":[]}'),
+            "at_risk",
+        )
+
+    def test_mangled_prefix_is_detected(self):
+        self.assertEqual(
+            ct_preflight.classify_source_ref("evidenceproposal_id p1 chunk"),
+            "mangled",
+        )
+
+    def test_255_char_legal_ref_is_treated_as_truncated(self):
+        self.assertEqual(ct_preflight.classify_source_ref("a" * 255), "mangled")
+
+    def test_plain_path_ref_is_stable(self):
+        self.assertEqual(
+            ct_preflight.classify_source_ref("documents_note.md"), "stable"
+        )
+
+    def test_null_ref(self):
+        self.assertEqual(ct_preflight.classify_source_ref(None), "null")
+
+
+class ImportPreflightTests(DoctorTestCase):
+    """The check that protects an imported graph before an agent trusts it."""
+
+    def _seed_entries(self, refs, with_evidence_table=False):
+        import sqlite3
+
+        self.make_brain()
+        db = self.brain_db()
+        conn = sqlite3.connect(db)
+        try:
+            conn.execute("CREATE TABLE llm_wiki_entries (id TEXT, source_ref TEXT)")
+            conn.executemany(
+                "INSERT INTO llm_wiki_entries VALUES (?, ?)",
+                [(f"e{i}", r) for i, r in enumerate(refs)],
+            )
+            if with_evidence_table:
+                conn.execute(
+                    "CREATE TABLE librarian_evidence "
+                    "(entry_id TEXT PRIMARY KEY, proposal_id TEXT, "
+                    "evidence_json TEXT, created_at INTEGER)"
+                )
+            conn.commit()
+        finally:
+            conn.close()
+        return db
+
+    def test_no_table_yet_passes(self):
+        self.make_brain()
+        r = ct_doctor.check_import_preflight()
+        self.assertEqual(r.status, ct_doctor.PASS)
+        self.assertIn("nothing to verify", r.detail)
+
+    def test_healthy_token_brain_passes(self):
+        self._seed_entries(
+            ["librarian-" + f"{i:032x}" for i in range(3)], with_evidence_table=True
+        )
+        r = ct_doctor.check_import_preflight()
+        self.assertEqual(r.status, ct_doctor.PASS)
+        self.assertIn("engine-proof", r.detail)
+
+    def test_mangled_rows_fail_loudly(self):
+        self._seed_entries(["evidenceproposal_id p1 chunk_id c1", "librarian-ab"])
+        r = ct_doctor.check_import_preflight()
+        self.assertEqual(r.status, ct_doctor.FAIL)
+        self.assertIn("mangled", r.detail)
+        self.assertIn("#188", r.hint)
+
+    def test_json_refs_flagged_before_damage(self):
+        # Not yet damaged, but the next app launch destroys them.
+        self._seed_entries(['{"proposal_id":"p1","evidence":[{"chunk_id":"c1"}]}'])
+        r = ct_doctor.check_import_preflight()
+        self.assertEqual(r.status, ct_doctor.FAIL)
+        self.assertIn("will rewrite", r.detail)
+        self.assertIn("setup()", r.hint)
+
+    def test_tokens_without_evidence_table_fail(self):
+        # The export hazard: entries travelled, librarian_evidence did not.
+        self._seed_entries(["librarian-abc123"], with_evidence_table=False)
+        r = ct_doctor.check_import_preflight()
+        self.assertEqual(r.status, ct_doctor.FAIL)
+        self.assertIn("provenance did not", r.hint)
+
+    def test_missing_database_warns_not_fails(self):
+        self.make_brain()
+        self.brain_db().unlink()
+        r = ct_doctor.check_import_preflight()
+        self.assertEqual(r.status, ct_doctor.WARN)
+
+    def test_census_never_writes_to_the_database(self):
+        db = self._seed_entries(["librarian-abc"], with_evidence_table=True)
+        before = db.read_bytes()
+        mtime = db.stat().st_mtime
+        ct_doctor.check_import_preflight()
+        self.assertEqual(db.read_bytes(), before, "pre-flight must not write")
+        self.assertEqual(db.stat().st_mtime, mtime)
+
+    def test_engine_version_detected_from_manifest(self):
+        pkg = (
+            self.fake_home
+            / "node_modules"
+            / "@equationalapplications"
+            / "core-llm-wiki"
+            / "package.json"
+        )
+        pkg.parent.mkdir(parents=True)
+        pkg.write_text('{"version": "6.0.1"}')
+        version, source = ct_preflight.detect_engine_version(
+            env={"CT_ENGINE_PACKAGE_JSON": str(pkg)}
+        )
+        self.assertEqual(version, "6.0.1")
+        self.assertIn("core-llm-wiki", source)
+
+    def test_engine_version_unknown_is_not_an_error(self):
+        version, source = ct_preflight.detect_engine_version(env={})
+        self.assertIsNone(version)
+        self.assertIsNone(source)
+
+
+class CompatTests(DoctorTestCase):
     def test_tier_matrix_versions(self):
         self.assertEqual(ct_doctor._tier_for((2, 4, 3))[0], "v2.4-read")
         self.assertEqual(ct_doctor._tier_for((2, 4, 9))[0], "v2.4-read")
@@ -413,7 +734,7 @@ class FullRunTests(DoctorTestCase):
         )
         data = json.loads(out.stdout)
         self.assertIn("exit_code", data)
-        self.assertEqual(len(data["checks"]), 8)
+        self.assertEqual(len(data["checks"]), len(EXPECTED_CHECKS))
         for chk in data["checks"]:
             self.assertIn(chk["status"], ("PASS", "WARN", "FAIL"))
 
@@ -519,100 +840,113 @@ class CheckJsonCliTests(DoctorTestCase):
         data = json.loads(out.stdout)
         self.assertIn("exit_code", data)
         self.assertIn("checks", data)
-        self.assertEqual(len(data["checks"]), 8)
+        self.assertEqual(len(data["checks"]), len(EXPECTED_CHECKS))
         names = [c["name"] for c in data["checks"]]
-        self.assertIn("version-compat", names)
+        # The full contract, in order — brain-dir and vault are distinct
+        # checks, and import-preflight replaced the old static okf-hygiene.
+        self.assertEqual(names, list(EXPECTED_CHECKS))
         for chk in data["checks"]:
             self.assertEqual(set(chk), {"name", "status", "detail", "hint"})
             self.assertIn(chk["status"], ("PASS", "WARN", "FAIL"))
 
 
-class VersionFallbackTests(DoctorTestCase):
-    """Gap: check_version_compat's serverInfo.version sanity-window branch.
+class VersionCompatTests(DoctorTestCase):
+    """Version is corroborating metadata; tool count is the tier authority.
 
-    dpkg-query is unavailable/failing in the test env, so the fallback reads
-    serverInfo.version from the (mocked) handshake. We monkeypatch
-    mcp_tools_list to control the reported version deterministically and to
-    avoid real subprocess handshakes.
+    The sidecar has no --version flag, and MCP serverInfo reports the rmcp
+    framework version rather than the Curated Thoughts release — which is why
+    the old serverInfo sanity-window heuristic was removed. An undiscoverable
+    version must therefore be unremarkable (PASS), never a warning that every
+    macOS and Windows user sees.
     """
 
-    def setUp(self):
-        super().setUp()
-        self._orig_mcp_tools_list = ct_doctor.mcp_tools_list
-        self.addCleanup(self._restore)
-
-    def _restore(self):
-        ct_doctor.mcp_tools_list = self._orig_mcp_tools_list
-
-    def _mock_handshake(self, server_version):
-        def fake(path, timeout=ct_doctor.MCP_TIMEOUT, env=None):
-            return (["wiki_context"], server_version, None)
-
-        ct_doctor.mcp_tools_list = fake
-
     def _patch_no_dpkg(self):
-        """Force the dpkg-query branch to fail so the fallback is exercised."""
+        """Force the dpkg-query branch to fail (as on macOS/Windows)."""
         orig = ct_doctor.subprocess.run
 
         def fake_run(cmd, *a, **k):
             if cmd[:2] == ["dpkg-query", "-W"]:
-                raise FileNotFoundError("no dpkg in test env")
+                raise FileNotFoundError("no dpkg on this platform")
             return orig(cmd, *a, **k)
 
         ct_doctor.subprocess.run = fake_run
         self.addCleanup(setattr, ct_doctor.subprocess, "run", orig)
 
-    def test_in_window_low_bound_1_0(self):
-        # 1.0.0 passes the sanity window (so it's reported as a detected
-        # version) but is below every tier → WARN "outside every tier",
-        # NOT the "could not determine" path.
-        self._mock_handshake("1.0.0")
-        self._patch_no_dpkg()
-        r = ct_doctor.check_version_compat(str(self.mock_path))
-        self.assertEqual(r.status, ct_doctor.WARN)
-        self.assertIn("serverInfo.version='1.0.0'", r.detail)
-        self.assertIn("outside every tier", r.detail)
+    def _patch_dpkg_version(self, version):
+        orig = ct_doctor.subprocess.run
 
-    def test_in_window_high_bound_30_0(self):
-        # (30,0) itself would be in the window, but any full triple like
-        # 30.0.0 compares greater than (30, 0) and is rejected → undetermined
-        # WARN. Effectively the sanity window's usable ceiling is < 30.
-        self._mock_handshake("30.0.0")
-        self._patch_no_dpkg()
-        r = ct_doctor.check_version_compat(str(self.mock_path))
-        self.assertEqual(r.status, ct_doctor.WARN)
-        self.assertIn("could not determine", r.detail)
+        def fake_run(cmd, *a, **k):
+            if cmd[:2] == ["dpkg-query", "-W"]:
+                return subprocess.CompletedProcess(cmd, 0, version, "")
+            return orig(cmd, *a, **k)
 
-    def test_in_window_realistic_2_5(self):
-        self._mock_handshake("2.5.0")
+        ct_doctor.subprocess.run = fake_run
+        self.addCleanup(setattr, ct_doctor.subprocess, "run", orig)
+
+    def test_undiscoverable_version_with_tool_count_passes(self):
         self._patch_no_dpkg()
-        r = ct_doctor.check_version_compat(str(self.mock_path))
+        r = ct_doctor.check_version_compat(str(self.mock_path), tool_count=14)
+        self.assertEqual(r.status, ct_doctor.PASS)
+        self.assertIn("v2.5-full", r.detail)
+        self.assertIn("tool count", r.detail)
+
+    def test_undiscoverable_version_without_tool_count_still_passes(self):
+        self._patch_no_dpkg()
+        r = ct_doctor.check_version_compat(str(self.mock_path), tool_count=None)
+        self.assertEqual(r.status, ct_doctor.PASS)
+
+    def test_dpkg_version_agreeing_with_tools_passes(self):
+        self._patch_dpkg_version("2.5.1")
+        r = ct_doctor.check_version_compat(str(self.mock_path), tool_count=14)
         self.assertEqual(r.status, ct_doctor.PASS)
         self.assertIn("v2.5-full", r.detail)
 
-    def test_out_of_window_zero_rejected(self):
-        # 0.x < (1,0): the sanity window must reject it → undetermined WARN.
-        self._mock_handshake("0.9.4")
-        self._patch_no_dpkg()
-        r = ct_doctor.check_version_compat(str(self.mock_path))
+    def test_version_disagreeing_with_tool_count_warns(self):
+        # The genuinely useful case: package says 2.5, but a stale sidecar
+        # process is still serving the 8-tool surface.
+        self._patch_dpkg_version("2.5.1")
+        r = ct_doctor.check_version_compat(str(self.mock_path), tool_count=8)
         self.assertEqual(r.status, ct_doctor.WARN)
-        self.assertIn("could not determine", r.detail)
+        self.assertIn("disagree", r.hint)
+        self.assertIn("v2.4-read", r.detail)
 
-    def test_out_of_window_above_30_rejected(self):
-        # > (30,0) is not a plausible sidecar version (it's a framework
-        # version) → the sanity window rejects it → undetermined WARN.
-        self._mock_handshake("99.99.0")
-        self._patch_no_dpkg()
-        r = ct_doctor.check_version_compat(str(self.mock_path))
+    def test_pre_tier_version_warns(self):
+        self._patch_dpkg_version("2.3.0")
+        r = ct_doctor.check_version_compat(str(self.mock_path), tool_count=8)
         self.assertEqual(r.status, ct_doctor.WARN)
-        self.assertIn("could not determine", r.detail)
+        self.assertIn("outside every tier", r.detail)
 
-    def test_unparseable_server_version_rejected(self):
-        self._mock_handshake("rmcp-abc-dev")
-        self._patch_no_dpkg()
-        r = ct_doctor.check_version_compat(str(self.mock_path))
-        self.assertEqual(r.status, ct_doctor.WARN)
-        self.assertIn("could not determine", r.detail)
+    def test_tier_for_tool_count(self):
+        self.assertEqual(ct_doctor._tier_for_tool_count(14), "v2.5-full")
+        self.assertEqual(ct_doctor._tier_for_tool_count(20), "v2.5-full")
+        self.assertEqual(ct_doctor._tier_for_tool_count(8), "v2.4-read")
+        self.assertIsNone(ct_doctor._tier_for_tool_count(3))
+        self.assertIsNone(ct_doctor._tier_for_tool_count(0))
+
+
+class StatusSnapshotTests(DoctorTestCase):
+    """The session-start snapshot: fast, read-only, fail-open."""
+
+    def test_healthy_brain_reports_ok(self):
+        self.make_brain()
+        snap = ct_status.snapshot(env={**os.environ, **self.with_path()})
+        self.assertEqual(snap["status"], ct_status.OK, snap["notes"])
+
+    def test_missing_vault_is_degraded_with_note(self):
+        self.make_brain(vault_exists=False)
+        snap = ct_status.snapshot(env={**os.environ, **self.with_path()})
+        self.assertEqual(snap["status"], ct_status.DEGRADED)
+        self.assertTrue(any("vault" in n for n in snap["notes"]), snap["notes"])
+
+    def test_context_section_always_carries_routing_reminder(self):
+        self.make_brain()
+        section = ct_status.context_section(env={**os.environ, **self.with_path()})
+        self.assertIn("wiki_context", section)
+        self.assertIn("out-of-band", section)
+
+    def test_snapshot_never_raises_on_broken_env(self):
+        snap = ct_status.snapshot(env={"CURATED_BRAIN_DIR": "\x00bad"})
+        self.assertIn(snap["status"], (ct_status.OK, ct_status.DEGRADED, ct_status.UNKNOWN))
 
 
 def load_suite():

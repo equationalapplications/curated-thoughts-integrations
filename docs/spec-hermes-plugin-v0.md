@@ -1,6 +1,15 @@
 # curated-thoughts-integrations — Hermes/CT Plugin v0 SPEC (DRAFT)
 
-Status: DRAFT for review · 2026-09-05 · Owner: maintainer · Author: CT integrations team
+Status: IMPLEMENTED · 2026-09-05, revised 2026-09-06 · Owner: maintainer · Author: CT integrations team
+
+> **Revision note (2026-09-06).** §4, §5 and §8 were written against the
+> superpowers/Claude Code plugin layout and did not match Hermes. Corrected
+> here: Hermes uses `plugin.yaml` + a `register(ctx)` entry point, names the
+> event `on_session_start`, and exposes `PLUGIN_ROOT` (not
+> `CLAUDE_PLUGIN_ROOT`). §5's environment contract was also wrong — Curated
+> Thoughts reads `CURATED_BRAIN_DIR`, and the brain directory is not the
+> vault. Check 7 (a static OKF advisory) is replaced by a real import
+> pre-flight tied to curated-thoughts PR #188.
 Decisions: D1 monorepo · D2 name `curated-thoughts-integrations` · D3 full plugin (config + hooks + skills)
 
 ## 1. Purpose
@@ -59,39 +68,62 @@ Current customized installation → retired by the plugin:
 
 ## 4. Plugin manifest & registration
 
-`plugin.json` (mirrors the proven superpowers layout):
+`plugin.yaml` plus an `__init__.py` exporting `register(ctx)` — the Hermes
+native plugin shape:
 
-```json
-{
-  "name": "curated-thoughts",
-  "version": "0.1.0",
-  "description": "Curated Thoughts memory integration for Hermes Agent: MCP sidecar, skills, health checks",
-  "skills": ["./skills"],
-  "hooks": "./hooks/hooks.json"
-}
+```yaml
+name: curated-thoughts
+version: 0.2.0
+description: >-
+  Curated Thoughts memory integration for Hermes Agent...
+provides_hooks:
+  - on_session_start
 ```
 
-Installed via `hermes plugin add <path|git url>` (verify exact command against
-current Hermes docs at implementation time). Config ownership: the plugin does
-NOT hold API keys; `.env` stays user-owned.
+```python
+def register(ctx):
+    ctx.register_skill(name, path)              # ×3
+    ctx.register_hook("on_session_start", cb)
+    ctx.register_system_prompt_section("curated-thoughts", section)
+```
+
+Plugins live in `~/.hermes/plugins/<name>/` and are enabled via
+`plugins.enabled` in `~/.hermes/config.yaml`; `hermes plugins install
+owner/repo` is the packaged path. The plugin registers no tools of its own —
+the tool surface is the MCP sidecar, registered under `mcp_servers`.
+
+Config ownership: the plugin does NOT hold API keys; `.env` stays user-owned.
 
 ## 5. `ct_doctor.py` — checks (each: PASS / WARN / FAIL + fix hint)
 
-1. Sidecar binary: `curated-thoughts-mcp` on PATH; verify it is the MAIN
-   sidecar (dpkg path, e.g. /usr/bin/) not a tools-crate build (same name,
-   different build — two servers on one brain is a bug).
-2. Sidecar reachable: `tools/list` over MCP; print tool count.
-   WARN <14 tools → write path dormant (`curated_add_wisdom` absent).
-3. Vault path configured and exists (default ~/Documents/equational-wiki).
-4. Vault reachable read-only probe (no out-of-band writes, ever).
-5. Embedding backend: OLLAMA_HOST (or configured profile) responds.
-6. Hermes registration: plugin dir listed under `plugins:` in config.yaml;
-   `mcp_servers.curated-thoughts` present with `--mcp` args.
-7. OKF hygiene guidance: If-Match `updated_at` semantics — surfaced as a doc
-   check pointer, not a write test.
-8. Version compat: sidecar version vs `shared/compat.yaml` matrix.
+1. Sidecar binary: `curated-thoughts-mcp` on PATH, else this platform's
+   install location — macOS app bundle (Tauri `externalBin`), Linux
+   `/usr/bin`, Windows Programs dir. No dpkg assumption: CT ships on all three.
+2. Sidecar identity: the resolved binary is an installed sidecar, not a build
+   output from a source checkout (`target/`, `tools/`). Two servers on one
+   brain is a bug; disambiguate by path, OS-agnostically.
+3. Sidecar reachable: `tools/list` over MCP; the tool count determines the
+   tier (8 = v2.4-read, 14 = v2.5-full). WARN at 8 → write path dormant.
+4. Brain directory: resolved as Curated Thoughts resolves it —
+   `CURATED_BRAIN_DIR` / `CURATED_BRAIN_DB` / `CURATED_BRAIN_CONFIG`,
+   default `~/.brain`. Holds `brain.db` + `config.json`.
+5. Vault: the documents tree named by `vault_path` **inside config.json** —
+   a different thing from the brain dir, and machine-specific, so it is the
+   usual casualty of importing a brain. Read-only probe; no writes, ever.
+6. Embedding backend: OLLAMA_HOST (or configured profile) responds.
+7. Hermes registration: `mcp_servers.curated-thoughts` with `--mcp` args, AND
+   `curated-thoughts` under `plugins.enabled`.
+8. Import pre-flight: engine version + a census of every
+   `llm_wiki_entries.source_ref`, classifying rows as token / at_risk /
+   mangled and checking that `librarian_evidence` travelled with the entries.
+   Read-only (`mode=ro` URI). See curated-thoughts PR #188.
+9. Version compat: best-effort sidecar version vs `shared/compat.yaml`. The
+   sidecar has no `--version` flag and MCP `serverInfo` reports the rmcp
+   framework version, so an undiscoverable version is PASS, not WARN; this
+   check warns only when a discoverable version disagrees with the live tool
+   count.
 
-Exit code 0 = all PASS/WARN; nonzero = FAIL list (CI-usable).
+Exit code 0 = all PASS, 1 = any FAIL, 2 = WARNs only (CI-usable).
 
 ## 6. `install.sh` (idempotent, no sudo)
 
@@ -115,9 +147,17 @@ Exit code 0 = all PASS/WARN; nonzero = FAIL list (CI-usable).
 
 ## 8. Session-start hook
 
-Fast (<200ms target), read-only, fail-open: locate vault + sidecar, emit a
-compact health line + routing reminder into session context. If sidecar is
-down: state it plainly and continue (never block session start).
+Fast (<200ms target), read-only, fail-open: locate brain + vault + sidecar,
+emit a compact health line + routing reminder into session context. If the
+sidecar is down: state it plainly and continue (never block session start).
+
+Hermes offers two mechanisms and the plugin supports both:
+
+- **Native plugin hook** — `ctx.register_hook("on_session_start", ...)` plus
+  `ctx.register_system_prompt_section(...)` for the injected block.
+- **Shell hook** — `hooks/session-start.py`, wired into the `hooks:` block of
+  `~/.hermes/config.yaml`, following Hermes' stdin-JSON / stdout-JSON
+  protocol. Shell hooks are consent-gated per (event, command) pair.
 
 ## 9. Delivery flow (per house conventions)
 

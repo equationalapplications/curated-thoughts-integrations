@@ -1,8 +1,15 @@
 # Shared compatibility matrix
-# Single source of truth for sidecar capability tiers.
+# Single source of truth for sidecar capability tiers and engine data-safety.
 # Integrations read this data; it is documentation-as-data, not code.
 
 compat:
+  # Sidecar tiers decide what the agent CAN DO. Verified against
+  # curated-thoughts src-tauri/src/mcp_server.rs: v2.4.x registers 8 tools,
+  # v2.5.x registers 14.
+  #
+  # Note the tier is detected from the live tool count, not from a version
+  # string: the sidecar exposes no --version flag, and MCP serverInfo reports
+  # the rmcp framework version rather than the Curated Thoughts release.
   tiers:
     v2.4-read:
       sidecar: ">=2.4,<2.5"
@@ -17,5 +24,58 @@ compat:
       tools: 14
       write_path: full
       notes: >-
-        Adds curated_add_wisdom / curated_update_wisdom /
-        curated_archive_wisdom and companions. Write-tool rules active.
+        Adds curated_recall_context, curated_get_wiki_entry,
+        curated_search_code, curated_add_wisdom, curated_update_wisdom and
+        curated_archive_wisdom. Write-tool rules active.
+
+  # Engine versions decide whether the DATA SURVIVES. core-llm-wiki is the JS
+  # engine the desktop app runs; it shares brain.db with the sidecar, and its
+  # setup() pass rewrites source_ref values. This is independent of the
+  # sidecar tier: a fully capable sidecar and a mangling engine can coexist,
+  # which is exactly the case the import pre-flight exists to catch.
+  #
+  # See curated-thoughts issue #186 and PR #188.
+  engine:
+    package: "@equationalapplications/core-llm-wiki"
+    states:
+      mangles-structured-refs:
+        engine: "<=7.1.0"
+        safe: false
+        notes: >-
+          setup() runs an unconditional legacy-ref back-rewrite:
+          findRowsForSourceRefMigration() GLOB-matches every row whose
+          source_ref contains a character outside [A-Za-z0-9._- ] — which
+          every JSON blob does — and strips it through normalizeSourceRef
+          (replace disallowed chars, trim, slice to 255). Any structured
+          source_ref is destroyed, on every app launch, over the shared
+          brain.db. No engine release is known to be fixed yet; the upstream
+          guard is filed as a separate non-blocking issue in PR #188 §7.1.
+    # A brain is engine-proof when Curated Thoughts writes normalizer-idempotent
+    # tokens and keeps evidence in its own table, regardless of engine version.
+    data_safety:
+      engine_proof_from: "curated-thoughts >= 2.6 (PR #188 structural fix, unreleased)"
+      source_ref_shape: "librarian-<hex>"
+      evidence_table: librarian_evidence
+      notes: >-
+        Post-fix, source_ref is a per-entry hash token that normalizeSourceRef
+        maps to itself, so the engine's GLOB never selects it, and the evidence
+        JSON lives in the CT-owned librarian_evidence table the engine never
+        touches. Because the token is derived from the entry id it is stable
+        across export and import.
+
+  # Export/import: what must travel for a brain to keep working elsewhere.
+  portability:
+    required_tables:
+      - llm_wiki_entries
+      - librarian_evidence
+      - chunks
+      - curated_proposals
+      - curated_proposal_items
+    machine_specific:
+      - "config.json vault_path — absolute, and always wrong after an import"
+    notes: >-
+      An export carrying llm_wiki_entries without librarian_evidence loses all
+      provenance silently. An export without chunks is worse: PR #188 §2.5.4
+      classifies entries with no surviving chunk anchor as orphans and deletes
+      them, so a partial export can have its provenance removed rather than
+      merely missing. Re-point vault_path on the destination machine.
