@@ -1,16 +1,18 @@
 # curated-thoughts-integrations
 
+[![CI](https://github.com/equationalapplications/curated-thoughts-integrations/actions/workflows/ci.yml/badge.svg)](https://github.com/equationalapplications/curated-thoughts-integrations/actions/workflows/ci.yml)
+
 Open-source integrations connecting [Curated Thoughts](https://github.com/equationalapplications/curated-thoughts)
 to AI agent harnesses. One installable integration per harness, sharing a
 common architecture.
 
 ## Integrations
 
-| Harness | Directory | Status |
-|---------|-----------|--------|
-| [Hermes Agent](https://github.com/NousResearch/hermes-agent) | [`integrations/hermes/`](integrations/hermes/) | v0.2 — implemented |
-| OpenClaw | `integrations/openclaw/` | planned |
-| Claude Code | `integrations/claude-code/` | planned |
+| Harness | Directory | Status | Version |
+|---------|-----------|--------|---------|
+| [Hermes Agent](https://github.com/NousResearch/hermes-agent) | [`integrations/hermes/`](integrations/hermes/) | implemented | [0.2.0](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=hermes) |
+| OpenClaw | `integrations/openclaw/` | planned | — |
+| Claude Code | `integrations/claude-code/` | planned | — |
 
 ## What an integration provides
 
@@ -69,6 +71,14 @@ reports both:
   `~/.brain`. All access goes through the sidecar's MCP tools.
 - **Fail open, diagnose early.** A down sidecar must never block an agent
   session — but the doctor should catch it before the session starts.
+
+## Versioning
+
+Each integration versions independently on its own SemVer line and releases
+from a `<id>-v<semver>` tag — `hermes-v0.2.0`. There is no repository-wide
+version. An integration declares the sidecar range it needs
+(`requires_sidecar`) and the `shared/compat.yaml` tier it targets; CI enforces
+that the two agree. See [`docs/ci.md`](docs/ci.md).
 
 ## License
 
