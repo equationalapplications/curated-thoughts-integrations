@@ -120,7 +120,8 @@ def gate_versions(repo_root, base_ref):
             mirrored = read_mirror(directory, mirror)
             if mirrored is None:
                 problems.append(
-                    f"{manifest_path}: version_mirror '{mirror}' does not resolve"
+                    f"{manifest_path}: version_mirror '{mirror}' does not resolve "
+                    f"(spec §5.1)"
                 )
             elif str(mirrored) != str(data.get("version")):
                 problems.append(
@@ -137,9 +138,25 @@ def gate_versions(repo_root, base_ref):
         old_manifest = _file_at_ref(repo_root, base_ref, f"{rel_dir}integration.yaml")
         if old_manifest is None:
             continue  # brand-new integration: nothing to bump from
-        old_version = (yaml.safe_load(old_manifest) or {}).get("version")
+        try:
+            old_version = (yaml.safe_load(old_manifest) or {}).get("version")
+        except yaml.YAMLError:
+            problems.append(
+                f"{rel_dir}integration.yaml at {base_ref}: is not valid YAML, so the "
+                f"version bump cannot be verified (spec §5.1)."
+            )
+            continue
         new_version = data.get("version")
-        if old_version and _semver_key(new_version) <= _semver_key(old_version):
+        try:
+            bumped = _semver_key(new_version) > _semver_key(old_version)
+        except (ValueError, TypeError):
+            problems.append(
+                f"{manifest_path}: version {new_version!r} cannot be compared "
+                f"against {old_version!r}; versions must be numeric SemVer "
+                f"2.0.0 (spec §5.1)."
+            )
+            continue
+        if not bumped:
             problems.append(
                 f"{rel_dir}: {len(material)} shipped file(s) changed "
                 f"(e.g. {material[0]}) but version is still {new_version}. "

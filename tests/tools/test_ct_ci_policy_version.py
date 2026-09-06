@@ -163,5 +163,54 @@ class TestVersionGate(unittest.TestCase):
         self.assertTrue(any("greater" in p for p in problems), problems)
 
 
+class TestRobustness(unittest.TestCase):
+    """C1/I1: a policy violation is a named failure, never a traceback."""
+
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = make_repo(self.tmp.name)
+
+    def change(self, rel, text):
+        path = self.root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+        git(self.root, "add", "-A")
+        git(self.root, "commit", "-m", f"change {rel}")
+
+    def test_non_semver_version_reports_gate_failure_not_traceback(self):
+        base = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=self.root, capture_output=True, text=True
+        ).stdout.strip()
+        self.change("integrations/demo/scripts/run.py", "VALUE = 6\n")
+        self.change(
+            "integrations/demo/integration.yaml",
+            (self.root / "integrations/demo/integration.yaml")
+            .read_text(encoding="utf-8").replace("0.1.0", "v2.0.0"),
+        )
+        self.change("integrations/demo/plugin.yaml", "name: demo\nversion: v2.0.0\n")
+        problems = ct_ci_policy.gate_versions(self.root, base)
+        self.assertTrue(
+            any("cannot be compared" in p and "§5.1" in p for p in problems), problems
+        )
+
+    def test_bad_base_ref_is_clean_usage_error(self):
+        import argparse
+        import contextlib
+        import io
+
+        sys.path.insert(0, str(REPO / "tools"))
+        import ct_ci
+
+        buffer = io.StringIO()
+        with contextlib.redirect_stderr(buffer):
+            code = ct_ci.cmd_policy(
+                argparse.Namespace(repo=self.root, base="no-such-ref")
+            )
+        self.assertEqual(code, 2)
+        self.assertIn("--base", buffer.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()

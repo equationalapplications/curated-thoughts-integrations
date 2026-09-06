@@ -13,6 +13,7 @@ Exit codes: 0 = pass, 1 = a gate failed, 2 = usage error.
 from __future__ import annotations
 
 import argparse
+import subprocess
 import sys
 from pathlib import Path
 
@@ -57,7 +58,17 @@ GATES = {
 def cmd_policy(args):
     failures = []
     for name, gate in sorted(GATES.items()):
-        problems = gate(args.repo, args.base) if name == "versions" else gate(args.repo)
+        try:
+            problems = (
+                gate(args.repo, args.base) if name == "versions" else gate(args.repo)
+            )
+        except subprocess.CalledProcessError:
+            print(
+                f"FAIL [{name}] git could not resolve --base {args.base!r}; "
+                f"pass a ref that exists in this repository (e.g. origin/main).",
+                file=sys.stderr,
+            )
+            return 2
         for problem in problems:
             print(f"FAIL [{name}] {problem}", file=sys.stderr)
         failures.extend(problems)
