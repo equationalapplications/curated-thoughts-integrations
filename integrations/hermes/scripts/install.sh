@@ -89,6 +89,12 @@ install_plugin_files() {
   # so pruning here never touches user files).
   find "${DEST_DIR}" \( -name '__pycache__' -o -name '.git' \) -type d \
     -prune -exec rm -rf {} + 2>/dev/null
+  # Prune Claude Code-era manifests left by pre-0.2 installs. Hermes never
+  # read them (the native shape is plugin.yaml + register(ctx)), and a stale
+  # copy at the destination masks the real manifest. The dir is
+  # plugin-owned, so pruning here never touches user files.
+  rm -f "${DEST_DIR}/plugin.json" "${DEST_DIR}/hooks/hooks.json"
+  rmdir "${DEST_DIR}/hooks" 2>/dev/null || true
   say "copied plugin contents from: ${SCRIPT_SRC}"
 }
 

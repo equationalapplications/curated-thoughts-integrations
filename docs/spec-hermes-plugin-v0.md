@@ -34,9 +34,8 @@ curated-thoughts-integrations/
 │   └── spec-hermes-plugin-v0.md   # this document
 ├── integrations/
 │   └── hermes/                    # ← v0 deliverable
-│       ├── plugin.json            # Hermes plugin manifest
-│   │   ├── hooks/
-│   │   │   ├── hooks.json         # session-start hook registration
+│       ├── plugin.yaml            # Hermes native plugin manifest (§4)
+│       │   ├── hooks/
 │   │   │   └── session-start.py   # context injection + health snapshot (fast, read-only)
 │   │   ├── skills/
 │   │   │   ├── curated-thoughts-usage/SKILL.md   # usage tier (every CT user)
@@ -87,6 +86,30 @@ def register(ctx):
     ctx.register_system_prompt_section("curated-thoughts", section)
 ```
 
+Two runtime contracts verified against the real `hermes_cli.plugins` API
+(dogfood 2026-09-06; both were registration bugs in v0.2.0, fixed in the
+same PR):
+
+- **Section callables receive an argument.** Hermes calls
+  `register_system_prompt_section` callables with a read-only session-info
+  mapping. A zero-arg callback passes registration but raises at render
+  time, and Hermes skips the section — the `## Curated Thoughts` block
+  silently disappears from every session. Accept the argument and ignore
+  it (`def section(session_info=None)`) unless the section is
+  session-scoped by design.
+- **`register_skill` requires a `Path`.** It probes `path.exists()`;
+  passing a `str` raises `AttributeError` for every skill, and the plugin
+  swallows the exception, so all skills silently fail to register. Verify
+  with `hermes plugins doctor <name>` and a fresh-session
+  `skill_view("curated-thoughts:<name>")`.
+
+Note on visibility: plugin skills are opt-in. They resolve via
+`skill_view("<plugin>:<skill>")` but are deliberately **not** listed in
+the `skills_list` index (plugins.py: "opt-in explicit loads only") — an
+acceptance test that greps `skills_list` for the plugin skills will fail
+against a healthy install. `superpowers:*` skills appear there only
+because their bootstrap content self-lists.
+
 Plugins live in `~/.hermes/plugins/<name>/` and are enabled via
 `plugins.enabled` in `~/.hermes/config.yaml`; `hermes plugins install
 owner/repo` is the packaged path. The plugin registers no tools of its own —
@@ -128,6 +151,9 @@ Exit code 0 = all PASS, 1 = any FAIL, 2 = WARNs only (CI-usable).
 ## 6. `install.sh` (idempotent, no sudo)
 
 - Copies plugin into ~/.hermes/plugins/curated-thoughts/ (or registers path).
+- Prunes build junk and stale Claude Code-era manifests (`plugin.json`,
+  `hooks/hooks.json`) left by pre-0.2 installs — Hermes never read them;
+  a stale copy at the destination masks the real `plugin.yaml`.
 - Merges `mcp_servers.curated-thoughts` block into ~/.hermes/config.yaml only
   if absent; NEVER overwrites an existing entry (prints it for review).
 - Refuses to touch existing loose ~/.hermes/skills/curated-thoughts* copies —
@@ -150,6 +176,14 @@ Exit code 0 = all PASS, 1 = any FAIL, 2 = WARNs only (CI-usable).
 Fast (<200ms target), read-only, fail-open: locate brain + vault + sidecar,
 emit a compact health line + routing reminder into session context. If the
 sidecar is down: state it plainly and continue (never block session start).
+
+**Emit-always, never silent.** Verified 2026-09-06: on a healthy machine
+the hook emits a "Memory sidecar ready (brain: …)" block plus the routing
+reminder — silence is *not* the success signal. Degraded machines get a
+"Memory sidecar DEGRADED" block listing the first findings; both paths
+exit 0 (fail-open). The degraded knob is `CURATED_BRAIN_DIR` (point it at
+a missing directory to exercise the degraded path); `CT_VAULT_DIR` is not
+a Curated Thoughts variable and nothing reads it.
 
 Hermes offers two mechanisms and the plugin supports both:
 
