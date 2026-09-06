@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import ct_ci_generate  # noqa: E402
 import ct_ci_manifest  # noqa: E402
+import ct_ci_policy  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -48,6 +49,26 @@ def cmd_generate(args):
     return 0
 
 
+GATES = {
+    "versions": ct_ci_policy.gate_versions,
+}
+
+
+def cmd_policy(args):
+    failures = []
+    for name, gate in sorted(GATES.items()):
+        problems = gate(args.repo, args.base) if name == "versions" else gate(args.repo)
+        for problem in problems:
+            print(f"FAIL [{name}] {problem}", file=sys.stderr)
+        failures.extend(problems)
+        if not problems:
+            print(f"ok   [{name}]")
+    if failures:
+        print(f"\n{len(failures)} policy violation(s).", file=sys.stderr)
+        return 1
+    return 0
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="ct_ci.py", description=__doc__)
     parser.add_argument(
@@ -61,12 +82,20 @@ def main(argv=None):
         action="store_true",
         help="fail if a generated file is missing or stale, writing nothing",
     )
+    policy = sub.add_parser("policy", help="run the repository policy gates")
+    policy.add_argument(
+        "--base",
+        default=None,
+        help="git ref to diff against for version hygiene (e.g. origin/main)",
+    )
 
     args = parser.parse_args(argv)
     if args.command == "validate":
         return cmd_validate(args)
     if args.command == "generate":
         return cmd_generate(args)
+    if args.command == "policy":
+        return cmd_policy(args)
     parser.error(f"unknown command {args.command}")
     return 2
 
