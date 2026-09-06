@@ -210,6 +210,17 @@ class ToolCountTieringTests(DoctorTestCase):
         self.assertEqual(r.status, ct_doctor.WARN)
         self.assertIn("below every known tier", r.detail)
 
+    def test_zero_tools_fails(self):
+        """tools/list succeeding with 0 tools is a broken install, not a tier."""
+        orig = ct_doctor.mcp_tools_list
+        ct_doctor.mcp_tools_list = lambda *a, **k: ([], "2.5.0", None)
+        try:
+            r = ct_doctor.check_sidecar_reachable(str(self.mock_path), timeout=5)
+        finally:
+            ct_doctor.mcp_tools_list = orig
+        self.assertEqual(r.status, ct_doctor.FAIL)
+        self.assertIn("0 tools", r.detail)
+
     def test_unreachable_sidecar_fails(self):
         r = ct_doctor.check_sidecar_reachable(
             str(self.mock_path),

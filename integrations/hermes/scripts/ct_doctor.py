@@ -300,6 +300,15 @@ def check_sidecar_reachable(path, timeout=MCP_TIMEOUT, env=None):
             ".deb to >=2.5 (v2.5-full) for the full 14-tool surface. "
             "Read-only routing still works.",
         )
+    if count == 0:
+        return CheckResult(
+            "sidecar-mcp",
+            FAIL,
+            "sidecar answered tools/list with 0 tools — broken install",
+            "The MCP handshake succeeded but the sidecar exposed no tools at "
+            "all. This is a broken install, not an older tier: reinstall the "
+            "curated-thoughts .deb and re-run ct_doctor.",
+        )
     return CheckResult(
         "sidecar-mcp",
         WARN,

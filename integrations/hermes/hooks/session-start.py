@@ -18,7 +18,7 @@ import os
 import shutil
 import sys
 
-TIMEOUT_GUARD = None  # no network calls; purely local filesystem checks
+# no network calls; purely local filesystem checks
 
 
 def _find_sidecar():
