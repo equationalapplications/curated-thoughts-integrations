@@ -13,7 +13,7 @@ no daemons, no data paths.
 (validation), live `pgrep` against the running sidecar for acceptance.
 
 **Spec:** `docs/superpowers/specs/2026-09-06-sidecar-process-matching-design.md`
-(same branch, commit 1dd88ff)
+(same branch, latest content as of commit 2194a8d)
 
 **Global constraints:**
 
@@ -56,6 +56,11 @@ no daemons, no data paths.
     herring).
 - [ ] Commit: `docs: sidecar process-matching contract`
 
+Note: the Provenance section references the internal incident handoff
+(`fix-sidecar-pgrep-install-script-2026-09-06`) by name/date only — spec
+Design item 1's link requirement satisfied path-free, agent-internal
+narrative excluded (public repo).
+
 ### Task 2: Cross-reference from the plugin spec
 
 - [ ] Append a short `## Process-matching contract` section to
@@ -69,7 +74,16 @@ no daemons, no data paths.
 - [ ] In `/home/kv-thinkpad-t420-ubuntu/Downloads/install-ct-2.6.0.sh`:
   line 67 → `SIDE_PIDS="$(pgrep -f '^/usr/bin/curated-thoughts-mcp' 2>/dev/null || true)"`;
   line 78 → `pkill -f '^/usr/bin/curated-thoughts-mcp' || true`;
-  comment block above line 67 states the contract. Nothing else changes.
+  the comment block above line 67 is replaced with EXACTLY (three lines):
+
+  ```
+  # Match the sidecar by path-anchored full-cmdline -f match: pgrep -x
+  # compares /proc/<pid>/comm, truncated to 15 chars ('curated-thought'),
+  # so the 20-char binary name can never match with -x.
+  ```
+
+  Nothing else changes (checksum, install, dpkg verification, and the md5
+  freshness loop are byte-identical).
 
 **Interfaces (cross-task contract):** the exact pattern string
 `'^/usr/bin/curated-thoughts-mcp'` is identical in Tasks 1–3 — copy it, do
@@ -79,8 +93,8 @@ not retype variants.
 
 - [ ] `bash -n /home/kv-thinkpad-t420-ubuntu/Downloads/install-ct-2.6.0.sh`
   → exit 0.
-- [ ] `shellcheck` on the script → no NEW findings from lines 63–85
-  (pre-existing minor findings elsewhere may stand, reported in PR).
+- [ ] `shellcheck` on the script → exit 0, zero findings (spec Testing bar:
+  clean; verified live result already meets it).
 - [ ] Live run: `sudo bash
   /home/kv-thinkpad-t420-ubuntu/Downloads/install-ct-2.6.0.sh` (Kurt runs
   it, or it exits early without root) → expect checksum OK,
@@ -93,7 +107,11 @@ not retype variants.
 
 - [ ] Push branch `docs/sidecar-process-matching-contract`; open PR with
   body linking spec + plan, conventional title
-  (`docs: sidecar process-matching contract`).
+  (`docs: sidecar process-matching contract`). PR body also documents the
+  spec's negative check (stale-sidecar branch reports and pkills) and why
+  it is documented rather than force-tested live (it requires a genuinely
+  stale sidecar; the md5/exe comparison logic it depends on is exercised
+  by the live fresh-sidecar run).
 - [ ] Watch CI to green (`gh pr checks` — never claim green unchecked);
   adjudicate reviewer findings with fix commits (no amending pushed
   commits).

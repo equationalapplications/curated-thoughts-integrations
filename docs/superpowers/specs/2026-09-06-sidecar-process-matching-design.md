@@ -119,9 +119,11 @@ Rejected alternatives:
    `pkill -f '^/usr/bin/curated-thoughts-mcp' || true`. The md5
    freshness loop is correct as-is (it compares `/proc/<pid>/exe` of the
    matched pids against the installed binary — which is exactly why the pid
-   set must be exact). These two line edits are the complete script
-   change-set: no other line of `install-ct-2.6.0.sh` changes — the
-   checksum, install, and dpkg verification sections are untouched.
+   set must be exact). These two line edits — plus replacing the short
+   comment block above the `pgrep` line with the matching-contract comment —
+   are the complete script change-set: no functional line of
+   `install-ct-2.6.0.sh` changes; the checksum, install, and dpkg
+   verification sections are untouched.
 
 ## Error handling
 
