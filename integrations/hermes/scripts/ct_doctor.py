@@ -917,24 +917,24 @@ def _self_test_suite():
     # tests/ lives at the repo root; this script is
     # integrations/hermes/scripts/ct_doctor.py — resolve relative to __file__
     # so the self-test works from any cwd and any checkout layout.
+    import importlib.util
+
     tests_dir = Path(__file__).resolve().parents[3] / "tests"
     sys.path.insert(0, str(tests_dir))
     sys.path.insert(0, str(Path(__file__).resolve().parent))
-    try:
-        import test_ct_doctor
-    except ImportError:
+    # Loaded via importlib rather than a bare import: a shipped script must
+    # not import test modules (CONTRIBUTING rule 4, enforced by gate_arch).
+    candidate = tests_dir / "test_ct_doctor.py"
+    if not candidate.exists():
         # allow an alternate layout where tests sit next to the script
-        import importlib.util
-
-        candidate = tests_dir / "test_ct_doctor.py"
-        if not candidate.exists():
-            raise
-        spec = importlib.util.spec_from_file_location("test_ct_doctor", candidate)
-        module = importlib.util.module_from_spec(spec)
-        sys.modules["test_ct_doctor"] = module
-        spec.loader.exec_module(module)
-        test_ct_doctor = module
-    return unittest.defaultTestLoader.loadTestsFromModule(test_ct_doctor)
+        candidate = Path(__file__).resolve().parent / "test_ct_doctor.py"
+    if not candidate.exists():
+        raise ImportError(f"test_ct_doctor.py not found under {tests_dir}")
+    spec = importlib.util.spec_from_file_location("test_ct_doctor", candidate)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["test_ct_doctor"] = module
+    spec.loader.exec_module(module)
+    return unittest.defaultTestLoader.loadTestsFromModule(module)
 
 
 def cmd_self_test():

@@ -10,8 +10,11 @@ gate the author cannot act on is a gate they will route around.
 """
 from __future__ import annotations
 
+import ast
 import fnmatch
+import re
 import subprocess
+import sys
 from pathlib import Path
 
 import yaml
@@ -172,5 +175,171 @@ def gate_versions(repo_root, base_ref):
                 f"{changelog}: no entry for version {new_version}. Add a "
                 f"'## {new_version} — YYYY-MM-DD' section; the release body is "
                 f"taken from it (spec §4.2, §5.1)."
+            )
+    return problems
+
+
+# Modules a shipped script may import: the standard library, its own siblings,
+# and the generated compat module. Everything else violates CONTRIBUTING rule 4.
+STDLIB_ALLOWLIST = frozenset(sys.stdlib_module_names) | {
+    "_compat_generated",
+    "ct_env",
+    "ct_doctor",
+    "ct_preflight",
+    "ct_status",
+}
+
+# CONTRIBUTING rule 3 / the environment contract: these three and nothing else.
+CONTRACT_ENV_VARS = frozenset(
+    {"CURATED_BRAIN_DIR", "CURATED_BRAIN_DB", "CURATED_BRAIN_CONFIG"}
+)
+
+# Any drive-letter path, not merely C:\Users\ — a hardcoded
+# "C:\Program Files\..." binary location is just as machine-specific.
+ABS_PATH_RE = re.compile(
+    r"(^/Users/[^/\s]+)|(^/home/[^/\s]+)|(^[A-Za-z]:[\\/])"
+)
+
+_ENV_GETTERS = {"getenv", "get"}
+
+
+def _is_env_lookup(node):
+    """True for os.environ.get('X'), os.getenv('X') and os.environ['X']."""
+    if isinstance(node, ast.Subscript):
+        target = ast.unparse(node.value)
+        return target.endswith("environ")
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+        if node.func.attr in _ENV_GETTERS:
+            return ast.unparse(node.func.value).endswith(("environ", "os"))
+    return False
+
+
+def _env_name(node):
+    if isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Constant):
+        return node.slice.value
+    if isinstance(node, ast.Call) and node.args:
+        first = node.args[0]
+        if isinstance(first, ast.Constant):
+            return first.value
+    return None
+
+
+def _string_constants(tree):
+    """Yield (node, value) for string literals that are values, not docstrings."""
+    docstrings = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+            body = getattr(node, "body", [])
+            if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
+                docstrings.add(id(body[0].value))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            if id(node) not in docstrings:
+                yield node, node.value
+
+
+def scan_python(path, rel, allow_sqlite):
+    """Architecture violations in one Python file. rel is repo-relative POSIX."""
+    problems = []
+    source = Path(path).read_text(encoding="utf-8")
+    try:
+        tree = ast.parse(source, filename=str(rel))
+    except SyntaxError as exc:
+        return [f"{rel}:{exc.lineno}: syntax error, cannot audit ({exc.msg})"]
+
+    in_fixtures = "/tests/fixtures/" in f"/{rel}"
+    integration = rel.split("/")[1] if rel.startswith("integrations/") else None
+    imports_sqlite = False
+    opens_db = False
+
+    for node in ast.walk(tree):
+        names = []
+        if isinstance(node, ast.Import):
+            names = [alias.name for alias in node.names]
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            names = [node.module]
+        for name in names:
+            root = name.split(".")[0]
+            if root == "integrations" or (
+                name.startswith("integrations.")
+            ):
+                other = name.split(".")[1] if "." in name else ""
+                if other != integration:
+                    problems.append(
+                        f"{rel}:{node.lineno}: cross-integration import of "
+                        f"'{name}'. Nothing in one integration may depend on "
+                        f"another (CONTRIBUTING rule: repository layout)."
+                    )
+                continue
+            if root == "sqlite3":
+                imports_sqlite = True
+                if not allow_sqlite:
+                    problems.append(
+                        f"{rel}:{node.lineno}: imports sqlite3. Integrations reach "
+                        f"the brain through the sidecar's MCP tools "
+                        f"(CONTRIBUTING rule 6). A read-only census may be "
+                        f"exempted via policy.allow_sqlite_readonly in "
+                        f"integration.yaml."
+                    )
+                continue
+            if root not in STDLIB_ALLOWLIST:
+                problems.append(
+                    f"{rel}:{node.lineno}: imports '{name}', which is not stdlib. "
+                    f"Shipped scripts use the standard library only "
+                    f"(CONTRIBUTING rule 4)."
+                )
+
+    for node, value in _string_constants(tree):
+        if not in_fixtures and ABS_PATH_RE.search(value):
+            problems.append(
+                f"{rel}:{node.lineno}: hardcoded absolute or drive-letter path "
+                f"{value!r}. No machine-specific content (CONTRIBUTING rule 3); "
+                f"resolve paths at runtime."
+            )
+
+    for node in ast.walk(tree):
+        if _is_env_lookup(node):
+            name = _env_name(node)
+            if (
+                isinstance(name, str)
+                and name.startswith("CURATED_")
+                and name not in CONTRACT_ENV_VARS
+            ):
+                problems.append(
+                    f"{rel}:{node.lineno}: reads '{name}'. The environment "
+                    f"contract is exactly {sorted(CONTRACT_ENV_VARS)}; there are "
+                    f"no integration-specific variables (README: the environment "
+                    f"contract)."
+                )
+
+    opens_db = any(
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "connect"
+        for node in ast.walk(tree)
+    )
+    if allow_sqlite and imports_sqlite and opens_db:
+        if "mode=ro" not in source:
+            problems.append(
+                f"{rel}: declared in policy.allow_sqlite_readonly but never opens "
+                f"the database with a 'mode=ro' URI. The exemption is for "
+                f"read-only census only (spec §5.2)."
+            )
+    return problems
+
+
+def gate_arch(repo_root):
+    """The CONTRIBUTING architecture rules across integrations/ (spec §5.2)."""
+    repo_root = Path(repo_root)
+    problems = []
+    for name, directory, data in ct_ci_manifest.discover_manifests(repo_root):
+        exempt = set((data.get("policy") or {}).get("allow_sqlite_readonly") or [])
+        for path in sorted(directory.rglob("*.py")):
+            if "__pycache__" in path.parts:
+                continue
+            rel_in_integration = path.relative_to(directory).as_posix()
+            rel = path.relative_to(repo_root).as_posix()
+            problems.extend(
+                scan_python(path, rel, rel_in_integration in exempt)
             )
     return problems
