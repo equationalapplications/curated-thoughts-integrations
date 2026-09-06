@@ -86,13 +86,30 @@ Field notes:
 - `checks` values are commands run with the integration directory as the
   working directory. `shell` is a list of scripts handed to shellcheck.
 
-The schema lives at `shared/integration.schema.json`. It is validated by
-`tools/ct_ci.py`, which uses the Python standard library only — the
-zero-dependency rule applies to the CI tooling as much as to shipped scripts.
-YAML is parsed by a minimal stdlib-only loader restricted to the subset the
-manifests use, or, if that proves fragile, the manifests are authored as JSON
-with a `.yaml` extension rejected; the implementation plan settles this with a
-spike. Whichever wins, no third-party package is installed to read a manifest.
+The schema lives at `shared/integration.schema.json`, validated by
+`tools/ct_ci.py`.
+
+### 3.1 Parsing YAML without shipping a dependency
+
+Manifests and `shared/compat.yaml` stay YAML, because their comments carry the
+issue #186 / PR #188 reasoning that makes the compatibility matrix legible.
+Two consumers read them, with different constraints:
+
+- **`tools/ct_ci.py`** runs only in CI and never ships, so it may
+  `pip install PyYAML` and use a real parser. A hand-rolled mini-YAML loader
+  is rejected deliberately: it is a well-known trap whose edge cases would
+  surface as a broken doctor on a user's machine.
+- **Shipped scripts** (the doctor, hooks, installers) must remain stdlib-only
+  per `CONTRIBUTING.md` rule 4. They therefore never parse YAML. They import
+  `integrations/<id>/_compat_generated.py` — a plain Python module of
+  constants generated from `shared/compat.yaml` by
+  `tools/ct_ci.py generate`, carrying a header that names its source and
+  forbids hand-editing.
+
+A **generated-files-are-current** gate (§5.3) regenerates the module in CI and
+fails if the result differs from what is committed. `shared/compat.yaml`
+remains the single source of truth; the generated module is a build product
+that happens to be checked in so that a released tarball is self-contained.
 
 ## 4. Workflow topology
 
@@ -188,17 +205,21 @@ Enforcing `CONTRIBUTING.md` rules 3, 4, and 6:
 - Every `compat_tier` named by an integration exists under `compat.tiers`.
 - Each integration's `requires_sidecar` range intersects its tier's declared
   `sidecar` range.
-- Integration code **reads** `shared/compat.yaml` as data rather than
-  duplicating its values. The lint fails when tier tool counts (`8`, `14` as
-  capability constants), `pinned_version`, `source_ref_shape`, the
-  `librarian_evidence` table name, or the `required_tables` list appear as
-  literals in `integrations/**`. This is the regression guard for the
-  "memory in a box" data-safety rules: the compatibility matrix stays the
-  single source of truth, and drift between it and the doctor becomes
-  impossible rather than merely unlikely.
+- **Generated files are current.** CI re-runs `tools/ct_ci.py generate` and
+  fails if any `_compat_generated.py` differs from the committed copy, naming
+  the command to run. This is what keeps the generated constants honest.
+- Integration code **derives** its compatibility values from
+  `shared/compat.yaml` (via the generated module) rather than duplicating
+  them. The lint fails when tier tool counts (`8`, `14` as capability
+  constants), `pinned_version`, `source_ref_shape`, the `librarian_evidence`
+  table name, or the `required_tables` list appear as literals anywhere in
+  `integrations/**` outside a `_compat_generated.py`. This is the regression
+  guard for the "memory in a box" data-safety rules: the compatibility matrix
+  stays the single source of truth, and drift between it and the doctor
+  becomes impossible rather than merely unlikely.
 
-Where the doctor currently hardcodes such values, this work moves them to a
-compat.yaml read. That is in scope: it is the change that makes the gate
+Where the doctor currently hardcodes such values, this work moves them to the
+generated module. That is in scope: it is the change that makes the gate
 meaningful.
 
 ## 6. Supporting a non-Python harness
@@ -244,7 +265,8 @@ integrations under `tests/fixtures/` cover, at minimum:
 - a rogue `CURATED_*` environment variable,
 - a dangling `compat_tier`,
 - a `requires_sidecar` range disjoint from its tier,
-- a hardcoded compat.yaml literal.
+- a hardcoded compat.yaml literal,
+- a stale `_compat_generated.py`.
 
 Each fixture asserts both that the gate fails and that the message names the
 right file. CI that is not tested is CI that quietly stops enforcing.
@@ -254,10 +276,11 @@ right file. CI that is not tested is CI that quietly stops enforcing.
 The change lands as a spec PR (this document) followed by implementation PRs,
 per `CONTRIBUTING.md` rule 1. Suggested implementation order:
 
-1. `tools/ct_ci.py` with schema validation and its tests; manifests authored
-   for all three integration directories. No workflow change yet.
+1. `tools/ct_ci.py` with schema validation, the `generate` subcommand, and
+   its tests; manifests authored for all three integration directories. No
+   workflow change yet.
 2. Policy gates (§5), added to the existing `ci.yml` as one job, with the
-   doctor's hardcoded compat values moved to a compat.yaml read.
+   doctor's hardcoded compat values moved to the generated module.
 3. Workflow split into `discover` / `integration` / `policy` / `ci-ok`; the
    Hermes-specific steps move into its manifest's `checks`.
 4. `release.yml`, exercised end to end with a `hermes-v0.2.1-rc.1` prerelease
@@ -273,4 +296,5 @@ per `CONTRIBUTING.md` rule 1. Suggested implementation order:
 | CI discovery | Manifest-driven with path filtering on PRs | One workflow per integration; monolithic always-run |
 | `main`/tags scope | Always run everything | Path filtering everywhere |
 | Versioning | Independent SemVer, `requires_sidecar` + `compat_tier` in each manifest | Compat centralised in compat.yaml only; lockstep with core releases |
+| YAML parsing | PyYAML in CI tooling; stdlib-only shipped scripts read a generated constants module, freshness-gated | Hand-rolled mini-YAML loader; JSON manifests (loses comments) |
 | Policy gates | Version hygiene + architecture lint + compat drift, all three | Minimal gates, human review |
