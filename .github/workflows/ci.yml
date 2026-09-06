@@ -1,0 +1,141 @@
+name: CI
+
+# Spec: docs/spec-hermes-plugin-v0.md §9.5 — lint + shellcheck + doctor
+# self-test. The OS matrix is not incidental: this integration claims to work
+# on macOS, Linux and Windows (Curated Thoughts ships all three), and the
+# sidecar-discovery and path-handling code is exactly where that claim breaks.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: tests (${{ matrix.os }}, py${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Oldest supported and current: the code is stdlib-only, so the
+        # interpreter range is the whole compatibility surface.
+        os: [ubuntu-latest, macos-latest]
+        python: ["3.9", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Both jobs execute repository-controlled Python after
+          # checkout. Without this, checkout leaves the job token in
+          # .git/config where that code could read and exfiltrate it;
+          # `contents: read` limits the token's power, not its
+          # disclosure. Nothing here pushes, so no credential is needed.
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Run the test suite
+        run: python -m unittest discover -s tests -v
+
+      - name: Doctor self-test (spec §9.5)
+        # Exercises the same suite through the shipped entry point, from a
+        # directory outside the checkout, proving the script resolves tests/
+        # relative to __file__ rather than the cwd.
+        run: |
+          cd "${{ runner.temp }}"
+          python "${{ github.workspace }}/integrations/hermes/scripts/ct_doctor.py" --self-test
+
+      - name: Doctor runs clean-room without crashing
+        # No sidecar, no brain: every check must still resolve to a verdict
+        # and the process must exit 1 (FAILs), never traceback.
+        run: |
+          cd "${{ runner.temp }}"
+          set +e
+          python "${{ github.workspace }}/integrations/hermes/scripts/ct_doctor.py" check --json > out.json
+          rc=$?
+          set -e
+          echo "exit=$rc"
+          test "$rc" = "1" || { echo "expected exit 1 with no sidecar/brain"; exit 1; }
+          python -c "
+          import json,sys
+          d=json.load(open('out.json'))
+          names=[c['name'] for c in d['checks']]
+          assert len(names)==9, names
+          assert d['exit_code']==1, d['exit_code']
+          print('checks:', ', '.join(names))
+          "
+
+  lint:
+    name: lint + shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Both jobs execute repository-controlled Python after
+          # checkout. Without this, checkout leaves the job token in
+          # .git/config where that code could read and exfiltrate it;
+          # `contents: read` limits the token's power, not its
+          # disclosure. Nothing here pushes, so no credential is needed.
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install ruff
+        run: pip install --disable-pip-version-check ruff
+
+      - name: Ruff (errors and undefined names)
+        # Deliberately the correctness subset, not a style opinion: syntax
+        # errors, undefined names, broken f-strings, unused imports.
+        run: ruff check --select E9,F63,F7,F82,F401 .
+
+      - name: Shellcheck install.sh
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq shellcheck
+          shellcheck integrations/hermes/scripts/install.sh
+
+      - name: Plugin entry point registers against a stub host
+        # The Hermes contract is verified against a stub ctx rather than a
+        # live host (Hermes is not installable in CI): three skills, the
+        # on_session_start hook, and graceful degradation when the optional
+        # system-prompt API is absent.
+        run: |
+          python - <<'PY'
+          import importlib.util, sys
+          from pathlib import Path
+          root = Path("integrations/hermes").resolve()
+          spec = importlib.util.spec_from_file_location("ct_plugin", root / "__init__.py")
+          m = importlib.util.module_from_spec(spec); sys.modules["ct_plugin"] = m
+          spec.loader.exec_module(m)
+
+          class Ctx:
+              def __init__(self): self.skills=[]; self.hooks=[]; self.sections=[]
+              def register_skill(self, n, p): self.skills.append((n, p))
+              def register_hook(self, e, cb): self.hooks.append((e, cb))
+              def register_system_prompt_section(self, i, cb): self.sections.append((i, cb))
+
+          ctx = Ctx(); m.register(ctx)
+          assert len(ctx.skills) == 3, ctx.skills
+          assert [e for e, _ in ctx.hooks] == ["on_session_start"], ctx.hooks
+          assert len(ctx.sections) == 1, ctx.sections
+          ctx.hooks[0][1](session_id="ci", cwd=".")
+          assert ctx.sections[0][1](), "system prompt section rendered empty"
+
+          class Minimal(Ctx):
+              register_system_prompt_section = None
+          mc = Minimal(); mc.register_system_prompt_section = None
+          m.register(mc)
+          assert [e for e, _ in mc.hooks] == ["on_session_start"]
+          print("plugin entry point OK")
+          PY

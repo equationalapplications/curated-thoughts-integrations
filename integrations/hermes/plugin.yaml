@@ -1,0 +1,24 @@
+# Hermes Agent plugin manifest.
+#
+# Format per the Hermes plugin developer guide: plugin.yaml alongside an
+# __init__.py exporting register(ctx). This replaced a plugin.json +
+# hooks/hooks.json pair that used Claude Code's plugin format (SessionStart
+# matchers, ${CLAUDE_PLUGIN_ROOT}) and which Hermes never read.
+name: curated-thoughts
+version: 0.2.0
+description: >-
+  Curated Thoughts memory integration for Hermes Agent: MCP sidecar
+  registration, health checks, import pre-flight, and usage skills.
+author: Equational Applications LLC
+license: MIT
+homepage: https://github.com/equationalapplications/curated-thoughts-integrations
+tags:
+  - memory
+  - mcp
+  - knowledge-graph
+
+# The plugin registers no tools of its own: the Curated Thoughts tool surface
+# is served by the curated-thoughts-mcp sidecar over MCP, registered under
+# mcp_servers in ~/.hermes/config.yaml. The plugin supplies context and skills.
+provides_hooks:
+  - on_session_start

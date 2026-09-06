@@ -16,8 +16,8 @@ Or:            python3 -m unittest discover -s tests
 
 from __future__ import annotations
 
-import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -87,7 +87,16 @@ class FreshInstallTests(InstallShTestCase):
             if "__pycache__" in rel.split("/") or rel.split("/")[0] == ".git":
                 continue
             self.assertIn(rel, copied)
-        for sentinel in ("plugin.json", "scripts/ct_doctor.py", "scripts/install.sh"):
+        for sentinel in (
+            "plugin.yaml",
+            "__init__.py",
+            "scripts/ct_doctor.py",
+            "scripts/ct_env.py",
+            "scripts/ct_preflight.py",
+            "scripts/ct_status.py",
+            "scripts/install.sh",
+            "hooks/session-start.py",
+        ):
             self.assertTrue((self.dest / sentinel).is_file(), sentinel)
         # Shipped skills make it over too.
         self.assertTrue((self.dest / "skills" / "curated-thoughts-usage" / "SKILL.md").is_file())
@@ -114,7 +123,7 @@ class IdempotencyTests(InstallShTestCase):
         self.assertIn("destination exists", second.stdout)
         self.assertIn("refreshing plugin files", second.stdout)
         self.assertTrue(self.dest.is_dir())
-        self.assertTrue((self.dest / "plugin.json").is_file())
+        self.assertTrue((self.dest / "plugin.yaml").is_file())
         # Merge-copy semantics: pre-existing extra files are left in place.
         self.assertTrue(marker.is_file())
 
@@ -232,6 +241,138 @@ class PruneJunkTests(InstallShTestCase):
         self.assertTrue(self.junk_git.exists(), "source .git must not be deleted")
         self.assertTrue((self.junk_git / "HEAD").exists())
         self.assertIn("copied plugin contents", proc.stdout)
+
+
+class PluginShapeTests(InstallShTestCase):
+    """The plugin must be shaped for Hermes, not for Claude Code."""
+
+    def test_hermes_manifest_declares_session_start_hook(self):
+        manifest = (PLUGIN_SRC / "plugin.yaml").read_text()
+        self.assertIn("name: curated-thoughts", manifest)
+        self.assertIn("provides_hooks:", manifest)
+        self.assertIn("on_session_start", manifest)
+
+    def test_register_entry_point_exists(self):
+        init = (PLUGIN_SRC / "__init__.py").read_text()
+        self.assertIn("def register(ctx)", init)
+        self.assertIn("register_hook", init)
+        self.assertIn("on_session_start", init)
+        self.assertIn("register_skill", init)
+
+    def test_no_claude_code_plugin_manifests_remain(self):
+        # plugin.json and hooks/hooks.json were Claude Code's format; Hermes
+        # never read them, so shipping them again would be dead weight that
+        # silently does nothing.
+        self.assertFalse((PLUGIN_SRC / "plugin.json").exists())
+        self.assertFalse((PLUGIN_SRC / "hooks" / "hooks.json").exists())
+
+
+class RepoWideContractTests(unittest.TestCase):
+    """Guards the two contract errors this branch exists to fix."""
+
+    def _repo_text_files(self):
+        skip_dirs = {".git", "__pycache__"}
+        for path in REPO.resolve().rglob("*"):
+            if not path.is_file():
+                continue
+            if any(part in skip_dirs for part in path.parts):
+                continue
+            if path.suffix not in {".py", ".sh", ".yaml", ".yml", ".json", ".md"}:
+                continue
+            try:
+                yield path, path.read_text(errors="replace")
+            except OSError:
+                continue
+
+    # Usage syntax, not bare mention: comments documenting why these were
+    # removed are legitimate and must not trip the guard.
+    # Only environment *reads* are matched. Shell-expansion syntax
+    # (${CLAUDE_PLUGIN_ROOT}) is deliberately not matched here: the one place
+    # it could do damage was hooks/hooks.json, whose absence is asserted by
+    # PluginShapeTests, and matching it textually would flag the comments that
+    # document why these variables were removed.
+    _VAULT_USES = (
+        re.compile(r"""environ(?:\.get)?[\(\[]\s*["']CT_VAULT_DIR"""),
+    )
+    _ROOT_USES = (
+        re.compile(r"""environ(?:\.get)?[\(\[]\s*["']CLAUDE_PLUGIN_ROOT"""),
+    )
+
+    def _offenders(self, patterns):
+        out = []
+        for p, text in self._repo_text_files():
+            if any(pat.search(text) for pat in patterns):
+                out.append(str(p.relative_to(REPO.resolve())))
+        return sorted(out)
+
+    def test_ct_vault_dir_is_never_read(self):
+        # CT_VAULT_DIR never existed in Curated Thoughts; reading it meant the
+        # doctor described a path the sidecar was not using.
+        self.assertEqual(self._offenders(self._VAULT_USES), [])
+
+    def test_claude_plugin_root_is_never_read(self):
+        # Claude Code's variable. Hermes sets PLUGIN_ROOT, so any expansion of
+        # CLAUDE_PLUGIN_ROOT silently resolves to an empty path under Hermes.
+        self.assertEqual(self._offenders(self._ROOT_USES), [])
+
+    def test_curated_brain_dir_is_the_contract(self):
+        doctor = (PLUGIN_SRC / "scripts" / "ct_env.py").read_text()
+        self.assertIn('"CURATED_BRAIN_DIR"', doctor)
+        self.assertIn('"CURATED_BRAIN_DB"', doctor)
+        self.assertIn('"CURATED_BRAIN_CONFIG"', doctor)
+
+    def test_no_linux_package_manager_in_user_facing_hints(self):
+        # Curated Thoughts ships on macOS and Windows too; a fix hint must
+        # never assume dpkg/apt.
+        pattern = re.compile(r"\.deb\b|dpkg -i|apt-get")
+        offenders = []
+        for p, text in self._repo_text_files():
+            if p.name in {"ct_doctor.py", "ct_env.py", "ct_status.py"} and pattern.search(text):
+                offenders.append(str(p.relative_to(REPO.resolve())))
+        self.assertEqual(offenders, [], f"Linux-only install advice in {offenders}")
+
+
+class PluginEnablementTests(InstallShTestCase):
+    """plugins.enabled scoping — a disabled entry must not read as enabled."""
+
+    def _write_config(self, body):
+        cfg = self.home / ".hermes" / "config.yaml"
+        cfg.parent.mkdir(parents=True, exist_ok=True)
+        cfg.write_text(body)
+        return cfg
+
+    MCP = (
+        "mcp_servers:\n"
+        "  curated-thoughts:\n"
+        "    command: curated-thoughts-mcp\n"
+        '    args: ["--mcp"]\n'
+    )
+
+    def test_entry_under_disabled_is_not_reported_enabled(self):
+        self._write_config(
+            self.MCP + "plugins:\n  enabled:\n    - other\n  disabled:\n"
+            "    - curated-thoughts\n"
+        )
+        proc = run_install(self.home)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("does not list 'curated-thoughts'", proc.stdout)
+        self.assertNotIn("is listed under plugins.enabled", proc.stdout)
+
+    def test_entry_under_enabled_is_reported_enabled(self):
+        self._write_config(
+            self.MCP + "plugins:\n  enabled:\n    - curated-thoughts\n"
+            "  disabled:\n    - noisy\n"
+        )
+        proc = run_install(self.home)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("is listed under plugins.enabled", proc.stdout)
+
+    def test_no_plugins_section_prints_guidance(self):
+        self._write_config(self.MCP)
+        proc = run_install(self.home)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("No 'plugins:' section found", proc.stdout)
+        self.assertIn("enabled:", proc.stdout)
 
 
 if __name__ == "__main__":

@@ -1,7 +1,0 @@
-{
-  "name": "curated-thoughts",
-  "version": "0.1.0",
-  "description": "Curated Thoughts memory integration for Hermes Agent: MCP sidecar, skills, health checks",
-  "skills": ["./skills"],
-  "hooks": "./hooks/hooks.json"
-}
