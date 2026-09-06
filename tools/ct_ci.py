@@ -21,16 +21,23 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import ct_ci_discover  # noqa: E402
-import ct_ci_generate  # noqa: E402
-import ct_ci_manifest  # noqa: E402
-import ct_ci_package  # noqa: E402
-import ct_ci_policy  # noqa: E402
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
+def _import(name):
+    """Import a subcommand module lazily.
+
+    Some subcommand modules (ct_ci_policy) read sys.stdlib_module_names at
+    import time, which only exists on Python 3.10+.  Importing at dispatch
+    time keeps the other subcommands (e.g. `package`) runnable on 3.9.
+    """
+    import importlib
+
+    return importlib.import_module(name)
+
+
 def cmd_validate(args):
+    ct_ci_manifest = _import("ct_ci_manifest")
     errors = []
     for _id, _dir, data in ct_ci_manifest.discover_manifests(args.repo):
         errors.extend(ct_ci_manifest.validate_manifest(data, _dir / "integration.yaml"))
@@ -44,6 +51,7 @@ def cmd_validate(args):
 
 
 def cmd_generate(args):
+    ct_ci_generate = _import("ct_ci_generate")
     if args.check:
         stale = ct_ci_generate.check_current(args.repo)
         for problem in stale:
@@ -55,15 +63,17 @@ def cmd_generate(args):
 
 
 GATES = {
-    "versions": ct_ci_policy.gate_versions,
-    "architecture": ct_ci_policy.gate_arch,
-    "compat": ct_ci_policy.gate_compat,
+    "versions": "gate_versions",
+    "architecture": "gate_arch",
+    "compat": "gate_compat",
 }
 
 
 def cmd_policy(args):
+    ct_ci_policy = _import("ct_ci_policy")
     failures = []
-    for name, gate in sorted(GATES.items()):
+    for name, gate_name in sorted(GATES.items()):
+        gate = getattr(ct_ci_policy, gate_name)
         try:
             problems = (
                 gate(args.repo, args.base) if name == "versions" else gate(args.repo)
@@ -87,6 +97,7 @@ def cmd_policy(args):
 
 
 def cmd_package(args):
+    ct_ci_package = _import("ct_ci_package")
     try:
         integration_id, version = ct_ci_package.parse_tag(args.tag)
         directory, data = ct_ci_package._manifest(args.repo, integration_id)
@@ -111,6 +122,7 @@ def cmd_package(args):
 
 
 def cmd_discover(args):
+    ct_ci_discover = _import("ct_ci_discover")
     entries = ct_ci_discover.select(args.repo, args.base, args.all)
     print(json.dumps(entries))
     return 0

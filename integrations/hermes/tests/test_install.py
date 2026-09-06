@@ -20,6 +20,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -30,6 +31,12 @@ REPO = INTEGRATION.parents[1]
 INSTALL_SH = (INTEGRATION / "scripts" / "install.sh").resolve()
 PLUGIN_SRC = INTEGRATION.resolve()
 SCRIPT_TIMEOUT = 60  # every subprocess gets a hard timeout
+
+IS_WINDOWS = sys.platform == "win32"
+# install.sh is a bash script by design (Hermes users install on POSIX shells);
+# Windows runners have no bash on PATH, so every subprocess test below is
+# skipped there rather than the shipped installer rewritten.
+BASH_SKIP = "POSIX-only: exercises install.sh, a bash script"
 
 
 def run_install(home: Path, extra_env=None, cwd="/", install_sh=INSTALL_SH):
@@ -76,6 +83,7 @@ class InstallShTestCase(unittest.TestCase):
         return sorted(str(p.relative_to(PLUGIN_SRC)) for p in PLUGIN_SRC.rglob("*"))
 
 
+@unittest.skipIf(IS_WINDOWS, BASH_SKIP)
 class FreshInstallTests(InstallShTestCase):
     def test_fresh_install_creates_plugin_dir_and_copies_files(self):
         proc = run_install(self.home)
@@ -112,6 +120,7 @@ class FreshInstallTests(InstallShTestCase):
         self.assertFalse((self.home / ".hermes" / "config.yaml").exists())
 
 
+@unittest.skipIf(IS_WINDOWS, BASH_SKIP)
 class IdempotencyTests(InstallShTestCase):
     def test_rerun_exits_zero_and_refreshes_files(self):
         first = run_install(self.home)
@@ -139,6 +148,7 @@ class IdempotencyTests(InstallShTestCase):
         self.assertIn("already present", second.stdout)
 
 
+@unittest.skipIf(IS_WINDOWS, BASH_SKIP)
 class ConfigPreservationTests(InstallShTestCase):
     def test_existing_curated_thoughts_entry_is_never_modified(self):
         cfg_dir = self.home / ".hermes"
@@ -175,6 +185,7 @@ class ConfigPreservationTests(InstallShTestCase):
         self.assertIn("INSIDE that section", proc.stdout)
 
 
+@unittest.skipIf(IS_WINDOWS, BASH_SKIP)
 class SkillCollisionTests(InstallShTestCase):
     def test_loose_skill_collision_warns_and_files_untouched(self):
         skills = self.home / ".hermes" / "skills"
@@ -207,6 +218,7 @@ class SkillCollisionTests(InstallShTestCase):
         self.assertIn("nothing to warn about", proc.stdout)
 
 
+@unittest.skipIf(IS_WINDOWS, BASH_SKIP)
 class PruneJunkTests(InstallShTestCase):
     """__pycache__/.git in the SOURCE checkout are pruned from the DEST copy
     only — the source itself must never be modified."""
@@ -244,6 +256,7 @@ class PruneJunkTests(InstallShTestCase):
         self.assertIn("copied plugin contents", proc.stdout)
 
 
+@unittest.skipIf(IS_WINDOWS, BASH_SKIP)
 class StaleManifestPruneTests(InstallShTestCase):
     """Pre-0.2 installs shipped plugin.json + hooks/hooks.json (Claude Code's
     format — Hermes never read them). The installer must prune them from the
@@ -401,6 +414,7 @@ class RepoWideContractTests(unittest.TestCase):
         self.assertEqual(offenders, [], f"Linux-only install advice in {offenders}")
 
 
+@unittest.skipIf(IS_WINDOWS, BASH_SKIP)
 class PluginEnablementTests(InstallShTestCase):
     """plugins.enabled scoping — a disabled entry must not read as enabled."""
 
