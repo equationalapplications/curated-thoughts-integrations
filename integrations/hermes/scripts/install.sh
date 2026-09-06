@@ -85,6 +85,10 @@ install_plugin_files() {
   fi
   # Merge-copy: overwrites plugin-owned files, never removes anything.
   cp -R "${SCRIPT_SRC}/." "${DEST_DIR}/"
+  # Prune build junk that may exist in a source checkout (plugin-owned dir,
+  # so pruning here never touches user files).
+  find "${DEST_DIR}" \( -name '__pycache__' -o -name '.git' \) -type d \
+    -prune -exec rm -rf {} + 2>/dev/null
   say "copied plugin contents from: ${SCRIPT_SRC}"
 }
 
