@@ -276,8 +276,9 @@ class CensusResult:
 
 def _connect_readonly(db_path):
     """Open the brain database strictly read-only."""
-    uri = "file:" + Path(db_path).as_posix() + "?mode=ro"
-    return sqlite3.connect(uri, uri=True, timeout=5.0)
+    return sqlite3.connect(
+        "file:" + Path(db_path).as_posix() + "?mode=ro", uri=True, timeout=5.0
+    )
 
 
 def _table_exists(conn, name):

@@ -250,7 +250,6 @@ def scan_python(path, rel, allow_sqlite):
     in_fixtures = "/tests/fixtures/" in f"/{rel}"
     integration = rel.split("/")[1] if rel.startswith("integrations/") else None
     imports_sqlite = False
-    opens_db = False
 
     for node in ast.walk(tree):
         names = []
@@ -312,19 +311,38 @@ def scan_python(path, rel, allow_sqlite):
                     f"contract)."
                 )
 
-    opens_db = any(
-        isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Attribute)
-        and node.func.attr == "connect"
-        for node in ast.walk(tree)
-    )
-    if allow_sqlite and imports_sqlite and opens_db:
-        if "mode=ro" not in source:
-            problems.append(
-                f"{rel}: declared in policy.allow_sqlite_readonly but never opens "
-                f"the database with a 'mode=ro' URI. The exemption is for "
-                f"read-only census only (spec §5.2)."
+    # The exemption covers read-only census only, and only on the calls that
+    # actually open the brain: every sqlite3.connect(...) in a declared file
+    # must carry a 'mode=ro' URI (spec §5.2). Unrelated .connect() calls —
+    # sockets, HTTP clients — are none of this gate's business.
+    if allow_sqlite and imports_sqlite:
+        for call in (
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "connect"
+            and ast.unparse(node.func.value).endswith("sqlite3")
+        ):
+            uri = "".join(
+                node.value
+                for arg in call.args
+                for node in ast.walk(arg)
+                if isinstance(node, ast.Constant) and isinstance(node.value, str)
             )
+            if "mode=ro" not in uri:
+                problems.append(
+                    f"{rel}:{call.lineno}: sqlite3.connect(...) does not open the "
+                    f"database with a 'mode=ro' URI. The "
+                    f"policy.allow_sqlite_readonly exemption is for read-only "
+                    f"census only (spec §5.2)."
+                )
+            elif not any(kw.arg == "uri" for kw in call.keywords):
+                problems.append(
+                    f"{rel}:{call.lineno}: sqlite3.connect(...) passes a 'mode=ro' "
+                    f"URI without uri=True, so SQLite treats it as a plain file "
+                    f"path. Open read-only with uri=True (spec §5.2)."
+                )
     return problems
 
 

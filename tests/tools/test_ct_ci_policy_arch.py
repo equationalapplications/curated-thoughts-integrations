@@ -71,6 +71,57 @@ class TestDirectBrainAccess(unittest.TestCase):
             [],
         )
 
+    def test_mode_rw_fails_even_when_an_unrelated_string_mentions_mode_ro(self):
+        problems = scan(
+            """
+            import sqlite3
+            DOCS = "the exemption requires mode=ro somewhere"
+            def open_db(path):
+                return sqlite3.connect(f"file:{path}?mode=rw", uri=True)
+            """,
+            allow_sqlite=True,
+        )
+        self.assertTrue(any("mode=ro" in p for p in problems), problems)
+
+    def test_non_sqlite_connect_call_is_clean(self):
+        self.assertEqual(
+            scan(
+                """
+                import socket
+                def dial():
+                    sock = socket.socket()
+                    return sock.connect(("sidecar", 8500))
+                """,
+                allow_sqlite=True,
+            ),
+            [],
+        )
+
+    def test_connect_without_uri_true_fails(self):
+        problems = scan(
+            """
+            import sqlite3
+            def open_db(path):
+                return sqlite3.connect(path)
+            """,
+            allow_sqlite=True,
+        )
+        self.assertTrue(any("mode=ro" in p or "uri=True" in p for p in problems), problems)
+
+    def test_mode_ro_uri_without_uri_true_flag_fails(self):
+        problems = scan(
+            """
+            import sqlite3
+            def open_db(path):
+                return sqlite3.connect("file:" + path + "?mode=ro")
+            """,
+            allow_sqlite=True,
+        )
+        self.assertTrue(any("uri=True" in p for p in problems), problems)
+
+    def test_import_without_connect_stays_clean_when_declared(self):
+        self.assertEqual(scan("import sqlite3\nX = sqlite3.DatabaseError\n", allow_sqlite=True), [])
+
 
 class TestMachineSpecificPaths(unittest.TestCase):
     def test_hardcoded_user_home_fails(self):
