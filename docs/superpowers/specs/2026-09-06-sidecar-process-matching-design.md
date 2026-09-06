@@ -62,15 +62,17 @@ command line:
 
 ```bash
 # find
-pgrep -f '^/usr/bin/curated-thoughts-mcp'
+pgrep -f '^/usr/bin/curated-thoughts-mcp([[:space:]]|$)'
 # kill
-pkill -f '^/usr/bin/curated-thoughts-mcp'
+pkill -f '^/usr/bin/curated-thoughts-mcp([[:space:]]|$)'
 ```
 
 The leading `^` is mandatory: it excludes (a) supervisor/wrapper processes
 whose cmdline merely contains the path as an argument (mcp_stdio_watchdog),
 and (b) the invoking shell itself, whose own cmdline embeds the pattern
-text. `pgrep -x`/`pkill -x`/`killall` by name are forbidden for the sidecar
+text. The trailing `([[:space:]]|$)` boundary excludes same-prefix sibling
+paths (e.g. a hypothetical `/usr/bin/curated-thoughts-mcp-helper`).
+`pgrep -x`/`pkill -x`/`killall` by name are forbidden for the sidecar
 (never match: comm truncation). Unanchored `-f` matching is forbidden (three
 false-positive classes above). Do not "fix" by truncating the pattern to 15
 chars — the comm is not guaranteed to be a truncation of the binary name at
@@ -83,8 +85,11 @@ or an interpreter (e.g. `bash /usr/bin/curated-thoughts-mcp`) has a cmdline
 that does not begin with the path and is **out of contract** — those launch
 styles do not occur for the dpkg-installed sidecar (the Hermes daemon starts
 it with the absolute path). Verification flows should keep using the
-`/proc/<pid>/exe` readlink check, which is launch-style independent and
-remains the fallback if a launch style ever changes.
+`/proc/<pid>/exe` readlink check — which resolves the actually executed
+binary regardless of start path for direct executions, though for an
+interpreter launch it resolves the interpreter, so the script path must
+then be validated from the cmdline — as the fallback if a launch style
+ever changes.
 
 Rejected alternatives:
 
@@ -114,9 +119,9 @@ Rejected alternatives:
 3. **One-off script fix (not in this repo, same change-set):**
    `~/Downloads/install-ct-2.6.0.sh` line 67
    `pgrep -x curated-thoughts-mcp 2>/dev/null || true` →
-   `pgrep -f '^/usr/bin/curated-thoughts-mcp' 2>/dev/null || true`, and
+   `pgrep -f '^/usr/bin/curated-thoughts-mcp([[:space:]]|$)' 2>/dev/null || true`, and
    line 78 `pkill -x curated-thoughts-mcp || true` →
-   `pkill -f '^/usr/bin/curated-thoughts-mcp' || true`. The md5
+   `pkill -f '^/usr/bin/curated-thoughts-mcp([[:space:]]|$)' || true`. The md5
    freshness loop is correct as-is (it compares `/proc/<pid>/exe` of the
    matched pids against the installed binary — which is exactly why the pid
    set must be exact). These two line edits — plus replacing the short

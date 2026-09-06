@@ -8,12 +8,15 @@ command line — never by process name.
 
 ```bash
 # find
-pgrep -f '^/usr/bin/curated-thoughts-mcp'
+pgrep -f '^/usr/bin/curated-thoughts-mcp([[:space:]]|$)'
 # kill
-pkill -f '^/usr/bin/curated-thoughts-mcp'
+pkill -f '^/usr/bin/curated-thoughts-mcp([[:space:]]|$)'
 ```
 
-The leading `^` is **mandatory** (see "Why the anchor is mandatory" below).
+The leading `^` is **mandatory** (see "Why the anchor is mandatory" below),
+and the trailing `([[:space:]]|$)` boundary is too: without it, a
+same-prefix sibling path such as `/usr/bin/curated-thoughts-mcp-helper`
+would also match the anchored pattern.
 
 ## Why name matching never works
 
@@ -60,13 +63,21 @@ with the absolute sidecar path — exactly the real sidecar(s).
 ## Verification (not find/kill)
 
 For *verifying* which binary a running pid executes (e.g. freshness
-checks after an upgrade), readlink the exe and compare hashes — this is
-launch-style independent:
+checks after an upgrade), readlink the exe and compare hashes:
 
 ```bash
 readlink "/proc/${pid}/exe"        # → /usr/bin/curated-thoughts-mcp
 md5sum "/proc/${pid}/exe"
 ```
+
+Note the limit: `/proc/<pid>/exe` resolves the *actually executed*
+binary. For direct executions of the installed sidecar this is
+launch-style independent (symlinked or relocated start paths still
+resolve here). For an interpreter launch (`bash
+/usr/bin/curated-thoughts-mcp`), it resolves to the *interpreter*, not
+the script — in that case validate the script path from the command
+line instead. This launch style does not occur for the
+dpkg-installed sidecar.
 
 ## Launch-path assumption
 
@@ -84,7 +95,9 @@ pids.
 
 Diagnosed and verified live on 2026-09-06 (CT 2.6.0): a one-off
 release-install script used `pgrep -x curated-thoughts-mcp` and
-silently skipped stale-sidecar detection while a sidecar was running.
-Full reproduction detail: see the internal incident handoff
-`fix-sidecar-pgrep-install-script-2026-09-06` (agent worklog,
-2026-09-06).
+silently skipped stale-sidecar detection while a sidecar was running —
+the freshness check fell into its "no sidecar running" branch, and the
+`pgrep` warning about >15-character name patterns was hidden by a
+`2>/dev/null`. The reproduction is self-contained in this document:
+run `pgrep -x curated-thoughts-mcp` on any machine with the sidecar
+running and observe zero matches despite a live sidecar.

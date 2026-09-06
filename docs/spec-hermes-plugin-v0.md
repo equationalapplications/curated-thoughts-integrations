@@ -236,8 +236,8 @@ limit), and never an unanchored `-f` pattern, which also matches supervisor
 wrappers and the invoking shell:
 
 ```bash
-pgrep -f '^/usr/bin/curated-thoughts-mcp'
-pkill -f '^/usr/bin/curated-thoughts-mcp'
+pgrep -f '^/usr/bin/curated-thoughts-mcp([[:space:]]|$)'
+pkill -f '^/usr/bin/curated-thoughts-mcp([[:space:]]|$)'
 ```
 
 Full contract, forbidden-pattern table, and the launch-path assumption:

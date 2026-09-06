@@ -25,7 +25,8 @@ no daemons, no data paths.
   remain byte-identical — only the two process-matching lines (and their
   comment) change.
 - Never verify the sidecar via `--version` (hangs on stdio); live checks
-  use `pgrep -f '^/usr/bin/curated-thoughts-mcp'` and `/proc/<pid>/exe`.
+  use `pgrep -f '^/usr/bin/curated-thoughts-mcp([[:space:]]|$)'` and
+  `/proc/<pid>/exe`.
 
 ## Tasks
 
@@ -33,8 +34,10 @@ no daemons, no data paths.
 
 - [ ] Create `docs/process-matching.md` with exactly these sections:
   - **The contract** (one paragraph + the two code lines: `pgrep -f
-    '^/usr/bin/curated-thoughts-mcp'` / `pkill -f
-    '^/usr/bin/curated-thoughts-mcp'`; the `^` anchor is mandatory).
+    '^/usr/bin/curated-thoughts-mcp([[:space:]]|$)'` / `pkill -f
+    '^/usr/bin/curated-thoughts-mcp([[:space:]]|$)'`; the `^` anchor is
+    mandatory and so is the trailing `([[:space:]]|$)` boundary — it
+    excludes same-prefix sibling paths like `...-mcp-helper`).
   - **Why name matching never works** — 15-char `/proc/<pid>/comm`
     truncation; comm is not guaranteed to derive from the binary name;
     `pgrep -x`'s >15-char warning is easy to swallow with `2>/dev/null`.
@@ -72,8 +75,8 @@ narrative excluded (public repo).
 ### Task 3: Patch the one-off script (repo-external)
 
 - [ ] In `/home/kv-thinkpad-t420-ubuntu/Downloads/install-ct-2.6.0.sh`:
-  line 67 → `SIDE_PIDS="$(pgrep -f '^/usr/bin/curated-thoughts-mcp' 2>/dev/null || true)"`;
-  line 78 → `pkill -f '^/usr/bin/curated-thoughts-mcp' || true`;
+  line 67 → `SIDE_PIDS="$(pgrep -f '^/usr/bin/curated-thoughts-mcp([[:space:]]|$)' 2>/dev/null || true)"`;
+  line 78 → `pkill -f '^/usr/bin/curated-thoughts-mcp([[:space:]]|$)' || true`;
   the comment block above line 67 is replaced with EXACTLY (three lines):
 
   ```
@@ -86,8 +89,8 @@ narrative excluded (public repo).
   freshness loop are byte-identical).
 
 **Interfaces (cross-task contract):** the exact pattern string
-`'^/usr/bin/curated-thoughts-mcp'` is identical in Tasks 1–3 — copy it, do
-not retype variants.
+`'^/usr/bin/curated-thoughts-mcp([[:space:]]|$)'` is identical in Tasks 1–3 —
+copy it, do not retype variants.
 
 ### Task 4: Validate
 
