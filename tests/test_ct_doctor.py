@@ -546,30 +546,78 @@ class NormalizerPortTests(unittest.TestCase):
         self.assertFalse(ct_preflight.engine_would_rewrite("librarian-deadbeef"))
         self.assertFalse(ct_preflight.engine_would_rewrite("docs_note-1.md"))
 
-    def test_token_is_a_fixed_point(self):
+    def test_five_predicate_selector(self):
+        """PR #188 §2.2: the selector ORs five predicates, not just the GLOB.
+
+        Only TRIM adds coverage the GLOB lacks — space is inside the keep-set,
+        so a whitespace-padded ref clears the GLOB and is still selected.
+        """
+        # TRIM(source_ref) != source_ref
+        self.assertTrue(ct_preflight.engine_would_rewrite("  padded.md  "))
+        self.assertTrue(ct_preflight.engine_would_rewrite("trailing "))
+        self.assertTrue(ct_preflight.engine_would_rewrite(" leading"))
+        # INSTR '/' and '\\'
+        self.assertTrue(ct_preflight.engine_would_rewrite("docs/note.md"))
+        self.assertTrue(ct_preflight.engine_would_rewrite("docs\\note.md"))
+        # INSTR CHAR(0)
+        self.assertTrue(ct_preflight.engine_would_rewrite("nul\x00byte"))
+        # GLOB
+        self.assertTrue(ct_preflight.engine_would_rewrite('{"proposal_id":"p"}'))
+        # None of the five
+        self.assertFalse(ct_preflight.engine_would_rewrite("docs_note-1.md"))
+        self.assertFalse(ct_preflight.engine_would_rewrite("librarian-" + "a" * 32))
+
+    def test_space_padded_ref_is_at_risk_not_stable(self):
+        # The regression the GLOB-only port missed entirely.
+        self.assertEqual(
+            ct_preflight.classify_source_ref("  documents_note.md  "), "at_risk"
+        )
+
+    def test_token_shape_is_exactly_32_hex(self):
+        """§2.2 is normative: 'librarian-' + exactly 32 lowercase hex."""
+        good = "librarian-" + "0123456789abcdef" * 2  # 32 chars
+        self.assertTrue(ct_preflight.is_token(good))
+        self.assertEqual(ct_preflight.classify_source_ref(good), "token")
+        for bad in (
+            "librarian-abc",                  # too short
+            "librarian-" + "a" * 31,          # off by one
+            "librarian-" + "a" * 33,          # off by one
+            "librarian-" + "A" * 32,          # uppercase
+            "librarian-" + "g" * 32,          # non-hex
+            "librarian-",                     # empty digest
+        ):
+            self.assertFalse(ct_preflight.is_token(bad), bad)
+            # Detection is the positive token test: not-a-token is damaged.
+            self.assertNotEqual(ct_preflight.classify_source_ref(bad), "token", bad)
+
+    def test_token_is_a_fixed_point_of_all_predicates(self):
         token = "librarian-" + "ab12" * 8
         self.assertTrue(ct_preflight.is_normalizer_fixed_point(token))
+        self.assertFalse(ct_preflight.engine_would_rewrite(token))
         self.assertEqual(ct_preflight.classify_source_ref(token), "token")
 
     def test_json_ref_is_at_risk_not_mangled(self):
         self.assertEqual(
-            ct_preflight.classify_source_ref('{"proposal_id":"p1","evidence":[]}'),
+            ct_preflight.classify_source_ref('{"evidence":[],"proposal_id":"p1"}'),
             "at_risk",
         )
 
-    def test_mangled_prefix_is_detected(self):
+    def test_already_normalized_non_token_is_mangled(self):
+        # A normalizer fixed point that is not a token: the evidence is gone.
         self.assertEqual(
-            ct_preflight.classify_source_ref("evidenceproposal_id p1 chunk"),
+            ct_preflight.classify_source_ref("evidenceproposal_idprop_abc"),
             "mangled",
         )
 
-    def test_255_char_legal_ref_is_treated_as_truncated(self):
-        self.assertEqual(ct_preflight.classify_source_ref("a" * 255), "mangled")
-
-    def test_plain_path_ref_is_stable(self):
-        self.assertEqual(
-            ct_preflight.classify_source_ref("documents_note.md"), "stable"
-        )
+    def test_recovery_shapes_are_advisory_only(self):
+        """§2.5.4 shapes drive recovery, not detection."""
+        a, b = "evidenceproposal_idprop_ab", "evidencechunk_idc1content_hashff"
+        self.assertIn("2.5.4b", ct_preflight.recovery_shape(a)[0])
+        self.assertIn("2.5.4c", ct_preflight.recovery_shape(b)[0])
+        self.assertIsNone(ct_preflight.recovery_shape("librarian-" + "a" * 32))
+        # Detection does not depend on them: an unrecognised mangled blob is
+        # still classified damaged.
+        self.assertEqual(ct_preflight.classify_source_ref("some.other.junk"), "mangled")
 
     def test_null_ref(self):
         self.assertEqual(ct_preflight.classify_source_ref(None), "null")
@@ -578,28 +626,119 @@ class NormalizerPortTests(unittest.TestCase):
 class ImportPreflightTests(DoctorTestCase):
     """The check that protects an imported graph before an agent trusts it."""
 
-    def _seed_entries(self, refs, with_evidence_table=False):
+    TOKEN = "librarian-" + "ab12" * 8  # 32 hex, the normative §2.2 shape
+
+    def _seed(self, rows, evidence_table=True, evidence_ids=None, unanchored=0,
+              with_source_type=True):
+        """Seed llm_wiki_entries (+ optional librarian_evidence).
+
+        rows: list of (entry_id, source_ref, source_type)
+        evidence_ids: entry_ids that get a librarian_evidence row; None = all
+                      token rows.
+        """
         import sqlite3
 
         self.make_brain()
         db = self.brain_db()
         conn = sqlite3.connect(db)
         try:
-            conn.execute("CREATE TABLE llm_wiki_entries (id TEXT, source_ref TEXT)")
-            conn.executemany(
-                "INSERT INTO llm_wiki_entries VALUES (?, ?)",
-                [(f"e{i}", r) for i, r in enumerate(refs)],
-            )
-            if with_evidence_table:
+            if with_source_type:
+                conn.execute(
+                    "CREATE TABLE llm_wiki_entries "
+                    "(id TEXT, source_ref TEXT, source_type TEXT)"
+                )
+                conn.executemany(
+                    "INSERT INTO llm_wiki_entries VALUES (?,?,?)", rows
+                )
+            else:
+                conn.execute("CREATE TABLE llm_wiki_entries (id TEXT, source_ref TEXT)")
+                conn.executemany(
+                    "INSERT INTO llm_wiki_entries VALUES (?,?)",
+                    [(r[0], r[1]) for r in rows],
+                )
+            if evidence_table:
                 conn.execute(
                     "CREATE TABLE librarian_evidence "
                     "(entry_id TEXT PRIMARY KEY, proposal_id TEXT, "
-                    "evidence_json TEXT, created_at INTEGER)"
+                    "evidence_json TEXT, unanchored INTEGER NOT NULL DEFAULT 0, "
+                    "created_at INTEGER)"
                 )
+                if evidence_ids is None:
+                    evidence_ids = [
+                        r[0] for r in rows
+                        if r[1] and ct_preflight.is_token(r[1])
+                    ]
+                for i, eid in enumerate(evidence_ids):
+                    conn.execute(
+                        "INSERT INTO librarian_evidence VALUES (?,?,?,?,?)",
+                        (eid, "prop_x", '{"evidence":[]}',
+                         1 if i < unanchored else 0, 0),
+                    )
             conn.commit()
         finally:
             conn.close()
         return db
+
+    # --- the pinned regression (PR #188 §2.5.1 census-scope test) ----------
+
+    def test_document_sourced_255_char_path_is_never_damaged(self):
+        """A legitimate long vault path normalizes to exactly 255 chars.
+
+        Unscoped, shape/length heuristics classify it as damaged and the check
+        tells a healthy user their provenance is destroyed. §2.5.1 restricts
+        the census to source_type='librarian_inferred' precisely to prevent
+        this, and pins it as a regression test.
+        """
+        long_path = "documents_" + "a" * 245
+        self.assertEqual(len(long_path), 255)
+        self._seed([
+            ("d1", long_path, "document"),
+            ("e1", self.TOKEN, "librarian_inferred"),
+        ])
+        r = ct_doctor.check_import_preflight()
+        self.assertEqual(r.status, ct_doctor.PASS, r.detail)
+        # The document row is out of scope entirely — not counted, not judged.
+        census = ct_preflight.census_source_refs(self.brain_db())
+        self.assertEqual(census.total, 1, census.as_dict())
+        self.assertEqual(census.damaged, 0)
+        self.assertEqual(census.counts.get("token"), 1)
+
+    def test_census_is_scoped_to_librarian_inferred(self):
+        self._seed([
+            ("d1", '{"json":"doc"}', "document"),
+            ("d2", "  padded  ", "document"),
+            ("e1", self.TOKEN, "librarian_inferred"),
+        ])
+        census = ct_preflight.census_source_refs(self.brain_db())
+        self.assertTrue(census.scoped)
+        self.assertEqual(census.total, 1)
+        self.assertEqual(census.at_risk, 0, "document rows must not be judged")
+
+    def test_unscoped_schema_is_reported_not_silently_trusted(self):
+        # No source_type column: we cannot scope, so say so rather than risk
+        # the false positive silently.
+        self._seed([("e1", self.TOKEN, None)], with_source_type=False)
+        census = ct_preflight.census_source_refs(self.brain_db())
+        self.assertFalse(census.scoped)
+        r = ct_doctor.check_import_preflight()
+        self.assertIn("UNSCOPED", r.detail)
+
+    # --- NULL refs (§2.5.1: legitimate, visibility only) ------------------
+
+    def test_null_refs_counted_separately_and_never_damaged(self):
+        self._seed([
+            ("e1", None, "librarian_inferred"),
+            ("e2", self.TOKEN, "librarian_inferred"),
+        ])
+        census = ct_preflight.census_source_refs(self.brain_db())
+        self.assertEqual(census.null_ref_count, 1)
+        self.assertEqual(census.total, 1, "NULL rows are excluded from the judged total")
+        self.assertEqual(census.damaged, 0)
+        r = ct_doctor.check_import_preflight()
+        self.assertEqual(r.status, ct_doctor.PASS)
+        self.assertIn("null_ref_count=1", r.detail)
+
+    # --- verdicts ---------------------------------------------------------
 
     def test_no_table_yet_passes(self):
         self.make_brain()
@@ -608,34 +747,69 @@ class ImportPreflightTests(DoctorTestCase):
         self.assertIn("nothing to verify", r.detail)
 
     def test_healthy_token_brain_passes(self):
-        self._seed_entries(
-            ["librarian-" + f"{i:032x}" for i in range(3)], with_evidence_table=True
-        )
+        self._seed([(f"e{i}", "librarian-" + f"{i:032x}", "librarian_inferred")
+                    for i in range(3)])
         r = ct_doctor.check_import_preflight()
-        self.assertEqual(r.status, ct_doctor.PASS)
+        self.assertEqual(r.status, ct_doctor.PASS, r.detail)
         self.assertIn("engine-proof", r.detail)
 
-    def test_mangled_rows_fail_loudly(self):
-        self._seed_entries(["evidenceproposal_id p1 chunk_id c1", "librarian-ab"])
+    def test_mangled_rows_fail_with_recovery_hint(self):
+        self._seed([
+            ("e1", "evidenceproposal_idprop_" + "a" * 24, "librarian_inferred"),
+            ("e2", self.TOKEN, "librarian_inferred"),
+        ])
         r = ct_doctor.check_import_preflight()
         self.assertEqual(r.status, ct_doctor.FAIL)
         self.assertIn("mangled", r.detail)
+        self.assertIn("2.5.4b", r.detail)   # recovery path surfaced
         self.assertIn("#188", r.hint)
 
     def test_json_refs_flagged_before_damage(self):
-        # Not yet damaged, but the next app launch destroys them.
-        self._seed_entries(['{"proposal_id":"p1","evidence":[{"chunk_id":"c1"}]}'])
+        self._seed([("e1", '{"evidence":[{"chunk_id":"c1"}]}', "librarian_inferred")])
         r = ct_doctor.check_import_preflight()
         self.assertEqual(r.status, ct_doctor.FAIL)
         self.assertIn("will rewrite", r.detail)
-        self.assertIn("setup()", r.hint)
+        self.assertIn("five-predicate", r.hint)
 
-    def test_tokens_without_evidence_table_fail(self):
-        # The export hazard: entries travelled, librarian_evidence did not.
-        self._seed_entries(["librarian-abc123"], with_evidence_table=False)
+    def test_space_padded_ref_is_caught(self):
+        # Clears the GLOB, selected by TRIM. The GLOB-only port missed this.
+        self._seed([("e1", "  librarian_note.md  ", "librarian_inferred")])
+        r = ct_doctor.check_import_preflight()
+        self.assertEqual(r.status, ct_doctor.FAIL)
+        self.assertIn("will rewrite", r.detail)
+
+    def test_missing_evidence_TABLE_fails(self):
+        # Import contract broken: the export was not brain-complete.
+        self._seed([("e1", self.TOKEN, "librarian_inferred")], evidence_table=False)
         r = ct_doctor.check_import_preflight()
         self.assertEqual(r.status, ct_doctor.FAIL)
         self.assertIn("provenance did not", r.hint)
+        self.assertIn("2.5.5", r.hint)
+
+    def test_missing_evidence_ROWS_warns(self):
+        # §2.3: still-grounded + loud warn, never auto-purged. A WARN, because
+        # nothing is being deleted and the graph remains usable.
+        self._seed(
+            [("e1", self.TOKEN, "librarian_inferred"),
+             ("e2", "librarian-" + "cd34" * 8, "librarian_inferred")],
+            evidence_ids=["e1"],
+        )
+        r = ct_doctor.check_import_preflight()
+        self.assertEqual(r.status, ct_doctor.WARN)
+        self.assertIn("no librarian_evidence row", r.detail)
+        self.assertIn("never auto-purged", r.hint)
+
+    def test_unanchored_rows_are_expected_under_phase_1(self):
+        # §2.4 Phase 1 deliberately writes unanchored facts to measure the
+        # drop rate. Their presence is not a defect.
+        self._seed(
+            [("e1", self.TOKEN, "librarian_inferred")],
+            evidence_ids=["e1"], unanchored=1,
+        )
+        r = ct_doctor.check_import_preflight()
+        self.assertEqual(r.status, ct_doctor.PASS, r.detail)
+        self.assertIn("unanchored", r.detail)
+        self.assertIn("Phase 1", r.detail)
 
     def test_missing_database_warns_not_fails(self):
         self.make_brain()
@@ -644,7 +818,7 @@ class ImportPreflightTests(DoctorTestCase):
         self.assertEqual(r.status, ct_doctor.WARN)
 
     def test_census_never_writes_to_the_database(self):
-        db = self._seed_entries(["librarian-abc"], with_evidence_table=True)
+        db = self._seed([("e1", self.TOKEN, "librarian_inferred")])
         before = db.read_bytes()
         mtime = db.stat().st_mtime
         ct_doctor.check_import_preflight()
@@ -653,18 +827,15 @@ class ImportPreflightTests(DoctorTestCase):
 
     def test_engine_version_detected_from_manifest(self):
         pkg = (
-            self.fake_home
-            / "node_modules"
-            / "@equationalapplications"
-            / "core-llm-wiki"
-            / "package.json"
+            self.fake_home / "node_modules" / "@equationalapplications"
+            / "core-llm-wiki" / "package.json"
         )
         pkg.parent.mkdir(parents=True)
-        pkg.write_text('{"version": "6.0.1"}')
+        pkg.write_text('{"version": "7.1.0"}')
         version, source = ct_preflight.detect_engine_version(
             env={"CT_ENGINE_PACKAGE_JSON": str(pkg)}
         )
-        self.assertEqual(version, "6.0.1")
+        self.assertEqual(version, "7.1.0")
         self.assertIn("core-llm-wiki", source)
 
     def test_engine_version_unknown_is_not_an_error(self):

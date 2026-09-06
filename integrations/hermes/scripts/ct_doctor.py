@@ -592,54 +592,89 @@ def check_import_preflight(path=None, brain_paths=None):
 
     damaged = census.damaged
     at_risk = census.at_risk
-    tokens = census.counts.get("token", 0)
-    has_evidence = ct_preflight.has_evidence_table(paths.db_path)
+    tokens = census.tokens
+    has_evidence = census.evidence_table_present
     shape = census.shape()
+    if not census.scoped:
+        shape += "; UNSCOPED (no source_type column)"
+    hints = "; ".join(f"{k} ×{v}" for k, v in sorted(census.recovery_hints.items()))
 
     if damaged:
         return CheckResult(
             "import-preflight",
             FAIL,
-            f"{damaged} of {census.total} wiki entries have a mangled "
-            f"source_ref ({shape}; {engine_note})",
+            f"{damaged} of {census.total} librarian_inferred entries have a "
+            f"mangled source_ref ({shape}; {engine_note})"
+            + (f" [recovery: {hints}]" if hints else ""),
             "These rows lost their evidence JSON to the engine's setup() "
             "back-rewrite (curated-thoughts issue #186): provenance display "
             "is empty and proposal-based retraction cannot match them. Do not "
-            "treat this graph's provenance as trustworthy. The repair "
+            "treat this graph's provenance as trustworthy. The V18 repair "
             "migration in curated-thoughts PR #188 re-derives the evidence "
-            "from curated_proposal_items; run it before relying on this brain.",
+            "(outbox-first, then proposal lookup) and exports before it "
+            "mutates; run it before relying on this brain.",
         )
     if at_risk:
         return CheckResult(
             "import-preflight",
             FAIL,
-            f"{at_risk} of {census.total} wiki entries carry a source_ref the "
-            f"engine will rewrite on next launch ({shape}; {engine_note})",
-            "These rows still hold structured (JSON) source_ref values. "
-            "core-llm-wiki's setup() GLOB-matches them and strips them through "
+            f"{at_risk} of {census.total} librarian_inferred entries carry a "
+            f"source_ref the engine will rewrite on next launch "
+            f"({shape}; {engine_note})",
+            "These rows still hold structured (JSON) source_ref values, or a "
+            "whitespace-padded ref. core-llm-wiki's setup() selects them via "
+            "its five-predicate migration selector and strips them through "
             "normalizeSourceRef on every app launch, destroying the evidence. "
             "Do not open this brain with the desktop app until Curated "
             "Thoughts carries the PR #188 structural fix (source_ref becomes "
-            "an engine-proof token and evidence moves to librarian_evidence).",
+            "an engine-proof token and evidence moves to librarian_evidence). "
+            "The current engine pin, 7.1.0, still mangles.",
         )
     if tokens and has_evidence is False:
+        # The whole table is absent: the export was not brain-complete. This
+        # is an import-contract failure, distinct from individual rows going
+        # missing (below), and it is not something the destination can heal.
         return CheckResult(
             "import-preflight",
             FAIL,
-            f"{tokens} engine-proof token refs but no librarian_evidence table "
-            f"({shape}; {engine_note})",
+            f"{tokens} engine-proof token refs but no librarian_evidence "
+            f"table ({shape}; {engine_note})",
             "This brain was written by a post-fix Curated Thoughts, but the "
             "CT-owned librarian_evidence table did not travel with it. The "
-            "wiki entries survived; their provenance did not. Re-export the "
-            "brain including librarian_evidence — an export that copies only "
-            "llm_wiki_entries silently drops every evidence link.",
+            "wiki entries survived; their provenance did not. PR #188 §2.5.5 "
+            "defines a supported export as brain-complete — entries, "
+            "evidence, chunks and proposals together. Re-export including "
+            "librarian_evidence; an export copying only llm_wiki_entries "
+            "silently drops every evidence link.",
         )
-    return CheckResult(
-        "import-preflight",
-        PASS,
-        f"{census.total} wiki entries, all source_refs engine-proof "
-        f"({shape}; {engine_note})",
+    if census.missing_evidence_rows:
+        # Individual rows missing. PR #188 §2.3 rules these still-grounded
+        # with a loud warning, never auto-purged — so this is a WARN, not a
+        # FAIL: the graph is usable, the provenance for those rows is not.
+        return CheckResult(
+            "import-preflight",
+            WARN,
+            f"{census.missing_evidence_rows} of {tokens} token entries have no "
+            f"librarian_evidence row ({shape}; {engine_note})",
+            "Per PR #188 §2.3 these entries are treated as still-grounded and "
+            "are never auto-purged, so nothing is being deleted — but their "
+            "provenance cannot be displayed and retraction cannot resolve "
+            "them. Most often a partial export or an interrupted import. "
+            "Re-export brain-complete (§2.5.5) to restore the links.",
+        )
+    detail = (
+        f"{census.total} librarian_inferred entries, all source_refs "
+        f"engine-proof ({shape}; {engine_note})"
     )
+    if census.unanchored_rows:
+        # Phase 1 of §2.4 deliberately writes unanchored facts so the drop
+        # rate can be measured before the policy flips to skip+log. Their
+        # presence is expected, not a defect.
+        detail += (
+            f"; {census.unanchored_rows} unanchored evidence rows "
+            "(expected under PR #188 §2.4 Phase 1 write-with-flag)"
+        )
+    return CheckResult("import-preflight", PASS, detail)
 
 
 def check_version_compat(path, tool_count=None):

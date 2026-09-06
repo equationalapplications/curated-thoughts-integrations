@@ -53,30 +53,48 @@ can destroy an imported graph before an agent reads a word of it, and the
 pre-flight check reports both.
 
 **The engine rewrites `source_ref`.** core-llm-wiki's `setup()` runs an
-unconditional back-rewrite that GLOB-matches every `source_ref` containing a
-character outside `[A-Za-z0-9._- ]` — which every JSON blob does — and strips
-it through `normalizeSourceRef`. That destroys the embedded evidence: the
-`proposal_id` needed for retraction and the evidence array behind provenance
-display. It fires on every app launch, over the shared `brain.db`. See
-curated-thoughts issue #186 and PR #188.
+unconditional back-rewrite. `findRowsForSourceRefMigration()` selects a row if
+**any of five predicates** holds — `TRIM(source_ref) != source_ref`,
+`INSTR '/'`, `INSTR '\'`, `INSTR CHAR(0)`, or the GLOB
+`'*[^-A-Za-z0-9._ ]*'` — then strips it through `normalizeSourceRef`. Every
+JSON blob qualifies, destroying the `proposal_id` needed for retraction and the
+evidence array behind provenance display. It fires on every app launch, over
+the shared `brain.db`. The current engine pin, 7.1.0, still mangles.
 
-The check classifies every row and reports:
+Note the GLOB is not the whole selector: **space is inside the keep-set**, so a
+whitespace-padded ref clears the GLOB and is still caught by `TRIM`.
+
+Detection is a **positive token-shape test** (§2.5.1): a row is damaged iff its
+`source_ref` does not match `^librarian-[0-9a-f]{32}$`. The `evidence…` prefixes
+drive *recovery* (§2.5.4), never detection.
+
+The census is scoped to `source_type = 'librarian_inferred'`, and this matters:
+a legitimate document-sourced ref can itself reach the 255-char cap (long vault
+paths normalize to exactly 255), so an unscoped shape test would report a
+healthy brain as damaged. `NULL` refs are legitimate engine-era data, counted
+separately as `null_ref_count`.
+
+Verdicts:
 
 - **mangled** → FAIL. Evidence already destroyed. Do not trust this graph's
-  provenance. PR #188 ships a repair migration that re-derives evidence from
-  `curated_proposal_items`.
-- **at_risk** → FAIL. Rows still hold JSON refs; intact right now, destroyed
-  at the next app launch. Do not open this brain with the desktop app until
-  Curated Thoughts carries the PR #188 structural fix.
-- **token** with no `librarian_evidence` table → FAIL. The entries travelled
-  but their provenance did not. Re-export including that table.
-- **token** with the evidence table → PASS. Engine-proof.
+  provenance. The V18 repair migration re-derives it (outbox-first, then
+  proposal lookup) and exports before mutating.
+- **at_risk** → FAIL. Rows still hold JSON or whitespace-padded refs; intact
+  right now, destroyed at the next app launch. Do not open this brain with the
+  desktop app until Curated Thoughts carries the PR #188 fix.
+- **token** with no `librarian_evidence` **table** → FAIL. The entries
+  travelled, their provenance did not — a broken import contract.
+- **token** rows missing individual evidence **rows** → WARN. §2.3 treats these
+  as still-grounded and never auto-purges them, so nothing is being deleted;
+  provenance display and retraction just cannot resolve them.
+- **token** with evidence → PASS. `unanchored=1` rows are expected under §2.4
+  Phase 1 write-with-flag, not damage.
 
-**Provenance can be deleted, not merely missing.** PR #188 §2.5.4 treats an
-entry whose chunk anchors are all gone as an orphan and deletes it. So an
-export that carries wiki entries without the `chunks` rows arrives looking
-exactly like the orphan class. Export whole brains, not table subsets —
-`shared/compat.yaml` lists what must travel.
+**Export whole brains, not table subsets.** §2.5.5 defines a supported export
+as brain-complete — entries, evidence, chunks and proposals. A partial export
+made legitimately-anchored facts look like orphans, so the repair migration now
+asserts a complete chunk schema before any orphan deletion and skips it loudly
+if the assertion fails. `shared/compat.yaml` lists what must travel.
 
 ## Registration in Hermes
 

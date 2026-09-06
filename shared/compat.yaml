@@ -41,24 +41,38 @@ compat:
       mangles-structured-refs:
         engine: "<=7.1.0"
         safe: false
+        pinned_version: "7.1.0"
         notes: >-
-          setup() runs an unconditional legacy-ref back-rewrite:
-          findRowsForSourceRefMigration() GLOB-matches every row whose
-          source_ref contains a character outside [A-Za-z0-9._- ] — which
-          every JSON blob does — and strips it through normalizeSourceRef
-          (replace disallowed chars, trim, slice to 255). Any structured
-          source_ref is destroyed, on every app launch, over the shared
-          brain.db. No engine release is known to be fixed yet; the upstream
-          guard is filed as a separate non-blocking issue in PR #188 §7.1.
+          setup() runs an unconditional legacy-ref back-rewrite.
+          findRowsForSourceRefMigration() selects a row if ANY of five
+          predicates holds — TRIM(source_ref) != source_ref, INSTR '/',
+          INSTR '\', INSTR CHAR(0), or GLOB '*[^-A-Za-z0-9._ ]*' — and strips
+          it through normalizeSourceRef (drop disallowed chars, trim, slice to
+          255). Every JSON blob qualifies. Note the GLOB alone is not the
+          selector: space is inside the keep-set, so a whitespace-padded ref
+          clears the GLOB and is still caught by TRIM. Fires on every app
+          launch and every outbox-worker transition over the shared brain.db.
+          The current pin, 7.1.0, still mangles (PR #188 §3, §7.2 — the
+          earlier 6.0.1-vs-7.1.0 skew was resolved by #183). No fixed engine
+          release exists yet; the upstream guard is a non-blocking follow-up
+          (PR #188 §7.1).
     # A brain is engine-proof when Curated Thoughts writes normalizer-idempotent
     # tokens and keeps evidence in its own table, regardless of engine version.
     data_safety:
       engine_proof_from: "curated-thoughts >= 2.6 (PR #188 structural fix, unreleased)"
-      source_ref_shape: "librarian-<hex>"
+      # Normative shape (PR #188 §2.2): exactly the first 32 lowercase hex
+      # characters of SHA-256(entry_id). §2.5.1's census keys on this regex.
+      source_ref_shape: "^librarian-[0-9a-f]{32}$"
       evidence_table: librarian_evidence
+      migration_step: V18
+      # §2.4 Phase 1 writes unanchored facts deliberately so the drop rate can
+      # be measured before the policy flips to skip+log. unanchored=1 rows are
+      # expected, not damage.
+      unanchored_column: true
       notes: >-
         Post-fix, source_ref is a per-entry hash token that normalizeSourceRef
-        maps to itself, so the engine's GLOB never selects it, and the evidence
+        maps to itself, so none of the engine's five selector predicates
+        matches it, and the evidence
         JSON lives in the CT-owned librarian_evidence table the engine never
         touches. Because the token is derived from the entry id it is stable
         across export and import.
@@ -69,13 +83,19 @@ compat:
       - llm_wiki_entries
       - librarian_evidence
       - chunks
+      - documents
       - curated_proposals
       - curated_proposal_items
     machine_specific:
       - "config.json vault_path — absolute, and always wrong after an import"
     notes: >-
-      An export carrying llm_wiki_entries without librarian_evidence loses all
-      provenance silently. An export without chunks is worse: PR #188 §2.5.4
-      classifies entries with no surviving chunk anchor as orphans and deletes
-      them, so a partial export can have its provenance removed rather than
-      merely missing. Re-point vault_path on the destination machine.
+      PR #188 §2.5.5 defines a supported export as brain-complete: entries,
+      evidence, chunks and proposals together. An export carrying
+      llm_wiki_entries without librarian_evidence loses all provenance
+      silently. An export without chunks was worse — entries with no surviving
+      anchor look exactly like the orphan class §2.5.4 deletes — so the repair
+      migration now asserts a complete chunk schema before any orphan
+      deletion, requiring non-emptiness only for chunks and documents
+      (embeddings are legitimately empty before the first embed sweep). If the
+      assertion fails, orphan deletion is skipped and reported loudly.
+      Re-point vault_path on the destination machine.
