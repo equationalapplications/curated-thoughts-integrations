@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Shared sidecar/engine compatibility matrix",
+  "type": "object",
+  "required": ["compat"],
+  "properties": {
+    "compat": {
+      "type": "object",
+      "required": ["tiers", "engine", "portability"],
+      "properties": {
+        "tiers": {"type": "object", "minProperties": 1},
+        "engine": {
+          "type": "object",
+          "required": ["states", "data_safety"],
+          "properties": {
+            "data_safety": {
+              "type": "object",
+              "required": ["source_ref_shape", "evidence_table"]
+            }
+          }
+        },
+        "portability": {
+          "type": "object",
+          "required": ["required_tables"]
+        }
+      }
+    }
+  }
+}

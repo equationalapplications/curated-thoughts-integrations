@@ -6,6 +6,7 @@ integrations/, this may use PyYAML (spec §3.1).
 
 Subcommands:
     validate    Schema-check every integration.yaml.
+    generate    Render shared/compat.yaml into stdlib compat constants.
 
 Exit codes: 0 = pass, 1 = a gate failed, 2 = usage error.
 """
@@ -17,6 +18,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import ct_ci_generate  # noqa: E402
 import ct_ci_manifest  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -35,6 +37,17 @@ def cmd_validate(args):
     return 0
 
 
+def cmd_generate(args):
+    if args.check:
+        stale = ct_ci_generate.check_current(args.repo)
+        for problem in stale:
+            print(f"FAIL {problem}", file=sys.stderr)
+        return 1 if stale else 0
+    for path in ct_ci_generate.write_all(args.repo):
+        print(f"wrote {path.relative_to(args.repo)}")
+    return 0
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="ct_ci.py", description=__doc__)
     parser.add_argument(
@@ -42,10 +55,18 @@ def main(argv=None):
     )
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("validate", help="schema-check every integration.yaml")
+    generate = sub.add_parser("generate", help="render compat constants")
+    generate.add_argument(
+        "--check",
+        action="store_true",
+        help="fail if a generated file is missing or stale, writing nothing",
+    )
 
     args = parser.parse_args(argv)
     if args.command == "validate":
         return cmd_validate(args)
+    if args.command == "generate":
+        return cmd_generate(args)
     parser.error(f"unknown command {args.command}")
     return 2
 
