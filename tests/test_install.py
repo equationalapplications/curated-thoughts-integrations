@@ -16,7 +16,6 @@ Or:            python3 -m unittest discover -s tests
 
 from __future__ import annotations
 
-import json
 import os
 import re
 import shutil

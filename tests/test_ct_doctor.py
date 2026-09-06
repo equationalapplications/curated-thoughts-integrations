@@ -11,7 +11,6 @@ Or via the doctor:       ct_doctor.py --self-test
 
 from __future__ import annotations
 
-import contextlib
 import json
 import os
 import stat
