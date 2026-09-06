@@ -1,0 +1,21 @@
+# Shared compatibility matrix
+# Single source of truth for sidecar capability tiers.
+# Integrations read this data; it is documentation-as-data, not code.
+
+compat:
+  tiers:
+    v2.4-read:
+      sidecar: ">=2.4,<2.5"
+      tools: 8
+      write_path: dormant
+      notes: >-
+        Read-only MCP surface. 8 tools (wiki_context, wiki_search,
+        wiki_traverse_graph, wiki_get_ontology, vault_semantic_search,
+        vault_related_chunks, vault_write_note, vault_upsert_index_entry).
+    v2.5-full:
+      sidecar: ">=2.5"
+      tools: 14
+      write_path: full
+      notes: >-
+        Adds curated_add_wisdom / curated_update_wisdom /
+        curated_archive_wisdom and companions. Write-tool rules active.
