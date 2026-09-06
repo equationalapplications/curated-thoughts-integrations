@@ -89,8 +89,8 @@ jobs:
           python-version: ${{ matrix.entry.python }}
 
       - name: Tests
-        # Truthy guard: `!= ''` is true when the key is absent (null != ''),
-        # which would run an empty command.
+        # Truthy guard: the step is skipped when the manifest declares no test
+        # command (a falsey/absent key), never run with an empty command.
         if: matrix.entry.checks.test
         run: ${{ matrix.entry.checks.test }}
 
@@ -120,6 +120,19 @@ jobs:
           assert d['exit_code'] == 1, d['exit_code']
           print('checks:', ', '.join(names))
           "
+
+      - name: Packaging dry run (spec §4.1)
+        # Every release is built by `ct_ci.py package` at tag time; running it
+        # here too means package.include/exclude regressions surface on main,
+        # not only when someone cuts a tag. One OS per integration is enough —
+        # the tarball contents do not vary by runner. The tag is synthetic
+        # (<id>-v<manifest version>), never published. Needs the repo-root
+        # working directory: the packager reads tools/ and the manifest tree.
+        if: matrix.entry.os == 'ubuntu-latest'
+        working-directory: ${{ github.workspace }}
+        run: |
+          pip install --disable-pip-version-check -r tools/requirements-ci.txt
+          python tools/ct_ci.py package --tag "${{ matrix.entry.id }}-v${{ matrix.entry.version }}" --out dist
 
   policy:
     name: policy gates

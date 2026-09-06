@@ -39,6 +39,8 @@ class TestSelect(unittest.TestCase):
             self.assertIsInstance(entry["python"], str)
             self.assertEqual(entry["dir"], "integrations/hermes")
             self.assertEqual(entry["language"], "python")
+            # The packaging dry run composes its dry-run tag from this.
+            self.assertEqual(entry["version"], "0.2.0")
             self.assertIn("test", entry["checks"])
 
     def test_shared_path_change_selects_everything(self):

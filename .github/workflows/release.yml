@@ -28,6 +28,8 @@ jobs:
       os: ${{ steps.parse.outputs.os }}
       python: ${{ steps.parse.outputs.python }}
       test: ${{ steps.parse.outputs.test }}
+      lint: ${{ steps.parse.outputs.lint }}
+      shell: ${{ steps.parse.outputs.shell }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -68,6 +70,9 @@ jobs:
           print("os=" + json.dumps(matrix["os"]))
           print("python=" + json.dumps(matrix.get("python", [])))
           print("test=" + data["checks"]["test"])
+          checks = data["checks"]
+          print("lint=" + checks.get("lint", ""))
+          print("shell=" + json.dumps(checks.get("shell", [])))
           PY
 
       - name: Policy gates must pass at the tagged commit
@@ -93,6 +98,32 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - run: ${{ needs.identify.outputs.test }}
+
+      # Spec §4.2 step 3: the tag re-runs the integration's *full* declared
+      # checks, not just its tests. Lint commands and shell scripts come
+      # straight from the manifest, same as the test command above.
+
+      - name: Install ruff
+        # Only when the manifest declares a lint command (ruff is not
+        # preinstalled on runners).
+        if: needs.identify.outputs.lint != ''
+        run: pip install --disable-pip-version-check ruff
+
+      - name: Lint
+        if: needs.identify.outputs.lint != ''
+        run: ${{ needs.identify.outputs.lint }}
+
+      - name: Shellcheck declared scripts
+        # Declared shell checks re-run here on ubuntu only: shellcheck is a
+        # one-line apt install there but awkward on the windows/macos runners.
+        # The ci.yml policy job is the cross-OS authority for shell checks.
+        if: matrix.os == 'ubuntu-latest' && needs.identify.outputs.shell != '[]'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq shellcheck
+          for script in $(echo '${{ needs.identify.outputs.shell }}' | python -c "import json,sys; print(*json.load(sys.stdin))"); do
+            shellcheck "$script"
+          done
 
   publish:
     name: publish the release

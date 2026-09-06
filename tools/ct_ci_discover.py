@@ -46,6 +46,7 @@ def _entries(name, directory, data, repo_root):
             entries.append(
                 {
                     "id": name,
+                    "version": str(data["version"]),
                     "dir": directory.relative_to(repo_root).as_posix(),
                     "language": language,
                     "os": os_name,
