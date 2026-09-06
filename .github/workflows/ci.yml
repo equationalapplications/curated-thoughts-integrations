@@ -1,9 +1,12 @@
 name: CI
 
-# Spec: docs/spec-hermes-plugin-v0.md §9.5 — lint + shellcheck + doctor
-# self-test. The OS matrix is not incidental: this integration claims to work
-# on macOS, Linux and Windows (Curated Thoughts ships all three), and the
-# sidecar-discovery and path-handling code is exactly where that claim breaks.
+# Manifest-driven monorepo CI.
+# Spec: docs/superpowers/specs/2026-09-06-monorepo-ci-and-independent-versioning-design.md
+#
+# discover -> integration (matrix) -> policy -> ci-ok
+#
+# Adding a harness means adding integrations/<id>/integration.yaml. This file
+# should not need to change again.
 
 on:
   push:
@@ -19,95 +22,174 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  test:
-    name: tests (${{ matrix.os }}, py${{ matrix.python }})
-    runs-on: ${{ matrix.os }}
+  discover:
+    name: discover integrations
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.select.outputs.matrix }}
+      empty: ${{ steps.select.outputs.empty }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          # Repository-controlled Python executes after checkout. Without this,
+          # checkout leaves the job token in .git/config where that code could
+          # read it; `contents: read` limits the token's power, not its
+          # disclosure. Nothing here pushes, so no credential is needed.
+          persist-credentials: false
+          # Path filtering needs the merge base, so the history must be there.
+          fetch-depth: 0
+
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: "3.13"
+
+      - run: pip install --disable-pip-version-check -r tools/requirements-ci.txt
+
+      - id: select
+        # main and tags run everything: path filters are brittle around shared
+        # assets, and main must be ground truth.
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            # fetch-depth: 0 above already has full history; just update the
+            # base ref (a --depth flag here would need a positive value).
+            git fetch --no-tags origin "${{ github.base_ref }}"
+            MATRIX=$(python tools/ct_ci.py discover --base "origin/${{ github.base_ref }}")
+          else
+            MATRIX=$(python tools/ct_ci.py discover --all)
+          fi
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+          python - <<PY >> "$GITHUB_OUTPUT"
+          import json
+          print("empty=" + str(not json.loads('''$MATRIX''')).lower())
+          PY
+          echo "selected: $MATRIX"
+
+  integration:
+    # `discover` pre-expands each integration into one entry per
+    # (id, os, interpreter) triple, so a single matrix axis is correct for any
+    # number of integrations — a nested os/python cross-product would run
+    # every entry on entry[0]'s interpreters.
+    name: ${{ matrix.entry.id }} (${{ matrix.entry.os }}, ${{ matrix.entry.python || matrix.entry.node }})
+    needs: discover
+    if: needs.discover.outputs.empty == 'false'
+    runs-on: ${{ matrix.entry.os }}
     strategy:
       fail-fast: false
       matrix:
-        # Oldest supported and current: the code is stdlib-only, so the
-        # interpreter range is the whole compatibility surface.
-        os: [ubuntu-latest, macos-latest]
-        python: ["3.9", "3.13"]
+        entry: ${{ fromJson(needs.discover.outputs.matrix) }}
+    defaults:
+      run:
+        working-directory: ${{ matrix.entry.dir }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          # Both jobs execute repository-controlled Python after
-          # checkout. Without this, checkout leaves the job token in
-          # .git/config where that code could read and exfiltrate it;
-          # `contents: read` limits the token's power, not its
-          # disclosure. Nothing here pushes, so no credential is needed.
           persist-credentials: false
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        if: matrix.entry.language == 'python'
         with:
-          python-version: ${{ matrix.python }}
+          python-version: ${{ matrix.entry.python }}
 
-      - name: Run the test suite
-        run: python -m unittest discover -s tests -v
+      - name: Tests
+        # Truthy guard: the step is skipped when the manifest declares no test
+        # command (a falsey/absent key), never run with an empty command.
+        if: matrix.entry.checks.test
+        run: ${{ matrix.entry.checks.test }}
 
       - name: Doctor self-test (spec §9.5)
-        # Exercises the same suite through the shipped entry point, from a
-        # directory outside the checkout, proving the script resolves tests/
-        # relative to __file__ rather than the cwd.
-        run: |
-          cd "${{ runner.temp }}"
-          python "${{ github.workspace }}/integrations/hermes/scripts/ct_doctor.py" --self-test
+        # Runs the same suite through the shipped entry point from outside the
+        # checkout, proving the script resolves tests/ relative to __file__.
+        if: matrix.entry.id == 'hermes'
+        working-directory: ${{ runner.temp }}
+        run: python "${{ github.workspace }}/integrations/hermes/scripts/ct_doctor.py" --self-test
 
       - name: Doctor runs clean-room without crashing
-        # No sidecar, no brain: every check must still resolve to a verdict
-        # and the process must exit 1 (FAILs), never traceback.
+        # No sidecar, no brain: every check must still resolve to a verdict and
+        # the process must exit 1 (FAILs), never traceback.
+        if: matrix.entry.id == 'hermes' && runner.os != 'Windows'
+        working-directory: ${{ runner.temp }}
         run: |
-          cd "${{ runner.temp }}"
           set +e
           python "${{ github.workspace }}/integrations/hermes/scripts/ct_doctor.py" check --json > out.json
           rc=$?
           set -e
-          echo "exit=$rc"
-          test "$rc" = "1" || { echo "expected exit 1 with no sidecar/brain"; exit 1; }
+          test "$rc" = "1" || { echo "expected exit 1 with no sidecar/brain, got $rc"; exit 1; }
           python -c "
-          import json,sys
-          d=json.load(open('out.json'))
-          names=[c['name'] for c in d['checks']]
-          assert len(names)==9, names
-          assert d['exit_code']==1, d['exit_code']
+          import json
+          d = json.load(open('out.json'))
+          names = [c['name'] for c in d['checks']]
+          assert len(names) == 9, names
+          assert d['exit_code'] == 1, d['exit_code']
           print('checks:', ', '.join(names))
           "
 
-  lint:
-    name: lint + shellcheck
+      - name: Packaging dry run (spec §4.1)
+        # Every release is built by `ct_ci.py package` at tag time; running it
+        # here too means package.include/exclude regressions surface on main,
+        # not only when someone cuts a tag. One OS per integration is enough —
+        # the tarball contents do not vary by runner. The tag is synthetic
+        # (<id>-v<manifest version>), never published. Needs the repo-root
+        # working directory: the packager reads tools/ and the manifest tree.
+        if: matrix.entry.os == 'ubuntu-latest'
+        working-directory: ${{ github.workspace }}
+        run: |
+          pip install --disable-pip-version-check -r tools/requirements-ci.txt
+          python tools/ct_ci.py package --tag "${{ matrix.entry.id }}-v${{ matrix.entry.version }}" --out dist
+
+  policy:
+    name: policy gates
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          # Both jobs execute repository-controlled Python after
-          # checkout. Without this, checkout leaves the job token in
-          # .git/config where that code could read and exfiltrate it;
-          # `contents: read` limits the token's power, not its
-          # disclosure. Nothing here pushes, so no credential is needed.
           persist-credentials: false
+          fetch-depth: 0
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
         with:
           python-version: "3.13"
 
-      - name: Install ruff
-        run: pip install --disable-pip-version-check ruff
+      - run: pip install --disable-pip-version-check -r tools/requirements-ci.txt ruff
+
+      - name: Tooling tests
+        run: python -m unittest discover -s tests/tools -v
+
+      - name: Manifest schema
+        run: python tools/ct_ci.py validate
+
+      - name: Generated compat constants are current
+        run: python tools/ct_ci.py generate --check
+
+      - name: Policy gates (versions, architecture, compat)
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            git fetch --no-tags origin "${{ github.base_ref }}"
+            python tools/ct_ci.py policy --base "origin/${{ github.base_ref }}"
+          else
+            python tools/ct_ci.py policy
+          fi
 
       - name: Ruff (errors and undefined names)
         # Deliberately the correctness subset, not a style opinion: syntax
         # errors, undefined names, broken f-strings, unused imports.
         run: ruff check --select E9,F63,F7,F82,F401 .
 
-      - name: Shellcheck install.sh
+      - name: Shellcheck every declared script
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq shellcheck
-          shellcheck integrations/hermes/scripts/install.sh
+          python - <<'PY' | xargs -r shellcheck
+          import sys
+          sys.path.insert(0, "tools")
+          import ct_ci_manifest
+          for name, directory, data in ct_ci_manifest.discover_manifests("."):
+              for script in (data.get("checks") or {}).get("shell", []):
+                  print(directory / script)
+          PY
 
       - name: Plugin entry point registers against a stub host
-        # The Hermes contract is verified against a stub ctx rather than a
-        # live host (Hermes is not installable in CI): three skills, the
+        # The Hermes contract is verified against a stub ctx rather than a live
+        # host (Hermes is not installable in CI): three skills, the
         # on_session_start hook, and graceful degradation when the optional
         # system-prompt API is absent.
         run: |
@@ -133,9 +215,33 @@ jobs:
           assert ctx.sections[0][1](), "system prompt section rendered empty"
 
           class Minimal(Ctx):
-              register_system_prompt_section = None
+              pass
           mc = Minimal(); mc.register_system_prompt_section = None
           m.register(mc)
           assert [e for e, _ in mc.hooks] == ["on_session_start"]
           print("plugin entry point OK")
           PY
+
+  ci-ok:
+    # The single required status check. Branch protection names this job and
+    # nothing else, so adding an integration never means editing protection
+    # rules. An empty (skipped) integration matrix is success; a failed or
+    # cancelled dependency is not.
+    name: ci-ok
+    if: always()
+    needs: [discover, integration, policy]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check dependency results
+        run: |
+          echo "discover=${{ needs.discover.result }}"
+          echo "integration=${{ needs.integration.result }}"
+          echo "policy=${{ needs.policy.result }}"
+          for result in "${{ needs.discover.result }}" "${{ needs.policy.result }}"; do
+            [ "$result" = "success" ] || { echo "a required job did not succeed"; exit 1; }
+          done
+          case "${{ needs.integration.result }}" in
+            success|skipped) ;;
+            *) echo "integration matrix did not succeed"; exit 1 ;;
+          esac
+          echo "all green"

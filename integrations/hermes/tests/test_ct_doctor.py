@@ -20,14 +20,33 @@ import tempfile
 import unittest
 from pathlib import Path
 
-# Allow running from any cwd: locate the doctor next to this file.
+# Allow running from any cwd: resolve the integration relative to this file
+# (tests live inside the integration: integrations/hermes/tests/).
 HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(HERE / ".." / "integrations" / "hermes" / "scripts"))
+INTEGRATION = HERE.parent
+sys.path.insert(0, str(INTEGRATION / "scripts"))
 
 import ct_doctor  # noqa: E402
 import ct_env  # noqa: E402
 import ct_preflight  # noqa: E402
 import ct_status  # noqa: E402
+
+IS_WINDOWS = sys.platform == "win32"
+
+# The mock sidecar fixture is a shebang script. POSIX execs it directly via
+# the `#!` line; Windows CreateProcess cannot (WinError 193, CI run
+# 34066939677) because it has no PATHEXT association. The *shipped* code is
+# platform-correct — on Windows ct_env.sidecar_candidates() targets
+# curated-thoughts-mcp.exe, which shutil.which resolves — so these tests are
+# skipped rather than the fixture rewritten.
+MOCK_SPAWN_SKIP = (
+    "POSIX-only: mock sidecar is a shebang script, only directly "
+    "executable on POSIX (WinError 193 on Windows)"
+)
+POSIX_PATHS_SKIP = (
+    "POSIX-only: asserts POSIX-absolute candidate paths (/usr/bin, .app "
+    "bundles); pathlib renders those drive-relative on Windows"
+)
 
 
 MOCK_SIDECAR = r'''#!/usr/bin/env python3
@@ -202,6 +221,7 @@ class DoctorTestCase(unittest.TestCase):
         return {"PATH": str(self.bin_dir) + os.pathsep + os.environ["PATH"]}
 
 
+@unittest.skipIf(IS_WINDOWS, MOCK_SPAWN_SKIP)
 class MockSidecarRpcTests(DoctorTestCase):
     """The mock itself speaks protocol correctly (guards the fixture)."""
 
@@ -221,6 +241,7 @@ class MockSidecarRpcTests(DoctorTestCase):
 
 
 class ToolCountTieringTests(DoctorTestCase):
+    @unittest.skipIf(IS_WINDOWS, MOCK_SPAWN_SKIP)
     def test_full_tier_14_tools_pass(self):
         r = ct_doctor.check_sidecar_reachable(
             str(self.mock_path), timeout=5, env=self.with_path()
@@ -228,6 +249,7 @@ class ToolCountTieringTests(DoctorTestCase):
         self.assertEqual(r.status, ct_doctor.PASS)
         self.assertIn("14", r.detail)
 
+    @unittest.skipIf(IS_WINDOWS, MOCK_SPAWN_SKIP)
     def test_read_only_tier_8_tools_warns(self):
         r = ct_doctor.check_sidecar_reachable(
             str(self.mock_path), timeout=5, env={**self.with_path(), "MOCK_TOOLS": TIER8}
@@ -236,6 +258,7 @@ class ToolCountTieringTests(DoctorTestCase):
         self.assertIn("dormant", r.detail)
         self.assertIn(">=2.5", r.hint)  # actionable: upgrade hint
 
+    @unittest.skipIf(IS_WINDOWS, MOCK_SPAWN_SKIP)
     def test_below_tier_warns(self):
         r = ct_doctor.check_sidecar_reachable(
             str(self.mock_path),
@@ -256,6 +279,7 @@ class ToolCountTieringTests(DoctorTestCase):
         self.assertEqual(r.status, ct_doctor.FAIL)
         self.assertIn("0 tools", r.detail)
 
+    @unittest.skipIf(IS_WINDOWS, MOCK_SPAWN_SKIP)
     def test_unreachable_sidecar_fails(self):
         r = ct_doctor.check_sidecar_reachable(
             str(self.mock_path),
@@ -380,6 +404,12 @@ class VaultTests(DoctorTestCase):
         self.assertEqual(r.status, ct_doctor.FAIL)
         self.assertIn("imported from another", r.hint)
 
+    @unittest.skipIf(
+        IS_WINDOWS,
+        "POSIX-only: '~' expansion follows HOME, which the fake home patches; "
+        "on Windows os.path.expanduser uses USERPROFILE and ignores HOME "
+        "(run 34066939677)",
+    )
     def test_tilde_in_vault_path_is_expanded(self):
         brain = self.fake_home / ".brain"
         brain.mkdir()
@@ -475,6 +505,7 @@ class IdentityTests(DoctorTestCase):
 
 
 class PlatformDiscoveryTests(DoctorTestCase):
+    @unittest.skipIf(IS_WINDOWS, POSIX_PATHS_SKIP)
     def test_macos_candidates_are_app_bundles(self):
         cands = [str(p) for p in ct_env.sidecar_candidates(platform="darwin")]
         self.assertTrue(any(".app/Contents/MacOS" in c for c in cands), cands)
@@ -485,11 +516,17 @@ class PlatformDiscoveryTests(DoctorTestCase):
         self.assertTrue(cands)
         self.assertTrue(all(c.endswith(".exe") for c in cands), cands)
 
+    @unittest.skipIf(IS_WINDOWS, POSIX_PATHS_SKIP)
     def test_linux_candidates_cover_usr_and_local(self):
         cands = [str(p) for p in ct_env.sidecar_candidates(platform="linux")]
         self.assertTrue(any(c.startswith("/usr/bin") for c in cands), cands)
         self.assertTrue(any(".local/bin" in c for c in cands), cands)
 
+    @unittest.skipIf(
+        IS_WINDOWS,
+        "POSIX-only: PATH lookup of an extensionless shebang script is a "
+        "POSIX mechanism; Windows shutil.which needs a PATHEXT-suffixed file",
+    )
     def test_path_lookup_wins_over_bundled(self):
         path, _resolved, source = ct_env.find_sidecar(
             env={"PATH": str(self.bin_dir)}
@@ -859,7 +896,7 @@ class CompatTests(DoctorTestCase):
 
     def test_compat_file_agreement(self):
         # The embedded tier matrix must agree with shared/compat.yaml.
-        compat = HERE / ".." / "shared" / "compat.yaml"
+        compat = INTEGRATION.parents[1] / "shared" / "compat.yaml"
         if not compat.exists():
             self.skipTest("shared/compat.yaml not present")
         text = compat.read_text()
@@ -893,7 +930,7 @@ class FullRunTests(DoctorTestCase):
         out = subprocess.run(
             [
                 sys.executable,
-                str(HERE / ".." / "integrations" / "hermes" / "scripts" / "ct_doctor.py"),
+                str(INTEGRATION / "scripts" / "ct_doctor.py"),
                 "check",
                 "--json",
             ],
@@ -922,7 +959,7 @@ class FullRunTests(DoctorTestCase):
 class SelfTestCliTests(unittest.TestCase):
     """Gap: `ct_doctor.py --self-test` as a real subprocess, from a temp cwd."""
 
-    DOCTOR = (HERE / ".." / "integrations" / "hermes" / "scripts" / "ct_doctor.py").resolve()
+    DOCTOR = (INTEGRATION / "scripts" / "ct_doctor.py").resolve()
 
     @classmethod
     def setUpClass(cls):
@@ -998,7 +1035,7 @@ class CheckJsonCliTests(DoctorTestCase):
         out = subprocess.run(
             [
                 sys.executable,
-                str(HERE / ".." / "integrations" / "hermes" / "scripts" / "ct_doctor.py"),
+                str(INTEGRATION / "scripts" / "ct_doctor.py"),
                 "check",
                 "--json",
             ],
@@ -1097,6 +1134,7 @@ class VersionCompatTests(DoctorTestCase):
 class StatusSnapshotTests(DoctorTestCase):
     """The session-start snapshot: fast, read-only, fail-open."""
 
+    @unittest.skipIf(IS_WINDOWS, MOCK_SPAWN_SKIP)
     def test_healthy_brain_reports_ok(self):
         self.make_brain()
         snap = ct_status.snapshot(env={**os.environ, **self.with_path()})
@@ -1168,6 +1206,7 @@ class ReviewRegressionTests(DoctorTestCase):
 
     # --- tool count passed structurally, not scraped from prose -----------
 
+    @unittest.skipIf(IS_WINDOWS, MOCK_SPAWN_SKIP)
     def test_probe_returns_tool_count_including_zero(self):
         result, count = ct_doctor._probe_sidecar(
             str(self.mock_path), timeout=5, env={**self.with_path(), "MOCK_TOOLS": ""}
@@ -1178,6 +1217,7 @@ class ReviewRegressionTests(DoctorTestCase):
         result, count = ct_doctor._probe_sidecar(None)
         self.assertIsNone(count, "no live surface observed => None, not 0")
 
+    @unittest.skipIf(IS_WINDOWS, MOCK_SPAWN_SKIP)
     def test_probe_count_matches_detail_for_real_tiers(self):
         for mock_tools, expected in ((TIER8, 8), (None, 14)):
             env = dict(self.with_path())
@@ -1248,7 +1288,7 @@ class PluginConcurrencyTests(unittest.TestCase):
     def _load(self):
         import importlib.util
 
-        root = (HERE / ".." / "integrations" / "hermes").resolve()
+        root = INTEGRATION.resolve()
         spec = importlib.util.spec_from_file_location("ct_plugin_test", root / "__init__.py")
         m = importlib.util.module_from_spec(spec)
         sys.modules["ct_plugin_test"] = m
@@ -1282,6 +1322,30 @@ class PluginConcurrencyTests(unittest.TestCase):
         self.assertTrue(hasattr(m, "_cache_lock"))
         m._cached_section = None
         self.assertIsInstance(m._system_prompt_section(), str)
+
+
+class TestCompatConstantsAreGenerated(unittest.TestCase):
+    """The tier matrix must come from shared/compat.yaml, not from literals.
+
+    shared/compat.yaml is the single source of truth (spec §5.3). If these
+    values are ever retyped into the doctor, the compatibility matrix and the
+    doctor can disagree, which is precisely the drift the generated module
+    exists to prevent.
+    """
+
+    def test_doctor_tiers_come_from_the_generated_module(self):
+        import _compat_generated
+
+        self.assertIs(ct_doctor.COMPAT_TIERS, _compat_generated.TIERS)
+        self.assertIs(ct_doctor.FULL_TIER_TOOLS, _compat_generated.FULL_TIER_TOOLS)
+        self.assertIs(ct_doctor.READ_TIER_TOOLS, _compat_generated.READ_TIER_TOOLS)
+
+    def test_generated_tiers_match_the_shipped_expectations(self):
+        import _compat_generated
+
+        by_name = {tier[0]: tier for tier in _compat_generated.TIERS}
+        self.assertEqual(by_name["v2.4-read"][3], 8)
+        self.assertEqual(by_name["v2.5-full"][3], 14)
 
 
 def load_suite():

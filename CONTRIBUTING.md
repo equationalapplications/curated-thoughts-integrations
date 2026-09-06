@@ -29,9 +29,16 @@ Thanks for your interest in improving the Curated Thoughts integrations.
 
 ## Review gates
 
-- CI runs lint + shellcheck + doctor self-tests (mock sidecar fixtures).
-- One review approval required; spec PRs also need the maintainer's sign-off
-  on scope before the implementation PR opens.
+CI is manifest-driven: `discover` selects the integrations a change affects
+(everything, on `main` and tags), each runs its declared checks, and a
+repository-wide `policy` job enforces the rules above automatically —
+version and changelog hygiene, the architecture rules in this document, and
+`shared/compat.yaml` drift. Branch protection requires the single `ci-ok`
+check. See [`docs/ci.md`](docs/ci.md) for what each gate means and how to run
+it locally.
+
+One review approval is required; spec PRs also need the maintainer's sign-off
+on scope before the implementation PR opens.
 
 ## License
 

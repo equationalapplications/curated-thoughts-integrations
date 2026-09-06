@@ -1,0 +1,10 @@
+# CI contract for the OpenClaw integration (not yet implemented).
+# `status: planned` means: schema-validated, but skipped for tests,
+# packaging and release until the integration exists.
+id: openclaw
+name: Curated Thoughts for OpenClaw
+version: 0.0.0
+language: python
+status: planned
+requires_sidecar: ">=2.5"
+compat_tier: v2.5-full

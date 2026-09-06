@@ -1,0 +1,40 @@
+# CI contract for the Hermes Agent integration.
+#
+# This is the *CI* manifest. plugin.yaml remains the manifest Hermes itself
+# reads; `version_mirror` below is what keeps the two from drifting.
+# Spec: docs/superpowers/specs/2026-09-06-monorepo-ci-and-independent-versioning-design.md
+id: hermes
+name: Curated Thoughts for Hermes Agent
+version: 0.2.0
+language: python
+status: implemented
+requires_sidecar: ">=2.5"
+compat_tier: v2.5-full
+version_mirror: plugin.yaml#version
+
+matrix:
+  # The README claims macOS, Linux and Windows. Sidecar discovery and path
+  # handling are exactly where that claim breaks, so Windows is not optional.
+  os: [ubuntu-latest, macos-latest, windows-latest]
+  # The code is stdlib-only, so the interpreter range is the whole
+  # compatibility surface: oldest supported and current.
+  python: ["3.9", "3.13"]
+
+checks:
+  test: python -m unittest discover -s tests
+  lint: ruff check --select E9,F63,F7,F82,F401 .
+  shell:
+    - scripts/install.sh
+
+policy:
+  # ct_preflight.py is the import pre-flight census. It opens brain.db through
+  # a mode=ro URI and issues nothing but SELECT — read-only by construction.
+  # The architecture lint asserts exactly that for every file listed here.
+  allow_sqlite_readonly:
+    - scripts/ct_preflight.py
+
+package:
+  include: ["**"]
+  exclude:
+    - "**/__pycache__/**"
+    - "**/*.pyc"

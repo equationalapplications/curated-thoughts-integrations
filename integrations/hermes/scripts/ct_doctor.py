@@ -57,16 +57,16 @@ OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434")
 # MCP handshake timeout (seconds) — the sidecar must never hang the doctor.
 MCP_TIMEOUT = 10.0
 
-# Tier matrix, mirrored from shared/compat.yaml (that file is the source of
-# truth). Both tiers are verified against curated-thoughts' mcp_server.rs:
-# v2.4.x registers 8 tools, v2.5.x registers 14.
-COMPAT_TIERS = (
-    # (name, min_version, max_version_exclusive, tools, write_path)
-    ("v2.4-read", (2, 4), (2, 5), 8, "dormant"),
-    ("v2.5-full", (2, 5), None, 14, "full"),
-)
-FULL_TIER_TOOLS = 14
-READ_TIER_TOOLS = 8
+# Tier matrix. shared/compat.yaml is the source of truth; _compat_generated.py
+# is compiled from it by `tools/ct_ci.py generate` and verified current in CI,
+# so these values cannot drift from the matrix (spec §3.1, §5.3).
+import _compat_generated  # noqa: E402
+
+COMPAT_TIERS = _compat_generated.TIERS
+FULL_TIER_TOOLS = _compat_generated.FULL_TIER_TOOLS
+READ_TIER_TOOLS = _compat_generated.READ_TIER_TOOLS
+EVIDENCE_TABLE = _compat_generated.EVIDENCE_TABLE
+ENGINE_PINNED_VERSION = _compat_generated.ENGINE_PINNED_VERSION
 
 PASS, WARN, FAIL = "PASS", "WARN", "FAIL"
 
@@ -698,8 +698,8 @@ def check_import_preflight(path=None, brain_paths=None):
             "normalizeSourceRef on every app launch, destroying the evidence. "
             "Do not open this brain with the desktop app until Curated "
             "Thoughts carries the PR #188 structural fix (source_ref becomes "
-            "an engine-proof token and evidence moves to librarian_evidence). "
-            "The current engine pin, 7.1.0, still mangles.",
+            f"an engine-proof token and evidence moves to {EVIDENCE_TABLE}). "
+            f"The current engine pin, {ENGINE_PINNED_VERSION}, still mangles.",
         )
     if tokens and has_evidence is False:
         # The whole table is absent: the export was not brain-complete. This
@@ -708,14 +708,14 @@ def check_import_preflight(path=None, brain_paths=None):
         return CheckResult(
             "import-preflight",
             FAIL,
-            f"{tokens} engine-proof token refs but no librarian_evidence "
+            f"{tokens} engine-proof token refs but no {EVIDENCE_TABLE} "
             f"table ({shape}; {engine_note})",
             "This brain was written by a post-fix Curated Thoughts, but the "
-            "CT-owned librarian_evidence table did not travel with it. The "
+            f"CT-owned {EVIDENCE_TABLE} table did not travel with it. The "
             "wiki entries survived; their provenance did not. PR #188 §2.5.5 "
             "defines a supported export as brain-complete — entries, "
             "evidence, chunks and proposals together. Re-export including "
-            "librarian_evidence; an export copying only llm_wiki_entries "
+            f"{EVIDENCE_TABLE}; an export copying only llm_wiki_entries "
             "silently drops every evidence link.",
         )
     if census.missing_evidence_rows:
@@ -726,7 +726,7 @@ def check_import_preflight(path=None, brain_paths=None):
             "import-preflight",
             WARN,
             f"{census.missing_evidence_rows} of {tokens} token entries have no "
-            f"librarian_evidence row ({shape}; {engine_note})",
+            f"{EVIDENCE_TABLE} row ({shape}; {engine_note})",
             "Per PR #188 §2.3 these entries are treated as still-grounded and "
             "are never auto-purged, so nothing is being deleted — but their "
             "provenance cannot be displayed and retraction cannot resolve "
@@ -916,27 +916,29 @@ def cmd_check(json_output=False):
 # --------------------------------------------------------------------------
 
 def _self_test_suite():
-    # tests/ lives at the repo root; this script is
-    # integrations/hermes/scripts/ct_doctor.py — resolve relative to __file__
-    # so the self-test works from any cwd and any checkout layout.
-    tests_dir = Path(__file__).resolve().parents[3] / "tests"
+    # tests/ lives inside this integration:
+    # integrations/hermes/{scripts/ct_doctor.py, tests/test_ct_doctor.py}.
+    # Resolve relative to __file__ so the self-test works from any cwd.
+    import importlib.util
+
+    tests_dir = Path(__file__).resolve().parents[1] / "tests"
     sys.path.insert(0, str(tests_dir))
     sys.path.insert(0, str(Path(__file__).resolve().parent))
-    try:
-        import test_ct_doctor
-    except ImportError:
-        # allow an alternate layout where tests sit next to the script
-        import importlib.util
-
-        candidate = tests_dir / "test_ct_doctor.py"
-        if not candidate.exists():
-            raise
-        spec = importlib.util.spec_from_file_location("test_ct_doctor", candidate)
-        module = importlib.util.module_from_spec(spec)
-        sys.modules["test_ct_doctor"] = module
-        spec.loader.exec_module(module)
-        test_ct_doctor = module
-    return unittest.defaultTestLoader.loadTestsFromModule(test_ct_doctor)
+    # Loaded via importlib rather than a bare import: a shipped script must
+    # not import test modules (CONTRIBUTING rule 4, enforced by gate_arch).
+    candidate = tests_dir / "test_ct_doctor.py"
+    if not candidate.exists():
+        # With tests inside the integration there is exactly one location,
+        # so a missing suite is a real error, not an alternate layout.
+        raise RuntimeError(
+            f"self-test suite not found at {candidate}; the doctor must ship "
+            f"alongside its tests"
+        )
+    spec = importlib.util.spec_from_file_location("test_ct_doctor", candidate)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["test_ct_doctor"] = module
+    spec.loader.exec_module(module)
+    return unittest.defaultTestLoader.loadTestsFromModule(module)
 
 
 def cmd_self_test():

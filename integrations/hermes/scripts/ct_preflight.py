@@ -68,15 +68,24 @@ import json
 import os
 import re
 import sqlite3
+import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import _compat_generated  # noqa: E402
+
+# Token shape and evidence table are normative (PR #188 §2.2, §2.5.1) and are
+# declared in shared/compat.yaml. Never restate them here.
+TOKEN_RE = re.compile(_compat_generated.SOURCE_REF_SHAPE)
+EVIDENCE_TABLE = _compat_generated.EVIDENCE_TABLE
+REQUIRED_TABLES = _compat_generated.REQUIRED_TABLES
+# The wiki entries table leads the required list (PR #188 §2.5.5 export order).
+ENTRIES_TABLE = REQUIRED_TABLES[0]
 
 # The engine's keep-set, verbatim from normalizeSourceRef (7.1.0 dist:4082).
 _NORMALIZE_STRIP = re.compile(r"[^A-Za-z0-9._\- ]")
 _NORMALIZE_CAP = 255
-
-# Normative token shape (PR #188 §2.2): exactly 32 lowercase hex characters.
-# §2.5.1's census keys on this regex, so it is an equality test, not a prefix.
-_TOKEN_RE = re.compile(r"^librarian-[0-9a-f]{32}$")
 
 # Row type the census and every verdict are scoped to (§2.5.1).
 LIBRARIAN_SOURCE_TYPE = "librarian_inferred"
@@ -139,7 +148,7 @@ def is_normalizer_fixed_point(value):
 
 def is_token(value):
     """True if the ref is a well-formed post-#188 token (§2.2)."""
-    return isinstance(value, str) and bool(_TOKEN_RE.match(value))
+    return isinstance(value, str) and bool(TOKEN_RE.match(value))
 
 
 def recovery_shape(value):
@@ -269,8 +278,9 @@ class CensusResult:
 
 def _connect_readonly(db_path):
     """Open the brain database strictly read-only."""
-    uri = "file:" + Path(db_path).as_posix() + "?mode=ro"
-    return sqlite3.connect(uri, uri=True, timeout=5.0)
+    return sqlite3.connect(
+        "file:" + Path(db_path).as_posix() + "?mode=ro", uri=True, timeout=5.0
+    )
 
 
 def _table_exists(conn, name):
@@ -296,12 +306,12 @@ def census_source_refs(db_path):
     except sqlite3.Error as exc:
         return CensusResult(error=f"cannot open database read-only: {exc}")
     try:
-        if not _table_exists(conn, "llm_wiki_entries"):
+        if not _table_exists(conn, ENTRIES_TABLE):
             # A brain that has never run the wiki engine has no entries table.
             # That is a legitimate state, not an error.
             return CensusResult(table_present=False)
 
-        cols = _columns(conn, "llm_wiki_entries")
+        cols = _columns(conn, ENTRIES_TABLE)
         scoped = "source_type" in cols
         if scoped:
             sql = (
@@ -333,7 +343,7 @@ def census_source_refs(db_path):
                     key = f"{hint[0]} {hint[1]}"
                     hints[key] = hints.get(key, 0) + 1
 
-        evidence_present = _table_exists(conn, "librarian_evidence")
+        evidence_present = _table_exists(conn, EVIDENCE_TABLE)
         missing_evidence = 0
         unanchored = 0
         if evidence_present and token_ids:
@@ -341,14 +351,19 @@ def census_source_refs(db_path):
             # Chunk the IN list: SQLite's default variable limit is 999.
             for i in range(0, len(token_ids), 500):
                 batch = token_ids[i : i + 500]
-                q = "SELECT entry_id FROM librarian_evidence WHERE entry_id IN ({})".format(
-                    ",".join("?" * len(batch))
+                # Table name is interpolated because SQLite cannot
+                # parameterise identifiers; it comes from a repository-
+                # controlled data file, never from user input.
+                q = (
+                    f"SELECT entry_id FROM {EVIDENCE_TABLE} WHERE entry_id IN ("
+                    + ",".join("?" * len(batch))
+                    + ")"
                 )
                 have.update(r[0] for r in conn.execute(q, batch))
             missing_evidence = sum(1 for t in token_ids if t not in have)
-            if "unanchored" in _columns(conn, "librarian_evidence"):
+            if "unanchored" in _columns(conn, EVIDENCE_TABLE):
                 unanchored = conn.execute(
-                    "SELECT COUNT(*) FROM librarian_evidence WHERE unanchored = 1"
+                    f"SELECT COUNT(*) FROM {EVIDENCE_TABLE} WHERE unanchored = 1"
                 ).fetchone()[0]
 
         return CensusResult(
@@ -384,7 +399,7 @@ def has_evidence_table(db_path):
     except sqlite3.Error:
         return None
     try:
-        return _table_exists(conn, "librarian_evidence")
+        return _table_exists(conn, EVIDENCE_TABLE)
     except sqlite3.Error:
         return None
     finally:
