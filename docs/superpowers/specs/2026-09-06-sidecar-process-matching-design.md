@@ -13,7 +13,7 @@ silently broken on Linux. Verified live on this machine (2026-09-06, CT
 
 1. **comm truncation.** `pgrep -x <name>` matches `/proc/<pid>/comm`, which
    the kernel truncates to 15 characters. The sidecar binary is
-   `curated-thoughts-mcp` (19 chars); its comm reads `curated-thought`.
+   `curated-thoughts-mcp` (20 chars); its comm reads `curated-thought`.
    `pgrep -x curated-thoughts-mcp` can never match.
 2. **The comm is not even the binary name.** On launcher-style binaries the
    comm can be entirely different (earlier this bug was observed with the
@@ -76,6 +76,16 @@ false-positive classes above). Do not "fix" by truncating the pattern to 15
 chars — the comm is not guaranteed to be a truncation of the binary name at
 all.
 
+**Assumption of the contract:** the anchored pattern presumes the sidecar is
+started via the absolute installed path (`/usr/bin/curated-thoughts-mcp`).
+A sidecar launched through a symlink, a relative path, a relocated binary,
+or an interpreter (e.g. `bash /usr/bin/curated-thoughts-mcp`) has a cmdline
+that does not begin with the path and is **out of contract** — those launch
+styles do not occur for the dpkg-installed sidecar (the Hermes daemon starts
+it with the absolute path). Verification flows should keep using the
+`/proc/<pid>/exe` readlink check, which is launch-style independent and
+remains the fallback if a launch style ever changes.
+
 Rejected alternatives:
 
 - **`pgrep -x curated-thought` (15-char truncation of the name):** matches
@@ -109,7 +119,9 @@ Rejected alternatives:
    `pkill -f '^/usr/bin/curated-thoughts-mcp' || true`. The md5
    freshness loop is correct as-is (it compares `/proc/<pid>/exe` of the
    matched pids against the installed binary — which is exactly why the pid
-   set must be exact).
+   set must be exact). These two line edits are the complete script
+   change-set: no other line of `install-ct-2.6.0.sh` changes — the
+   checksum, install, and dpkg verification sections are untouched.
 
 ## Error handling
 
