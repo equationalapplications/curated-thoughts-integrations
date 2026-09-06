@@ -623,7 +623,9 @@ def main(argv=None):
     p_check = sub.add_parser("check", help="run all checks against the live system")
     p_check.add_argument("--json", action="store_true", help="machine-readable output")
     parser.add_argument("--self-test", action="store_true", help="run the embedded mock-sidecar test suite")
-    args = parser.parse_args(argv)
+    # parse_known_args: --self-test is a global flag and must be accepted
+    # in any position, including after the subcommand (`check --self-test`).
+    args, _unknown = parser.parse_known_args(argv)
 
     if args.self_test:
         return cmd_self_test()
