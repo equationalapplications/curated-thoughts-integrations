@@ -91,5 +91,28 @@ class TestDiscoverManifests(unittest.TestCase):
         self.assertIn("hermes", ids)
 
 
+class TestRealManifests(unittest.TestCase):
+    def test_every_shipped_manifest_validates(self):
+        problems = []
+        for _id, directory, data in ct_ci_manifest.discover_manifests(REPO):
+            problems.extend(
+                ct_ci_manifest.validate_manifest(data, directory / "integration.yaml")
+            )
+        self.assertEqual(problems, [])
+
+    def test_all_three_integrations_are_declared(self):
+        ids = [i for i, _, _ in ct_ci_manifest.discover_manifests(REPO)]
+        self.assertEqual(ids, ["claude-code", "hermes", "openclaw"])
+
+    def test_hermes_version_matches_plugin_yaml(self):
+        import yaml
+        manifest = ct_ci_manifest.load_manifest(
+            REPO / "integrations" / "hermes" / "integration.yaml"
+        )
+        with open(REPO / "integrations" / "hermes" / "plugin.yaml", encoding="utf-8") as fh:
+            native = yaml.safe_load(fh)
+        self.assertEqual(manifest["version"], native["version"])
+
+
 if __name__ == "__main__":
     unittest.main()
