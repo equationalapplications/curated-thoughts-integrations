@@ -1,7 +1,7 @@
 # Sidecar process-matching contract — spec
 
 **Date:** 2026-09-06
-**Status:** Draft
+**Status:** Implemented 2026-09-06 (PR #7)
 **Branch:** docs/sidecar-process-matching-contract
 **Priority:** Medium (correctness of every future release-install script; no release blocked — v2.6.0 artifact itself is unaffected)
 
