@@ -1,0 +1,123 @@
+name: Release
+
+# Independent per-integration releases (spec §4.2).
+# Tag grammar: <id>-v<semver>, e.g. hermes-v0.2.1 or hermes-v0.3.0-rc.1.
+# A release never trusts a previous CI run: it re-runs the integration's full
+# checks across its full declared matrix before publishing anything.
+
+on:
+  push:
+    tags:
+      - "*-v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  identify:
+    name: identify and validate the tag
+    runs-on: ubuntu-latest
+    outputs:
+      id: ${{ steps.parse.outputs.id }}
+      version: ${{ steps.parse.outputs.version }}
+      dir: ${{ steps.parse.outputs.dir }}
+      os: ${{ steps.parse.outputs.os }}
+      python: ${{ steps.parse.outputs.python }}
+      test: ${{ steps.parse.outputs.test }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: "3.13"
+
+      - run: pip install --disable-pip-version-check -r tools/requirements-ci.txt
+
+      - id: parse
+        run: |
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, os, sys
+          sys.path.insert(0, "tools")
+          import ct_ci_manifest, ct_ci_package
+          tag = os.environ["GITHUB_REF_NAME"]
+          ident, version = ct_ci_package.parse_tag(tag)
+          directory, data = ct_ci_package._manifest(".", ident)
+          if str(data["version"]) != version:
+              raise SystemExit(
+                  f"tag {tag} does not match {directory}/integration.yaml "
+                  f"version {data['version']}"
+              )
+          if data.get("status") != "implemented":
+              raise SystemExit(f"{ident} is status={data.get('status')}; nothing to release")
+          # Fails loudly here, before anything is published, if notes are missing.
+          ct_ci_package.changelog_section(directory, version)
+          matrix = data["matrix"]
+          print(f"id={ident}")
+          print(f"version={version}")
+          print(f"dir={directory.as_posix()}")
+          print("os=" + json.dumps(matrix["os"]))
+          print("python=" + json.dumps(matrix.get("python", [])))
+          print("test=" + data["checks"]["test"])
+          PY
+
+      - name: Policy gates must pass at the tagged commit
+        run: python tools/ct_ci.py policy
+
+  verify:
+    name: ${{ needs.identify.outputs.id }} (${{ matrix.os }}, py${{ matrix.python }})
+    needs: identify
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: true
+      matrix:
+        os: ${{ fromJson(needs.identify.outputs.os) }}
+        python: ${{ fromJson(needs.identify.outputs.python) }}
+    defaults:
+      run:
+        working-directory: ${{ needs.identify.outputs.dir }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: ${{ matrix.python }}
+      - run: ${{ needs.identify.outputs.test }}
+
+  publish:
+    name: publish the release
+    needs: [identify, verify]
+    runs-on: ubuntu-latest
+    permissions:
+      # The only job in the repository that may write. Everything upstream of
+      # here runs with contents: read.
+      contents: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: "3.13"
+
+      - run: pip install --disable-pip-version-check -r tools/requirements-ci.txt
+
+      - name: Build the artifact and release notes
+        run: python tools/ct_ci.py package --tag "${GITHUB_REF_NAME}" --out dist
+
+      - name: Create the GitHub Release
+        uses: softprops/action-gh-release@c95fe1489396fe8a9eb87c0abf8aa5b2ef267fda # v2.2.1
+        with:
+          name: ${{ needs.identify.outputs.id }} v${{ needs.identify.outputs.version }}
+          body_path: dist/RELEASE_NOTES.md
+          prerelease: ${{ contains(needs.identify.outputs.version, '-') }}
+          files: |
+            dist/*.tar.gz
+            dist/SHA256SUMS

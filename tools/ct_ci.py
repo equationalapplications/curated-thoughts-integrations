@@ -24,6 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import ct_ci_discover  # noqa: E402
 import ct_ci_generate  # noqa: E402
 import ct_ci_manifest  # noqa: E402
+import ct_ci_package  # noqa: E402
 import ct_ci_policy  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -85,6 +86,26 @@ def cmd_policy(args):
     return 0
 
 
+def cmd_package(args):
+    integration_id, version = ct_ci_package.parse_tag(args.tag)
+    directory, data = ct_ci_package._manifest(args.repo, integration_id)
+    if str(data.get("version")) != version:
+        print(
+            f"FAIL tag {args.tag} declares {version} but "
+            f"{directory}/integration.yaml says {data.get('version')}",
+            file=sys.stderr,
+        )
+        return 1
+    tarball = ct_ci_package.build(args.repo, integration_id, args.out)
+    sums = ct_ci_package.write_checksums([tarball], args.out)
+    body = ct_ci_package.changelog_section(directory, version)
+    (Path(args.out) / "RELEASE_NOTES.md").write_text(body + "\n", encoding="utf-8")
+    print(f"artifact={tarball}")
+    print(f"checksums={sums}")
+    print(f"prerelease={str(ct_ci_package.is_prerelease(version)).lower()}")
+    return 0
+
+
 def cmd_discover(args):
     entries = ct_ci_discover.select(args.repo, args.base, args.all)
     print(json.dumps(entries))
@@ -115,6 +136,9 @@ def main(argv=None):
         default=None,
         help="git ref to diff against for version hygiene (e.g. origin/main)",
     )
+    package = sub.add_parser("package", help="build the artifact for a tag")
+    package.add_argument("--tag", required=True, help="e.g. hermes-v0.2.1")
+    package.add_argument("--out", type=Path, default=Path("dist"))
 
     args = parser.parse_args(argv)
     if args.command == "validate":
@@ -125,6 +149,8 @@ def main(argv=None):
         return cmd_discover(args)
     if args.command == "policy":
         return cmd_policy(args)
+    if args.command == "package":
+        return cmd_package(args)
     parser.error(f"unknown command {args.command}")
     return 2
 
