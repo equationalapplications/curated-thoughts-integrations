@@ -178,8 +178,16 @@ independently-failing groups. Every failure message names the
 - If any file under `integrations/<id>/` changed against the base branch, then
   `version` must be greater than the base branch's value **and**
   `integrations/<id>/CHANGELOG.md` must contain an entry for the new version.
-  Exempt when the only changed files are that integration's `README.md` or
-  `CHANGELOG.md`.
+- **Exemption set** — the bump is not required when *every* changed file under
+  that integration is documentation (`README.md`, `CHANGELOG.md`, `docs/**`)
+  or a test (`tests/**`, `**/test_*.py`, `**/*.test.ts`). Rationale: a release
+  exists to change what a user runs, and adding a missing unit test changes
+  nothing a user runs; forcing a version bump for it would train maintainers
+  to bump reflexively, which is exactly how version numbers stop meaning
+  anything. The consequence is accepted explicitly: tests land in the tarball
+  at the *next* release rather than immediately, and the exemption is
+  all-or-nothing — one shipped-code line in the same change and the bump is
+  required again.
 - Tags are validated in `release.yml` (§4.2), not here.
 
 ### 5.2 Architecture lint
@@ -192,8 +200,12 @@ Enforcing `CONTRIBUTING.md` rules 3, 4, and 6:
   anything else fails.
 - No direct brain access: `import sqlite3`, `brain.db`, or file writes under a
   vault or brain directory anywhere in `integrations/**`.
-- No machine-specific paths: `/Users/`, `/home/<name>/`, `C:\Users\`, or any
-  absolute path outside a documented default.
+- No machine-specific or platform-absolute paths. The check bans `/Users/`,
+  `/home/<name>/`, and **any drive-letter path** (`^[A-Za-z]:\\`) — not just
+  `C:\Users\`, so a hardcoded `C:\Program Files\...` binary location fails
+  too — along with any other absolute path outside a documented default. The
+  sole exemption is `tests/fixtures/**`, where fake absolute paths are the
+  point; fixtures elsewhere get no pass.
 - No environment variable matching `CURATED_*` other than the three contract
   variables `CURATED_BRAIN_DIR`, `CURATED_BRAIN_DB`, `CURATED_BRAIN_CONFIG`.
   This is what stops the environment contract from silently regrowing
@@ -262,6 +274,10 @@ integrations under `tests/fixtures/` cover, at minimum:
 - a cross-integration import,
 - a third-party import in a script,
 - a hardcoded home directory,
+- a hardcoded `C:\Program Files\` path,
+- a docs-only change with no version bump (must pass),
+- a tests-only change with no version bump (must pass),
+- a mixed tests-plus-code change with no version bump (must fail),
 - a rogue `CURATED_*` environment variable,
 - a dangling `compat_tier`,
 - a `requires_sidecar` range disjoint from its tier,
