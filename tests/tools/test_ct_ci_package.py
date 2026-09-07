@@ -11,6 +11,14 @@ REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "tools"))
 
 import ct_ci_package  # noqa: E402
+import ct_ci_manifest  # noqa: E402
+
+# CI policy tests must track the manifest, not pin a snapshot version:
+# any legitimate release bump (e.g. 0.2.1-rc.1) would otherwise re-break
+# this suite. The contract under test is "packaging reflects integration.yaml".
+HERMES_VERSION = ct_ci_manifest.load_manifest(
+    REPO / "integrations" / "hermes" / "integration.yaml"
+)["version"]
 
 
 class TestParseTag(unittest.TestCase):
@@ -46,7 +54,7 @@ class TestBuild(unittest.TestCase):
     def test_tarball_contains_scripts_and_excludes_pycache(self):
         with tempfile.TemporaryDirectory() as out:
             path = ct_ci_package.build(REPO, "hermes", Path(out))
-            self.assertEqual(path.name, "hermes-0.2.0.tar.gz")
+            self.assertEqual(path.name, f"hermes-{HERMES_VERSION}.tar.gz")
             with tarfile.open(path) as archive:
                 names = archive.getnames()
             self.assertTrue(any(n.endswith("scripts/ct_doctor.py") for n in names), names[:5])
@@ -58,7 +66,7 @@ class TestBuild(unittest.TestCase):
             path = ct_ci_package.build(REPO, "hermes", Path(out))
             with tarfile.open(path) as archive:
                 roots = {n.split("/")[0] for n in archive.getnames()}
-            self.assertEqual(roots, {"hermes-0.2.0"})
+            self.assertEqual(roots, {f"hermes-{HERMES_VERSION}"})
 
     def test_checksums_match_the_files(self):
         with tempfile.TemporaryDirectory() as out:

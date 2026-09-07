@@ -9,6 +9,13 @@ REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "tools"))
 
 import ct_ci_discover  # noqa: E402
+import ct_ci_manifest  # noqa: E402
+
+# Track the manifest version rather than pinning a snapshot: a release bump
+# must not re-break this suite. Contract: discovery reflects integration.yaml.
+HERMES_VERSION = ct_ci_manifest.load_manifest(
+    REPO / "integrations" / "hermes" / "integration.yaml"
+)["version"]
 
 
 class TestSelect(unittest.TestCase):
@@ -40,7 +47,7 @@ class TestSelect(unittest.TestCase):
             self.assertEqual(entry["dir"], "integrations/hermes")
             self.assertEqual(entry["language"], "python")
             # The packaging dry run composes its dry-run tag from this.
-            self.assertEqual(entry["version"], "0.2.0")
+            self.assertEqual(entry["version"], HERMES_VERSION)
             self.assertIn("test", entry["checks"])
 
     def test_shared_path_change_selects_everything(self):
