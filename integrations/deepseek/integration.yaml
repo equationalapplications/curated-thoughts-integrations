@@ -2,7 +2,7 @@ id: deepseek
 name: Curated Thoughts for DeepSeek Harness
 version: 0.1.0
 language: node
-status: planned
+status: implemented
 requires_sidecar: ">=2.5"
 compat_tier: v2.5-full
 version_mirror: package.json#version
