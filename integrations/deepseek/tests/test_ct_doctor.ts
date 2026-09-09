@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import {
   runChecks,
   cmdCheck,
+  checkDshRegistration,
   PASS, WARN, FAIL,
   type CheckResult,
 } from '../scripts/ct_doctor.js';
@@ -65,5 +66,50 @@ describe('cmdCheck', () => {
     const parsed = JSON.parse(out.stdout);
     expect(parsed.exit_code).toBeGreaterThanOrEqual(1);
     expect(Array.isArray(parsed.checks)).toBe(true);
+  });
+});
+
+describe('checkDshRegistration', () => {
+  function writeCordisYml(text: string): void {
+    mkdirSync(tmpHome, { recursive: true });
+    writeFileSync(join(tmpHome, 'cordis.yml'), text);
+  }
+
+  it('passes when the mcp-client entry is the LAST list item (appended shape)', () => {
+    // Regression: the block-end lookahead used Python's `\Z`, which is a
+    // literal `Z` in JS — an mcp-client entry as the final list item (the
+    // common appended shape) never matched and the doctor false-FAILed a
+    // valid config.
+    writeCordisYml(
+      [
+        "- name: '@equational-applications/dsh-curated-thoughts'",
+        '  config:',
+        '    brainDir: ~/.brain',
+        "- name: '@deepseek-ai/dsh-mcp-client'",
+        '  config:',
+        "    serverName: 'curated-thoughts'",
+        '    transport: stdio',
+        '',
+      ].join('\n'),
+    );
+    const r = checkDshRegistration({ ...process.env, DSH_HOME: tmpHome });
+    expect(r.status).toBe(PASS);
+  });
+
+  it('detects the server when the mcp-client block itself contains a literal Z', () => {
+    // The old `\Z` truncated the captured block at any `Z` character.
+    // Plugin entry absent → WARN is the correct verdict for a detected
+    // server mount; the old bug produced FAIL here instead.
+    writeCordisYml(
+      [
+        "- name: '@deepseek-ai/dsh-mcp-client'",
+        '  config:',
+        '    # Zone: main',
+        "    serverName: 'curated-thoughts'",
+        '',
+      ].join('\n'),
+    );
+    const r = checkDshRegistration({ ...process.env, DSH_HOME: tmpHome });
+    expect(r.status).toBe(WARN);
   });
 });

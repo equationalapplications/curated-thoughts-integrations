@@ -658,11 +658,14 @@ function _cordisYmlHasPlugin(text: string, name: string): boolean {
 function _cordisYmlHasMcpServer(text: string): boolean {
   // Look for an MCP-client list item, then check its indented `serverName:`
   // block for a matching serverName line. End at the next list item (`- `)
-  // or end of file.
+  // or end of file. Python's `\Z` (end-of-string) is a literal `Z` identity
+  // escape in JS, so the block-end lookahead uses `(?![\s\S])` — without it
+  // an mcp-client entry as the LAST list item (the common appended shape)
+  // never matches and the doctor false-FAILs a valid config.
   const blockRe = new RegExp(
     String.raw`^-\s+name:\s*(?:['"]?)` +
       DSH_MCP_CLIENT_PACKAGE.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') +
-      `(?:['"]?)\s*$([\s\S]*?)(?=^-\s|\Z)`,
+      String.raw`(?:['"]?)\s*$([\s\S]*?)(?=^-\s|(?![\s\S]))`,
     'm',
   );
   const m = blockRe.exec(text);
