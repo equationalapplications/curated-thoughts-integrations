@@ -26,10 +26,11 @@
     "@deepseek-ai/schemastery": "*"
   },
   "devDependencies": {
+    "@deepseek-ai/cordis": "^4.0.2",
+    "@deepseek-ai/schemastery": "^3.18.2",
     "@types/better-sqlite3": "^9.6.0",
     "@types/node": "^22.19.0",
     "better-sqlite3": "^13.0.3",
-    "execa": "^9.6.0",
     "typescript": "^5.6.0",
     "vitest": "^2.1.0"
   }
