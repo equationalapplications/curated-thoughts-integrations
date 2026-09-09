@@ -108,6 +108,12 @@ jobs:
         # Frozen: CI must fail on a package.json that disagrees with the
         # committed lockfile, not paper over the drift.
         if: matrix.entry.language == 'node' && matrix.entry.checks.test
+        env:
+          # pnpm bundles node-gyp 10, whose Visual Studio finder cannot
+          # recognise VS 18 (2026) on the windows-latest image. Point it at
+          # the integration's own node-gyp (>= 12.1.0, which knows VS 18)
+          # for native-module builds like better-sqlite3.
+          npm_config_node_gyp: ${{ github.workspace }}/${{ matrix.entry.dir }}/node_modules/node-gyp/bin/node-gyp.js
         run: pnpm install --frozen-lockfile
 
       - name: Tests
