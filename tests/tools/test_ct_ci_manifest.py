@@ -100,9 +100,9 @@ class TestRealManifests(unittest.TestCase):
             )
         self.assertEqual(problems, [])
 
-    def test_all_three_integrations_are_declared(self):
+    def test_all_four_integrations_are_declared(self):
         ids = [i for i, _, _ in ct_ci_manifest.discover_manifests(REPO)]
-        self.assertEqual(ids, ["claude-code", "hermes", "openclaw"])
+        self.assertEqual(ids, ["claude-code", "deepseek", "hermes", "openclaw"])
 
     def test_hermes_version_matches_plugin_yaml(self):
         import yaml

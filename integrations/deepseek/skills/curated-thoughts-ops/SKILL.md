@@ -11,7 +11,7 @@ by out-of-band writes.
 
 ## First move: run the doctor
 
-Run the plugin's `ct_doctor.py` before guessing. It reports PASS / WARN / FAIL
+Run the plugin's doctor (`node lib/scripts/ct_doctor.js check`) before guessing. It reports PASS / WARN / FAIL
 per check, each with a fix hint:
 
 1. **Sidecar binary** — `curated-thoughts-mcp` on PATH, or in this platform's
@@ -33,9 +33,9 @@ per check, each with a fix hint:
    has a `vault_path` that does not exist here.
 6. **Embedding backend** — the configured embedding host responds. WARN/FAIL
    degrades semantic search but the sidecar may still answer.
-7. **Harness registration** — `mcp_servers.curated-thoughts` present with
-   `--mcp` args, and `curated-thoughts` listed under `plugins.enabled` so the
-   skills and session-start hook actually load.
+7. **Harness registration** — the plugin list-item entry and the
+   `curated-thoughts` MCP server mount are present in dsh's `cordis.yml` so
+   the skills and session-start hook actually load.
 8. **Import pre-flight** — reads the engine version and censuses every
    `llm_wiki_entries.source_ref`. See below; this is the check that protects
    an imported graph.
@@ -97,16 +97,24 @@ made legitimately-anchored facts look like orphans, so the repair migration now
 asserts a complete chunk schema before any orphan deletion and skips it loudly
 if the assertion fails. `shared/compat.yaml` lists what must travel.
 
-## Registration in Hermes
+## Registration in dsh
 
-The MCP server is registered in `~/.hermes/config.yaml` under
-`mcp_servers.curated-thoughts` with `--mcp` arguments, and the plugin is
-listed under `plugins.enabled`. Both halves matter: without the `mcp_servers`
-block there are no tools, and without the `plugins` entry the skills and the
-`on_session_start` hook never load. The installer merges this block only if
-absent — it never overwrites an existing entry. If both a plugin copy and a
-loose `~/.hermes/skills/curated-thoughts*` skill exist, remove the loose copy
-to avoid skill collisions (the installer warns; it never deletes user files).
+The plugin is registered as a top-level list item in dsh's `cordis.yml`
+(`$DSH_HOME/cordis.yml`, default `~/.dsh/cordis.yml`):
+
+```
+- name: '@equational-applications/dsh-curated-thoughts'
+  config:
+    brainDir: ~/.brain
+```
+
+`scripts/install.sh` appends this block only when absent — by default it
+prints the block and writes nothing; `CT_INSTALL_EDIT=1` writes it. The
+plugin's `apply()` mounts the `@deepseek-ai/dsh-mcp-client` MCP server
+(`curated-thoughts --mcp`) itself, so no separate mcp-client list item is
+needed, though one also works. Verify with
+`node lib/scripts/ct_doctor.js check`: check 7 (dsh registration) FAILs with
+the exact block to paste when the entry is missing.
 
 ## Safe routing when things fail
 

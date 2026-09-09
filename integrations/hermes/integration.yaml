@@ -5,7 +5,7 @@
 # Spec: docs/superpowers/specs/2026-09-06-monorepo-ci-and-independent-versioning-design.md
 id: hermes
 name: Curated Thoughts for Hermes Agent
-version: 0.2.1-rc.1
+version: 0.2.1
 language: python
 status: implemented
 requires_sidecar: ">=2.5"

@@ -1,0 +1,37 @@
+id: deepseek
+name: Curated Thoughts for DeepSeek Harness
+version: 0.1.0
+language: node
+status: implemented
+requires_sidecar: ">=2.5"
+compat_tier: v2.5-full
+version_mirror: package.json#version
+
+matrix:
+  # DSH officially supports Windows (npm global install and desktop
+  # installers), and sidecar/PATHEXT resolution is exactly where that
+  # support breaks — so Windows is not optional. Interpreters are DSH's
+  # stated Node minimums.
+  os: [ubuntu-latest, macos-latest, windows-latest]
+  node: ["22.19", "24.x"]
+
+checks:
+  # Build first: lib/ is gitignored, so a CI checkout has no compiled doctor
+  # to spawn and every lib-dependent test would skip — the TypeScript would
+  # never even compile. Building in the test chain closes that.
+  test: pnpm run build && pnpm run test
+  lint: pnpm exec tsc --noEmit
+  shell:
+    - scripts/install.sh
+
+policy:
+  allow_sqlite_readonly:
+    - scripts/ct_preflight.ts
+
+package:
+  include: ["**"]
+  # lib/ must ship: package.json's entry points (lib/src/index.js,
+  # lib/scripts/ct_doctor.js) live there. Only true build junk is excluded.
+  exclude:
+    - "**/dist/**"
+    - "**/node_modules/**"
