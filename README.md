@@ -99,7 +99,7 @@ reports both:
 ## Versioning
 
 Each integration versions independently on its own SemVer line and releases
-from a `<id>-v<semver>` tag — `hermes-v0.2.0`. There is no repository-wide
+from a `<id>-v<semver>` tag — `hermes-v0.2.1`. There is no repository-wide
 version. An integration declares the sidecar range it needs
 (`requires_sidecar`) and the `shared/compat.yaml` tier it targets; CI enforces
 that the two agree. See [`docs/ci.md`](docs/ci.md).
