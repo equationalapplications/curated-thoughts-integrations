@@ -15,7 +15,7 @@ export function formatStatusBlock(snap: Snapshot): string | null {
   if (snap.status === 'degraded') {
     lines.push(
       'Memory sidecar DEGRADED — CT tool calls may fail. ' +
-      'Run `ct_doctor.ts check` for details.',
+      'Run `node lib/scripts/ct_doctor.js check` for details.',
     );
     for (const note of snap.notes.slice(0, 3)) {
       lines.push(`- ${note}`);

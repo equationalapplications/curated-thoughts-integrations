@@ -20,7 +20,7 @@ describe('formatStatusBlock', () => {
     const out = formatStatusBlock(snap);
     expect(out).toMatch(/## Curated Thoughts/);
     expect(out).toMatch(/DEGRADED/);
-    expect(out).toMatch(/ct_doctor\.ts check/);
+    expect(out).toMatch(/node lib\/scripts\/ct_doctor\.js check/);
     expect(out).toMatch(/- vault_path unresolved/);
     expect(out).toMatch(/- config.json missing/);
     expect(out).toMatch(/- note 3/);
