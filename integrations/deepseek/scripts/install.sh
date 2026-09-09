@@ -12,7 +12,8 @@
 # Arguments:
 #   --profile <name>      target the per-profile patch
 #                         (${DSH_HOME}/profiles/<name>/cordis.patch.yml)
-#                         instead of the global ${DSH_HOME}/cordis.yml
+#                         instead of the global ${DSH_HOME}/cordis.yml.
+#                         <name> must be a single path segment.
 #
 # Spec: docs/superpowers/specs/2026-09-09-deepseek-harness-integration-design.md §4, §7
 
@@ -26,6 +27,22 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --profile)
       [ $# -ge 2 ] || { printf 'install.sh: --profile requires a name\n' >&2; exit 2; }
+      # The name is interpolated straight into CONFIG_FILE below, so it has to
+      # be a single path segment: `--profile ../../elsewhere` would otherwise
+      # aim the CT_INSTALL_EDIT=1 create/append outside ${DSH_HOME}. Checked
+      # here rather than after the loop so an explicitly empty name is caught
+      # too — post-loop, "" is indistinguishable from "no --profile given".
+      case "$2" in
+        '' | . | ..)
+          printf 'install.sh: --profile needs a single path segment, not %s\n' \
+            "${2:-an empty name}" >&2
+          exit 2
+          ;;
+        */* | *\\*)
+          printf 'install.sh: --profile must not contain a path separator: %s\n' "$2" >&2
+          exit 2
+          ;;
+      esac
       PROFILE="$2"
       shift 2
       ;;
@@ -57,7 +74,8 @@ EOF
 
 # True if the plugin entry is already in cordis.yml as a list item.
 # Accepts both bare and quoted name scalars — a leading @ is a reserved YAML
-# indicator, so the doctor (and hand-edited files) use the quoted form.
+# indicator, so the doctor (and hand-edited files) use the quoted form — and
+# tolerates a trailing inline comment, which hand-managed files tend to carry.
 has_plugin_entry() {
   [ -f "$CONFIG_FILE" ] || return 1
   awk -v name="$PLUGIN_NAME" -v sq="'" '
@@ -65,11 +83,20 @@ has_plugin_entry() {
     /^[[:space:]]*-[[:space:]]*name:[[:space:]]*/ {
       line = $0
       sub(/^[[:space:]]*-[[:space:]]*name:[[:space:]]*/, "", line)
-      gsub(/[[:space:]]*$/, "", line)
       q1 = substr(line, 1, 1)
-      qn = substr(line, length(line), 1)
-      if (q1 == "\"" && qn == "\"") { line = substr(line, 2, length(line) - 2) }
-      else if (q1 == sq && qn == sq) { line = substr(line, 2, length(line) - 2) }
+      if (q1 == "\"" || q1 == sq) {
+        # Quoted scalar: it ends at the closing quote, so a `#` before that is
+        # part of the name and anything after it (typically an inline comment)
+        # is not. Unterminated quotes yield "" and simply do not match.
+        rest = substr(line, 2)
+        close_at = index(rest, q1)
+        line = (close_at > 0) ? substr(rest, 1, close_at - 1) : ""
+      } else {
+        # Bare scalar: YAML only starts an inline comment at a `#` preceded by
+        # whitespace, so that is the one form to strip.
+        sub(/[[:space:]]+#.*$/, "", line)
+        gsub(/[[:space:]]+$/, "", line)
+      }
       if (line == name) { found = 1 }
     }
     END { if (found) exit 0; exit 1 }

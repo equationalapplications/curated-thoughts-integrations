@@ -54,6 +54,29 @@ run_install
 SIZE_AFTER=$(wc -c < "$DSH_HOME/cordis.yml")
 [ "$SIZE_BEFORE" = "$SIZE_AFTER" ] || { echo "FAIL: quoted-name entry was not detected (duplicate appended)"; exit 1; }
 
+# An entry carrying a trailing inline comment is still detected — the comment
+# is not part of the name scalar, so this must not append a duplicate.
+rm -f "$DSH_HOME/cordis.yml"
+printf -- "- name: '@equational-applications/dsh-curated-thoughts' # managed\n  config:\n    brainDir: ~/.brain\n" \
+  > "$DSH_HOME/cordis.yml"
+SIZE_BEFORE=$(wc -c < "$DSH_HOME/cordis.yml")
+run_install
+SIZE_AFTER=$(wc -c < "$DSH_HOME/cordis.yml")
+[ "$SIZE_BEFORE" = "$SIZE_AFTER" ] \
+  || { echo "FAIL: entry with an inline comment was not detected (duplicate appended)"; exit 1; }
+
+# The mirror image: a `#` *inside* the quoted scalar belongs to the name, so
+# this is a different plugin and the entry must still be appended. Guards the
+# comment stripping above against eating part of the name.
+rm -f "$DSH_HOME/cordis.yml"
+printf -- "- name: '@equational-applications/dsh-curated-thoughts # not-a-comment'\n" \
+  > "$DSH_HOME/cordis.yml"
+SIZE_BEFORE=$(wc -c < "$DSH_HOME/cordis.yml")
+run_install
+SIZE_AFTER=$(wc -c < "$DSH_HOME/cordis.yml")
+[ "$SIZE_BEFORE" != "$SIZE_AFTER" ] \
+  || { echo "FAIL: '#' inside the name scalar was treated as a comment"; exit 1; }
+
 # --profile targets the per-profile patch, not the global config.
 rm -f "$DSH_HOME/cordis.yml"
 run_install --profile headless
@@ -64,5 +87,15 @@ SIZE_BEFORE=$(wc -c < "$DSH_HOME/profiles/headless/cordis.patch.yml")
 run_install --profile headless
 SIZE_AFTER=$(wc -c < "$DSH_HOME/profiles/headless/cordis.patch.yml")
 [ "$SIZE_BEFORE" = "$SIZE_AFTER" ] || { echo "FAIL: profile patch changed on re-run"; exit 1; }
+
+# A --profile name is a single path segment: a traversal must be refused
+# outright rather than aiming the CT_INSTALL_EDIT=1 write outside DSH_HOME.
+# ${DSH_HOME}/profiles/../../escaped resolves to ${TMP}/escaped.
+for bad in '../../escaped' 'nested/name' '' '.' '..'; do
+  if run_install --profile "$bad" 2>/dev/null; then
+    echo "FAIL: --profile '${bad}' was accepted"; exit 1
+  fi
+done
+test ! -e "$TMP/escaped" || { echo "FAIL: --profile traversal wrote outside DSH_HOME"; exit 1; }
 
 echo "OK"
