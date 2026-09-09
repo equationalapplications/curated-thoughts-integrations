@@ -16,7 +16,7 @@ discipline.
   knows whether memory is usable before its first tool call.
 - **Three skills** — `curated-thoughts-usage`, `curated-thoughts-ops`,
   `curated-thoughts-sidecar` (verbatim from Hermes).
-- **Doctor** — `ct_doctor.ts check` runs the nine deep checks
+- **Doctor** — `node lib/scripts/ct_doctor.js check` runs the nine deep checks
   (sidecar binary / identity / MCP reachable / brain / vault / embedding
   backend / dsh registration / import pre-flight / version compat).
 - **Idempotent installer** — `scripts/install.sh`.
@@ -36,8 +36,8 @@ Without `CT_INSTALL_EDIT=1`, the installer prints the block to append to
 ## Verify
 
 ```bash
-node lib/ct_doctor.js check
-node lib/ct_doctor.js check --json   # machine-readable
+node lib/scripts/ct_doctor.js check
+node lib/scripts/ct_doctor.js check --json   # machine-readable
 ```
 
 ## Compatibility

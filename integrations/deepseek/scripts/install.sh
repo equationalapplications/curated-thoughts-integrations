@@ -100,7 +100,7 @@ check_mcp_mount() {
 verify_with_doctor() {
   say ""
   say "== Doctor =="
-  local doctor="${SCRIPT_SRC}/lib/ct_doctor.js"
+  local doctor="${SCRIPT_SRC}/lib/scripts/ct_doctor.js"
   if [ -f "$doctor" ]; then
     if node "$doctor" check; then
       say "OK: doctor reports all checks passing."
@@ -121,7 +121,7 @@ main() {
   say ""
   say "== Done =="
   say "Next step — verify the install:"
-  say "  node ${SCRIPT_SRC}/lib/ct_doctor.js check"
+  say "  node ${SCRIPT_SRC}/lib/scripts/ct_doctor.js check"
   say ""
   say "Importing a brain from another machine? Point CURATED_BRAIN_DIR at it"
   say "and re-run the doctor — the import pre-flight check reports whether the"

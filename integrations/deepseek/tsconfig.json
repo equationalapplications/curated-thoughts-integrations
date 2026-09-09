@@ -4,6 +4,7 @@
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
     "outDir": "./lib",
+    "rootDir": ".",
     "strict": true,
     "noImplicitAny": true,
     "esModuleInterop": true,
@@ -12,6 +13,6 @@
     "resolveJsonModule": true,
     "forceConsistentCasingInFileNames": true
   },
-  "include": ["src/**/*.ts"],
-  "exclude": ["node_modules", "lib", "tests", "scripts"]
+  "include": ["src/**/*.ts", "scripts/**/*.ts"],
+  "exclude": ["node_modules", "lib", "tests"]
 }

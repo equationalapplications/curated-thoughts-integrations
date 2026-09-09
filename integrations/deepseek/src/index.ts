@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Context } from '@deepseek-ai/cordis';
@@ -34,7 +34,33 @@ const SKILL_DESCRIPTIONS: Record<SkillName, string> = {
 };
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const SKILLS_ROOT = join(HERE, '..', 'skills');
+
+/**
+ * Locate the package's `skills/` directory starting from this module's
+ * compiled location. Works both installed (lib/src/index.js → <pkg>/skills)
+ * and from source (src/index.ts → <pkg>/skills) by walking up until a
+ * directory that actually contains the shipped skills is found.
+ */
+function findSkillsRoot(start: string): string {
+  let dir = start;
+  for (let i = 0; i < 6; i++) {
+    const candidate = join(dir, 'skills');
+    if (
+      existsSync(join(candidate, 'curated-thoughts-usage', 'SKILL.md')) &&
+      existsSync(join(candidate, 'curated-thoughts-ops', 'SKILL.md')) &&
+      existsSync(join(candidate, 'curated-thoughts-sidecar', 'SKILL.md'))
+    ) {
+      return candidate;
+    }
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  // Fallback mirrors the compiled layout: lib/src → package root.
+  return join(HERE, '..', '..', 'skills');
+}
+
+export const SKILLS_ROOT = findSkillsRoot(HERE);
 
 function readSkill(name: SkillName): string {
   return readFileSync(join(SKILLS_ROOT, name, 'SKILL.md'), 'utf8');

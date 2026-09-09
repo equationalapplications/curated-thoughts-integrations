@@ -51,13 +51,14 @@ describe('runChecks', () => {
 describe('cmdCheck', () => {
   it('prints JSON when --json is passed', () => {
     // Capture stdout via a child process running the compiled doctor.
-    // lib/ct_doctor.js is built by scripts/tsconfig.json in Task 2.5.
+    // lib/scripts/ct_doctor.js is emitted by the root tsconfig.json
+    // (rootDir "." compiles src/ → lib/src and scripts/ → lib/scripts).
     // Use process.execPath (absolute) instead of bare 'node' because the
     // test sets PATH='' to wipe the sidecar's PATH lookup — bare 'node'
     // would then ENOENT. Bare 'node' is what the plan's verbatim test had;
     // it failed with `spawnSync node ENOENT` so we resolve to the running
     // Node binary by absolute path. (Plan-bug pattern #5.)
-    const out = spawnSync(process.execPath, [join(import.meta.dirname, '..', 'lib', 'ct_doctor.js'), 'check', '--json'], {
+    const out = spawnSync(process.execPath, [join(import.meta.dirname, '..', 'lib', 'scripts', 'ct_doctor.js'), 'check', '--json'], {
       env: { ...process.env, HOME: tmpHome, USERPROFILE: tmpHome, PATH: '' },
       encoding: 'utf8',
     });
