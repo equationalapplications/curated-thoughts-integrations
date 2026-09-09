@@ -371,7 +371,9 @@ def gate_arch(repo_root):
     for name, directory, data in ct_ci_manifest.discover_manifests(repo_root):
         exempt = set((data.get("policy") or {}).get("allow_sqlite_readonly") or [])
         for path in sorted(directory.rglob("*.py")):
-            if "__pycache__" in path.parts:
+            # node_modules is vendored (a node integration's installed deps —
+            # node-gyp even ships Python); it is not shipped code under review.
+            if "__pycache__" in path.parts or "node_modules" in path.parts:
                 continue
             rel = path.relative_to(repo_root).as_posix()
             if is_test_file(rel):
@@ -489,7 +491,7 @@ def gate_compat(repo_root):
                 f"{tier_name} ({tier.get('sidecar')!r}) (spec §5.3)."
             )
         for path in sorted(directory.rglob("*.py")):
-            if "__pycache__" in path.parts:
+            if "__pycache__" in path.parts or "node_modules" in path.parts:
                 continue
             rel = path.relative_to(repo_root).as_posix()
             if is_test_file(rel):
