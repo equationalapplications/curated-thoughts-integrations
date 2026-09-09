@@ -1,8 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   runChecks,
   cmdCheck,
@@ -10,6 +11,15 @@ import {
   PASS, WARN, FAIL,
   type CheckResult,
 } from '../scripts/ct_doctor.js';
+
+// lib/scripts/ct_doctor.js is emitted by `pnpm run build`; lib/ is
+// gitignored, so a fresh clone running `pnpm test` before `pnpm run build`
+// has nothing to spawn. Skip like test_build_output.ts does, rather than
+// failing on an empty child stdout.
+const COMPILED_DOCTOR = join(
+  dirname(fileURLToPath(import.meta.url)), '..', 'lib', 'scripts', 'ct_doctor.js',
+);
+const built = existsSync(COMPILED_DOCTOR);
 
 let tmpHome: string;
 let originalEnv: NodeJS.ProcessEnv;
@@ -49,7 +59,7 @@ describe('runChecks', () => {
   });
 });
 
-describe('cmdCheck', () => {
+describe.skipIf(!built)('cmdCheck', () => {
   it('prints JSON when --json is passed', () => {
     // Capture stdout via a child process running the compiled doctor.
     // lib/scripts/ct_doctor.js is emitted by the root tsconfig.json
@@ -59,7 +69,7 @@ describe('cmdCheck', () => {
     // would then ENOENT. Bare 'node' is what the plan's verbatim test had;
     // it failed with `spawnSync node ENOENT` so we resolve to the running
     // Node binary by absolute path. (Plan-bug pattern #5.)
-    const out = spawnSync(process.execPath, [join(import.meta.dirname, '..', 'lib', 'scripts', 'ct_doctor.js'), 'check', '--json'], {
+    const out = spawnSync(process.execPath, [COMPILED_DOCTOR, 'check', '--json'], {
       env: { ...process.env, HOME: tmpHome, USERPROFILE: tmpHome, PATH: '' },
       encoding: 'utf8',
     });

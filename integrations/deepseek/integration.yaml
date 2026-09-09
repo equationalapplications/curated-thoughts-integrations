@@ -12,7 +12,10 @@ matrix:
   node: ["22.19", "24.x"]
 
 checks:
-  test: pnpm run test
+  # Build first: lib/ is gitignored, so a CI checkout has no compiled doctor
+  # to spawn and every lib-dependent test would skip — the TypeScript would
+  # never even compile. Building in the test chain closes that.
+  test: pnpm run build && pnpm run test
   lint: pnpm exec tsc --noEmit
   shell:
     - scripts/install.sh
