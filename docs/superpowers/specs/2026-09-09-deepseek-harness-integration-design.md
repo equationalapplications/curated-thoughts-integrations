@@ -1,6 +1,6 @@
 # curated-thoughts-integrations — DeepSeek Harness/CT Plugin Design
 
-Status: DESIGN — Owner: maintainer · Author: CT integrations team · Date: 2026-09-09
+Status: implemented (branch feat/deepseek-harness-integration) — Owner: maintainer · Author: CT integrations team · Date: 2026-09-09
 
 Siblings: [`spec-hermes-plugin-v0.md`](../spec-hermes-plugin-v0.md) (implemented reference),
 [`2026-09-06-monorepo-ci-and-independent-versioning-design.md`](2026-09-06-monorepo-ci-and-independent-versioning-design.md)
