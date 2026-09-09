@@ -1,0 +1,29 @@
+{
+  "name": "@equational-applications/dsh-curated-thoughts",
+  "version": "0.1.0",
+  "description": "Curated Thoughts memory integration for DeepSeek Harness",
+  "license": "MIT",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./doctor": "./lib/ct_doctor.js"
+  },
+  "files": ["lib", "skills", "scripts/install.sh"],
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "lint": "tsc --noEmit"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.0",
+    "execa": "^9.6.0",
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  }
+}

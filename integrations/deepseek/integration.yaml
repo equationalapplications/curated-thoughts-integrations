@@ -1,0 +1,29 @@
+id: deepseek
+name: Curated Thoughts for DeepSeek Harness
+version: 0.1.0
+language: node
+status: planned
+requires_sidecar: ">=2.5"
+compat_tier: v2.5-full
+version_mirror: package.json#version
+
+matrix:
+  os: [ubuntu-latest, macos-latest, windows-latest]
+  node: ["22.19", "24.x"]
+
+checks:
+  test: pnpm run test
+  lint: pnpm exec tsc --noEmit
+  shell:
+    - scripts/install.sh
+
+policy:
+  allow_sqlite_readonly:
+    - scripts/ct_preflight.ts
+
+package:
+  include: ["**"]
+  exclude:
+    - "**/dist/**"
+    - "**/lib/**"
+    - "**/node_modules/**"
