@@ -96,7 +96,13 @@ const MCP_TIMEOUT = 10.0;
 // Tier matrix + counters. _compat_generated.ts is the binding source of truth
 // (Task 11 generates it from shared/compat.yaml; stub for now).
 type CompatTier = readonly [string, readonly [number, number], readonly [number, number] | null, number, string];
-const COMPAT_TIERS: ReadonlyArray<CompatTier> = TIERS as unknown as ReadonlyArray<CompatTier>;
+// Defensive filter: tierFor compares against the lower bound unconditionally,
+// so a future compat.yaml tier without one would crash it at runtime. Drop
+// such tiers here instead (the generated TIERS type allows a null lower bound).
+const COMPAT_TIERS: ReadonlyArray<CompatTier> =
+  (TIERS as unknown as ReadonlyArray<CompatTier>).filter(
+    (t): t is CompatTier => t[1] !== null,
+  );
 
 // --------------------------------------------------------------------------
 // helpers
