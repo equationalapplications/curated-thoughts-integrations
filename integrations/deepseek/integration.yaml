@@ -8,6 +8,10 @@ compat_tier: v2.5-full
 version_mirror: package.json#version
 
 matrix:
+  # DSH officially supports Windows (npm global install and desktop
+  # installers), and sidecar/PATHEXT resolution is exactly where that
+  # support breaks — so Windows is not optional. Interpreters are DSH's
+  # stated Node minimums.
   os: [ubuntu-latest, macos-latest, windows-latest]
   node: ["22.19", "24.x"]
 
