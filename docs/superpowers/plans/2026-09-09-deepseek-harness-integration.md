@@ -676,6 +676,7 @@ Expected: import error — `status.js` does not exist yet.
 - [ ] **Step 3.3: Implement `src/status.ts`**:
 
 ```ts
+import { existsSync } from 'node:fs';
 import {
   findSidecar,
   resolveBrainPaths,
@@ -717,8 +718,6 @@ export function probe(env: NodeJS.ProcessEnv = process.env): Snapshot {
 
     const paths = resolveBrainPaths(env);
     out.brainDir = paths.brainDir;
-    // Use existsSync instead of a recursive walk — keep the probe O(1).
-    const { existsSync } = require('node:fs') as typeof import('node:fs');
     if (!existsSync(paths.brainDir)) {
       out.notes.push(`brain dir missing: ${paths.brainDir}`);
     } else {
@@ -1154,10 +1153,10 @@ The 9 checks mirror Hermes's `ct_doctor.py` (see spec §6). Read `hermes/scripts
 
 ```ts
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { spawn, spawnSync } from 'node:child_process';
 import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { spawn } from 'node:child_process';
 import {
   runChecks,
   cmdCheck,
@@ -1216,8 +1215,6 @@ describe('cmdCheck', () => {
     expect(Array.isArray(parsed.checks)).toBe(true);
   });
 });
-
-import { spawnSync } from 'node:child_process';
 ```
 
 - [ ] **Step 6.2: Run and verify it fails**:
