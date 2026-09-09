@@ -10,13 +10,17 @@ common architecture.
 
 | Harness | Directory | Status | Version |
 |---------|-----------|--------|---------|
-| [Hermes Agent](https://github.com/NousResearch/hermes-agent) | [`integrations/hermes/`](integrations/hermes/) | implemented | [0.2.0](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=hermes) |
+| [Hermes Agent](https://github.com/NousResearch/hermes-agent) | [`integrations/hermes/`](integrations/hermes/) | implemented | [0.2.1](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=hermes) |
+| DeepSeek Harness | [`integrations/deepseek/`](integrations/deepseek/) | implemented | [0.1.1](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=deepseek) |
 | OpenClaw | `integrations/openclaw/` | planned | — |
 | Claude Code | `integrations/claude-code/` | planned | — |
 
+Rows marked *planned* are placeholders — no installable artifact exists yet
+for that harness. Implemented rows link to that integration's releases.
+
 ## What an integration provides
 
-Each integration ships the same three layers, adapted to its harness:
+Each integration ships the same layers, adapted to its harness:
 
 1. **Registration** — wires the Curated Thoughts MCP sidecar
    (`curated-thoughts-mcp --mcp`) into the harness's MCP configuration.
@@ -29,6 +33,26 @@ Each integration ships the same three layers, adapted to its harness:
 4. **Skills** — harness-native skill files teaching the agent how to use
    Curated Thoughts correctly: tool routing, write paths (vault notes vs
    wisdom entries), and OKF frontmatter hygiene.
+
+## The integrations so far
+
+**[Hermes](integrations/hermes/)** (Python + POSIX shell) registers the
+sidecar in the agent's MCP config, ships the shared doctor as
+`ct_status`/`ct_preflight`, and installs the skill files directly into the
+Hermes skills tree.
+
+**[DeepSeek Harness](integrations/deepseek/)** (Node/TypeScript) is a Cordis
+plugin module, `@equational-applications/dsh-curated-thoughts`. It mounts the
+sidecar through `@deepseek-ai/dsh-mcp-client`, injects a cache-safe health
+snapshot into the system prompt (refreshed on every `agent/session-start`),
+and registers the same three skills as Hermes at runtime. The doctor is
+`node lib/scripts/ct_doctor.js check` (nine deep checks, `--json` for
+machine-readable output). DeepSeek Harness ships on Windows as well as macOS
+and Linux, so CI verifies the integration on all three — install is
+`CT_INSTALL_EDIT=1 ./scripts/install.sh` (without it, the installer only
+prints the `cordis.yml` block to append).
+
+See each integration's README for full install and verify instructions.
 
 ## The environment contract
 

@@ -8,7 +8,8 @@ discipline.
 
 ## What you get
 
-- **MCP sidecar wired in** — `@deepseek-ai/dsh-curated-thoughts` mounts
+- **MCP sidecar wired in** — the plugin
+  (`@equational-applications/dsh-curated-thoughts`) mounts
   `@deepseek-ai/dsh-mcp-client` against `curated-thoughts-mcp --mcp` and
   exposes the Curated Thoughts tool surface to dsh sessions.
 - **Cached health snapshot** — a `PromptContext` whose text is the latest
