@@ -35,14 +35,22 @@ import Database from 'better-sqlite3';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
+import { EVIDENCE_TABLE, REQUIRED_TABLES, SOURCE_REF_SHAPE } from './_compat_generated.js';
+
 // --------------------------------------------------------------------------
 // normative constants — token shape (PR #188 §2.2) and evidence table
-// (§2.5.1). Task 11's _compat_generated.ts will replace these literals.
+// (§2.5.1) are declared in shared/compat.yaml. Never restate them here:
+// _compat_generated.ts is regenerated from that file and byte-compared in CI,
+// so a literal copy here would drift silently the moment the shape changes,
+// and this census would start reporting healthy rows as mangled while
+// ct_doctor.ts — which already imports these — disagreed on the same brain.
+// Mirrors integrations/hermes/scripts/ct_preflight.py.
 // --------------------------------------------------------------------------
 
-export const TOKEN_RE = /^librarian-[0-9a-f]{32}$/;
-export const EVIDENCE_TABLE = 'librarian_evidence';
-export const ENTRIES_TABLE = 'llm_wiki_entries';
+export const TOKEN_RE = new RegExp(SOURCE_REF_SHAPE);
+export { EVIDENCE_TABLE };
+// The wiki entries table leads the required list (PR #188 §2.5.5 export order).
+export const ENTRIES_TABLE = REQUIRED_TABLES[0]!;
 
 // The engine's keep-set, verbatim from normalizeSourceRef (7.1.0 dist:4082).
 const _NORMALIZE_STRIP = /[^A-Za-z0-9._\- ]/;

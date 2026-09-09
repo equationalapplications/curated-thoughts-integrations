@@ -138,12 +138,31 @@ export function apply(ctx: Context, config: Config): void {
   // are ported verbatim from Hermes — the content is agent-generic and dsh
   // reads the same Markdown. Each is registered via the runtime skills
   // provider so dsh surfaces them in <available_skills>.
+  // A truncated install, a bad permission, or a broken symlink must cost us
+  // the one skill it affects — not the whole plugin. This loop runs last, so
+  // an escaping throw would abort apply() after (1)-(4) already registered on
+  // this scope, leaving the mount and the prompt context to be torn down with
+  // it. Hermes' register() (plugin/__init__.py) guards both steps the same
+  // way: warn on a missing file, warn on a failed registration, keep going.
   for (const name of SKILL_NAMES) {
-    dsh.skills.register({
-      name,
-      description: SKILL_DESCRIPTIONS[name],
-      content: readSkill(name),
-      invocation: { modelInvocable: true, userInvocable: true },
-    });
+    let content: string;
+    try {
+      content = readSkill(name);
+    } catch (error) {
+      console.warn(`curated-thoughts: skill file unreadable, skipping ${name}:`, error);
+      continue;
+    }
+    try {
+      dsh.skills.register({
+        name,
+        description: SKILL_DESCRIPTIONS[name],
+        content,
+        invocation: { modelInvocable: true, userInvocable: true },
+      });
+    } catch (error) {
+      // Host API variance: a register() that rejects one skill must not take
+      // the other two down with it.
+      console.warn(`curated-thoughts: could not register skill ${name}:`, error);
+    }
   }
 }

@@ -1,10 +1,11 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, writeFileSync, mkdirSync, chmodSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
+  mcpToolsList,
   runChecks,
   cmdCheck,
   checkDshRegistration,
@@ -121,5 +122,59 @@ describe('checkDshRegistration', () => {
     );
     const r = checkDshRegistration({ ...process.env, DSH_HOME: tmpHome });
     expect(r.status).toBe(WARN);
+  });
+});
+
+// A sidecar that answers tools/list with a non-array `tools`. mcpToolsList
+// documents "Never throws; every failure mode becomes a result with an error
+// field" — a malformed payload must become a graceful result, not a TypeError
+// out of .map() that aborts the whole doctor run with a stack trace.
+// POSIX-only: the stub relies on a shebang, as the exec-bit test does.
+function writeStub(dir: string, toolsLiteral: string): string {
+  const stub = join(dir, 'fake-sidecar');
+  writeFileSync(
+    stub,
+    // Absolute interpreter: beforeEach blanks PATH, so `env node` would
+    // not resolve and the stub would never run.
+    `#!${process.execPath}\n`
+      + 'let b = "";\n'
+      + 'process.stdin.on("data", (d) => { b += d; });\n'
+      + 'process.stdin.on("end", () => {\n'
+      + '  process.stdout.write(JSON.stringify({jsonrpc:"2.0",id:1,result:{serverInfo:{version:"2.5.0"}}}) + "\\n");\n'
+      + `  process.stdout.write(JSON.stringify({jsonrpc:"2.0",id:2,result:{tools:${toolsLiteral}}}) + "\\n");\n`
+      + '});\n',
+  );
+  chmodSync(stub, 0o755);
+  return stub;
+}
+
+describe.skipIf(process.platform === 'win32')('mcpToolsList with a malformed tools/list', () => {
+  for (const [label, literal] of [
+    ['a string', '"not-an-array"'],
+    ['an object', '{"a":1}'],
+    ['a number', '7'],
+  ] as const) {
+    it(`does not throw when tools is ${label}`, () => {
+      const stub = writeStub(tmpHome, literal);
+      let result!: ReturnType<typeof mcpToolsList>;
+      expect(() => { result = mcpToolsList(stub, 10); }).not.toThrow();
+      // Degrades to "no tools", which the tier check reports as a FAIL —
+      // never a crash.
+      expect(result.toolNames).toEqual([]);
+    });
+  }
+
+  it('tolerates a malformed element inside a well-formed array', () => {
+    const stub = writeStub(tmpHome, '[{"name":"wiki_context"},null,{}]');
+    let result!: ReturnType<typeof mcpToolsList>;
+    expect(() => { result = mcpToolsList(stub, 10); }).not.toThrow();
+    expect(result.toolNames).toEqual(['wiki_context', '?', '?']);
+  });
+
+  it('still reads a well-formed tools array', () => {
+    const stub = writeStub(tmpHome, '[{"name":"wiki_context"},{"name":"recall"}]');
+    const result = mcpToolsList(stub, 10);
+    expect(result.toolNames).toEqual(['wiki_context', 'recall']);
+    expect(result.error).toBeNull();
   });
 });

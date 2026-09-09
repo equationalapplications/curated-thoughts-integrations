@@ -22,8 +22,8 @@
  * Exit codes: 0 = all PASS, 1 = any FAIL, 2 = no FAIL but at least one WARN.
  *
  * Spec: docs/superpowers/specs/2026-09-09-deepseek-harness-integration-design.md §6.
- * Tier matrix: shared/compat.yaml (consumed via _compat_generated.ts — stub
- * until Task 11).
+ * Tier matrix: shared/compat.yaml (consumed via _compat_generated.ts, which
+ * `tools/ct_ci.py generate` emits and CI byte-compares).
  * Environment contract: scripts/ct_env.ts.
  * Import pre-flight: scripts/ct_preflight.ts.
  */
@@ -93,8 +93,9 @@ const DEFAULT_OLLAMA_HOST = 'http://127.0.0.1:11434';
 // MCP handshake timeout (seconds) — the sidecar must never hang the doctor.
 const MCP_TIMEOUT = 10.0;
 
-// Tier matrix + counters. _compat_generated.ts is the binding source of truth
-// (Task 11 generates it from shared/compat.yaml; stub for now).
+// Tier matrix + counters. _compat_generated.ts is the binding source of truth:
+// it is generated from shared/compat.yaml and verified in CI, so these values
+// must never be restated as literals here or in ct_preflight.ts.
 type CompatTier = readonly [string, readonly [number, number], readonly [number, number] | null, number, string];
 // Defensive filter: tierFor compares against the lower bound unconditionally,
 // so a future compat.yaml tier without one would crash it at runtime. Drop
@@ -369,7 +370,14 @@ export function mcpToolsList(
       serverVersion = msg.result.serverInfo?.version ?? null;
     } else if (msg.id === 2) {
       if (msg.result) {
-        toolNames = (msg.result.tools ?? []).map((t) => t.name ?? '?');
+        // `??` only screens null/undefined: a server answering with a
+        // non-array `tools` (object, string) would throw TypeError out of
+        // .map(), past probeSidecar and runChecks, and break this function's
+        // "Never throws" contract with a raw stack trace. Shape-check it, and
+        // tolerate a malformed element while we're here.
+        toolNames = (Array.isArray(msg.result.tools) ? msg.result.tools : []).map(
+          (t) => t?.name ?? '?',
+        );
       } else if (msg.error !== undefined) {
         error = `tools/list error: ${JSON.stringify(msg.error).slice(0, 120)}`;
       }
@@ -648,7 +656,10 @@ export function checkEmbedding(env: NodeJS.ProcessEnv = process.env): CheckResul
 function _cordisYmlPath(env: NodeJS.ProcessEnv): string {
   /** Locate dsh's cordis.yml. Honours $DSH_HOME; defaults to ~/.dsh/cordis.yml. */
   const raw = env.DSH_HOME ?? DEFAULT_DSH_HOME;
-  const expanded = raw.startsWith('~') ? join(homedir(), raw.slice(1)) : raw;
+  // Only a bare `~` or `~/...` names the current user's home; `~otheruser/...`
+  // is left alone rather than concatenated onto this user's home. Same rule as
+  // expandHome in ct_env.ts.
+  const expanded = /^~(?=[/\\]|$)/.test(raw) ? join(homedir(), raw.slice(1)) : raw;
   return join(expanded, CORDIS_YML);
 }
 

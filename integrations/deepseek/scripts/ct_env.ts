@@ -36,9 +36,20 @@ export const ENV_BRAIN_DB = 'CURATED_BRAIN_DB';
 export const ENV_BRAIN_CONFIG = 'CURATED_BRAIN_CONFIG';
 
 
+/**
+ * True for a bare `~` or a `~/`-rooted path — the only forms that name the
+ * *current* user's home. `~otheruser/...` deliberately does not match: Node
+ * has no password-database lookup, and the parity reference (Python's
+ * os.path.expanduser, used by Hermes' _expand) returns the path untouched
+ * when it cannot resolve the named user. Joining it onto $HOME instead would
+ * invent a real-looking path under the wrong account, and a caller would then
+ * report an apparently-valid vault that belongs to nobody.
+ */
+const TILDE_HOME_RE = /^~(?=[/\\]|$)/;
+
 function expandHome(p: string, env: NodeJS.ProcessEnv = process.env): string {
   /** Expand a leading ~ the way CT's doctor does, then return a string. */
-  if (p.startsWith('~')) {
+  if (TILDE_HOME_RE.test(p)) {
     const home = env['HOME'] ?? env['USERPROFILE'] ?? homedir();
     return join(home, p.slice(1));
   }

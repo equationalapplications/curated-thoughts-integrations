@@ -111,6 +111,24 @@ describe('resolveVaultPath', () => {
     expect(error).toBeNull();
     expect(vault).toBe(join(tmpHome, 'vault'));
   });
+
+  it('expands a bare ~ to HOME', () => {
+    const { vault, error } = resolveVaultPath({ vault_path: '~' });
+    expect(error).toBeNull();
+    expect(vault).toBe(tmpHome);
+  });
+
+  it('leaves ~otheruser alone rather than joining it onto HOME', () => {
+    // Node has no password-database lookup, so `~someone` cannot be resolved
+    // the way Python's expanduser does. Returning it untouched matches what
+    // expanduser itself does for an unknown user; joining it onto HOME would
+    // invent <HOME>/someone/Documents — a real-looking path under the wrong
+    // account that the doctor would then report as a valid vault.
+    const { vault, error } = resolveVaultPath({ vault_path: '~someone/Documents' });
+    expect(error).toBeNull();
+    expect(vault).toBe('~someone/Documents');
+    expect(vault).not.toBe(join(tmpHome, 'someone', 'Documents'));
+  });
 });
 
 describe('findSidecar', () => {
@@ -129,9 +147,10 @@ describe('findSidecar', () => {
     // The lookup enforces the executable bit on POSIX (shutil.which parity),
     // so the fixture must chmod +x its fake sidecar.
     chmodSync(fake, 0o755);
-    process.env.PATH = binDir + (process.platform === 'win32' ? ';' : ':') + process.env.PATH;
+    process.env.PATH = binDir;
     const found = findSidecar();
-    expect(found?.path).toMatch(/curated-thoughts-mcp/);
+    expect(found?.path).toBe(fake);
+    expect(found?.source).toBe('PATH');
   });
 
   it('ignores a non-executable sidecar on PATH (POSIX shutil.which parity)', () => {
@@ -144,7 +163,11 @@ describe('findSidecar', () => {
     const fake = join(binDir, 'curated-thoughts-mcp');
     writeFileSync(fake, '#!/bin/sh\necho ok\n');
     // Deliberately NOT chmod +x.
-    process.env.PATH = binDir + (process.platform === 'win32' ? ';' : ':') + process.env.PATH;
+    // Replace PATH rather than prepend: the assertion is toBeNull(), so an
+    // inherited PATH carrying a real curated-thoughts-mcp install would let
+    // the walk skip this fixture and match that instead, failing on the
+    // developer's machine while passing on a clean runner.
+    process.env.PATH = binDir;
     expect(findSidecar()).toBeNull();
   });
 
