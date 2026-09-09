@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, mkdirSync, rmSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { probe } from '../src/status.js';
@@ -36,6 +36,9 @@ describe('probe', () => {
     mkdirSync(binDir);
     const sidecar = join(binDir, 'curated-thoughts-mcp');
     writeFileSync(sidecar, '#!/bin/sh\n');
+    // Sidecar discovery enforces the executable bit on POSIX (shutil.which
+    // parity), so the fixture must chmod +x its fake sidecar.
+    chmodSync(sidecar, 0o755);
     process.env.PATH = binDir + (process.platform === 'win32' ? ';' : ':') + (process.env.PATH ?? '');
 
     const brainDir = join(tmpHome, '.brain');
@@ -58,6 +61,7 @@ describe('probe', () => {
     const binDir = join(tmpHome, 'bin');
     mkdirSync(binDir);
     writeFileSync(join(binDir, 'curated-thoughts-mcp'), '#!/bin/sh\n');
+    chmodSync(join(binDir, 'curated-thoughts-mcp'), 0o755);
     process.env.PATH = binDir + (process.platform === 'win32' ? ';' : ':') + (process.env.PATH ?? '');
 
     const brainDir = join(tmpHome, '.brain');
@@ -79,6 +83,7 @@ describe('probe', () => {
     // Write a script that creates a sentinel file — if probe() spawns it, the
     // sentinel will exist after the call.
     writeFileSync(sidecar, `#!/bin/sh\ntouch ${join(tmpHome, 'SPAWNED')}\n`);
+    chmodSync(sidecar, 0o755);
     process.env.PATH = binDir + (process.platform === 'win32' ? ';' : ':') + (process.env.PATH ?? '');
 
     probe();
