@@ -4,6 +4,7 @@
   "description": "Curated Thoughts memory integration for DeepSeek Harness",
   "license": "MIT",
   "type": "module",
+  "packageManager": "pnpm@9.15.9",
   "main": "lib/src/index.js",
   "exports": {
     ".": "./lib/src/index.js",

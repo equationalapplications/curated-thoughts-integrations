@@ -90,6 +90,26 @@ jobs:
         with:
           python-version: ${{ matrix.entry.python }}
 
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        # The pnpm version comes from the integration's `packageManager`
+        # field, so the installer can never drift from the lockfile's writer.
+        if: matrix.entry.language == 'node'
+        with:
+          package_json_file: ${{ matrix.entry.dir }}/package.json
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        if: matrix.entry.language == 'node'
+        with:
+          node-version: ${{ matrix.entry.node }}
+          cache: pnpm
+          cache-dependency-path: ${{ matrix.entry.dir }}/pnpm-lock.yaml
+
+      - name: Install dependencies
+        # Frozen: CI must fail on a package.json that disagrees with the
+        # committed lockfile, not paper over the drift.
+        if: matrix.entry.language == 'node' && matrix.entry.checks.test
+        run: pnpm install --frozen-lockfile
+
       - name: Tests
         # Truthy guard: the step is skipped when the manifest declares no test
         # command (a falsey/absent key), never run with an empty command.
