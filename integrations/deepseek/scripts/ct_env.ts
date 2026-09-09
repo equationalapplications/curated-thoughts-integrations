@@ -229,7 +229,11 @@ function whichOnPath(
    * resolve — CreateProcess-style lookup also probes PATHEXT-appended
    * candidates (`.exe`, `.cmd`, `.bat`, ...), so those are tried in order.
    */
-  const pathSep = env.PATH && env.PATH.includes(';') ? ';' : ':';
+  // The separator follows the platform, not the PATH string: a single-entry
+  // Windows PATH ("C:\...\bin") contains no ';' but does contain the drive
+  // colon, so sniffing split on ':' and broke the probe. shutil.which uses
+  // os.pathsep; this mirrors that.
+  const pathSep = platform === 'win32' || platform.startsWith('win') ? ';' : ':';
   const dirs = (env.PATH ?? '').split(pathSep).filter((d) => d.length > 0);
   const exts =
     platform === 'win32' || platform.startsWith('win')
