@@ -9,7 +9,11 @@
     ".": "./lib/index.js",
     "./doctor": "./lib/ct_doctor.js"
   },
-  "files": ["lib", "skills", "scripts/install.sh"],
+  "files": [
+    "lib",
+    "skills",
+    "scripts/install.sh"
+  ],
   "scripts": {
     "build": "tsc",
     "test": "vitest run",
@@ -21,7 +25,9 @@
     "@deepseek-ai/cordis": "*"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^9.6.0",
     "@types/node": "^22.19.0",
+    "better-sqlite3": "^13.0.3",
     "execa": "^9.6.0",
     "typescript": "^5.6.0",
     "vitest": "^2.1.0"
