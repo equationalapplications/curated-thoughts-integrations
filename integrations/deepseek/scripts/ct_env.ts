@@ -24,7 +24,7 @@
  */
 
 import { existsSync, readFileSync, realpathSync } from 'node:fs';
-import { join, sep } from 'node:path';
+import { dirname, join, sep } from 'node:path';
 import { homedir, platform as osPlatform } from 'node:os';
 
 export const SIDECAR_NAME = 'curated-thoughts-mcp';
@@ -77,7 +77,11 @@ export function resolveBrainPaths(env: NodeJS.ProcessEnv = process.env): BrainPa
   if (env[ENV_BRAIN_CONFIG]) {
     configPath = expandHome(env[ENV_BRAIN_CONFIG]!, env);
   } else if (env[ENV_BRAIN_DB]) {
-    configPath = join(brainDir, 'config.json');
+    // Hermes parity (ct_env.py): config.json sits BESIDE an explicit
+    // CURATED_BRAIN_DB, not in brainDir — split layouts (db on one path,
+    // config next to it) otherwise probe the wrong directory and report a
+    // false degraded/FAIL.
+    configPath = join(dirname(dbPath), 'config.json');
   } else {
     configPath = join(brainDir, 'config.json');
   }

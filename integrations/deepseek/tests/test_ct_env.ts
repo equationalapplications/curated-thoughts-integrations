@@ -47,13 +47,31 @@ describe('resolveBrainPaths', () => {
     expect(paths.brainDir).toBe(custom);
   });
 
-  it('CURATED_BRAIN_DB overrides brainDir for dbPath only', () => {
+  it('CURATED_BRAIN_DB overrides brainDir for dbPath, config.json sits beside the db', () => {
+    // Hermes parity (ct_env.py): with an explicit CURATED_BRAIN_DB, config.json
+    // is db_path.parent / "config.json" — split brain layouts probe the right
+    // directory.
     process.env[ENV_BRAIN_DIR] = join(tmpHome, 'a');
     process.env.CURATED_BRAIN_DB = join(tmpHome, 'b', 'brain.db');
     const paths = resolveBrainPaths();
     expect(paths.brainDir).toBe(join(tmpHome, 'a'));
     expect(paths.dbPath).toBe(join(tmpHome, 'b', 'brain.db'));
-    expect(paths.configPath).toBe(join(tmpHome, 'a', 'config.json'));
+    expect(paths.configPath).toBe(join(tmpHome, 'b', 'config.json'));
+  });
+
+  it('split brain layout: brainDir and db directory stay independent', () => {
+    process.env[ENV_BRAIN_DIR] = join(tmpHome, 'elsewhere');
+    process.env.CURATED_BRAIN_DB = join(tmpHome, 'x', 'b', 'brain.db');
+    const paths = resolveBrainPaths();
+    expect(paths.configPath).toBe(join(tmpHome, 'x', 'b', 'config.json'));
+    expect(paths.configPath).not.toContain('elsewhere');
+  });
+
+  it('CURATED_BRAIN_CONFIG still wins over the beside-the-db rule', () => {
+    process.env.CURATED_BRAIN_DB = join(tmpHome, 'b', 'brain.db');
+    process.env.CURATED_BRAIN_CONFIG = join(tmpHome, 'custom.json');
+    const paths = resolveBrainPaths();
+    expect(paths.configPath).toBe(join(tmpHome, 'custom.json'));
   });
 });
 
