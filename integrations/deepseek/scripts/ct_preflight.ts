@@ -46,6 +46,10 @@ export const ENTRIES_TABLE = 'llm_wiki_entries';
 
 // The engine's keep-set, verbatim from normalizeSourceRef (7.1.0 dist:4082).
 const _NORMALIZE_STRIP = /[^A-Za-z0-9._\- ]/;
+// Global variant for .replace(): without it only the FIRST illegal character
+// is stripped. Keep _NORMALIZE_STRIP non-global — engineWouldRewrite calls
+// .test() on it, and a global regex would carry lastIndex between calls.
+const _NORMALIZE_STRIP_ALL = /[^A-Za-z0-9._\- ]/g;
 const _NORMALIZE_CAP = 255;
 
 // Row type the census and every verdict are scoped to (§2.5.1).
@@ -162,7 +166,7 @@ export function normalizeSourceRef(value: unknown): string | null {
   if (typeof value !== 'string') {
     return null;
   }
-  return value.replace(_NORMALIZE_STRIP, '').trim().slice(0, _NORMALIZE_CAP);
+  return value.replace(_NORMALIZE_STRIP_ALL, '').trim().slice(0, _NORMALIZE_CAP);
 }
 
 export function engineWouldRewrite(value: unknown): boolean {

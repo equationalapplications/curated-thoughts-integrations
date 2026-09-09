@@ -64,8 +64,9 @@ the shared `brain.db`. The current engine pin, 7.1.0, still mangles.
 Note the GLOB is not the whole selector: **space is inside the keep-set**, so a
 whitespace-padded ref clears the GLOB and is still caught by `TRIM`.
 
-Detection is a **positive token-shape test** (§2.5.1): a row is damaged iff its
-`source_ref` does not match `^librarian-[0-9a-f]{32}$`. The `evidence…` prefixes
+Detection is a **positive token-shape test** (§2.5.1): a non-`NULL` row is
+damaged iff its `source_ref` does not match `^librarian-[0-9a-f]{32}$`. The
+`evidence…` prefixes
 drive *recovery* (§2.5.4), never detection.
 
 The census is scoped to `source_type = 'librarian_inferred'`, and this matters:

@@ -15,7 +15,7 @@ export CT_INSTALL_EDIT=1
 # deterministic (it fails; the test never asserts on doctor output).
 INSTALLER_PATH="/usr/bin:/bin"
 run_install() {
-  PATH="$INSTALLER_PATH" bash "$(dirname "$0")/../scripts/install.sh" >/dev/null
+  PATH="$INSTALLER_PATH" bash "$(dirname "$0")/../scripts/install.sh" "$@" >/dev/null
 }
 
 # First run: creates the config and the entry.
@@ -43,5 +43,26 @@ SIZE_BEFORE=$(wc -c < "$DSH_HOME/cordis.yml")
 run_install
 SIZE_AFTER=$(wc -c < "$DSH_HOME/cordis.yml")
 [ "$SIZE_BEFORE" = "$SIZE_AFTER" ] || { echo "FAIL: YAML with a tab was modified"; exit 1; }
+
+# An entry with a quoted name scalar (the doctor-recommended form) is still
+# detected — no duplicate append.
+rm -f "$DSH_HOME/cordis.yml"
+printf -- "- name: '@equational-applications/dsh-curated-thoughts'\n  config:\n    brainDir: ~/.brain\n" \
+  > "$DSH_HOME/cordis.yml"
+SIZE_BEFORE=$(wc -c < "$DSH_HOME/cordis.yml")
+run_install
+SIZE_AFTER=$(wc -c < "$DSH_HOME/cordis.yml")
+[ "$SIZE_BEFORE" = "$SIZE_AFTER" ] || { echo "FAIL: quoted-name entry was not detected (duplicate appended)"; exit 1; }
+
+# --profile targets the per-profile patch, not the global config.
+rm -f "$DSH_HOME/cordis.yml"
+run_install --profile headless
+test -f "$DSH_HOME/profiles/headless/cordis.patch.yml" \
+  || { echo "FAIL: profile patch not created"; exit 1; }
+test ! -e "$DSH_HOME/cordis.yml" || { echo "FAIL: --profile touched the global config"; exit 1; }
+SIZE_BEFORE=$(wc -c < "$DSH_HOME/profiles/headless/cordis.patch.yml")
+run_install --profile headless
+SIZE_AFTER=$(wc -c < "$DSH_HOME/profiles/headless/cordis.patch.yml")
+[ "$SIZE_BEFORE" = "$SIZE_AFTER" ] || { echo "FAIL: profile patch changed on re-run"; exit 1; }
 
 echo "OK"

@@ -31,7 +31,7 @@ Non-goals (v0):
 
 ## 2. Layout under `integrations/deepseek/`
 
-```
+```text
 integrations/deepseek/
 ├── integration.yaml              # CI contract: language=node, matrix, checks, policy
 ├── package.json                  # npm package metadata, exports, peerDependencies
@@ -76,6 +76,7 @@ This is the dsh analog of Hermes's `plugin.yaml` + `register(ctx)`.
 `src/index.ts`:
 
 ```ts
+import { readFileSync } from 'node:fs';
 import { Context, Schema } from 'cordis';
 
 export interface Config {
@@ -146,7 +147,7 @@ export function apply(ctx: Context, config: Config) {
     ctx.skills.register({
       name: skill,
       description: SKILL_DESCRIPTIONS[skill],
-      content: await readFile(path, 'utf8'),
+      content: readFileSync(path, 'utf8'),
       invocation: { modelInvocable: true, userInvocable: true },
     });
   }

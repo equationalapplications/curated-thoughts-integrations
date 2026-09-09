@@ -40,7 +40,10 @@ export function probe(env: NodeJS.ProcessEnv = process.env): Snapshot {
 
     const paths = resolveBrainPaths(env);
     out.brainDir = paths.brainDir;
-    if (!existsSync(paths.brainDir)) {
+    // Split-brain layout (CURATED_BRAIN_DB outside the brain dir): the config
+    // sits beside the database, so gate the config read on either path —
+    // not on brainDir alone.
+    if (!existsSync(paths.brainDir) && !existsSync(paths.dbPath)) {
       out.notes.push(`brain dir missing: ${paths.brainDir}`);
     } else {
       const { config, error } = readBrainConfig(paths.configPath);

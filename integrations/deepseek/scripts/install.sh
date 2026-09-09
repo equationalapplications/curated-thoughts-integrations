@@ -9,13 +9,37 @@
 #                         (only when absent). Default: print, don't write.
 #   DSH_HOME              override dsh config root (default: ~/.dsh)
 #
-# Spec: docs/superpowers/specs/2026-09-09-deepseek-harness-integration-design.md §7
+# Arguments:
+#   --profile <name>      target the per-profile patch
+#                         (${DSH_HOME}/profiles/<name>/cordis.patch.yml)
+#                         instead of the global ${DSH_HOME}/cordis.yml
+#
+# Spec: docs/superpowers/specs/2026-09-09-deepseek-harness-integration-design.md §4, §7
 
 set -euo pipefail
 
 PLUGIN_NAME="@equational-applications/dsh-curated-thoughts"
 DSH_HOME="${DSH_HOME:-${HOME}/.dsh}"
+
+PROFILE=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --profile)
+      [ $# -ge 2 ] || { printf 'install.sh: --profile requires a name\n' >&2; exit 2; }
+      PROFILE="$2"
+      shift 2
+      ;;
+    *)
+      printf 'install.sh: unknown argument: %s\n' "$1" >&2
+      exit 2
+      ;;
+  esac
+done
+
 CONFIG_FILE="${DSH_HOME}/cordis.yml"
+if [ -n "$PROFILE" ]; then
+  CONFIG_FILE="${DSH_HOME}/profiles/${PROFILE}/cordis.patch.yml"
+fi
 
 SCRIPT_SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
@@ -24,21 +48,28 @@ warn() { printf 'WARN: %s\n' "$*" >&2; }
 
 plugin_block() {
   cat <<EOF
-- name: ${PLUGIN_NAME}
+# Curated Thoughts integration (idempotent — install.sh detects + skips duplicates)
+- name: '${PLUGIN_NAME}'
   config:
     brainDir: ~/.brain
 EOF
 }
 
 # True if the plugin entry is already in cordis.yml as a list item.
+# Accepts both bare and quoted name scalars — a leading @ is a reserved YAML
+# indicator, so the doctor (and hand-edited files) use the quoted form.
 has_plugin_entry() {
   [ -f "$CONFIG_FILE" ] || return 1
-  awk -v name="$PLUGIN_NAME" '
+  awk -v name="$PLUGIN_NAME" -v sq="'" '
     /^[[:space:]]*#/ { next }
     /^[[:space:]]*-[[:space:]]*name:[[:space:]]*/ {
       line = $0
       sub(/^[[:space:]]*-[[:space:]]*name:[[:space:]]*/, "", line)
       gsub(/[[:space:]]*$/, "", line)
+      q1 = substr(line, 1, 1)
+      qn = substr(line, length(line), 1)
+      if (q1 == "\"" && qn == "\"") { line = substr(line, 2, length(line) - 2) }
+      else if (q1 == sq && qn == sq) { line = substr(line, 2, length(line) - 2) }
       if (line == name) { found = 1 }
     }
     END { if (found) exit 0; exit 1 }

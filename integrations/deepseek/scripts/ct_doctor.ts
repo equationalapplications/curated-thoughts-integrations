@@ -325,7 +325,11 @@ export function mcpToolsList(
   // Translate spawnSync's failure modes into the (toolNames|null) shape.
   if (proc.error) {
     const err = proc.error as NodeJS.ErrnoException;
-    const msg = err.code === 'ENOENT'
+    // spawnSync reports a timeout via proc.error (code ETIMEDOUT), before the
+    // killSignal fallback below can see SIGKILL — check it first.
+    const msg = err.code === 'ETIMEDOUT'
+      ? `timed out after ${timeout.toFixed(0)}s`
+      : err.code === 'ENOENT'
       ? 'binary disappeared'
       : err.code === 'EACCES'
       ? 'binary not executable'

@@ -50,7 +50,7 @@ describe('runChecks', () => {
     expect(names(rs)).toContain(`brain-dir:${FAIL}`);
   });
 
-  it('reports FAIL when the brain directory exists but config.json is missing', () => {
+  it('reports WARN when the brain directory exists but config.json is missing', () => {
     const brainDir = join(tmpHome, '.brain');
     mkdirSync(brainDir);
     process.env.CURATED_BRAIN_DIR = brainDir;

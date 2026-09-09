@@ -30,7 +30,8 @@ policy:
 
 package:
   include: ["**"]
+  # lib/ must ship: package.json's entry points (lib/src/index.js,
+  # lib/scripts/ct_doctor.js) live there. Only true build junk is excluded.
   exclude:
     - "**/dist/**"
-    - "**/lib/**"
     - "**/node_modules/**"

@@ -196,7 +196,7 @@ and ships three skills ported from Hermes (`curated-thoughts-usage`,
 
 - [ ] **Step 1.7: Create `.gitignore`**:
 
-```
+```gitignore
 node_modules/
 lib/
 dist/

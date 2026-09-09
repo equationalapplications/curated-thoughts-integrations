@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, writeFileSync, mkdirSync, rmSync, chmodSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, mkdirSync, rmSync, chmodSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { probe } from '../src/status.js';
@@ -88,6 +88,6 @@ describe('probe', () => {
 
     probe();
 
-    expect(require('node:fs').existsSync(join(tmpHome, 'SPAWNED'))).toBe(false);
+    expect(existsSync(join(tmpHome, 'SPAWNED'))).toBe(false);
   });
 });
