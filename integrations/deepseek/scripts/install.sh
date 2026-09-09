@@ -8,14 +8,12 @@
 #   CT_INSTALL_EDIT=1     opt-in: append the plugin entry to cordis.yml
 #                         (only when absent). Default: print, don't write.
 #   DSH_HOME              override dsh config root (default: ~/.dsh)
-#   HERMES_CT_SIDECAR     override the sidecar command (default: curated-thoughts-mcp)
 #
 # Spec: docs/superpowers/specs/2026-09-09-deepseek-harness-integration-design.md §7
 
 set -euo pipefail
 
 PLUGIN_NAME="@equational-applications/dsh-curated-thoughts"
-SIDECAR_CMD="${HERMES_CT_SIDECAR:-curated-thoughts-mcp}"
 DSH_HOME="${DSH_HOME:-${HOME}/.dsh}"
 CONFIG_FILE="${DSH_HOME}/cordis.yml"
 
