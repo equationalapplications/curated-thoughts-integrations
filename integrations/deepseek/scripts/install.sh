@@ -52,7 +52,9 @@ config_is_appendable() {
   if grep -qE '^(---|\.\.\.)' "$CONFIG_FILE"; then
     return 1
   fi
-  if grep -qP '\t' "$CONFIG_FILE" 2>/dev/null; then
+  # A literal tab in the pattern (not grep -P): BSD grep rejects -P with
+  # exit 2, which a suppressed-stderr -q check cannot tell from "no tabs".
+  if grep -q "$(printf '\t')" "$CONFIG_FILE" 2>/dev/null; then
     return 1
   fi
   return 0

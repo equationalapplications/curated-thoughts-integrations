@@ -37,4 +37,11 @@ run_install
 SIZE_AFTER=$(wc -c < "$DSH_HOME/cordis.yml")
 [ "$SIZE_BEFORE" = "$SIZE_AFTER" ] || { echo "FAIL: multi-document YAML was modified"; exit 1; }
 
+# YAML containing a tab must be refused as well.
+printf -- '- name: a\n\tconfig:\n' > "$DSH_HOME/cordis.yml"
+SIZE_BEFORE=$(wc -c < "$DSH_HOME/cordis.yml")
+run_install
+SIZE_AFTER=$(wc -c < "$DSH_HOME/cordis.yml")
+[ "$SIZE_BEFORE" = "$SIZE_AFTER" ] || { echo "FAIL: YAML with a tab was modified"; exit 1; }
+
 echo "OK"
