@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, writeFileSync, mkdirSync, rmSync, symlinkSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, mkdirSync, rmSync, symlinkSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -126,13 +126,40 @@ describe('findSidecar', () => {
     mkdirSync(binDir);
     const fake = join(binDir, 'curated-thoughts-mcp');
     writeFileSync(fake, '#!/bin/sh\necho ok\n');
-    // chmod via Node's fs — keep the test cross-platform.
-    // (Vitest runs on Linux/macOS/Windows CI; the sidecar binary must exist for
-    // the lookup to succeed. On Windows, `findSidecar` resolves .cmd/.exe —
-    // see implementation note.)
+    // The lookup enforces the executable bit on POSIX (shutil.which parity),
+    // so the fixture must chmod +x its fake sidecar.
+    chmodSync(fake, 0o755);
     process.env.PATH = binDir + (process.platform === 'win32' ? ';' : ':') + process.env.PATH;
     const found = findSidecar();
     expect(found?.path).toMatch(/curated-thoughts-mcp/);
+  });
+
+  it('ignores a non-executable sidecar on PATH (POSIX shutil.which parity)', () => {
+    if (process.platform === 'win32') {
+      // No executable bit on Windows; every file passes the check.
+      return;
+    }
+    const binDir = join(tmpHome, 'bin');
+    mkdirSync(binDir);
+    const fake = join(binDir, 'curated-thoughts-mcp');
+    writeFileSync(fake, '#!/bin/sh\necho ok\n');
+    // Deliberately NOT chmod +x.
+    process.env.PATH = binDir + (process.platform === 'win32' ? ';' : ':') + process.env.PATH;
+    expect(findSidecar()).toBeNull();
+  });
+
+  it('resolves a .cmd sidecar via PATHEXT probing when platform is win32', () => {
+    // Exercises the win32 branch of whichOnPath on any host OS: the bare
+    // name `curated-thoughts-mcp` does not exist, but the PATHEXT-appended
+    // `.cmd` candidate does.
+    const binDir = join(tmpHome, 'bin');
+    mkdirSync(binDir);
+    const fake = join(binDir, 'curated-thoughts-mcp.cmd');
+    writeFileSync(fake, '@echo ok\r\n');
+    process.env.PATH = binDir;
+    const found = findSidecar(process.env, 'win32');
+    expect(found?.path).toBe(fake);
+    expect(found?.source).toBe('PATH');
   });
 });
 

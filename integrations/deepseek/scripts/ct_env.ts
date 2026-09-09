@@ -23,7 +23,7 @@
  * Stdlib only. Every function is read-only and non-raising.
  */
 
-import { existsSync, readFileSync, realpathSync } from 'node:fs';
+import { accessSync, constants as fsConstants, existsSync, readFileSync, realpathSync } from 'node:fs';
 import { dirname, join, sep } from 'node:path';
 import { homedir, platform as osPlatform } from 'node:os';
 
@@ -203,21 +203,51 @@ export function sidecarCandidates(
 }
 
 
-function whichOnPath(name: string, env: NodeJS.ProcessEnv): string | null {
+/** True iff `p` is executable by this user, mirroring Hermes's platform
+ * behavior: POSIX files need the X_OK bit (shutil.which / os.access X_OK);
+ * on win32 every file is executable (there is no executable bit). */
+function isExecutable(p: string, platform: NodeJS.Platform): boolean {
+  if (platform === 'win32' || platform.startsWith('win')) return true;
+  try {
+    accessSync(p, fsConstants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+
+function whichOnPath(
+  name: string,
+  env: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform = osPlatform(),
+): string | null {
   /** Minimal POSIX/Windows equivalent of Python's `shutil.which`.
    *
-   * Splits `env.PATH` on the platform separator and returns the first existing
-   * entry. We intentionally do NOT require the executable bit here: on POSIX,
-   * `shutil.which` filters by X_OK, but the test fixture writes the candidate
-   * with default umask (no +x), so checking X_OK would make every PATH lookup
-   * miss. Callers that care about executability should check separately.
+   * Splits `env.PATH` on the platform separator and returns the first entry
+   * naming an existing file. On Windows the bare name alone can never
+   * resolve — CreateProcess-style lookup also probes PATHEXT-appended
+   * candidates (`.exe`, `.cmd`, `.bat`, ...), so those are tried in order.
    */
   const pathSep = env.PATH && env.PATH.includes(';') ? ';' : ':';
   const dirs = (env.PATH ?? '').split(pathSep).filter((d) => d.length > 0);
+  const exts =
+    platform === 'win32' || platform.startsWith('win')
+      ? [
+          '',
+          ...(env.PATHEXT ?? '.COM;.EXE;.BAT;.CMD')
+            .split(';')
+            .filter((e) => e.length > 0)
+            .map((e) => e.toLowerCase()),
+        ]
+      : [''];
   for (const dir of dirs) {
-    const candidate = join(dir, name);
-    if (existsSync(candidate)) {
-      return candidate;
+    for (const ext of exts) {
+      const candidate = join(dir, name + ext);
+      // shutil.which filters by X_OK — mirror that (no-op on win32).
+      if (existsSync(candidate) && isExecutable(candidate, platform)) {
+        return candidate;
+      }
     }
   }
   return null;
@@ -233,7 +263,7 @@ export function findSidecar(
    * `source` is "PATH" or "bundled" so callers can explain where it came from
    * without re-deriving the search order.
    */
-  const found = whichOnPath(SIDECAR_NAME, env);
+  const found = whichOnPath(SIDECAR_NAME, env, platform);
   if (found) {
     let resolved = found;
     try {
@@ -245,7 +275,9 @@ export function findSidecar(
   }
   for (const cand of sidecarCandidates(platform, env)) {
     try {
-      if (existsSync(cand)) {
+      // Hermes parity (ct_env.py): bundled candidates require os.access
+      // X_OK too (no-op on win32, where every file is executable).
+      if (existsSync(cand) && isExecutable(cand, platform)) {
         let resolved = cand;
         try {
           resolved = realpathSync(cand);
