@@ -19,7 +19,10 @@ permissions:
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # Cancel stale PR runs, but never a main push: "main must be ground truth"
+  # means its run should complete, not be cancelled mid-flight by the next
+  # merge.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   discover:
@@ -107,7 +110,7 @@ jobs:
       - name: Install dependencies
         # Frozen: CI must fail on a package.json that disagrees with the
         # committed lockfile, not paper over the drift.
-        if: matrix.entry.language == 'node' && matrix.entry.checks.test
+        if: matrix.entry.language == 'node' && (matrix.entry.checks.test || matrix.entry.checks.lint)
         env:
           # pnpm bundles node-gyp 10, whose Visual Studio finder cannot
           # recognise VS 18 (2026) on the windows-latest image. Point it at
@@ -121,6 +124,19 @@ jobs:
         # command (a falsey/absent key), never run with an empty command.
         if: matrix.entry.checks.test
         run: ${{ matrix.entry.checks.test }}
+
+      - name: Install lint toolchain
+        # The declared lint command may need a toolchain the runner lacks.
+        # Python integrations' lint is ruff (same assumption release.yml
+        # makes); node ones lint through their own installed devDependencies.
+        if: matrix.entry.checks.lint && matrix.entry.language == 'python'
+        run: pip install --disable-pip-version-check ruff
+
+      - name: Lint
+        # The manifest's lint contract runs in CI, not only at tag time —
+        # a type error must not wait for a release to surface.
+        if: matrix.entry.checks.lint
+        run: ${{ matrix.entry.checks.lint }}
 
       - name: Doctor self-test (spec §9.5)
         # Runs the same suite through the shipped entry point from outside the
