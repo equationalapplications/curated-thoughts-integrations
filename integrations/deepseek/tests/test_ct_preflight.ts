@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -179,6 +179,40 @@ describe('censusSourceRefs', () => {
     expect(c.damaged).toBe(0);
     expect(c.deadRows).toBe(1);
     expect(c.deadMangled).toBe(1);
+  });
+
+  it('leaves the live census intact when the corpse query fails', () => {
+    // Best-effort: an informational query must never degrade the census.
+    // Force the corpse query to throw, proving the dead counts fall back to
+    // 0 without an error result. Parity with the hermes port's
+    // test_dead_row_query_failure_leaves_the_live_census_intact.
+    const db = new Database(dbPath);
+    const ins = db.prepare(
+      `INSERT INTO llm_wiki_entries (source_ref, source_type, deleted_at)
+       VALUES (?, ?, ?)`,
+    );
+    ins.run(TOKEN, 'librarian_inferred', null);
+    ins.run(MANGLED, 'librarian_inferred', '2026-01-01');
+    db.close();
+
+    const realPrepare = Database.prototype.prepare;
+    const spy = vi
+      .spyOn(Database.prototype, 'prepare')
+      .mockImplementation(function (this: unknown, sql: string) {
+        if (sql.includes('deleted_at IS NOT NULL')) {
+          throw new Error('simulated mid-flight failure');
+        }
+        return realPrepare.call(this as never, sql);
+      } as typeof Database.prototype.prepare);
+    try {
+      const c = censusSourceRefs(dbPath);
+      expect(c.error).toBeNull();
+      expect(c.total).toBe(1);
+      expect(c.deadRows).toBe(0);
+      expect(c.deadMangled).toBe(0);
+    } finally {
+      spy.mockRestore();
+    }
   });
 });
 

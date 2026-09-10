@@ -386,8 +386,17 @@ def census_source_refs(db_path):
                     + ",".join("?" * len(batch))
                     + ")"
                 )
-                have.update(r[0] for r in conn.execute(q, batch))
-            missing_evidence = sum(1 for t in token_ids if t not in have)
+                # token_ids come from llm_wiki_entries.id, which is INTEGER
+                # when the schema uses INTEGER PRIMARY KEY. Bind as strings so
+                # the IN match works against the TEXT entry_id column: sqlite3
+                # binds a Python int as INTEGER and SQLite does not coerce
+                # bind parameters across column affinity, so an unconverted
+                # batch would silently miss every evidence row on a brain with
+                # INTEGER ids. Mirrors the TypeScript port.
+                have.update(
+                    r[0] for r in conn.execute(q, [str(x) for x in batch])
+                )
+            missing_evidence = sum(1 for t in token_ids if str(t) not in have)
             if "unanchored" in _columns(conn, EVIDENCE_TABLE):
                 unanchored = conn.execute(
                     f"SELECT COUNT(*) FROM {EVIDENCE_TABLE} WHERE unanchored = 1"
@@ -401,33 +410,41 @@ def census_source_refs(db_path):
         dead_mangled = 0
         if has_deleted_at:
             try:
-                dead_sql = (
-                    "SELECT COUNT(*) FROM llm_wiki_entries "
-                    "WHERE deleted_at IS NOT NULL"
-                )
-                dead_ref_sql = (
-                    "SELECT source_ref FROM llm_wiki_entries "
-                    "WHERE deleted_at IS NOT NULL"
-                )
-                if scoped:
-                    dead_sql += " AND source_type = ?"
-                    dead_ref_sql += " AND source_type = ?"
-                    params = (LIBRARIAN_SOURCE_TYPE,)
-                else:
-                    params = ()
-                dead_rows = conn.execute(dead_sql, params).fetchone()[0]
+                # One pass, not a COUNT(*) alongside a SELECT with the same
+                # WHERE: both counters then derive from the same result set,
+                # so no partial failure can leave dead_rows truthful while
+                # dead_mangled silently reads 0 and reports "(0 with mangled
+                # source_refs)".
+                #
                 # classify_source_ref is Python, so the corpses have to be
                 # read and classified here rather than counted in SQL. The
                 # predicate is "mangled" and only "mangled": at_risk, token
                 # and null corpses land in dead_rows but not here, so the
                 # number matches the operator-facing wording.
-                for (ref,) in conn.execute(dead_ref_sql, params):
+                dead_ref_sql = (
+                    "SELECT source_ref FROM llm_wiki_entries "
+                    "WHERE deleted_at IS NOT NULL"
+                )
+                if scoped:
+                    dead_ref_sql += " AND source_type = ?"
+                    params = (LIBRARIAN_SOURCE_TYPE,)
+                else:
+                    params = ()
+                dead_refs = conn.execute(dead_ref_sql, params).fetchall()
+                dead_rows = len(dead_refs)
+                for (ref,) in dead_refs:
                     if ref is None:
                         continue
                     if classify_source_ref(ref) == "mangled":
                         dead_mangled += 1
-            except sqlite3.Error:
-                pass  # informational only; never degrades the census
+            except Exception:  # noqa: BLE001 - deliberately broad
+                # Informational only; never degrades the census. Deliberately
+                # broader than sqlite3.Error: a non-sqlite failure in
+                # classify_source_ref would otherwise escape the outer
+                # `except sqlite3.Error` too and propagate out of the census
+                # entirely, which is exactly what this block exists to
+                # prevent. Matches the TypeScript port's bare `catch`.
+                pass
 
         return CensusResult(
             counts=counts,

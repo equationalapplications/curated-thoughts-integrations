@@ -436,26 +436,23 @@ export function censusSourceRefs(dbPath: string): Census {
     let deadMangled = 0;
     if (hasDeletedAt) {
       try {
-        let deadSql =
-          'SELECT COUNT(*) AS n FROM llm_wiki_entries WHERE deleted_at IS NOT NULL';
-        let deadRefSql =
-          'SELECT source_ref FROM llm_wiki_entries WHERE deleted_at IS NOT NULL';
-        if (scoped) {
-          deadSql += ' AND source_type = ?';
-          deadRefSql += ' AND source_type = ?';
-        }
-        const params = scoped ? [LIBRARIAN_SOURCE_TYPE] : [];
-        const countRow = conn.prepare(deadSql).get(...params) as
-          | { n: number }
-          | undefined;
-        deadRows = countRow?.n ?? 0;
+        // One pass, not a COUNT(*) alongside a SELECT with the same WHERE:
+        // both counters then derive from the same result set, so no partial
+        // failure can leave deadRows truthful while deadMangled silently
+        // reads 0 and reports '(0 with mangled source_refs)'.
+        //
         // classifySourceRef is TypeScript, so corpses have to be read and
         // classified here rather than counted in SQL. The predicate is
         // 'mangled' and only 'mangled': at_risk, token and null corpses land
         // in deadRows but not here, matching the operator-facing wording.
+        let deadRefSql =
+          'SELECT source_ref FROM llm_wiki_entries WHERE deleted_at IS NOT NULL';
+        if (scoped) deadRefSql += ' AND source_type = ?';
+        const params = scoped ? [LIBRARIAN_SOURCE_TYPE] : [];
         const deadRefs = conn.prepare(deadRefSql).all(...params) as Array<{
           source_ref: unknown;
         }>;
+        deadRows = deadRefs.length;
         for (const row of deadRefs) {
           if (row.source_ref === null) continue;
           if (classifySourceRef(row.source_ref) === 'mangled') deadMangled += 1;
