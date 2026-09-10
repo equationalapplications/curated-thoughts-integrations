@@ -1,7 +1,7 @@
 # ct_doctor import-preflight — live-row scoping for the source_ref census
 
 **Date:** 2026-09-10
-**Status:** Draft (rev 4 — Opus 5 review findings addressed)
+**Status:** Draft (rev 5 — Opus 5 round-2 review findings addressed)
 **Branch:** docs/spec-2026-09-10-doctor-preflight-live-scope
 **Priority:** Low (correctness polish; zero live-data impact)
 
@@ -76,9 +76,27 @@ soft-deleted corpse can never flip the check to FAIL:
      behavior, so the numbers always describe the same row population):
      - `dead_rows: int = 0` — `COUNT(*)` of rows with
        `deleted_at IS NOT NULL` (expected 505 on this brain).
-     - `dead_mangled: int = 0` — of those, how many have a mangled
-       source_ref (expected 14 on this brain; the remainder are healthy
-       token corpses).
+     - `dead_mangled: int = 0` — of those, how many classify as
+       **`"mangled"` and only `"mangled"`** (expected 14 on this brain; the
+       remainder are healthy token corpses).
+
+   **`dead_mangled` predicate (exact):** it is
+   `classify_source_ref(ref) == "mangled"`. It does **not** include
+   `"at_risk"`, `"token"`, or `"null"`. The live check treats `mangled` and
+   `at_risk` as two distinct FAIL conditions, and the operator-facing suffix
+   says "with mangled source_refs", so widening the predicate would make the
+   number disagree with its own label. A dead `at_risk` corpse is therefore
+   counted in `dead_rows` but not in `dead_mangled` — deliberate, and the
+   reason both fields are reported rather than just the mangled one.
+
+   **`dead_mangled` cannot be computed in SQL.** `classify_source_ref` is
+   Python (and `classifySourceRef` is TypeScript); SQLite knows nothing about
+   it. The implementation is two queries: a `COUNT(*)` for `dead_rows`, then
+   `SELECT source_ref FROM llm_wiki_entries WHERE deleted_at IS NOT NULL`
+   (plus `AND source_type = ?` when scoped), classified row-by-row in the
+   host language. That materialises ~505 refs on this brain — bounded by the
+   corpse count, comparable to the live-row loop directly above it, and
+   acceptable. `NULL` refs are skipped, matching the live loop.
 
    **`CensusResult` declares `__slots__`** (`ct_preflight.py:204`). Adding a
    field to `__init__` alone raises `AttributeError` on first access. Both
@@ -112,16 +130,25 @@ soft-deleted corpse can never flip the check to FAIL:
    ```
 
 2. **`CensusResult.as_dict()`**: include `dead_rows` and `dead_mangled` so
-   the JSON surface exposes corpse accumulation to tooling.
+   the debug-dump method stays complete — every `__slots__` field it omits
+   is a field that silently vanishes from any future dump.
 
-   Note: no existing test asserts on `as_dict()` *shape* — the sole
-   reference (`test_ct_doctor.py:739`) passes it as an `assertEqual` failure
-   message, not as the value under test. (Rev-3 claimed otherwise; that was
-   wrong.) Adding keys is therefore unguarded by the current suite, so the
-   new `as_dict()` round-trip test below is the only thing pinning the JSON
-   surface — treat it as required, not optional. The change is
-   additive-only: no existing key is renamed, removed, or retyped, so
-   key-stable downstream consumers keep working.
+   **This is not a JSON-surface change, and the two earlier revs both got
+   the reason wrong.** `CensusResult.as_dict()` has exactly one caller in the
+   repository: `test_ct_doctor.py:739`, where it is passed as an
+   `assertEqual` *failure message*, not as a value under test. The doctor's
+   `--json` output at `ct_doctor.py:906` builds `"checks": [r.as_dict() ...]`
+   from **`CheckResult`**, a different class; no `CensusResult` ever reaches
+   it. The DeepSeek twin has no `asDict`/`toJSON` equivalent at all, which is
+   why Approach 4 does not ask for one. So: rev-3 was wrong that existing
+   tests pin this method's shape, and rev-4 was wrong that tooling consumes
+   its output. Nothing downstream depends on these keys today.
+
+   Consequence for testing: the `as_dict()` round-trip case below is a cheap
+   consistency check against `__slots__` drift, **not** a contract test — it
+   is worth writing, but it is not load-bearing and nothing is protected by
+   it. The change remains additive-only (no key renamed, removed, or
+   retyped), so if a consumer ever does appear it keeps working.
 
 3. **`check_import_preflight()`** (`ct_doctor.py`):
    - All verdict logic operates on live counts only — no condition changes.
@@ -135,6 +162,14 @@ soft-deleted corpse can never flip the check to FAIL:
      "(M with mangled)" suffix there — informational only; it never affects
      any verdict. FAIL-result messages are left byte-for-byte unchanged —
      they carry recovery-hint text that out-of-scope work depends on.
+   - **The two remaining early returns carry no suffix, by construction —
+     not by oversight.** The census-error WARN returns before a usable
+     census exists (`dead_rows` is meaningless there), and the "no
+     llm_wiki_entries table yet" PASS returns from a
+     `CensusResult(table_present=False)` whose `dead_rows` is 0, so the
+     `dead_rows > 0` guard is already false. Both are correct as they stand;
+     a reviewer reading "PASS and missing-evidence WARN only" should not
+     read a gap here.
 
 4. **DeepSeek parity** (`integrations/deepseek/scripts/`): apply the same
    change to the TypeScript twin. `censusSourceRefs`
@@ -207,6 +242,29 @@ edits. Do **not** rewrite the default schema — the 10+ existing cases
 (e.g. `test_document_sourced_255_char_path_is_never_damaged`) assert against
 its current shape.
 
+**Rows must be normalised before `executemany` — an optional 4th element is
+not sufficient on its own.** The helper inserts with positional placeholders
+(`INSERT INTO llm_wiki_entries VALUES (?,?,?)`), so a 4-column table plus a
+3-tuple row raises `sqlite3.ProgrammingError`. Every branch must project each
+row to exactly the arity its own `CREATE TABLE` declared, padding with `None`:
+
+- `with_source_type=True,  with_deleted_at=False` → `(id, ref, type)` — today's
+  behaviour, unchanged.
+- `with_source_type=True,  with_deleted_at=True`  → `(id, ref, type, deleted_at)`,
+  4 placeholders.
+- `with_source_type=False, with_deleted_at=False` → `(r[0], r[1])` — today's
+  behaviour, unchanged.
+- `with_source_type=False, with_deleted_at=True`  → `(r[0], r[1], deleted_at)`,
+  3 placeholders. **This branch is required**: it is the only way to build
+  legacy-schema case (b) below (`deleted_at` present, `source_type` absent),
+  and its `deleted_at` comes from the row's 4th element, not its 3rd — the
+  3rd stays `source_type` in the caller's tuple shape regardless of whether
+  the column is created. Switching to explicit column names in the INSERT
+  instead of positional `VALUES` is an equally acceptable implementation.
+
+Read `deleted_at` as `row[3] if len(row) > 3 else None` so 2-, 3-, and
+4-tuples all work in every branch.
+
 ### Cases
 
 - Unit tests for `census_source_refs` with a fixture DB containing: live
@@ -247,3 +305,11 @@ requirement, exact query placement and variable-init shape, the `deleted_at`
 evidence provenance, the 505 arithmetic derivation, the DeepSeek parity
 requirement, the fixture-extension strategy, and corrects rev-3's false
 claim about existing `as_dict` test coverage.
+
+Rev-5 (Opus 5 round-2 review) corrects rev-4's replacement `as_dict` error —
+there is no JSON surface consuming `CensusResult.as_dict()`, so that test is
+a consistency check rather than a contract test — pins the `dead_mangled`
+predicate to `"mangled"` only and states that it cannot be computed in SQL,
+makes the `_seed` row-arity normalisation explicit (the optional 4th element
+alone would raise `ProgrammingError` against positional placeholders), and
+records why the two remaining early-return paths carry no suffix.
