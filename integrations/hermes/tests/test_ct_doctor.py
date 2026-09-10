@@ -664,12 +664,19 @@ class ImportPreflightTests(DoctorTestCase):
     """The check that protects an imported graph before an agent trusts it."""
 
     TOKEN = "librarian-" + "ab12" * 8  # 32 hex, the normative §2.2 shape
+    # A token that lost its hex to the engine's setup() rewrite: classifies
+    # as "mangled". Verified — a JSON ref classifies as "at_risk" instead.
+    MANGLED = "librarian-ab12"
+    # Whitespace-padded: the engine would rewrite it, so "at_risk".
+    AT_RISK = "  " + TOKEN
 
     def _seed(self, rows, evidence_table=True, evidence_ids=None, unanchored=0,
-              with_source_type=True):
+              with_source_type=True, with_deleted_at=False):
         """Seed llm_wiki_entries (+ optional librarian_evidence).
 
-        rows: list of (entry_id, source_ref, source_type)
+        rows: list of (entry_id, source_ref[, source_type[, deleted_at]]).
+              deleted_at defaults to None (a live row). Callers passing 2- or
+              3-tuples keep working unchanged.
         evidence_ids: entry_ids that get a librarian_evidence row; None = all
                       token rows.
         """
@@ -678,14 +685,41 @@ class ImportPreflightTests(DoctorTestCase):
         self.make_brain()
         db = self.brain_db()
         conn = sqlite3.connect(db)
+
+        def _deleted_at(row):
+            return row[3] if len(row) > 3 else None
+
         try:
-            if with_source_type:
+            # Each branch projects rows to exactly the arity its own CREATE
+            # TABLE declares: positional VALUES placeholders make a mismatch a
+            # ProgrammingError, not a silent NULL.
+            if with_source_type and with_deleted_at:
+                conn.execute(
+                    "CREATE TABLE llm_wiki_entries "
+                    "(id TEXT, source_ref TEXT, source_type TEXT, "
+                    "deleted_at TEXT)"
+                )
+                conn.executemany(
+                    "INSERT INTO llm_wiki_entries VALUES (?,?,?,?)",
+                    [(r[0], r[1], r[2], _deleted_at(r)) for r in rows],
+                )
+            elif with_source_type:
                 conn.execute(
                     "CREATE TABLE llm_wiki_entries "
                     "(id TEXT, source_ref TEXT, source_type TEXT)"
                 )
                 conn.executemany(
-                    "INSERT INTO llm_wiki_entries VALUES (?,?,?)", rows
+                    "INSERT INTO llm_wiki_entries VALUES (?,?,?)",
+                    [(r[0], r[1], r[2]) for r in rows],
+                )
+            elif with_deleted_at:
+                conn.execute(
+                    "CREATE TABLE llm_wiki_entries "
+                    "(id TEXT, source_ref TEXT, deleted_at TEXT)"
+                )
+                conn.executemany(
+                    "INSERT INTO llm_wiki_entries VALUES (?,?,?)",
+                    [(r[0], r[1], _deleted_at(r)) for r in rows],
                 )
             else:
                 conn.execute("CREATE TABLE llm_wiki_entries (id TEXT, source_ref TEXT)")
@@ -717,6 +751,295 @@ class ImportPreflightTests(DoctorTestCase):
         return db
 
     # --- the pinned regression (PR #188 §2.5.1 census-scope test) ----------
+
+    # --- fixture capability: soft-deleted rows (2026-09-10 live-scope) -----
+
+    def test_seed_can_express_soft_deleted_rows(self):
+        """The fixture must be able to build a corpse, or nothing else can."""
+        import sqlite3
+
+        db = self._seed(
+            [
+                ("e1", self.TOKEN, "librarian_inferred"),
+                ("e2", '{"json":"dead"}', "librarian_inferred", "2026-01-01"),
+            ],
+            with_deleted_at=True,
+        )
+        conn = sqlite3.connect(db)
+        try:
+            rows = conn.execute(
+                "SELECT id, deleted_at FROM llm_wiki_entries ORDER BY id"
+            ).fetchall()
+        finally:
+            conn.close()
+        self.assertEqual(rows, [("e1", None), ("e2", "2026-01-01")])
+
+    def test_evidence_lookup_matches_integer_entry_ids(self):
+        """INTEGER ids must still match the TEXT entry_id column.
+
+        sqlite3 binds a Python int as INTEGER and SQLite does not coerce bind
+        parameters across column affinity, so an uncoerced IN batch silently
+        matches nothing and over-reports missing evidence. The shared _seed
+        fixture declares `id TEXT`, so this case needs its own schema.
+        """
+        import sqlite3
+
+        self.make_brain()
+        db = self.brain_db()
+        conn = sqlite3.connect(db)
+        try:
+            conn.execute(
+                "CREATE TABLE llm_wiki_entries "
+                "(id INTEGER PRIMARY KEY, source_ref TEXT, source_type TEXT)"
+            )
+            conn.execute(
+                "INSERT INTO llm_wiki_entries VALUES (?,?,?)",
+                (1, self.TOKEN, "librarian_inferred"),
+            )
+            conn.execute(
+                "CREATE TABLE librarian_evidence "
+                "(entry_id TEXT PRIMARY KEY, proposal_id TEXT, "
+                "evidence_json TEXT, unanchored INTEGER NOT NULL DEFAULT 0, "
+                "created_at INTEGER)"
+            )
+            conn.execute(
+                "INSERT INTO librarian_evidence VALUES (?,?,?,?,?)",
+                ("1", "prop_x", '{"evidence":[]}', 0, 0),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        census = ct_preflight.census_source_refs(db)
+        self.assertIsNone(census.error)
+        self.assertEqual(census.missing_evidence_rows, 0)
+
+    def test_evidence_lookup_matches_integer_affinity_entry_id_column(self):
+        """The match must hold when *entry_id* is the INTEGER side.
+
+        Binding as str fixes the TEXT-column case but SQLite then applies the
+        column's own INTEGER affinity and hands the value back as an int, so a
+        raw `have` set would miss the str lookup in the mirror-image way.
+        Both sides are normalised, so neither affinity can break the match.
+        """
+        import sqlite3
+
+        self.make_brain()
+        db = self.brain_db()
+        conn = sqlite3.connect(db)
+        try:
+            conn.execute(
+                "CREATE TABLE llm_wiki_entries "
+                "(id INTEGER PRIMARY KEY, source_ref TEXT, source_type TEXT)"
+            )
+            conn.execute(
+                "INSERT INTO llm_wiki_entries VALUES (?,?,?)",
+                (1, self.TOKEN, "librarian_inferred"),
+            )
+            conn.execute(
+                "CREATE TABLE librarian_evidence "
+                "(entry_id INTEGER PRIMARY KEY, proposal_id TEXT, "
+                "evidence_json TEXT, unanchored INTEGER NOT NULL DEFAULT 0, "
+                "created_at INTEGER)"
+            )
+            conn.execute(
+                "INSERT INTO librarian_evidence VALUES (?,?,?,?,?)",
+                (1, "prop_x", '{"evidence":[]}', 0, 0),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        census = ct_preflight.census_source_refs(db)
+        self.assertIsNone(census.error)
+        self.assertEqual(census.missing_evidence_rows, 0)
+
+    def test_seed_supports_deleted_at_without_source_type(self):
+        """Legacy schema: deleted_at present, source_type absent."""
+        import sqlite3
+
+        db = self._seed(
+            [
+                ("e1", self.TOKEN, "librarian_inferred"),
+                ("e2", self.TOKEN, "librarian_inferred", "2026-01-01"),
+            ],
+            with_source_type=False,
+            with_deleted_at=True,
+        )
+        conn = sqlite3.connect(db)
+        try:
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(llm_wiki_entries)")}
+            rows = conn.execute(
+                "SELECT id, deleted_at FROM llm_wiki_entries ORDER BY id"
+            ).fetchall()
+        finally:
+            conn.close()
+        self.assertEqual(cols, {"id", "source_ref", "deleted_at"})
+        self.assertEqual(rows, [("e1", None), ("e2", "2026-01-01")])
+
+    def test_census_result_carries_dead_row_fields(self):
+        """__slots__ drift check: new fields exist and reach as_dict()."""
+        c = ct_preflight.CensusResult(dead_rows=505, dead_mangled=14)
+        self.assertEqual(c.dead_rows, 505)
+        self.assertEqual(c.dead_mangled, 14)
+        d = c.as_dict()
+        self.assertEqual(d["dead_rows"], 505)
+        self.assertEqual(d["dead_mangled"], 14)
+        # Additive only: every pre-existing key survives, unrenamed.
+        self.assertEqual(
+            set(d) - {"dead_rows", "dead_mangled"},
+            {
+                "table_present", "evidence_table_present",
+                "scoped_to_librarian_inferred", "total", "counts",
+                "null_ref_count", "missing_evidence_rows", "unanchored_rows",
+                "recovery_hints", "error",
+            },
+        )
+
+    def test_census_result_dead_fields_default_to_zero(self):
+        c = ct_preflight.CensusResult()
+        self.assertEqual(c.dead_rows, 0)
+        self.assertEqual(c.dead_mangled, 0)
+
+    # --- live-row scoping (2026-09-10 spec) --------------------------------
+
+    def test_soft_deleted_mangled_rows_are_excluded_from_the_census(self):
+        """The reference bug: a corpse must not flip the check to FAIL."""
+        self._seed(
+            [
+                ("live1", self.TOKEN, "librarian_inferred"),
+                ("live2", self.TOKEN, "librarian_inferred"),
+                ("dead1", self.MANGLED, "librarian_inferred", "2026-01-01"),
+                ("dead2", self.MANGLED, "librarian_inferred", "2026-01-02"),
+                ("dead3", self.TOKEN, "librarian_inferred", "2026-01-03"),
+            ],
+            with_deleted_at=True,
+        )
+        census = ct_preflight.census_source_refs(self.brain_db())
+        self.assertIsNone(census.error)
+        self.assertEqual(census.total, 2)
+        self.assertEqual(census.damaged, 0)
+        self.assertEqual(census.counts.get("token"), 2)
+        self.assertEqual(census.dead_rows, 3)
+        # Only the two truncated-token corpses are mangled; the token
+        # corpse is healthy. (A JSON corpse would classify "at_risk".)
+        self.assertEqual(census.dead_mangled, 2)
+        r = ct_doctor.check_import_preflight()
+        self.assertEqual(r.status, ct_doctor.PASS, r.detail)
+
+    def test_dead_mangled_excludes_at_risk_corpses(self):
+        """The predicate is classify == 'mangled', not 'anything unhealthy'."""
+        self.assertEqual(
+            ct_preflight.classify_source_ref(self.AT_RISK), "at_risk"
+        )
+        self.assertEqual(
+            ct_preflight.classify_source_ref(self.MANGLED), "mangled"
+        )
+        self._seed(
+            [
+                ("live1", self.TOKEN, "librarian_inferred"),
+                ("dead1", self.AT_RISK, "librarian_inferred", "2026-01-01"),
+                ("dead2", self.MANGLED, "librarian_inferred", "2026-01-02"),
+            ],
+            with_deleted_at=True,
+        )
+        census = ct_preflight.census_source_refs(self.brain_db())
+        self.assertEqual(census.dead_rows, 2)
+        self.assertEqual(census.dead_mangled, 1)
+
+    def test_dead_row_counts_are_scoped_to_librarian_inferred(self):
+        """Corpses of other source_types are not this census's business."""
+        self._seed(
+            [
+                ("live1", self.TOKEN, "librarian_inferred"),
+                ("dead1", self.MANGLED, "librarian_inferred", "2026-01-01"),
+                ("deaddoc", '{"json":"doc"}', "document", "2026-01-01"),
+            ],
+            with_deleted_at=True,
+        )
+        census = ct_preflight.census_source_refs(self.brain_db())
+        self.assertEqual(census.dead_rows, 1)
+        self.assertEqual(census.dead_mangled, 1)
+
+    def test_census_unchanged_when_deleted_at_column_absent(self):
+        """Pre-soft-delete engines: the fix is a no-op, not a silent change."""
+        self._seed([
+            ("e1", self.TOKEN, "librarian_inferred"),
+            ("e2", self.MANGLED, "librarian_inferred"),
+        ])
+        census = ct_preflight.census_source_refs(self.brain_db())
+        self.assertEqual(census.total, 2)
+        self.assertEqual(census.damaged, 1)
+        self.assertEqual(census.dead_rows, 0)
+        self.assertEqual(census.dead_mangled, 0)
+
+    def test_deleted_at_scoping_applies_on_the_legacy_unscoped_path(self):
+        """deleted_at present, source_type absent: scope by deleted_at alone."""
+        self._seed(
+            [
+                ("live1", self.TOKEN, "librarian_inferred"),
+                ("dead1", self.MANGLED, "librarian_inferred", "2026-01-01"),
+            ],
+            with_source_type=False,
+            with_deleted_at=True,
+        )
+        census = ct_preflight.census_source_refs(self.brain_db())
+        self.assertFalse(census.scoped)
+        self.assertEqual(census.total, 1)
+        self.assertEqual(census.damaged, 0)
+        # Table-wide, because there is no source_type to scope by.
+        self.assertEqual(census.dead_rows, 1)
+        self.assertEqual(census.dead_mangled, 1)
+
+    def test_dead_row_query_failure_leaves_the_live_census_intact(self):
+        """Best-effort: an informational query must never degrade the census.
+
+        Force the corpse-loop query to raise the sqlite3 error the inner
+        handler catches, proving dead counts fall back to 0 without an error
+        result and without UnboundLocalError.
+
+        Implementation note: Python 3.13 made sqlite3.Connection immutable,
+        so the planned `mock.patch.object(sqlite3.Connection, "execute", ...)`
+        raises TypeError. We instead wrap the connection returned by
+        `_connect_readonly`, which is semantically equivalent.
+        """
+        import sqlite3
+        from unittest import mock
+
+        self._seed(
+            [
+                ("live1", self.TOKEN, "librarian_inferred"),
+                ("dead1", self.MANGLED, "librarian_inferred", "2026-01-01"),
+            ],
+            with_deleted_at=True,
+        )
+
+        class _Wrap:
+            def __init__(self, conn):
+                self._conn = conn
+
+            def __getattr__(self, name):
+                return getattr(self._conn, name)
+
+            def execute(self, sql, *args, **kwargs):
+                if "deleted_at IS NOT NULL" in sql:
+                    raise sqlite3.OperationalError("simulated mid-flight failure")
+                return self._conn.execute(sql, *args, **kwargs)
+
+            def close(self):
+                self._conn.close()
+
+        real_connect = ct_preflight._connect_readonly
+
+        def fake_connect(db_path):
+            return _Wrap(real_connect(db_path))
+
+        with mock.patch.object(ct_preflight, "_connect_readonly", fake_connect):
+            census = ct_preflight.census_source_refs(self.brain_db())
+        self.assertIsNone(census.error)
+        self.assertEqual(census.total, 1)
+        self.assertEqual(census.dead_rows, 0)
+        self.assertEqual(census.dead_mangled, 0)
 
     def test_document_sourced_255_char_path_is_never_damaged(self):
         """A legitimate long vault path normalizes to exactly 255 chars.
@@ -759,6 +1082,65 @@ class ImportPreflightTests(DoctorTestCase):
         self.assertFalse(census.scoped)
         r = ct_doctor.check_import_preflight()
         self.assertIn("UNSCOPED", r.detail)
+
+    # --- corpse reporting in detail (2026-09-10 spec §3.4) -----------------
+
+    def test_pass_detail_reports_excluded_corpses(self):
+        self._seed(
+            [
+                ("live1", self.TOKEN, "librarian_inferred"),
+                ("dead1", self.MANGLED, "librarian_inferred", "2026-01-01"),
+                ("dead2", self.TOKEN, "librarian_inferred", "2026-01-02"),
+            ],
+            with_deleted_at=True,
+        )
+        r = ct_doctor.check_import_preflight()
+        self.assertEqual(r.status, ct_doctor.PASS, r.detail)
+        self.assertIn(
+            "; 2 soft-deleted rows excluded from this census "
+            "(1 with mangled source_refs)",
+            r.detail,
+        )
+
+    def test_pass_detail_omits_the_suffix_when_there_are_no_corpses(self):
+        self._seed(
+            [("live1", self.TOKEN, "librarian_inferred")],
+            with_deleted_at=True,
+        )
+        r = ct_doctor.check_import_preflight()
+        self.assertEqual(r.status, ct_doctor.PASS, r.detail)
+        self.assertNotIn("soft-deleted", r.detail)
+
+    def test_missing_evidence_warn_reports_excluded_corpses(self):
+        self._seed(
+            [
+                ("live1", self.TOKEN, "librarian_inferred"),
+                ("dead1", self.MANGLED, "librarian_inferred", "2026-01-01"),
+            ],
+            evidence_ids=[],  # evidence table exists but has no rows
+            with_deleted_at=True,
+        )
+        r = ct_doctor.check_import_preflight()
+        self.assertEqual(r.status, ct_doctor.WARN, r.detail)
+        self.assertIn(
+            "; 1 soft-deleted rows excluded from this census "
+            "(1 with mangled source_refs)",
+            r.detail,
+        )
+
+    def test_fail_detail_is_unchanged_by_corpse_reporting(self):
+        """FAIL strings carry recovery-hint text other work depends on."""
+        self._seed(
+            [
+                ("live1", self.MANGLED, "librarian_inferred"),
+                ("dead1", self.MANGLED, "librarian_inferred", "2026-01-01"),
+            ],
+            with_deleted_at=True,
+        )
+        r = ct_doctor.check_import_preflight()
+        self.assertEqual(r.status, ct_doctor.FAIL)
+        self.assertIn("1 of 1 librarian_inferred entries have a mangled", r.detail)
+        self.assertNotIn("soft-deleted", r.detail)
 
     # --- NULL refs (§2.5.1: legitimate, visibility only) ------------------
 

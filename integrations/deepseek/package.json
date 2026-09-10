@@ -1,6 +1,6 @@
 {
   "name": "@equational-applications/dsh-curated-thoughts",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Curated Thoughts memory integration for DeepSeek Harness",
   "license": "MIT",
   "type": "module",

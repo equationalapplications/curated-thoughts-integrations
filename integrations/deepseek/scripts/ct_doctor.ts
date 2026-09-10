@@ -815,6 +815,13 @@ export function checkImportPreflight(opts: ImportPreflightOpts = {}): CheckResul
     .sort(([a], [b]) => a.localeCompare(b))
     .map(([k, v]) => `${k} ×${v}`)
     .join('; ');
+  // Corpse accumulation is expected engine behavior (soft-delete with no
+  // purge), so it is reported, never warned about — a permanent WARN would be
+  // the same crying-wolf problem as the FAIL this change removes.
+  const deadNote = census.deadRows > 0
+    ? `; ${census.deadRows} soft-deleted rows excluded from this census `
+      + `(${census.deadMangled} with mangled source_refs)`
+    : '';
 
   if (damaged > 0) {
     return _fail(
@@ -865,7 +872,7 @@ export function checkImportPreflight(opts: ImportPreflightOpts = {}): CheckResul
     return _warn(
       'import-preflight',
       `${census.missingEvidenceRows} of ${tokens} token entries have no `
-        + `${EVIDENCE_TABLE} row (${shape}; ${engineNote})`,
+        + `${EVIDENCE_TABLE} row (${shape}; ${engineNote})` + deadNote,
       'Per PR #188 §2.3 these entries are treated as still-grounded and '
         + 'are never auto-purged, so nothing is being deleted — but their '
         + 'provenance cannot be displayed and retraction cannot resolve '
@@ -879,6 +886,7 @@ export function checkImportPreflight(opts: ImportPreflightOpts = {}): CheckResul
     detail += `; ${census.unanchoredRows} unanchored evidence rows `
       + '(expected under PR #188 §2.4 Phase 1 write-with-flag)';
   }
+  detail += deadNote;
   return _pass('import-preflight', detail);
 }
 

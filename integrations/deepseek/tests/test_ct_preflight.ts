@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -9,6 +9,12 @@ import { censusSourceRefs, detectEngineVersion } from '../scripts/ct_preflight.j
 // (PR #188 §2.2). The plan's literal 'ct_token:abc123' is not a valid token
 // under the normative regex; using a real token keeps the assertion true.
 const TOKEN = 'librarian-' + 'ab12cd34ef5678901234abcd56789012';
+// A token that lost its hex to the engine's setup() rewrite: 'mangled'. A
+// JSON ref would classify 'at_risk' (verified — see classifySourceRef), so
+// the truncated-token shape is the right post-rewrite corpse fixture.
+const MANGLED = 'librarian-ab12';
+// Whitespace-padded: the engine would rewrite it, so 'at_risk'.
+const AT_RISK = `  ${TOKEN}`;
 
 let tmpDir: string;
 let dbPath: string;
@@ -17,11 +23,14 @@ beforeEach(() => {
   tmpDir = mkdtempSync(join(tmpdir(), 'ct-preflight-'));
   dbPath = join(tmpDir, 'brain.db');
   const db = new Database(dbPath);
+  // shared schema includes deleted_at so existing rows default to NULL
+  // (live); 2026-09-10 live-scope cases insert against it directly.
   db.exec(`
     CREATE TABLE llm_wiki_entries (
       id INTEGER PRIMARY KEY,
       source_ref TEXT,
-      source_type TEXT
+      source_type TEXT,
+      deleted_at TEXT
     );
   `);
   db.close();
@@ -77,6 +86,172 @@ describe('censusSourceRefs', () => {
     // match that message rather than the plan's /brain\.db/ literal.
     expect(c.error).toMatch(/brain/i);
   });
+
+  // --- live-row scoping (2026-09-10 spec) --------------------------------
+
+  it('excludes soft-deleted rows and counts them separately', () => {
+    const db = new Database(dbPath);
+    const ins = db.prepare(
+      `INSERT INTO llm_wiki_entries (source_ref, source_type, deleted_at)
+       VALUES (?, ?, ?)`,
+    );
+    ins.run(TOKEN, 'librarian_inferred', null);
+    ins.run(TOKEN, 'librarian_inferred', null);
+    ins.run(MANGLED, 'librarian_inferred', '2026-01-01');
+    ins.run(MANGLED, 'librarian_inferred', '2026-01-02');
+    ins.run(TOKEN, 'librarian_inferred', '2026-01-03');
+    db.close();
+    const c = censusSourceRefs(dbPath);
+    expect(c.error).toBeNull();
+    expect(c.total).toBe(2);
+    expect(c.damaged).toBe(0);
+    expect(c.deadRows).toBe(3);
+    // The token corpse is healthy; only the two truncated ones are mangled.
+    expect(c.deadMangled).toBe(2);
+  });
+
+  it('counts dead rows scoped to librarian_inferred', () => {
+    const db = new Database(dbPath);
+    const ins = db.prepare(
+      `INSERT INTO llm_wiki_entries (source_ref, source_type, deleted_at)
+       VALUES (?, ?, ?)`,
+    );
+    ins.run(TOKEN, 'librarian_inferred', null);
+    ins.run(MANGLED, 'librarian_inferred', '2026-01-01');
+    ins.run('{"json":"doc"}', 'document', '2026-01-01');
+    db.close();
+    const c = censusSourceRefs(dbPath);
+    expect(c.deadRows).toBe(1);
+    expect(c.deadMangled).toBe(1);
+  });
+
+  it('excludes at_risk corpses from deadMangled', () => {
+    const db = new Database(dbPath);
+    const ins = db.prepare(
+      `INSERT INTO llm_wiki_entries (source_ref, source_type, deleted_at)
+       VALUES (?, ?, ?)`,
+    );
+    ins.run(TOKEN, 'librarian_inferred', null);
+    ins.run(AT_RISK, 'librarian_inferred', '2026-01-01');
+    ins.run(MANGLED, 'librarian_inferred', '2026-01-02'); // mangled
+    db.close();
+    const c = censusSourceRefs(dbPath);
+    expect(c.deadRows).toBe(2);
+    expect(c.deadMangled).toBe(1);
+  });
+
+  it('is a no-op on a schema with no deleted_at column', () => {
+    const legacyPath = join(tmpDir, 'legacy.db');
+    const db = new Database(legacyPath);
+    db.exec(
+      `CREATE TABLE llm_wiki_entries (
+         id INTEGER PRIMARY KEY, source_ref TEXT, source_type TEXT
+       );`,
+    );
+    db.prepare(
+      `INSERT INTO llm_wiki_entries (source_ref, source_type) VALUES (?, ?)`,
+    ).run(MANGLED, 'librarian_inferred');
+    db.close();
+    const c = censusSourceRefs(legacyPath);
+    expect(c.total).toBe(1);
+    expect(c.damaged).toBe(1);
+    expect(c.deadRows).toBe(0);
+    expect(c.deadMangled).toBe(0);
+  });
+
+  it('scopes by deleted_at even when source_type is absent', () => {
+    const legacyPath = join(tmpDir, 'no-source-type.db');
+    const db = new Database(legacyPath);
+    db.exec(
+      `CREATE TABLE llm_wiki_entries (
+         id INTEGER PRIMARY KEY, source_ref TEXT, deleted_at TEXT
+       );`,
+    );
+    const ins = db.prepare(
+      `INSERT INTO llm_wiki_entries (source_ref, deleted_at) VALUES (?, ?)`,
+    );
+    ins.run(TOKEN, null);
+    ins.run(MANGLED, '2026-01-01');
+    db.close();
+    const c = censusSourceRefs(legacyPath);
+    expect(c.scoped).toBe(false);
+    expect(c.total).toBe(1);
+    expect(c.damaged).toBe(0);
+    expect(c.deadRows).toBe(1);
+    expect(c.deadMangled).toBe(1);
+  });
+
+  it('leaves the live census intact when the corpse query fails', () => {
+    // Best-effort: an informational query must never degrade the census.
+    // Force the corpse query to throw, proving the dead counts fall back to
+    // 0 without an error result. Parity with the hermes port's
+    // test_dead_row_query_failure_leaves_the_live_census_intact.
+    const db = new Database(dbPath);
+    const ins = db.prepare(
+      `INSERT INTO llm_wiki_entries (source_ref, source_type, deleted_at)
+       VALUES (?, ?, ?)`,
+    );
+    ins.run(TOKEN, 'librarian_inferred', null);
+    ins.run(MANGLED, 'librarian_inferred', '2026-01-01');
+    db.close();
+
+    const realPrepare = Database.prototype.prepare;
+    const spy = vi
+      .spyOn(Database.prototype, 'prepare')
+      .mockImplementation(function (this: unknown, sql: string) {
+        if (sql.includes('deleted_at IS NOT NULL')) {
+          throw new Error('simulated mid-flight failure');
+        }
+        return realPrepare.call(this as never, sql);
+      } as typeof Database.prototype.prepare);
+    try {
+      const c = censusSourceRefs(dbPath);
+      expect(c.error).toBeNull();
+      expect(c.total).toBe(1);
+      expect(c.deadRows).toBe(0);
+      expect(c.deadMangled).toBe(0);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  // Neither side's column affinity is a contract this repo controls, so the
+  // entry_id match is exercised against both. Binding as strings fixes the
+  // TEXT column; SQLite then applies an INTEGER column's own affinity and
+  // hands the value back as a number, which the String(t) lookup would miss
+  // unless the values read back are normalised too.
+  for (const affinity of ['TEXT', 'INTEGER'] as const) {
+    it(`matches evidence entry_id with ${affinity} affinity`, () => {
+      const p = join(tmpDir, `evidence-${affinity}.db`);
+      const db = new Database(p);
+      db.exec(
+        `CREATE TABLE llm_wiki_entries (
+           id INTEGER PRIMARY KEY, source_ref TEXT, source_type TEXT
+         );
+         CREATE TABLE librarian_evidence (
+           entry_id ${affinity} PRIMARY KEY, proposal_id TEXT,
+           evidence_json TEXT, unanchored INTEGER NOT NULL DEFAULT 0,
+           created_at INTEGER
+         );`,
+      );
+      db.prepare(
+        `INSERT INTO llm_wiki_entries (id, source_ref, source_type)
+         VALUES (?, ?, ?)`,
+      ).run(1, TOKEN, 'librarian_inferred');
+      db.prepare(`INSERT INTO librarian_evidence VALUES (?, ?, ?, ?, ?)`).run(
+        affinity === 'TEXT' ? '1' : 1,
+        'prop_x',
+        '{"evidence":[]}',
+        0,
+        0,
+      );
+      db.close();
+      const c = censusSourceRefs(p);
+      expect(c.error).toBeNull();
+      expect(c.tokens).toBe(1);
+      expect(c.missingEvidenceRows).toBe(0);
+    });
+  }
 });
 
 describe('detectEngineVersion', () => {

@@ -212,6 +212,8 @@ class CensusResult:
         "missing_evidence_rows",
         "unanchored_rows",
         "evidence_table_present",
+        "dead_rows",
+        "dead_mangled",
     )
 
     def __init__(
@@ -226,6 +228,8 @@ class CensusResult:
         missing_evidence_rows=0,
         unanchored_rows=0,
         evidence_table_present=None,
+        dead_rows=0,
+        dead_mangled=0,
     ):
         self.counts = counts or {}
         self.total = total
@@ -241,6 +245,15 @@ class CensusResult:
         self.missing_evidence_rows = missing_evidence_rows
         self.unanchored_rows = unanchored_rows
         self.evidence_table_present = evidence_table_present
+        # Soft-deleted rows, excluded from every count above. Informational
+        # only: corpse accumulation is expected engine behavior (soft-delete
+        # with no purge) and never affects a verdict.
+        self.dead_rows = dead_rows
+        # Of those corpses, how many classify as "mangled" — and only
+        # "mangled". at_risk/token/null corpses are counted in dead_rows but
+        # not here, so the number matches the "with mangled source_refs"
+        # wording of the operator-facing suffix.
+        self.dead_mangled = dead_mangled
 
     @property
     def damaged(self):
@@ -271,6 +284,8 @@ class CensusResult:
             "null_ref_count": self.null_ref_count,
             "missing_evidence_rows": self.missing_evidence_rows,
             "unanchored_rows": self.unanchored_rows,
+            "dead_rows": self.dead_rows,
+            "dead_mangled": self.dead_mangled,
             "recovery_hints": dict(self.recovery_hints),
             "error": self.error,
         }
@@ -313,15 +328,27 @@ def census_source_refs(db_path):
 
         cols = _columns(conn, ENTRIES_TABLE)
         scoped = "source_type" in cols
+        # Soft-deleted rows are retained forever (the engine has no purge), so
+        # a corpse's mangled source_ref would otherwise be counted as live
+        # damage and FAIL a healthy brain. The column is detected rather than
+        # assumed: it is not part of any schema contract this repo controls,
+        # and on a pre-soft-delete engine its absence must leave behavior
+        # byte-identical to before.
+        has_deleted_at = "deleted_at" in cols
         if scoped:
             sql = (
                 "SELECT id, source_ref FROM llm_wiki_entries WHERE source_type = ?"
             )
+            if has_deleted_at:
+                sql += " AND deleted_at IS NULL"
             rows = conn.execute(sql, (LIBRARIAN_SOURCE_TYPE,)).fetchall()
         else:
             # Older schema with no source_type column: we cannot scope, so we
             # report that plainly rather than risk the §2.5.1 false positive.
-            rows = conn.execute("SELECT id, source_ref FROM llm_wiki_entries").fetchall()
+            sql = "SELECT id, source_ref FROM llm_wiki_entries"
+            if has_deleted_at:
+                sql += " WHERE deleted_at IS NULL"
+            rows = conn.execute(sql).fetchall()
 
         counts = {}
         hints = {}
@@ -359,12 +386,66 @@ def census_source_refs(db_path):
                     + ",".join("?" * len(batch))
                     + ")"
                 )
-                have.update(r[0] for r in conn.execute(q, batch))
-            missing_evidence = sum(1 for t in token_ids if t not in have)
+                # Neither side's affinity is a contract this repo controls:
+                # llm_wiki_entries.id is INTEGER under an INTEGER PRIMARY KEY,
+                # and librarian_evidence.entry_id has been seen both TEXT and
+                # INTEGER. SQLite does not coerce bind parameters across column
+                # affinity, so comparing raw values misses every row whenever
+                # the two disagree -- in either direction. Normalising both the
+                # bind and the values read back to str makes the match
+                # affinity-independent. Mirrors the TypeScript port.
+                have.update(
+                    str(r[0]) for r in conn.execute(q, [str(x) for x in batch])
+                )
+            missing_evidence = sum(1 for t in token_ids if str(t) not in have)
             if "unanchored" in _columns(conn, EVIDENCE_TABLE):
                 unanchored = conn.execute(
                     f"SELECT COUNT(*) FROM {EVIDENCE_TABLE} WHERE unanchored = 1"
                 ).fetchone()[0]
+
+        # Corpse census: informational only, and deliberately isolated. Its
+        # own try/except means a failure here can never degrade the primary
+        # census to an error result; the counters are initialized before the
+        # try so the failure path cannot leave them unbound.
+        dead_rows = 0
+        dead_mangled = 0
+        if has_deleted_at:
+            try:
+                # One pass, not a COUNT(*) alongside a SELECT with the same
+                # WHERE: both counters then derive from the same result set,
+                # so no partial failure can leave dead_rows truthful while
+                # dead_mangled silently reads 0 and reports "(0 with mangled
+                # source_refs)".
+                #
+                # classify_source_ref is Python, so the corpses have to be
+                # read and classified here rather than counted in SQL. The
+                # predicate is "mangled" and only "mangled": at_risk, token
+                # and null corpses land in dead_rows but not here, so the
+                # number matches the operator-facing wording.
+                dead_ref_sql = (
+                    "SELECT source_ref FROM llm_wiki_entries "
+                    "WHERE deleted_at IS NOT NULL"
+                )
+                if scoped:
+                    dead_ref_sql += " AND source_type = ?"
+                    params = (LIBRARIAN_SOURCE_TYPE,)
+                else:
+                    params = ()
+                dead_refs = conn.execute(dead_ref_sql, params).fetchall()
+                dead_rows = len(dead_refs)
+                for (ref,) in dead_refs:
+                    if ref is None:
+                        continue
+                    if classify_source_ref(ref) == "mangled":
+                        dead_mangled += 1
+            except Exception:  # noqa: BLE001 - deliberately broad
+                # Informational only; never degrades the census. Deliberately
+                # broader than sqlite3.Error: a non-sqlite failure in
+                # classify_source_ref would otherwise escape the outer
+                # `except sqlite3.Error` too and propagate out of the census
+                # entirely, which is exactly what this block exists to
+                # prevent. Matches the TypeScript port's bare `catch`.
+                pass
 
         return CensusResult(
             counts=counts,
@@ -376,6 +457,8 @@ def census_source_refs(db_path):
             missing_evidence_rows=missing_evidence,
             unanchored_rows=unanchored,
             evidence_table_present=evidence_present,
+            dead_rows=dead_rows,
+            dead_mangled=dead_mangled,
         )
     except sqlite3.Error as exc:
         return CensusResult(error=f"census query failed: {exc}", table_present=True)

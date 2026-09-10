@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+## 0.1.2 — 2026-09-10
+
+- `import-preflight` no longer counts soft-deleted `llm_wiki_entries` rows as
+  live damage. The census is now scoped to rows with `deleted_at IS NULL` when
+  that column exists, so retained issue-#186 corpses can no longer flip a
+  healthy brain to FAIL. Soft-deleted rows are reported separately in the
+  PASS/WARN detail as informational context. On brains with no `deleted_at`
+  column the behavior is unchanged.
+
 ## 0.1.1 — 2026-09-09
 
 Security: bump devDependencies to clear 9 Dependabot alerts in
