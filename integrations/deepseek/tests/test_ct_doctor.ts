@@ -4,11 +4,13 @@ import { existsSync, mkdtempSync, writeFileSync, mkdirSync, chmodSync, rmSync } 
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import Database from 'better-sqlite3';
 import {
   mcpToolsList,
   runChecks,
   cmdCheck,
   checkDshRegistration,
+  checkImportPreflight,
   PASS, WARN, FAIL,
   type CheckResult,
 } from '../scripts/ct_doctor.js';
@@ -176,5 +178,74 @@ describe.skipIf(process.platform === 'win32')('mcpToolsList with a malformed too
     const result = mcpToolsList(stub, 10);
     expect(result.toolNames).toEqual(['wiki_context', 'recall']);
     expect(result.error).toBeNull();
+  });
+});
+
+describe('checkImportPreflight', () => {
+  const TOKEN = 'librarian-' + 'ab12'.repeat(8);
+  // A token that lost its hex to the engine's setup() rewrite: 'mangled'.
+  // A JSON ref would classify 'at_risk' and FAIL on the wrong branch.
+  const MANGLED = 'librarian-ab12';
+
+  let brainDir = '';
+
+  afterEach(() => {
+    if (brainDir) rmSync(brainDir, { recursive: true, force: true });
+  });
+
+  function seedBrain(
+    rows: Array<{ id: number; ref: string; deletedAt: string | null }>,
+  ) {
+    brainDir = mkdtempSync(join(tmpdir(), 'ct-doctor-preflight-'));
+    const dbPath = join(brainDir, 'brain.db');
+    const db = new Database(dbPath);
+    db.exec(
+      `CREATE TABLE llm_wiki_entries (
+         id INTEGER PRIMARY KEY, source_ref TEXT, source_type TEXT,
+         deleted_at TEXT
+       );
+       CREATE TABLE librarian_evidence (
+         entry_id TEXT PRIMARY KEY, proposal_id TEXT, evidence_json TEXT,
+         unanchored INTEGER NOT NULL DEFAULT 0, created_at INTEGER
+       );`,
+    );
+    const ins = db.prepare(
+      `INSERT INTO llm_wiki_entries (id, source_ref, source_type, deleted_at)
+       VALUES (?, ?, ?, ?)`,
+    );
+    const ev = db.prepare(
+      `INSERT INTO librarian_evidence VALUES (?, ?, ?, ?, ?)`,
+    );
+    for (const r of rows) {
+      ins.run(r.id, r.ref, 'librarian_inferred', r.deletedAt);
+      // Evidence follows live token rows, so the missing-evidence WARN
+      // stays out of the way unless a test asks for it.
+      if (r.deletedAt === null && r.ref === TOKEN) {
+        ev.run(String(r.id), 'prop_x', '{"evidence":[]}', 0, 0);
+      }
+    }
+    db.close();
+    return { brainDir, dbPath, configPath: join(brainDir, 'config.json') };
+  }
+
+  it('reports excluded soft-deleted rows in the PASS detail', () => {
+    const paths = seedBrain([
+      { id: 1, ref: TOKEN, deletedAt: null },
+      { id: 2, ref: MANGLED, deletedAt: '2026-01-01' },
+      { id: 3, ref: TOKEN, deletedAt: '2026-01-02' },
+    ]);
+    const r = checkImportPreflight({ brainPaths: paths });
+    expect(r.status).toBe('PASS');
+    expect(r.detail).toContain(
+      '; 2 soft-deleted rows excluded from this census '
+        + '(1 with mangled source_refs)',
+    );
+  });
+
+  it('omits the suffix when there are no soft-deleted rows', () => {
+    const paths = seedBrain([{ id: 1, ref: TOKEN, deletedAt: null }]);
+    const r = checkImportPreflight({ brainPaths: paths });
+    expect(r.status).toBe('PASS');
+    expect(r.detail).not.toContain('soft-deleted');
   });
 });
