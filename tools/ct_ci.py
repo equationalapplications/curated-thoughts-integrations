@@ -8,6 +8,7 @@ Subcommands:
     validate    Schema-check every integration.yaml.
     generate    Render shared/compat.yaml into stdlib compat constants.
     discover    Emit the CI matrix as JSON for the workflow's discover job.
+    readme      Sync the README integrations table from the manifests.
 
 Exit codes: 0 = pass, 1 = a gate failed, 2 = usage error.
 """
@@ -128,6 +129,37 @@ def cmd_discover(args):
     return 0
 
 
+def cmd_readme(args):
+    ct_ci_readme = _import("ct_ci_readme")
+    if args.check:
+        problems = ct_ci_readme.check(args.repo)
+        for problem in problems:
+            print(f"FAIL {problem}", file=sys.stderr)
+        if problems:
+            print(
+                "\nrun `python tools/ct_ci.py readme` to regenerate the table",
+                file=sys.stderr,
+            )
+            return 1
+        print("README integrations table is current.")
+        return 0
+    changed, problems = ct_ci_readme.rewrite(args.repo)
+    if changed:
+        print(f"updated {args.repo / ct_ci_readme.README_NAME}")
+    else:
+        print("README integrations table already current")
+    if problems:
+        for problem in problems:
+            print(f"FAIL {problem}", file=sys.stderr)
+        print(
+            "\nadd or fix the README rows above, then re-run "
+            "`python tools/ct_ci.py readme`",
+            file=sys.stderr,
+        )
+        return 1
+    return 0
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="ct_ci.py", description=__doc__)
     parser.add_argument(
@@ -155,6 +187,14 @@ def main(argv=None):
     package = sub.add_parser("package", help="build the artifact for a tag")
     package.add_argument("--tag", required=True, help="e.g. hermes-v0.2.1")
     package.add_argument("--out", type=Path, default=Path("dist"))
+    readme = sub.add_parser(
+        "readme", help="sync the README integrations table from the manifests"
+    )
+    readme.add_argument(
+        "--check",
+        action="store_true",
+        help="fail if the table is stale, writing nothing",
+    )
 
     args = parser.parse_args(argv)
     if args.command == "validate":
@@ -167,6 +207,8 @@ def main(argv=None):
         return cmd_policy(args)
     if args.command == "package":
         return cmd_package(args)
+    if args.command == "readme":
+        return cmd_readme(args)
     parser.error(f"unknown command {args.command}")
     return 2
 

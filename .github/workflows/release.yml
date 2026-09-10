@@ -251,3 +251,48 @@ jobs:
           files: |
             dist/*.tar.gz
             dist/SHA256SUMS
+
+      - name: Sync the README version table
+        # Belt-and-braces: ci.yml's `readme --check` gate already forces the
+        # bump PR to update the table, so this only fires when a tag was cut
+        # without going through it. Runs against origin/main, not the tag:
+        # the rewrite is row-scoped by integration id, but starting from
+        # main's tip means a row that moved on since the tag is never
+        # clobbered. A blocked push (branch protection) warns without
+        # failing the release — the next PR's gate catches the drift.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git fetch --no-tags origin main
+          git checkout -B readme-sync origin/main
+          # `readme` exits nonzero when drift remains that a rewrite cannot
+          # fix (a missing or unknown row) — that is structural drift only
+          # a PR can repair, so warn rather than fail a published release.
+          python tools/ct_ci.py readme || \
+            echo "::warning::README table needs a row added or fixed; run \`python tools/ct_ci.py readme\` locally"
+          if git diff --quiet -- README.md; then
+            echo "README already current; nothing to commit"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add README.md
+          git commit -m "docs(readme): sync version table after ${GITHUB_REF_NAME}"
+          # One rebase-and-retry: two releases landing near-simultaneously
+          # race on the push, and a single non-fast-forward rejection is
+          # not a reason to warn. The rebase is guarded too — a conflict
+          # under `set -e` would otherwise abort the step with no warning.
+          synced=0
+          for attempt in 1 2; do
+            if git rebase origin/main && \
+               git push "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:main; then
+              synced=1
+              break
+            fi
+            git fetch --no-tags origin main
+          done
+          if [ "$synced" -eq 1 ]; then
+            echo "README synced on main"
+            exit 0
+          fi
+          echo "::warning::could not push README sync to main; run \`python tools/ct_ci.py readme\` locally and push"
