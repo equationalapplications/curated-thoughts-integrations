@@ -6,6 +6,8 @@ format below is load-bearing: `## <version> — <date>`.
 
 ## Unreleased
 
+## 0.2.2 — 2026-09-10
+
 - `import-preflight` no longer counts soft-deleted `llm_wiki_entries` rows as
   live damage. The census is now scoped to rows with `deleted_at IS NULL` when
   that column exists, so retained issue-#186 corpses can no longer flip a

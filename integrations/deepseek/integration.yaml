@@ -1,6 +1,6 @@
 id: deepseek
 name: Curated Thoughts for DeepSeek Harness
-version: 0.1.1
+version: 0.1.2
 language: node
 status: implemented
 requires_sidecar: ">=2.5"

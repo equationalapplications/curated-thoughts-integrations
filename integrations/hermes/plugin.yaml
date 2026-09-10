@@ -5,7 +5,7 @@
 # hooks/hooks.json pair that used Claude Code's plugin format (SessionStart
 # matchers, ${CLAUDE_PLUGIN_ROOT}) and which Hermes never read.
 name: curated-thoughts
-version: 0.2.1
+version: 0.2.2
 description: >-
   Curated Thoughts memory integration for Hermes Agent: MCP sidecar
   registration, health checks, import pre-flight, and usage skills.
