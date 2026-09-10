@@ -45,13 +45,20 @@ def _row_cells(line):
 
 
 def _process(repo_root, write):
-    """One pass over README.md. Returns (changed, problems)."""
+    """One pass over README.md. Returns (changed, problems).
+
+    In check mode every kind of drift is a problem. In write mode the
+    stale cells are repaired in place, so only the drift the rewrite
+    *cannot* fix is reported: a missing row (the rewrite is row-scoped,
+    it never adds one) and a row naming an unknown integration.
+    """
     root = Path(repo_root)
     readme = root / README_NAME
     text = readme.read_text(encoding="utf-8")
     state = _manifest_state(root)
     seen = set()
-    problems = []
+    stale = []
+    unresolved = []
     out = []
     for line in text.splitlines():
         cells = _row_cells(line)
@@ -61,7 +68,7 @@ def _process(repo_root, write):
             continue
         ident = match.group(1).lower()
         if ident not in state:
-            problems.append(f"README row references unknown integration '{ident}'")
+            unresolved.append(f"README row references unknown integration '{ident}'")
             out.append(line)
             continue
         seen.add(ident)
@@ -72,7 +79,7 @@ def _process(repo_root, write):
             else "—"
         )
         if cells[2] != status or cells[3] != version_cell:
-            problems.append(
+            stale.append(
                 f"{ident}: README table shows status={cells[2]!r} "
                 f"version={cells[3]!r}; integration.yaml says "
                 f"status={status!r} version={version}"
@@ -81,18 +88,21 @@ def _process(repo_root, write):
             line = "| " + " | ".join(cells) + " |"
         out.append(line)
     for ident in sorted(set(state) - seen):
-        problems.append(f"README has no row for {ident} ({state[ident][1]})")
+        unresolved.append(f"README has no row for {ident} ({state[ident][1]})")
     new_text = "\n".join(out) + ("\n" if text.endswith("\n") else "")
     changed = new_text != text
     if write and changed:
         readme.write_text(new_text, encoding="utf-8")
-    return changed, problems
+    return changed, (unresolved if write else stale + unresolved)
 
 
 def rewrite(repo_root):
-    """Regenerate the table in place. True if the README changed."""
-    changed, _problems = _process(repo_root, write=True)
-    return changed
+    """Regenerate the table in place. Returns (changed, problems).
+
+    `problems` lists the drift the rewrite could not fix (missing or
+    unknown rows); an empty list means the table is now fully current.
+    """
+    return _process(repo_root, write=True)
 
 
 def check(repo_root):

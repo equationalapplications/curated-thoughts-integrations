@@ -265,7 +265,11 @@ jobs:
         run: |
           git fetch --no-tags origin main
           git checkout -B readme-sync origin/main
-          python tools/ct_ci.py readme
+          # `readme` exits nonzero when drift remains that a rewrite cannot
+          # fix (a missing or unknown row) — that is structural drift only
+          # a PR can repair, so warn rather than fail a published release.
+          python tools/ct_ci.py readme || \
+            echo "::warning::README table needs a row added or fixed; run \`python tools/ct_ci.py readme\` locally"
           if git diff --quiet -- README.md; then
             echo "README already current; nothing to commit"
             exit 0

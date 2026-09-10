@@ -107,9 +107,13 @@ class TestRewrite(unittest.TestCase):
             README,
         )
         with root:
-            self.assertTrue(ct_ci_readme.rewrite(path))
+            changed, problems = ct_ci_readme.rewrite(path)
+            self.assertTrue(changed)
+            self.assertEqual(problems, [])
             once = (path / "README.md").read_text(encoding="utf-8")
-            self.assertFalse(ct_ci_readme.rewrite(path))
+            changed, problems = ct_ci_readme.rewrite(path)
+            self.assertFalse(changed)
+            self.assertEqual(problems, [])
             self.assertEqual(once, (path / "README.md").read_text(encoding="utf-8"))
 
     def test_non_table_lines_are_untouched(self):
@@ -121,6 +125,38 @@ class TestRewrite(unittest.TestCase):
             ct_ci_readme.rewrite(path)
             text = (path / "README.md").read_text(encoding="utf-8")
             self.assertIn("Rows marked *planned* are placeholders.", text)
+
+    def test_missing_row_is_reported_by_rewrite(self):
+        no_deepseek_row = README.replace(
+            "| DeepSeek Harness | [`integrations/deepseek/`](integrations/deepseek/) "
+            "| implemented | 0.1.0 |\n",
+            "",
+        )
+        root, path = make_repo(
+            {"hermes": HERMES_YAML, "deepseek": DEEPSEEK_YAML, "openclaw": OPENCLAW_YAML},
+            no_deepseek_row,
+        )
+        with root:
+            changed, problems = ct_ci_readme.rewrite(path)
+            self.assertTrue(changed)
+            self.assertEqual(
+                problems,
+                ["README has no row for deepseek (implemented)"],
+            )
+
+    def test_unknown_integration_row_is_reported_by_rewrite(self):
+        root, path = make_repo({"hermes": HERMES_YAML}, README)
+        with root:
+            changed, problems = ct_ci_readme.rewrite(path)
+            self.assertTrue(changed)
+            self.assertIn(
+                "README row references unknown integration 'deepseek'",
+                problems,
+            )
+            self.assertIn(
+                "README row references unknown integration 'openclaw'",
+                problems,
+            )
 
 
 class TestCheck(unittest.TestCase):

@@ -34,8 +34,11 @@ Releases are per-integration and independent. There is no repository version.
 5. `release.yml` re-runs the full matrix, builds
    `<id>-<version>.tar.gz` + `SHA256SUMS`, publishes the GitHub Release,
    and pushes a README sync commit to `main` as a self-heal if the table
-   still disagrees with the manifests. A SemVer prerelease suffix marks it
-   as a prerelease.
+   still disagrees with the manifests. The sync is best-effort, not
+   guaranteed: it only rewrites cells of rows that already exist, so a
+   missing or unknown row, a rebase conflict, or a blocked push leaves the
+   table unchanged and emits a workflow warning instead. A SemVer
+   prerelease suffix marks it as a prerelease.
 
 ## When a policy gate fails
 

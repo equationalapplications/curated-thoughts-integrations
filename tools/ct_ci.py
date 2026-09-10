@@ -143,10 +143,20 @@ def cmd_readme(args):
             return 1
         print("README integrations table is current.")
         return 0
-    if ct_ci_readme.rewrite(args.repo):
+    changed, problems = ct_ci_readme.rewrite(args.repo)
+    if changed:
         print(f"updated {args.repo / ct_ci_readme.README_NAME}")
     else:
         print("README integrations table already current")
+    if problems:
+        for problem in problems:
+            print(f"FAIL {problem}", file=sys.stderr)
+        print(
+            "\nadd or fix the README rows above, then re-run "
+            "`python tools/ct_ci.py readme`",
+            file=sys.stderr,
+        )
+        return 1
     return 0
 
 
