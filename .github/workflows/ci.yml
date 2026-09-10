@@ -202,6 +202,13 @@ jobs:
       - name: Generated compat constants are current
         run: python tools/ct_ci.py generate --check
 
+      - name: README version table is current
+        # The integrations table is generated from the manifests; a version
+        # bump that forgets its README row fails here, at PR time, rather
+        # than shipping a stale version index. `release.yml` re-syncs as a
+        # self-heal, but this gate is the primary enforcement.
+        run: python tools/ct_ci.py readme --check
+
       - name: Policy gates (versions, architecture, compat)
         run: |
           if [ "${{ github.event_name }}" = "pull_request" ]; then
