@@ -462,9 +462,19 @@ Add to `ImportPreflightTests` in `integrations/hermes/tests/test_ct_doctor.py`:
     def test_dead_row_query_failure_leaves_the_live_census_intact(self):
         """Best-effort: an informational query must never degrade the census.
 
-        Patch the classifier the corpse loop uses so it raises the sqlite3
-        error the inner handler catches, proving dead counts fall back to 0
-        without an error result and without UnboundLocalError.
+        Force the corpse-loop query to raise the sqlite3 error the inner
+        handler catches, proving dead counts fall back to 0 without an error
+        result and without UnboundLocalError.
+
+        Implementation note: Python 3.13 made sqlite3.Connection immutable
+        (it has been since the C extension landed; 3.13 just hardened the
+        type), so the original `mock.patch.object(sqlite3.Connection,
+        "execute", ...)` raises TypeError before the census runs. Patch the
+        application-owned seam `ct_preflight._connect_readonly` instead and
+        wrap the connection's `execute()` to raise only on the
+        `deleted_at IS NOT NULL` query — semantically equivalent to the
+        original, and the inner handler still catches the same
+        OperationalError.
         """
         import sqlite3
         from unittest import mock
@@ -476,14 +486,28 @@ Add to `ImportPreflightTests` in `integrations/hermes/tests/test_ct_doctor.py`:
             ],
             with_deleted_at=True,
         )
-        real_execute = sqlite3.Connection.execute
 
-        def boom(self, sql, *args):
-            if "deleted_at IS NOT NULL" in sql:
-                raise sqlite3.OperationalError("simulated mid-flight failure")
-            return real_execute(self, sql, *args)
+        class _Wrap:
+            def __init__(self, conn):
+                self._conn = conn
 
-        with mock.patch.object(sqlite3.Connection, "execute", boom):
+            def __getattr__(self, name):
+                return getattr(self._conn, name)
+
+            def execute(self, sql, *args, **kwargs):
+                if "deleted_at IS NOT NULL" in sql:
+                    raise sqlite3.OperationalError("simulated mid-flight failure")
+                return self._conn.execute(sql, *args, **kwargs)
+
+            def close(self):
+                self._conn.close()
+
+        real_connect = ct_preflight._connect_readonly
+
+        def fake_connect(db_path):
+            return _Wrap(real_connect(db_path))
+
+        with mock.patch.object(ct_preflight, "_connect_readonly", fake_connect):
             census = ct_preflight.census_source_refs(self.brain_db())
         self.assertIsNone(census.error)
         self.assertEqual(census.total, 1)
