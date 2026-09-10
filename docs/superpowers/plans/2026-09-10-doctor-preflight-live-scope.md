@@ -389,7 +389,8 @@ Add to `ImportPreflightTests` in `integrations/hermes/tests/test_ct_doctor.py`:
         self.assertEqual(census.damaged, 0)
         self.assertEqual(census.counts.get("token"), 2)
         self.assertEqual(census.dead_rows, 3)
-        # Only the two JSON corpses are mangled; the token corpse is healthy.
+        # Only the two truncated-token corpses are mangled; the token
+        # corpse is healthy. (A JSON corpse would classify "at_risk".)
         self.assertEqual(census.dead_mangled, 2)
         r = ct_doctor.check_import_preflight()
         self.assertEqual(r.status, ct_doctor.PASS, r.detail)
@@ -1000,12 +1001,56 @@ git commit -m "fix(deepseek): scope source_ref census to live rows, count corpse
 
 **Background you need:** Same rules as Task 4 — no verdict change, suffix on the final `_pass` and the missing-evidence `_warn` only, all three `_fail` strings byte-for-byte identical. Keeping the wording character-identical to the Python string matters: these two implementations are compared by operators reading output from both harnesses.
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Write the failing tests**
 
-Look at how `test_ct_doctor.ts` builds a brain fixture for the existing preflight cases and follow that pattern exactly. This is a different file from Task 5's, so define its own `TOKEN`/`MANGLED` constants here (or import them) — `MANGLED = 'librarian-ab12'`, a truncated token, because a JSON ref classifies as `'at_risk'` and would produce a FAIL on the wrong branch. Add inside the preflight `describe` block:
+`test_ct_doctor.ts` has **no existing preflight cases** — no brain fixture to copy, no preflight `describe` block, and no `checkImportPreflight` import — so this step builds all three. Two file-level edits first:
+
+1. Add `checkImportPreflight` to the existing named imports from `'../scripts/ct_doctor.js'` (lines 7–14):
 
 ```typescript
-  it('reports excluded soft-deleted rows in the PASS detail', () => {
+import {
+  mcpToolsList,
+  runChecks,
+  cmdCheck,
+  checkDshRegistration,
+  checkImportPreflight,
+  PASS, WARN, FAIL,
+  type CheckResult,
+} from '../scripts/ct_doctor.js';
+```
+
+2. Add a `better-sqlite3` import beside the other module imports (already a devDependency — `test_ct_preflight.ts` uses it the same way):
+
+```typescript
+import Database from 'better-sqlite3';
+```
+
+Then append a new self-contained `describe` block at the end of the file. Shape notes, all verified against the source:
+
+- `BrainPaths` (`ct_env.ts:60`) requires `brainDir`, `dbPath`, **and** `configPath` — passing only `{ dbPath }` fails `tsc`. The check reads only `paths.dbPath`, so the other two just have to exist.
+- The file-level `beforeEach` blanks `PATH`; that is fine here — `detectEngineVersion` degrades to "engine version unknown".
+- These tests import the TS source through vitest, so they run even before `pnpm run build` — no `built` guard needed.
+- `mkdtempSync`, `rmSync`, `tmpdir`, and `join` are already imported at the top of the file.
+- As everywhere else in this plan, **a JSON ref is not a mangled ref** (`classifySourceRef` returns `'at_risk'`): `MANGLED` below is a truncated token.
+
+```typescript
+describe('checkImportPreflight', () => {
+  const TOKEN = 'librarian-' + 'ab12'.repeat(8);
+  // A token that lost its hex to the engine's setup() rewrite: 'mangled'.
+  // A JSON ref would classify 'at_risk' and FAIL on the wrong branch.
+  const MANGLED = 'librarian-ab12';
+
+  let brainDir = '';
+
+  afterEach(() => {
+    if (brainDir) rmSync(brainDir, { recursive: true, force: true });
+  });
+
+  function seedBrain(
+    rows: Array<{ id: number; ref: string; deletedAt: string | null }>,
+  ) {
+    brainDir = mkdtempSync(join(tmpdir(), 'ct-doctor-preflight-'));
+    const dbPath = join(brainDir, 'brain.db');
     const db = new Database(dbPath);
     db.exec(
       `CREATE TABLE llm_wiki_entries (
@@ -1021,15 +1066,28 @@ Look at how `test_ct_doctor.ts` builds a brain fixture for the existing prefligh
       `INSERT INTO llm_wiki_entries (id, source_ref, source_type, deleted_at)
        VALUES (?, ?, ?, ?)`,
     );
-    ins.run(1, TOKEN, 'librarian_inferred', null);
-    ins.run(2, MANGLED, 'librarian_inferred', '2026-01-01');
-    ins.run(3, TOKEN, 'librarian_inferred', '2026-01-02');
-    db.prepare(
+    const ev = db.prepare(
       `INSERT INTO librarian_evidence VALUES (?, ?, ?, ?, ?)`,
-    ).run('1', 'prop_x', '{"evidence":[]}', 0, 0);
+    );
+    for (const r of rows) {
+      ins.run(r.id, r.ref, 'librarian_inferred', r.deletedAt);
+      // Evidence follows live token rows, so the missing-evidence WARN
+      // stays out of the way unless a test asks for it.
+      if (r.deletedAt === null && r.ref === TOKEN) {
+        ev.run(String(r.id), 'prop_x', '{"evidence":[]}', 0, 0);
+      }
+    }
     db.close();
+    return { brainDir, dbPath, configPath: join(brainDir, 'config.json') };
+  }
 
-    const r = checkImportPreflight({ brainPaths: { dbPath } });
+  it('reports excluded soft-deleted rows in the PASS detail', () => {
+    const paths = seedBrain([
+      { id: 1, ref: TOKEN, deletedAt: null },
+      { id: 2, ref: MANGLED, deletedAt: '2026-01-01' },
+      { id: 3, ref: TOKEN, deletedAt: '2026-01-02' },
+    ]);
+    const r = checkImportPreflight({ brainPaths: paths });
     expect(r.status).toBe('PASS');
     expect(r.detail).toContain(
       '; 2 soft-deleted rows excluded from this census '
@@ -1038,32 +1096,15 @@ Look at how `test_ct_doctor.ts` builds a brain fixture for the existing prefligh
   });
 
   it('omits the suffix when there are no soft-deleted rows', () => {
-    const db = new Database(dbPath);
-    db.exec(
-      `CREATE TABLE llm_wiki_entries (
-         id INTEGER PRIMARY KEY, source_ref TEXT, source_type TEXT,
-         deleted_at TEXT
-       );
-       CREATE TABLE librarian_evidence (
-         entry_id TEXT PRIMARY KEY, proposal_id TEXT, evidence_json TEXT,
-         unanchored INTEGER NOT NULL DEFAULT 0, created_at INTEGER
-       );`,
-    );
-    db.prepare(
-      `INSERT INTO llm_wiki_entries (id, source_ref, source_type, deleted_at)
-       VALUES (?, ?, ?, ?)`,
-    ).run(1, TOKEN, 'librarian_inferred', null);
-    db.prepare(`INSERT INTO librarian_evidence VALUES (?, ?, ?, ?, ?)`)
-      .run('1', 'prop_x', '{"evidence":[]}', 0, 0);
-    db.close();
-
-    const r = checkImportPreflight({ brainPaths: { dbPath } });
+    const paths = seedBrain([{ id: 1, ref: TOKEN, deletedAt: null }]);
+    const r = checkImportPreflight({ brainPaths: paths });
     expect(r.status).toBe('PASS');
     expect(r.detail).not.toContain('soft-deleted');
   });
+});
 ```
 
-If `checkImportPreflight`'s options shape or the `CheckResult` field names differ from what is written above (`brainPaths`, `status`, `detail`), read `ct_doctor.ts:777` and the existing preflight tests and match the real API — the assertions are what matter, not these exact call shapes.
+Note the first case seeds a *healthy* corpse (id 3, `TOKEN`, deleted) next to the mangled one — that is what makes the suffix read "2 … (1 with mangled …)" instead of "2 … (2 …)", pinning `deadRows` and `deadMangled` as genuinely different counts.
 
 - [ ] **Step 2: Run to verify failure**
 
@@ -1217,4 +1258,4 @@ The last row is the trap: an early draft of this plan used a JSON string as its
 mangled fixture throughout, which would have made almost every assertion wrong
 in a way that looks right. Use the constants, not ad-hoc literals.
 
-**Note for the executor:** Task 6's test call shape (`checkImportPreflight({ brainPaths: { dbPath } })`) is written from the Python analogue. Verify it against `ct_doctor.ts:777` and the existing preflight tests before assuming it compiles; the assertions are the contract, the call shape is not.
+**Note for the executor:** Task 6's fixture and call shape are verified against the source as of this rev — `test_ct_doctor.ts` has no preflight cases of its own (the Task 6 `describe` block builds them), and `BrainPaths` (`ct_env.ts:60`) requires `brainDir`, `dbPath`, and `configPath`, so the tests pass the full object. If the file has grown preflight cases by the time you execute, prefer following whatever pattern they settled on.
