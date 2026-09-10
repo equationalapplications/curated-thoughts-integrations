@@ -401,16 +401,23 @@ export function censusSourceRefs(dbPath: string): Census {
         // Table name is interpolated because SQLite cannot
         // parameterise identifiers; it comes from a repository-
         // controlled data file, never from user input.
+        // tokenIds come from llm_wiki_entries.id, which is INTEGER when
+        // the schema uses INTEGER PRIMARY KEY. Bind as strings so the
+        // IN match works against the TEXT entry_id column: better-sqlite3
+        // passes integer parameters through sqlite3_bind_int and SQLite
+        // does not coerce bind parameters across column affinity, so an
+        // unconverted batch would silently miss every evidence row on a
+        // brain with INTEGER ids.
         const placeholders = batch.map(() => '?').join(',');
         const q = `SELECT entry_id FROM ${EVIDENCE_TABLE} WHERE entry_id IN (${placeholders})`;
-        const evidenceRows = conn.prepare(q).all(...batch) as Array<{
+        const evidenceRows = conn.prepare(q).all(...batch.map(String)) as Array<{
           entry_id: unknown;
         }>;
         for (const r of evidenceRows) {
           have.add(r.entry_id);
         }
       }
-      missingEvidence = tokenIds.filter((t) => !have.has(t)).length;
+      missingEvidence = tokenIds.filter((t) => !have.has(String(t))).length;
       if (_columns(conn, EVIDENCE_TABLE).has('unanchored')) {
         const row = conn
           .prepare(
