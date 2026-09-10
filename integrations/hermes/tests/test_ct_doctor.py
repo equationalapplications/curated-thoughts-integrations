@@ -664,12 +664,19 @@ class ImportPreflightTests(DoctorTestCase):
     """The check that protects an imported graph before an agent trusts it."""
 
     TOKEN = "librarian-" + "ab12" * 8  # 32 hex, the normative §2.2 shape
+    # A token that lost its hex to the engine's setup() rewrite: classifies
+    # as "mangled". Verified — a JSON ref classifies as "at_risk" instead.
+    MANGLED = "librarian-ab12"
+    # Whitespace-padded: the engine would rewrite it, so "at_risk".
+    AT_RISK = "  " + TOKEN
 
     def _seed(self, rows, evidence_table=True, evidence_ids=None, unanchored=0,
-              with_source_type=True):
+              with_source_type=True, with_deleted_at=False):
         """Seed llm_wiki_entries (+ optional librarian_evidence).
 
-        rows: list of (entry_id, source_ref, source_type)
+        rows: list of (entry_id, source_ref[, source_type[, deleted_at]]).
+              deleted_at defaults to None (a live row). Callers passing 2- or
+              3-tuples keep working unchanged.
         evidence_ids: entry_ids that get a librarian_evidence row; None = all
                       token rows.
         """
@@ -678,14 +685,41 @@ class ImportPreflightTests(DoctorTestCase):
         self.make_brain()
         db = self.brain_db()
         conn = sqlite3.connect(db)
+
+        def _deleted_at(row):
+            return row[3] if len(row) > 3 else None
+
         try:
-            if with_source_type:
+            # Each branch projects rows to exactly the arity its own CREATE
+            # TABLE declares: positional VALUES placeholders make a mismatch a
+            # ProgrammingError, not a silent NULL.
+            if with_source_type and with_deleted_at:
+                conn.execute(
+                    "CREATE TABLE llm_wiki_entries "
+                    "(id TEXT, source_ref TEXT, source_type TEXT, "
+                    "deleted_at TEXT)"
+                )
+                conn.executemany(
+                    "INSERT INTO llm_wiki_entries VALUES (?,?,?,?)",
+                    [(r[0], r[1], r[2], _deleted_at(r)) for r in rows],
+                )
+            elif with_source_type:
                 conn.execute(
                     "CREATE TABLE llm_wiki_entries "
                     "(id TEXT, source_ref TEXT, source_type TEXT)"
                 )
                 conn.executemany(
-                    "INSERT INTO llm_wiki_entries VALUES (?,?,?)", rows
+                    "INSERT INTO llm_wiki_entries VALUES (?,?,?)",
+                    [(r[0], r[1], r[2]) for r in rows],
+                )
+            elif with_deleted_at:
+                conn.execute(
+                    "CREATE TABLE llm_wiki_entries "
+                    "(id TEXT, source_ref TEXT, deleted_at TEXT)"
+                )
+                conn.executemany(
+                    "INSERT INTO llm_wiki_entries VALUES (?,?,?)",
+                    [(r[0], r[1], _deleted_at(r)) for r in rows],
                 )
             else:
                 conn.execute("CREATE TABLE llm_wiki_entries (id TEXT, source_ref TEXT)")
@@ -717,6 +751,51 @@ class ImportPreflightTests(DoctorTestCase):
         return db
 
     # --- the pinned regression (PR #188 §2.5.1 census-scope test) ----------
+
+    # --- fixture capability: soft-deleted rows (2026-09-10 live-scope) -----
+
+    def test_seed_can_express_soft_deleted_rows(self):
+        """The fixture must be able to build a corpse, or nothing else can."""
+        import sqlite3
+
+        db = self._seed(
+            [
+                ("e1", self.TOKEN, "librarian_inferred"),
+                ("e2", '{"json":"dead"}', "librarian_inferred", "2026-01-01"),
+            ],
+            with_deleted_at=True,
+        )
+        conn = sqlite3.connect(db)
+        try:
+            rows = conn.execute(
+                "SELECT id, deleted_at FROM llm_wiki_entries ORDER BY id"
+            ).fetchall()
+        finally:
+            conn.close()
+        self.assertEqual(rows, [("e1", None), ("e2", "2026-01-01")])
+
+    def test_seed_supports_deleted_at_without_source_type(self):
+        """Legacy schema: deleted_at present, source_type absent."""
+        import sqlite3
+
+        db = self._seed(
+            [
+                ("e1", self.TOKEN, "librarian_inferred"),
+                ("e2", self.TOKEN, "librarian_inferred", "2026-01-01"),
+            ],
+            with_source_type=False,
+            with_deleted_at=True,
+        )
+        conn = sqlite3.connect(db)
+        try:
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(llm_wiki_entries)")}
+            rows = conn.execute(
+                "SELECT id, deleted_at FROM llm_wiki_entries ORDER BY id"
+            ).fetchall()
+        finally:
+            conn.close()
+        self.assertEqual(cols, {"id", "source_ref", "deleted_at"})
+        self.assertEqual(rows, [("e1", None), ("e2", "2026-01-01")])
 
     def test_document_sourced_255_char_path_is_never_damaged(self):
         """A legitimate long vault path normalizes to exactly 255 chars.
