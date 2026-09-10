@@ -276,13 +276,19 @@ jobs:
           git commit -m "docs(readme): sync version table after ${GITHUB_REF_NAME}"
           # One rebase-and-retry: two releases landing near-simultaneously
           # race on the push, and a single non-fast-forward rejection is
-          # not a reason to warn.
+          # not a reason to warn. The rebase is guarded too — a conflict
+          # under `set -e` would otherwise abort the step with no warning.
+          synced=0
           for attempt in 1 2; do
-            git rebase origin/main
-            if git push "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:main; then
-              echo "README synced on main"
-              exit 0
+            if git rebase origin/main && \
+               git push "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:main; then
+              synced=1
+              break
             fi
             git fetch --no-tags origin main
           done
+          if [ "$synced" -eq 1 ]; then
+            echo "README synced on main"
+            exit 0
+          fi
           echo "::warning::could not push README sync to main; run \`python tools/ct_ci.py readme\` locally and push"
