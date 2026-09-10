@@ -1,7 +1,7 @@
 # ct_doctor import-preflight — live-row scoping for the source_ref census
 
 **Date:** 2026-09-10
-**Status:** Draft (rev 5 — Opus 5 round-2 review findings addressed)
+**Status:** Implemented (2026-09-10 — Tasks 1-7 shipped; final whole-branch review clean)
 **Branch:** docs/spec-2026-09-10-doctor-preflight-live-scope
 **Priority:** Low (correctness polish; zero live-data impact)
 
