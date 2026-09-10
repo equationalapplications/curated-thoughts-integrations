@@ -328,15 +328,27 @@ def census_source_refs(db_path):
 
         cols = _columns(conn, ENTRIES_TABLE)
         scoped = "source_type" in cols
+        # Soft-deleted rows are retained forever (the engine has no purge), so
+        # a corpse's mangled source_ref would otherwise be counted as live
+        # damage and FAIL a healthy brain. The column is detected rather than
+        # assumed: it is not part of any schema contract this repo controls,
+        # and on a pre-soft-delete engine its absence must leave behavior
+        # byte-identical to before.
+        has_deleted_at = "deleted_at" in cols
         if scoped:
             sql = (
                 "SELECT id, source_ref FROM llm_wiki_entries WHERE source_type = ?"
             )
+            if has_deleted_at:
+                sql += " AND deleted_at IS NULL"
             rows = conn.execute(sql, (LIBRARIAN_SOURCE_TYPE,)).fetchall()
         else:
             # Older schema with no source_type column: we cannot scope, so we
             # report that plainly rather than risk the §2.5.1 false positive.
-            rows = conn.execute("SELECT id, source_ref FROM llm_wiki_entries").fetchall()
+            sql = "SELECT id, source_ref FROM llm_wiki_entries"
+            if has_deleted_at:
+                sql += " WHERE deleted_at IS NULL"
+            rows = conn.execute(sql).fetchall()
 
         counts = {}
         hints = {}
@@ -381,6 +393,42 @@ def census_source_refs(db_path):
                     f"SELECT COUNT(*) FROM {EVIDENCE_TABLE} WHERE unanchored = 1"
                 ).fetchone()[0]
 
+        # Corpse census: informational only, and deliberately isolated. Its
+        # own try/except means a failure here can never degrade the primary
+        # census to an error result; the counters are initialized before the
+        # try so the failure path cannot leave them unbound.
+        dead_rows = 0
+        dead_mangled = 0
+        if has_deleted_at:
+            try:
+                dead_sql = (
+                    "SELECT COUNT(*) FROM llm_wiki_entries "
+                    "WHERE deleted_at IS NOT NULL"
+                )
+                dead_ref_sql = (
+                    "SELECT source_ref FROM llm_wiki_entries "
+                    "WHERE deleted_at IS NOT NULL"
+                )
+                if scoped:
+                    dead_sql += " AND source_type = ?"
+                    dead_ref_sql += " AND source_type = ?"
+                    params = (LIBRARIAN_SOURCE_TYPE,)
+                else:
+                    params = ()
+                dead_rows = conn.execute(dead_sql, params).fetchone()[0]
+                # classify_source_ref is Python, so the corpses have to be
+                # read and classified here rather than counted in SQL. The
+                # predicate is "mangled" and only "mangled": at_risk, token
+                # and null corpses land in dead_rows but not here, so the
+                # number matches the operator-facing wording.
+                for (ref,) in conn.execute(dead_ref_sql, params):
+                    if ref is None:
+                        continue
+                    if classify_source_ref(ref) == "mangled":
+                        dead_mangled += 1
+            except sqlite3.Error:
+                pass  # informational only; never degrades the census
+
         return CensusResult(
             counts=counts,
             total=total,
@@ -391,6 +439,8 @@ def census_source_refs(db_path):
             missing_evidence_rows=missing_evidence,
             unanchored_rows=unanchored,
             evidence_table_present=evidence_present,
+            dead_rows=dead_rows,
+            dead_mangled=dead_mangled,
         )
     except sqlite3.Error as exc:
         return CensusResult(error=f"census query failed: {exc}", table_present=True)

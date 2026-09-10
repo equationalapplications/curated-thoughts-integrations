@@ -821,6 +821,146 @@ class ImportPreflightTests(DoctorTestCase):
         self.assertEqual(c.dead_rows, 0)
         self.assertEqual(c.dead_mangled, 0)
 
+    # --- live-row scoping (2026-09-10 spec) --------------------------------
+
+    def test_soft_deleted_mangled_rows_are_excluded_from_the_census(self):
+        """The reference bug: a corpse must not flip the check to FAIL."""
+        self._seed(
+            [
+                ("live1", self.TOKEN, "librarian_inferred"),
+                ("live2", self.TOKEN, "librarian_inferred"),
+                ("dead1", self.MANGLED, "librarian_inferred", "2026-01-01"),
+                ("dead2", self.MANGLED, "librarian_inferred", "2026-01-02"),
+                ("dead3", self.TOKEN, "librarian_inferred", "2026-01-03"),
+            ],
+            with_deleted_at=True,
+        )
+        census = ct_preflight.census_source_refs(self.brain_db())
+        self.assertIsNone(census.error)
+        self.assertEqual(census.total, 2)
+        self.assertEqual(census.damaged, 0)
+        self.assertEqual(census.counts.get("token"), 2)
+        self.assertEqual(census.dead_rows, 3)
+        # Only the two truncated-token corpses are mangled; the token
+        # corpse is healthy. (A JSON corpse would classify "at_risk".)
+        self.assertEqual(census.dead_mangled, 2)
+        r = ct_doctor.check_import_preflight()
+        self.assertEqual(r.status, ct_doctor.PASS, r.detail)
+
+    def test_dead_mangled_excludes_at_risk_corpses(self):
+        """The predicate is classify == 'mangled', not 'anything unhealthy'."""
+        self.assertEqual(
+            ct_preflight.classify_source_ref(self.AT_RISK), "at_risk"
+        )
+        self.assertEqual(
+            ct_preflight.classify_source_ref(self.MANGLED), "mangled"
+        )
+        self._seed(
+            [
+                ("live1", self.TOKEN, "librarian_inferred"),
+                ("dead1", self.AT_RISK, "librarian_inferred", "2026-01-01"),
+                ("dead2", self.MANGLED, "librarian_inferred", "2026-01-02"),
+            ],
+            with_deleted_at=True,
+        )
+        census = ct_preflight.census_source_refs(self.brain_db())
+        self.assertEqual(census.dead_rows, 2)
+        self.assertEqual(census.dead_mangled, 1)
+
+    def test_dead_row_counts_are_scoped_to_librarian_inferred(self):
+        """Corpses of other source_types are not this census's business."""
+        self._seed(
+            [
+                ("live1", self.TOKEN, "librarian_inferred"),
+                ("dead1", self.MANGLED, "librarian_inferred", "2026-01-01"),
+                ("deaddoc", '{"json":"doc"}', "document", "2026-01-01"),
+            ],
+            with_deleted_at=True,
+        )
+        census = ct_preflight.census_source_refs(self.brain_db())
+        self.assertEqual(census.dead_rows, 1)
+        self.assertEqual(census.dead_mangled, 1)
+
+    def test_census_unchanged_when_deleted_at_column_absent(self):
+        """Pre-soft-delete engines: the fix is a no-op, not a silent change."""
+        self._seed([
+            ("e1", self.TOKEN, "librarian_inferred"),
+            ("e2", self.MANGLED, "librarian_inferred"),
+        ])
+        census = ct_preflight.census_source_refs(self.brain_db())
+        self.assertEqual(census.total, 2)
+        self.assertEqual(census.damaged, 1)
+        self.assertEqual(census.dead_rows, 0)
+        self.assertEqual(census.dead_mangled, 0)
+
+    def test_deleted_at_scoping_applies_on_the_legacy_unscoped_path(self):
+        """deleted_at present, source_type absent: scope by deleted_at alone."""
+        self._seed(
+            [
+                ("live1", self.TOKEN, "librarian_inferred"),
+                ("dead1", self.MANGLED, "librarian_inferred", "2026-01-01"),
+            ],
+            with_source_type=False,
+            with_deleted_at=True,
+        )
+        census = ct_preflight.census_source_refs(self.brain_db())
+        self.assertFalse(census.scoped)
+        self.assertEqual(census.total, 1)
+        self.assertEqual(census.damaged, 0)
+        # Table-wide, because there is no source_type to scope by.
+        self.assertEqual(census.dead_rows, 1)
+        self.assertEqual(census.dead_mangled, 1)
+
+    def test_dead_row_query_failure_leaves_the_live_census_intact(self):
+        """Best-effort: an informational query must never degrade the census.
+
+        Force the corpse-loop query to raise the sqlite3 error the inner
+        handler catches, proving dead counts fall back to 0 without an error
+        result and without UnboundLocalError.
+
+        Implementation note: Python 3.13 made sqlite3.Connection immutable,
+        so the planned `mock.patch.object(sqlite3.Connection, "execute", ...)`
+        raises TypeError. We instead wrap the connection returned by
+        `_connect_readonly`, which is semantically equivalent.
+        """
+        import sqlite3
+        from unittest import mock
+
+        self._seed(
+            [
+                ("live1", self.TOKEN, "librarian_inferred"),
+                ("dead1", self.MANGLED, "librarian_inferred", "2026-01-01"),
+            ],
+            with_deleted_at=True,
+        )
+
+        class _Wrap:
+            def __init__(self, conn):
+                self._conn = conn
+
+            def __getattr__(self, name):
+                return getattr(self._conn, name)
+
+            def execute(self, sql, *args, **kwargs):
+                if "deleted_at IS NOT NULL" in sql:
+                    raise sqlite3.OperationalError("simulated mid-flight failure")
+                return self._conn.execute(sql, *args, **kwargs)
+
+            def close(self):
+                self._conn.close()
+
+        real_connect = ct_preflight._connect_readonly
+
+        def fake_connect(db_path):
+            return _Wrap(real_connect(db_path))
+
+        with mock.patch.object(ct_preflight, "_connect_readonly", fake_connect):
+            census = ct_preflight.census_source_refs(self.brain_db())
+        self.assertIsNone(census.error)
+        self.assertEqual(census.total, 1)
+        self.assertEqual(census.dead_rows, 0)
+        self.assertEqual(census.dead_mangled, 0)
+
     def test_document_sourced_255_char_path_is_never_damaged(self):
         """A legitimate long vault path normalizes to exactly 255 chars.
 
