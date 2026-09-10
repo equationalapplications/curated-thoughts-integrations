@@ -1003,6 +1003,65 @@ class ImportPreflightTests(DoctorTestCase):
         r = ct_doctor.check_import_preflight()
         self.assertIn("UNSCOPED", r.detail)
 
+    # --- corpse reporting in detail (2026-09-10 spec §3.4) -----------------
+
+    def test_pass_detail_reports_excluded_corpses(self):
+        self._seed(
+            [
+                ("live1", self.TOKEN, "librarian_inferred"),
+                ("dead1", self.MANGLED, "librarian_inferred", "2026-01-01"),
+                ("dead2", self.TOKEN, "librarian_inferred", "2026-01-02"),
+            ],
+            with_deleted_at=True,
+        )
+        r = ct_doctor.check_import_preflight()
+        self.assertEqual(r.status, ct_doctor.PASS, r.detail)
+        self.assertIn(
+            "; 2 soft-deleted rows excluded from this census "
+            "(1 with mangled source_refs)",
+            r.detail,
+        )
+
+    def test_pass_detail_omits_the_suffix_when_there_are_no_corpses(self):
+        self._seed(
+            [("live1", self.TOKEN, "librarian_inferred")],
+            with_deleted_at=True,
+        )
+        r = ct_doctor.check_import_preflight()
+        self.assertEqual(r.status, ct_doctor.PASS, r.detail)
+        self.assertNotIn("soft-deleted", r.detail)
+
+    def test_missing_evidence_warn_reports_excluded_corpses(self):
+        self._seed(
+            [
+                ("live1", self.TOKEN, "librarian_inferred"),
+                ("dead1", self.MANGLED, "librarian_inferred", "2026-01-01"),
+            ],
+            evidence_ids=[],  # evidence table exists but has no rows
+            with_deleted_at=True,
+        )
+        r = ct_doctor.check_import_preflight()
+        self.assertEqual(r.status, ct_doctor.WARN, r.detail)
+        self.assertIn(
+            "; 1 soft-deleted rows excluded from this census "
+            "(1 with mangled source_refs)",
+            r.detail,
+        )
+
+    def test_fail_detail_is_unchanged_by_corpse_reporting(self):
+        """FAIL strings carry recovery-hint text other work depends on."""
+        self._seed(
+            [
+                ("live1", self.MANGLED, "librarian_inferred"),
+                ("dead1", self.MANGLED, "librarian_inferred", "2026-01-01"),
+            ],
+            with_deleted_at=True,
+        )
+        r = ct_doctor.check_import_preflight()
+        self.assertEqual(r.status, ct_doctor.FAIL)
+        self.assertIn("1 of 1 librarian_inferred entries have a mangled", r.detail)
+        self.assertNotIn("soft-deleted", r.detail)
+
     # --- NULL refs (§2.5.1: legitimate, visibility only) ------------------
 
     def test_null_refs_counted_separately_and_never_damaged(self):

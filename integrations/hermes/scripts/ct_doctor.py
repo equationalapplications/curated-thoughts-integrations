@@ -669,6 +669,15 @@ def check_import_preflight(path=None, brain_paths=None):
     if not census.scoped:
         shape += "; UNSCOPED (no source_type column)"
     hints = "; ".join(f"{k} ×{v}" for k, v in sorted(census.recovery_hints.items()))
+    # Corpse accumulation is expected engine behavior (soft-delete with no
+    # purge), so it is reported, never warned about — a permanent WARN would
+    # be the same crying-wolf problem as the FAIL this change removes.
+    dead_note = (
+        f"; {census.dead_rows} soft-deleted rows excluded from this census "
+        f"({census.dead_mangled} with mangled source_refs)"
+        if census.dead_rows
+        else ""
+    )
 
     if damaged:
         return CheckResult(
@@ -726,7 +735,7 @@ def check_import_preflight(path=None, brain_paths=None):
             "import-preflight",
             WARN,
             f"{census.missing_evidence_rows} of {tokens} token entries have no "
-            f"{EVIDENCE_TABLE} row ({shape}; {engine_note})",
+            f"{EVIDENCE_TABLE} row ({shape}; {engine_note})" + dead_note,
             "Per PR #188 §2.3 these entries are treated as still-grounded and "
             "are never auto-purged, so nothing is being deleted — but their "
             "provenance cannot be displayed and retraction cannot resolve "
@@ -745,6 +754,7 @@ def check_import_preflight(path=None, brain_paths=None):
             f"; {census.unanchored_rows} unanchored evidence rows "
             "(expected under PR #188 §2.4 Phase 1 write-with-flag)"
         )
+    detail += dead_note
     return CheckResult("import-preflight", PASS, detail)
 
 
