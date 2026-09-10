@@ -797,6 +797,30 @@ class ImportPreflightTests(DoctorTestCase):
         self.assertEqual(cols, {"id", "source_ref", "deleted_at"})
         self.assertEqual(rows, [("e1", None), ("e2", "2026-01-01")])
 
+    def test_census_result_carries_dead_row_fields(self):
+        """__slots__ drift check: new fields exist and reach as_dict()."""
+        c = ct_preflight.CensusResult(dead_rows=505, dead_mangled=14)
+        self.assertEqual(c.dead_rows, 505)
+        self.assertEqual(c.dead_mangled, 14)
+        d = c.as_dict()
+        self.assertEqual(d["dead_rows"], 505)
+        self.assertEqual(d["dead_mangled"], 14)
+        # Additive only: every pre-existing key survives, unrenamed.
+        self.assertEqual(
+            set(d) - {"dead_rows", "dead_mangled"},
+            {
+                "table_present", "evidence_table_present",
+                "scoped_to_librarian_inferred", "total", "counts",
+                "null_ref_count", "missing_evidence_rows", "unanchored_rows",
+                "recovery_hints", "error",
+            },
+        )
+
+    def test_census_result_dead_fields_default_to_zero(self):
+        c = ct_preflight.CensusResult()
+        self.assertEqual(c.dead_rows, 0)
+        self.assertEqual(c.dead_mangled, 0)
+
     def test_document_sourced_255_char_path_is_never_damaged(self):
         """A legitimate long vault path normalizes to exactly 255 chars.
 

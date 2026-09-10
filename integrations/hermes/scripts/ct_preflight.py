@@ -212,6 +212,8 @@ class CensusResult:
         "missing_evidence_rows",
         "unanchored_rows",
         "evidence_table_present",
+        "dead_rows",
+        "dead_mangled",
     )
 
     def __init__(
@@ -226,6 +228,8 @@ class CensusResult:
         missing_evidence_rows=0,
         unanchored_rows=0,
         evidence_table_present=None,
+        dead_rows=0,
+        dead_mangled=0,
     ):
         self.counts = counts or {}
         self.total = total
@@ -241,6 +245,15 @@ class CensusResult:
         self.missing_evidence_rows = missing_evidence_rows
         self.unanchored_rows = unanchored_rows
         self.evidence_table_present = evidence_table_present
+        # Soft-deleted rows, excluded from every count above. Informational
+        # only: corpse accumulation is expected engine behavior (soft-delete
+        # with no purge) and never affects a verdict.
+        self.dead_rows = dead_rows
+        # Of those corpses, how many classify as "mangled" — and only
+        # "mangled". at_risk/token/null corpses are counted in dead_rows but
+        # not here, so the number matches the "with mangled source_refs"
+        # wording of the operator-facing suffix.
+        self.dead_mangled = dead_mangled
 
     @property
     def damaged(self):
@@ -271,6 +284,8 @@ class CensusResult:
             "null_ref_count": self.null_ref_count,
             "missing_evidence_rows": self.missing_evidence_rows,
             "unanchored_rows": self.unanchored_rows,
+            "dead_rows": self.dead_rows,
+            "dead_mangled": self.dead_mangled,
             "recovery_hints": dict(self.recovery_hints),
             "error": self.error,
         }
