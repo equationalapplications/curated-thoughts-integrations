@@ -386,15 +386,16 @@ def census_source_refs(db_path):
                     + ",".join("?" * len(batch))
                     + ")"
                 )
-                # token_ids come from llm_wiki_entries.id, which is INTEGER
-                # when the schema uses INTEGER PRIMARY KEY. Bind as strings so
-                # the IN match works against the TEXT entry_id column: sqlite3
-                # binds a Python int as INTEGER and SQLite does not coerce
-                # bind parameters across column affinity, so an unconverted
-                # batch would silently miss every evidence row on a brain with
-                # INTEGER ids. Mirrors the TypeScript port.
+                # Neither side's affinity is a contract this repo controls:
+                # llm_wiki_entries.id is INTEGER under an INTEGER PRIMARY KEY,
+                # and librarian_evidence.entry_id has been seen both TEXT and
+                # INTEGER. SQLite does not coerce bind parameters across column
+                # affinity, so comparing raw values misses every row whenever
+                # the two disagree -- in either direction. Normalising both the
+                # bind and the values read back to str makes the match
+                # affinity-independent. Mirrors the TypeScript port.
                 have.update(
-                    r[0] for r in conn.execute(q, [str(x) for x in batch])
+                    str(r[0]) for r in conn.execute(q, [str(x) for x in batch])
                 )
             missing_evidence = sum(1 for t in token_ids if str(t) not in have)
             if "unanchored" in _columns(conn, EVIDENCE_TABLE):

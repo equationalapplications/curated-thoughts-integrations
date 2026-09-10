@@ -393,7 +393,7 @@ export function censusSourceRefs(dbPath: string): Census {
     let missingEvidence = 0;
     let unanchored = 0;
     if (evidencePresent && tokenIds.length > 0) {
-      const have = new Set<unknown>();
+      const have = new Set<string>();
       // Chunk the IN list: SQLite's default variable limit is 999.
       const CHUNK = 500;
       for (let i = 0; i < tokenIds.length; i += CHUNK) {
@@ -414,7 +414,11 @@ export function censusSourceRefs(dbPath: string): Census {
           entry_id: unknown;
         }>;
         for (const r of evidenceRows) {
-          have.add(r.entry_id);
+          // Normalised on the way in as well as on the way out: entry_id has
+          // been seen with both TEXT and INTEGER affinity, and SQLite hands
+          // back whatever the column stores, so an unconverted value would
+          // miss the String(t) lookup below on an INTEGER-affinity column.
+          have.add(String(r.entry_id));
         }
       }
       missingEvidence = tokenIds.filter((t) => !have.has(String(t))).length;

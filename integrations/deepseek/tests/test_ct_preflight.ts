@@ -214,6 +214,44 @@ describe('censusSourceRefs', () => {
       spy.mockRestore();
     }
   });
+
+  // Neither side's column affinity is a contract this repo controls, so the
+  // entry_id match is exercised against both. Binding as strings fixes the
+  // TEXT column; SQLite then applies an INTEGER column's own affinity and
+  // hands the value back as a number, which the String(t) lookup would miss
+  // unless the values read back are normalised too.
+  for (const affinity of ['TEXT', 'INTEGER'] as const) {
+    it(`matches evidence entry_id with ${affinity} affinity`, () => {
+      const p = join(tmpDir, `evidence-${affinity}.db`);
+      const db = new Database(p);
+      db.exec(
+        `CREATE TABLE llm_wiki_entries (
+           id INTEGER PRIMARY KEY, source_ref TEXT, source_type TEXT
+         );
+         CREATE TABLE librarian_evidence (
+           entry_id ${affinity} PRIMARY KEY, proposal_id TEXT,
+           evidence_json TEXT, unanchored INTEGER NOT NULL DEFAULT 0,
+           created_at INTEGER
+         );`,
+      );
+      db.prepare(
+        `INSERT INTO llm_wiki_entries (id, source_ref, source_type)
+         VALUES (?, ?, ?)`,
+      ).run(1, TOKEN, 'librarian_inferred');
+      db.prepare(`INSERT INTO librarian_evidence VALUES (?, ?, ?, ?, ?)`).run(
+        affinity === 'TEXT' ? '1' : 1,
+        'prop_x',
+        '{"evidence":[]}',
+        0,
+        0,
+      );
+      db.close();
+      const c = censusSourceRefs(p);
+      expect(c.error).toBeNull();
+      expect(c.tokens).toBe(1);
+      expect(c.missingEvidenceRows).toBe(0);
+    });
+  }
 });
 
 describe('detectEngineVersion', () => {

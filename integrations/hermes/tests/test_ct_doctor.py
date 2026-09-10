@@ -814,6 +814,46 @@ class ImportPreflightTests(DoctorTestCase):
         self.assertIsNone(census.error)
         self.assertEqual(census.missing_evidence_rows, 0)
 
+    def test_evidence_lookup_matches_integer_affinity_entry_id_column(self):
+        """The match must hold when *entry_id* is the INTEGER side.
+
+        Binding as str fixes the TEXT-column case but SQLite then applies the
+        column's own INTEGER affinity and hands the value back as an int, so a
+        raw `have` set would miss the str lookup in the mirror-image way.
+        Both sides are normalised, so neither affinity can break the match.
+        """
+        import sqlite3
+
+        self.make_brain()
+        db = self.brain_db()
+        conn = sqlite3.connect(db)
+        try:
+            conn.execute(
+                "CREATE TABLE llm_wiki_entries "
+                "(id INTEGER PRIMARY KEY, source_ref TEXT, source_type TEXT)"
+            )
+            conn.execute(
+                "INSERT INTO llm_wiki_entries VALUES (?,?,?)",
+                (1, self.TOKEN, "librarian_inferred"),
+            )
+            conn.execute(
+                "CREATE TABLE librarian_evidence "
+                "(entry_id INTEGER PRIMARY KEY, proposal_id TEXT, "
+                "evidence_json TEXT, unanchored INTEGER NOT NULL DEFAULT 0, "
+                "created_at INTEGER)"
+            )
+            conn.execute(
+                "INSERT INTO librarian_evidence VALUES (?,?,?,?,?)",
+                (1, "prop_x", '{"evidence":[]}', 0, 0),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        census = ct_preflight.census_source_refs(db)
+        self.assertIsNone(census.error)
+        self.assertEqual(census.missing_evidence_rows, 0)
+
     def test_seed_supports_deleted_at_without_source_type(self):
         """Legacy schema: deleted_at present, source_type absent."""
         import sqlite3
