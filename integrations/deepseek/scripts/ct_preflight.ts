@@ -113,6 +113,15 @@ export interface Census {
   error: string | null;
   counts: Record<string, number>;
   nullRefCount: number;
+  // Soft-deleted rows, excluded from every count above. Informational
+  // only: corpse accumulation is expected engine behavior (soft-delete
+  // with no purge) and never affects a verdict.
+  deadRows: number;
+  // Of those corpses, how many classify as "mangled" — and only
+  // "mangled". at_risk/token/null corpses are counted in deadRows but
+  // not here, so the number matches the "with mangled source_refs"
+  // wording of the operator-facing suffix.
+  deadMangled: number;
 }
 
 interface CensusInit {
@@ -126,6 +135,8 @@ interface CensusInit {
   missingEvidenceRows?: number;
   unanchoredRows?: number;
   evidenceTablePresent?: boolean | null;
+  deadRows?: number;
+  deadMangled?: number;
 }
 
 function makeCensus(init: CensusInit = {}): Census {
@@ -143,6 +154,8 @@ function makeCensus(init: CensusInit = {}): Census {
     missingEvidenceRows: init.missingEvidenceRows ?? 0,
     unanchoredRows: init.unanchoredRows ?? 0,
     evidenceTablePresent: init.evidenceTablePresent ?? null,
+    deadRows: init.deadRows ?? 0,
+    deadMangled: init.deadMangled ?? 0,
     shape() {
       const parts = Object.keys(counts)
         .sort()
@@ -327,19 +340,28 @@ export function censusSourceRefs(dbPath: string): Census {
 
     const cols = _columns(conn, ENTRIES_TABLE);
     const scoped = cols.has('source_type');
+    // Soft-deleted rows are retained forever (the engine has no purge), so a
+    // corpse's mangled source_ref would otherwise be counted as live damage
+    // and FAIL a healthy brain. Detected, never assumed: on a pre-soft-delete
+    // engine the column's absence must leave behavior byte-identical.
+    const hasDeletedAt = cols.has('deleted_at');
     let rows: Array<{ id: unknown; source_ref: unknown }>;
     if (scoped) {
-      rows = conn
-        .prepare(
-          'SELECT id, source_ref FROM llm_wiki_entries WHERE source_type = ?',
-        )
-        .all(LIBRARIAN_SOURCE_TYPE) as Array<{ id: unknown; source_ref: unknown }>;
+      let sql = 'SELECT id, source_ref FROM llm_wiki_entries WHERE source_type = ?';
+      if (hasDeletedAt) sql += ' AND deleted_at IS NULL';
+      rows = conn.prepare(sql).all(LIBRARIAN_SOURCE_TYPE) as Array<{
+        id: unknown;
+        source_ref: unknown;
+      }>;
     } else {
       // Older schema with no source_type column: we cannot scope, so we
       // report that plainly rather than risk the §2.5.1 false positive.
-      rows = conn
-        .prepare('SELECT id, source_ref FROM llm_wiki_entries')
-        .all() as Array<{ id: unknown; source_ref: unknown }>;
+      let sql = 'SELECT id, source_ref FROM llm_wiki_entries';
+      if (hasDeletedAt) sql += ' WHERE deleted_at IS NULL';
+      rows = conn.prepare(sql).all() as Array<{
+        id: unknown;
+        source_ref: unknown;
+      }>;
     }
 
     const counts: Record<string, number> = {};
@@ -399,6 +421,43 @@ export function censusSourceRefs(dbPath: string): Census {
       }
     }
 
+    // Corpse census: informational only, and deliberately isolated. Its own
+    // try/catch means a failure here can never degrade the primary census to
+    // an error result. Declared with `let` outside the try so both are in
+    // scope at the return regardless of which path ran.
+    let deadRows = 0;
+    let deadMangled = 0;
+    if (hasDeletedAt) {
+      try {
+        let deadSql =
+          'SELECT COUNT(*) AS n FROM llm_wiki_entries WHERE deleted_at IS NOT NULL';
+        let deadRefSql =
+          'SELECT source_ref FROM llm_wiki_entries WHERE deleted_at IS NOT NULL';
+        if (scoped) {
+          deadSql += ' AND source_type = ?';
+          deadRefSql += ' AND source_type = ?';
+        }
+        const params = scoped ? [LIBRARIAN_SOURCE_TYPE] : [];
+        const countRow = conn.prepare(deadSql).get(...params) as
+          | { n: number }
+          | undefined;
+        deadRows = countRow?.n ?? 0;
+        // classifySourceRef is TypeScript, so corpses have to be read and
+        // classified here rather than counted in SQL. The predicate is
+        // 'mangled' and only 'mangled': at_risk, token and null corpses land
+        // in deadRows but not here, matching the operator-facing wording.
+        const deadRefs = conn.prepare(deadRefSql).all(...params) as Array<{
+          source_ref: unknown;
+        }>;
+        for (const row of deadRefs) {
+          if (row.source_ref === null) continue;
+          if (classifySourceRef(row.source_ref) === 'mangled') deadMangled += 1;
+        }
+      } catch {
+        // informational only; never degrades the census
+      }
+    }
+
     return makeCensus({
       counts,
       total,
@@ -409,6 +468,8 @@ export function censusSourceRefs(dbPath: string): Census {
       missingEvidenceRows: missingEvidence,
       unanchoredRows: unanchored,
       evidenceTablePresent: evidencePresent,
+      deadRows,
+      deadMangled,
     });
   } catch (e) {
     return makeCensus({

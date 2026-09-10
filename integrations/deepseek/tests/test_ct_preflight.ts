@@ -9,6 +9,12 @@ import { censusSourceRefs, detectEngineVersion } from '../scripts/ct_preflight.j
 // (PR #188 §2.2). The plan's literal 'ct_token:abc123' is not a valid token
 // under the normative regex; using a real token keeps the assertion true.
 const TOKEN = 'librarian-' + 'ab12cd34ef5678901234abcd56789012';
+// A token that lost its hex to the engine's setup() rewrite: 'mangled'. A
+// JSON ref would classify 'at_risk' (verified — see classifySourceRef), so
+// the truncated-token shape is the right post-rewrite corpse fixture.
+const MANGLED = 'librarian-ab12';
+// Whitespace-padded: the engine would rewrite it, so 'at_risk'.
+const AT_RISK = `  ${TOKEN}`;
 
 let tmpDir: string;
 let dbPath: string;
@@ -17,11 +23,14 @@ beforeEach(() => {
   tmpDir = mkdtempSync(join(tmpdir(), 'ct-preflight-'));
   dbPath = join(tmpDir, 'brain.db');
   const db = new Database(dbPath);
+  // shared schema includes deleted_at so existing rows default to NULL
+  // (live); 2026-09-10 live-scope cases insert against it directly.
   db.exec(`
     CREATE TABLE llm_wiki_entries (
       id INTEGER PRIMARY KEY,
       source_ref TEXT,
-      source_type TEXT
+      source_type TEXT,
+      deleted_at TEXT
     );
   `);
   db.close();
@@ -76,6 +85,100 @@ describe('censusSourceRefs', () => {
     // Python source uses 'brain database not found' (no '.db' substring);
     // match that message rather than the plan's /brain\.db/ literal.
     expect(c.error).toMatch(/brain/i);
+  });
+
+  // --- live-row scoping (2026-09-10 spec) --------------------------------
+
+  it('excludes soft-deleted rows and counts them separately', () => {
+    const db = new Database(dbPath);
+    const ins = db.prepare(
+      `INSERT INTO llm_wiki_entries (source_ref, source_type, deleted_at)
+       VALUES (?, ?, ?)`,
+    );
+    ins.run(TOKEN, 'librarian_inferred', null);
+    ins.run(TOKEN, 'librarian_inferred', null);
+    ins.run(MANGLED, 'librarian_inferred', '2026-01-01');
+    ins.run(MANGLED, 'librarian_inferred', '2026-01-02');
+    ins.run(TOKEN, 'librarian_inferred', '2026-01-03');
+    db.close();
+    const c = censusSourceRefs(dbPath);
+    expect(c.error).toBeNull();
+    expect(c.total).toBe(2);
+    expect(c.damaged).toBe(0);
+    expect(c.deadRows).toBe(3);
+    // The token corpse is healthy; only the two truncated ones are mangled.
+    expect(c.deadMangled).toBe(2);
+  });
+
+  it('counts dead rows scoped to librarian_inferred', () => {
+    const db = new Database(dbPath);
+    const ins = db.prepare(
+      `INSERT INTO llm_wiki_entries (source_ref, source_type, deleted_at)
+       VALUES (?, ?, ?)`,
+    );
+    ins.run(TOKEN, 'librarian_inferred', null);
+    ins.run(MANGLED, 'librarian_inferred', '2026-01-01');
+    ins.run('{"json":"doc"}', 'document', '2026-01-01');
+    db.close();
+    const c = censusSourceRefs(dbPath);
+    expect(c.deadRows).toBe(1);
+    expect(c.deadMangled).toBe(1);
+  });
+
+  it('excludes at_risk corpses from deadMangled', () => {
+    const db = new Database(dbPath);
+    const ins = db.prepare(
+      `INSERT INTO llm_wiki_entries (source_ref, source_type, deleted_at)
+       VALUES (?, ?, ?)`,
+    );
+    ins.run(TOKEN, 'librarian_inferred', null);
+    ins.run(AT_RISK, 'librarian_inferred', '2026-01-01');
+    ins.run(MANGLED, 'librarian_inferred', '2026-01-02'); // mangled
+    db.close();
+    const c = censusSourceRefs(dbPath);
+    expect(c.deadRows).toBe(2);
+    expect(c.deadMangled).toBe(1);
+  });
+
+  it('is a no-op on a schema with no deleted_at column', () => {
+    const legacyPath = join(tmpDir, 'legacy.db');
+    const db = new Database(legacyPath);
+    db.exec(
+      `CREATE TABLE llm_wiki_entries (
+         id INTEGER PRIMARY KEY, source_ref TEXT, source_type TEXT
+       );`,
+    );
+    db.prepare(
+      `INSERT INTO llm_wiki_entries (source_ref, source_type) VALUES (?, ?)`,
+    ).run(MANGLED, 'librarian_inferred');
+    db.close();
+    const c = censusSourceRefs(legacyPath);
+    expect(c.total).toBe(1);
+    expect(c.damaged).toBe(1);
+    expect(c.deadRows).toBe(0);
+    expect(c.deadMangled).toBe(0);
+  });
+
+  it('scopes by deleted_at even when source_type is absent', () => {
+    const legacyPath = join(tmpDir, 'no-source-type.db');
+    const db = new Database(legacyPath);
+    db.exec(
+      `CREATE TABLE llm_wiki_entries (
+         id INTEGER PRIMARY KEY, source_ref TEXT, deleted_at TEXT
+       );`,
+    );
+    const ins = db.prepare(
+      `INSERT INTO llm_wiki_entries (source_ref, deleted_at) VALUES (?, ?)`,
+    );
+    ins.run(TOKEN, null);
+    ins.run(MANGLED, '2026-01-01');
+    db.close();
+    const c = censusSourceRefs(legacyPath);
+    expect(c.scoped).toBe(false);
+    expect(c.total).toBe(1);
+    expect(c.damaged).toBe(0);
+    expect(c.deadRows).toBe(1);
+    expect(c.deadMangled).toBe(1);
   });
 });
 
