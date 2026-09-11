@@ -55,3 +55,22 @@ heading format below is load-bearing: `## <version> — <date>`.
   Windows, as in `integrations/hermes/`, because CI's Windows runner has no
   bash. `CT_INSTALL_EDIT=1` is exercised only against a fake `claude` shim on
   a temp PATH that logs its argv, never the real binary.
+- Make the doctor tests hermetic on all three OSes, so a developer with
+  Curated Thoughts installed gets a green suite (the upstream issue #14 class
+  of bug). Two leaks, one per platform family. On Windows the mock sidecar was
+  an extensionless `#!` script that `shutil.which` cannot resolve, so
+  `ct_env.find_sidecar()` fell through to the bundled candidates, found the
+  real `curated-thoughts-mcp.exe` and spawned it against the fixture brain —
+  the V18 repair migration then wrote `.brain/repair-export-186/` into the
+  fixture home and `FullRunTests.test_doctor_is_read_only` caught it. The
+  fixture now writes a `curated-thoughts-mcp.bat` shim next to the Python
+  mock, which `shutil.which` resolves via PATHEXT and Windows can execute. On
+  POSIX `which` always resolved the shebang mock, but a developer with the
+  sidecar in `/usr/bin` still had it on the PATH tail, so `DoctorTestCase`
+  now also scrubs every PATH entry that holds a real `curated-thoughts-mcp`
+  and patches the *process* PATH, not just the env dict passed to
+  `run_checks` — discovery calls `find_sidecar()` with no env and reads
+  `os.environ` directly. `tests/test_ct_doctor.py` goes from
+  `FAILED (failures=5, skipped=13)` to `OK (skipped=2)`; only the two
+  POSIX-absolute-candidate-path assertions stay skipped on Windows. No
+  shipped script changed.

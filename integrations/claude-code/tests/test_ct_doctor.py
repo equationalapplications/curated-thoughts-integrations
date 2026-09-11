@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -37,20 +38,38 @@ import ct_status  # noqa: E402
 
 IS_WINDOWS = sys.platform == "win32"
 
-# The mock sidecar fixture is a shebang script. POSIX execs it directly via
-# the `#!` line; Windows CreateProcess cannot (WinError 193, CI run
-# 34066939677) because it has no PATHEXT association. The *shipped* code is
-# platform-correct — on Windows ct_env.sidecar_candidates() targets
-# curated-thoughts-mcp.exe, which shutil.which resolves — so these tests are
-# skipped rather than the fixture rewritten.
-MOCK_SPAWN_SKIP = (
-    "POSIX-only: mock sidecar is a shebang script, only directly "
-    "executable on POSIX (WinError 193 on Windows)"
-)
 POSIX_PATHS_SKIP = (
     "POSIX-only: asserts POSIX-absolute candidate paths (/usr/bin, .app "
     "bundles); pathlib renders those drive-relative on Windows"
 )
+
+
+def _scrub_path(raw):
+    """Drop PATH entries that hold a real curated-thoughts-mcp.
+
+    A developer with Curated Thoughts installed has the real sidecar on
+    PATH. If a test leaves it reachable, the doctor spawns it against the
+    fixture brain, the V18 repair migration runs, and the fixture home
+    grows a .brain/repair-export-186/ directory — the upstream issue #14
+    class of bug, which test_doctor_is_read_only catches. Scrubbing is
+    done once, at import, against the inherited PATH.
+    """
+    keep = []
+    for entry in (raw or "").split(os.pathsep):
+        if not entry:
+            continue
+        try:
+            if shutil.which(ct_env.SIDECAR_NAME, path=entry):
+                continue
+        except OSError:
+            continue
+        keep.append(entry)
+    return os.pathsep.join(keep)
+
+
+# PATH with every real-sidecar directory removed. setUp prepends the fake
+# bin dir to this, so discovery can only ever find the mock.
+SCRUBBED_PATH = _scrub_path(os.environ.get("PATH", ""))
 
 
 MOCK_SIDECAR = r'''#!/usr/bin/env python3
@@ -59,7 +78,8 @@ MOCK_SIDECAR = r'''#!/usr/bin/env python3
 Env knobs:
   MOCK_TOOLS        comma-separated tool names to advertise (default: 14)
   MOCK_EXIT_START   if set, exit with this code before answering
-  MOCK_HANG         if set, never respond (sleep forever)
+  MOCK_HANG         if set, stop answering: close the stdio handles,
+                    then idle well past any doctor timeout
 """
 import json, os, sys, time
 
@@ -85,7 +105,26 @@ def main():
                 "serverInfo": {"name": "rmcp-mock", "version": "2.5.0"}}}), flush=True)
         elif msg.get("method") == "tools/list":
             if hang:
-                time.sleep(3600)
+                # Close the stdio handles before idling. On Windows the
+                # PATH shim is a .bat, so cmd.exe is the doctor's direct
+                # child and this process is a grandchild: killing the
+                # child on timeout leaves this one holding the inherited
+                # pipe, and subprocess.run would block reading it to EOF
+                # forever. Closing here gives it that EOF. The bounded
+                # idle keeps no orphan around after the suite.
+                for fd in (1, 2):
+                    try:
+                        os.close(fd)
+                    except OSError:
+                        pass
+                # Step off the caller's cwd too: an idling grandchild
+                # holds a handle on it, and the caller's
+                # TemporaryDirectory cleanup would fail with WinError 32.
+                try:
+                    os.chdir(os.path.abspath(os.sep))
+                except OSError:
+                    pass
+                time.sleep(30)
             print(json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": {
                 "tools": [{"name": t, "description": "mock", "inputSchema": {}} for t in tools]}}),
                 flush=True)
@@ -129,12 +168,39 @@ class DoctorTestCase(unittest.TestCase):
         self.fake_home = Path(self._tmp.name)
         self.bin_dir = self.fake_home / "bin"
         self.bin_dir.mkdir()
-        self.mock_path = self.bin_dir / "curated-thoughts-mcp"
-        self.mock_path.write_text(MOCK_SIDECAR)
-        self.mock_path.chmod(
-            self.mock_path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH
-        )
+        self.mock_py = self.bin_dir / "mock_sidecar.py"
+        self.mock_py.write_text(MOCK_SIDECAR)
+        if IS_WINDOWS:
+            # Windows CreateProcess cannot exec an extensionless `#!` script
+            # (WinError 193, CI run 34066939677) and shutil.which will not
+            # resolve one either — no PATHEXT association. A .bat shim is
+            # both: PATHEXT-resolvable and directly executable.
+            #
+            # sys.executable is baked in absolute on purpose: the discovery
+            # tests call find_sidecar with env={"PATH": bin_dir} and nothing
+            # else, so a bare `python` inside the shim would not resolve.
+            # `@echo off` matters just as much — without it cmd echoes the
+            # command line onto stdout, into the JSON-RPC stream the
+            # doctor's parser is reading.
+            self.mock_path = self.bin_dir / "curated-thoughts-mcp.bat"
+            self.mock_path.write_text(
+                "@echo off\r\n"
+                '"{}" "%~dp0mock_sidecar.py" %*\r\n'.format(sys.executable)
+            )
+        else:
+            self.mock_path = self.bin_dir / "curated-thoughts-mcp"
+            self.mock_path.write_text(MOCK_SIDECAR)
+            self.mock_path.chmod(
+                self.mock_path.stat().st_mode
+                | stat.S_IXUSR
+                | stat.S_IXGRP
+                | stat.S_IXOTH
+            )
         self._env_patches = {}
+        # Discovery is not env-injectable: ct_doctor.run_checks() calls
+        # find_sidecar() with no env, so it reads the *process* PATH. Patch
+        # it, so the mock wins in-process and in every child alike.
+        self.patch_env("PATH", str(self.bin_dir) + os.pathsep + SCRUBBED_PATH)
         self.patch_env("HOME", str(self.fake_home))
         # Path.home() reads USERPROFILE on Windows and HOME elsewhere, so
         # both must point at the fake home or CLAUDE_SETTINGS would
@@ -256,16 +322,15 @@ class DoctorTestCase(unittest.TestCase):
     def results_by_name(self, env=None):
         results = ct_doctor.run_checks(
             timeout=3.0,
-            env={"PATH": str(self.bin_dir) + os.pathsep + os.environ["PATH"], **(env or {})},
+            env={"PATH": os.environ["PATH"], **(env or {})},
         )
         return {r.name: r for r in results}
 
     def with_path(self):
-        """Return env dict putting the mock first on PATH."""
-        return {"PATH": str(self.bin_dir) + os.pathsep + os.environ["PATH"]}
+        """Return env dict carrying the patched PATH (mock first, scrubbed)."""
+        return {"PATH": os.environ["PATH"]}
 
 
-@unittest.skipIf(IS_WINDOWS, MOCK_SPAWN_SKIP)
 class MockSidecarRpcTests(DoctorTestCase):
     """The mock itself speaks protocol correctly (guards the fixture)."""
 
@@ -285,7 +350,6 @@ class MockSidecarRpcTests(DoctorTestCase):
 
 
 class ToolCountTieringTests(DoctorTestCase):
-    @unittest.skipIf(IS_WINDOWS, MOCK_SPAWN_SKIP)
     def test_full_tier_14_tools_pass(self):
         r = ct_doctor.check_sidecar_reachable(
             str(self.mock_path), timeout=5, env=self.with_path()
@@ -293,7 +357,6 @@ class ToolCountTieringTests(DoctorTestCase):
         self.assertEqual(r.status, ct_doctor.PASS)
         self.assertIn("14", r.detail)
 
-    @unittest.skipIf(IS_WINDOWS, MOCK_SPAWN_SKIP)
     def test_read_only_tier_8_tools_warns(self):
         r = ct_doctor.check_sidecar_reachable(
             str(self.mock_path), timeout=5, env={**self.with_path(), "MOCK_TOOLS": TIER8}
@@ -302,7 +365,6 @@ class ToolCountTieringTests(DoctorTestCase):
         self.assertIn("dormant", r.detail)
         self.assertIn(">=2.5", r.hint)  # actionable: upgrade hint
 
-    @unittest.skipIf(IS_WINDOWS, MOCK_SPAWN_SKIP)
     def test_below_tier_warns(self):
         r = ct_doctor.check_sidecar_reachable(
             str(self.mock_path),
@@ -323,7 +385,6 @@ class ToolCountTieringTests(DoctorTestCase):
         self.assertEqual(r.status, ct_doctor.FAIL)
         self.assertIn("0 tools", r.detail)
 
-    @unittest.skipIf(IS_WINDOWS, MOCK_SPAWN_SKIP)
     def test_unreachable_sidecar_fails(self):
         r = ct_doctor.check_sidecar_reachable(
             str(self.mock_path),
@@ -448,12 +509,6 @@ class VaultTests(DoctorTestCase):
         self.assertEqual(r.status, ct_doctor.FAIL)
         self.assertIn("imported from another", r.hint)
 
-    @unittest.skipIf(
-        IS_WINDOWS,
-        "POSIX-only: '~' expansion follows HOME, which the fake home patches; "
-        "on Windows os.path.expanduser uses USERPROFILE and ignores HOME "
-        "(run 34066939677)",
-    )
     def test_tilde_in_vault_path_is_expanded(self):
         brain = self.fake_home / ".brain"
         brain.mkdir()
@@ -650,16 +705,13 @@ class PlatformDiscoveryTests(DoctorTestCase):
         self.assertTrue(any(c.startswith("/usr/bin") for c in cands), cands)
         self.assertTrue(any(".local/bin" in c for c in cands), cands)
 
-    @unittest.skipIf(
-        IS_WINDOWS,
-        "POSIX-only: PATH lookup of an extensionless shebang script is a "
-        "POSIX mechanism; Windows shutil.which needs a PATHEXT-suffixed file",
-    )
     def test_path_lookup_wins_over_bundled(self):
         path, _resolved, source = ct_env.find_sidecar(
             env={"PATH": str(self.bin_dir)}
         )
-        self.assertEqual(path, str(self.mock_path))
+        # normcase, because on Windows shutil.which returns the name with
+        # the PATHEXT entry's own casing (".BAT"), not the file's.
+        self.assertEqual(os.path.normcase(path), os.path.normcase(str(self.mock_path)))
         self.assertEqual(source, "PATH")
 
     def test_no_binary_warns(self):
@@ -1448,7 +1500,7 @@ class FullRunTests(DoctorTestCase):
             capture_output=True,
             text=True,
             timeout=60,
-            env={**os.environ, "PATH": str(self.bin_dir) + os.pathsep + os.environ["PATH"]},
+            env=os.environ.copy(),  # PATH already patched in setUp
         )
         data = json.loads(out.stdout)
         self.assertIn("exit_code", data)
@@ -1555,7 +1607,7 @@ class CheckJsonCliTests(DoctorTestCase):
             capture_output=True,
             text=True,
             timeout=60,
-            env={**os.environ, "PATH": str(self.bin_dir) + os.pathsep + os.environ["PATH"]},
+            env=os.environ.copy(),  # PATH already patched in setUp
         )
         data = json.loads(out.stdout)
         self.assertIn("exit_code", data)
@@ -1647,7 +1699,6 @@ class VersionCompatTests(DoctorTestCase):
 class StatusSnapshotTests(DoctorTestCase):
     """The session-start snapshot: fast, read-only, fail-open."""
 
-    @unittest.skipIf(IS_WINDOWS, MOCK_SPAWN_SKIP)
     def test_healthy_brain_reports_ok(self):
         self.make_brain()
         snap = ct_status.snapshot(env={**os.environ, **self.with_path()})
@@ -1719,7 +1770,6 @@ class ReviewRegressionTests(DoctorTestCase):
 
     # --- tool count passed structurally, not scraped from prose -----------
 
-    @unittest.skipIf(IS_WINDOWS, MOCK_SPAWN_SKIP)
     def test_probe_returns_tool_count_including_zero(self):
         result, count = ct_doctor._probe_sidecar(
             str(self.mock_path), timeout=5, env={**self.with_path(), "MOCK_TOOLS": ""}
@@ -1730,7 +1780,6 @@ class ReviewRegressionTests(DoctorTestCase):
         result, count = ct_doctor._probe_sidecar(None)
         self.assertIsNone(count, "no live surface observed => None, not 0")
 
-    @unittest.skipIf(IS_WINDOWS, MOCK_SPAWN_SKIP)
     def test_probe_count_matches_detail_for_real_tiers(self):
         for mock_tools, expected in ((TIER8, 8), (None, 14)):
             env = dict(self.with_path())
