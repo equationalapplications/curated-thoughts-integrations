@@ -74,3 +74,28 @@ heading format below is load-bearing: `## <version> — <date>`.
   `FAILED (failures=5, skipped=13)` to `OK (skipped=2)`; only the two
   POSIX-absolute-candidate-path assertions stay skipped on Windows. No
   shipped script changed.
+- Add the three skills: `skills/usage/`, `skills/ops/` and `skills/sidecar/`.
+  Per design decision D2 the directories are the bare names and the
+  frontmatter `name` key is dropped, because Claude Code namespaces plugin
+  skills as `/<plugin>:<skill>` and falls back to the directory name — keeping
+  Hermes's `curated-thoughts-*` directories would have produced
+  `/curated-thoughts:curated-thoughts-usage`. `description` stays; it is what
+  drives skill selection. Bodies are verbatim from `integrations/hermes/`
+  except for three regions: doctor-check list item 7 and the whole
+  "Registration in Hermes" section, both rewritten for Claude Code
+  (`~/.claude.json` `mcpServers`, `claude mcp add --scope user`, `/mcp` to
+  verify, `--plugin-dir` or a marketplace for the plugin), and the
+  cross-reference to the ops skill, which now names `/curated-thoughts:ops` —
+  the name a user can actually type here.
+- Add `tests/test_skills_content.py`, ported from deepseek's
+  `test_skills_content.ts`. It asserts each body is byte-identical to its
+  Hermes original after normalizing away exactly those three harness-specific
+  regions, with an anti-no-op guard proving the normalizer does not equalize
+  arbitrary content, plus a stricter check that `usage` and `sidecar` match
+  Hermes on the nose. The content assertions from the plan are scoped to what
+  they actually protect: the three golden rules are asserted against the file
+  that carries each one rather than per-file, and "no absolute paths" is
+  scoped to machine-specific paths (a developer's home directory), since the
+  verbatim bodies legitimately mention `/usr/bin` as illustrative prose about
+  per-OS install locations. `claude plugin validate` (2.1.263) reports nothing
+  about skills either way, so this test is the only gate on the port.
