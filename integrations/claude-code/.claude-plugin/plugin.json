@@ -1,0 +1,9 @@
+{
+  "name": "curated-thoughts",
+  "version": "0.1.0",
+  "description": "Curated Thoughts memory integration for Claude Code: MCP sidecar registration, health checks, import pre-flight, and usage skills.",
+  "author": { "name": "Equational Applications LLC" },
+  "license": "MIT",
+  "homepage": "https://github.com/equationalapplications/curated-thoughts-integrations",
+  "keywords": ["memory", "mcp", "knowledge-graph"]
+}
