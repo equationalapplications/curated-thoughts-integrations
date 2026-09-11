@@ -34,3 +34,24 @@ heading format below is load-bearing: `## <version> — <date>`.
   `hookSpecificOutput` / `additionalContext` envelope instead of Hermes's bare
   `context` key. A set-but-wrong `CLAUDE_PLUGIN_ROOT` is not repaired by the
   `__file__` fallback: the hook stays silent and exits 0.
+- Add `scripts/install.sh`, the registration helper. Per design decision D1 it
+  copies nothing — a Claude Code plugin loads in place — and registers the
+  sidecar by absolute path through `claude mcp add --scope user`, not through a
+  plugin-shipped `.mcp.json`, which could only name `curated-thoughts-mcp` and
+  rely on PATH. It resolves the sidecar with the same search order and the same
+  candidate list as `scripts/ct_env.py` (both Windows locations included,
+  `CLAUDE_CT_SIDECAR` honoured), double-quotes the path everywhere it is
+  printed because the Windows install directory contains a space, prints the
+  registration as both a CLI command and a JSON block, prints the
+  `claude --plugin-dir` line, and ends with the doctor next step. A missing
+  sidecar is a WARN plus a placeholder block, never a failure. The script
+  never edits `~/.claude.json` itself: under `CT_INSTALL_EDIT=1` it checks
+  `claude mcp get` first and shells out to `claude mcp add` only when no entry
+  exists, so an existing registration is never overwritten.
+- Add `tests/test_install.py`. The text tests — candidate-list parity with
+  `ct_env.py`, "copies nothing", the `CLAUDE_CT_SIDECAR` override name, no
+  direct config writes — inspect the script and run on every OS. The
+  subprocess tests run it under bash against tempdirs and are skipped on
+  Windows, as in `integrations/hermes/`, because CI's Windows runner has no
+  bash. `CT_INSTALL_EDIT=1` is exercised only against a fake `claude` shim on
+  a temp PATH that logs its argv, never the real binary.
