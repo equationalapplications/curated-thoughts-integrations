@@ -8,11 +8,9 @@ against tempfile dirs and env overrides — nothing on the host is touched.
 Run directly:            python3 tests/test_ct_doctor.py
 Or via the doctor:       ct_doctor.py --self-test
 
-Copied from integrations/hermes; keep logically identical. The copy lands in
-two steps: this file currently carries the fixtures and the classes that
-exercise ct_status and ct_preflight, which ship as of Task 2. The ct_doctor
-classes — and the base-class lines that reach into ct_doctor — arrive with
-ct_doctor.py itself in Task 3.
+Copied from integrations/hermes; keep logically identical. The one
+harness-specific class is RegistrationTests, which covers check 7 against
+the JSON config Claude Code writes rather than Hermes's config.yaml.
 """
 
 from __future__ import annotations
@@ -20,6 +18,7 @@ from __future__ import annotations
 import json
 import os
 import stat
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -31,9 +30,10 @@ HERE = Path(__file__).resolve().parent
 INTEGRATION = HERE.parent
 sys.path.insert(0, str(INTEGRATION / "scripts"))
 
+import ct_doctor  # noqa: E402
+import ct_env  # noqa: E402
 import ct_preflight  # noqa: E402
 import ct_status  # noqa: E402
-
 
 IS_WINDOWS = sys.platform == "win32"
 
@@ -93,6 +93,33 @@ def main():
 main()
 '''
 
+# The check contract, in run order. Consumers of `check --json` rely on it.
+EXPECTED_CHECKS = (
+    "sidecar-binary",
+    "sidecar-identity",
+    "sidecar-mcp",
+    "brain-dir",
+    "vault",
+    "embedding-backend",
+    "claude-code-registration",
+    "import-preflight",
+    "version-compat",
+)
+
+# 8-tool read-only tier names (shared/compat.yaml v2.4-read)
+TIER8 = ",".join(
+    [
+        "wiki_context",
+        "wiki_search",
+        "wiki_traverse_graph",
+        "wiki_get_ontology",
+        "vault_semantic_search",
+        "vault_related_chunks",
+        "vault_write_note",
+        "vault_upsert_index_entry",
+    ]
+)
+
 
 class DoctorTestCase(unittest.TestCase):
     """Base: isolated fake home + mock sidecar in a tempfile dir."""
@@ -109,12 +136,27 @@ class DoctorTestCase(unittest.TestCase):
         )
         self._env_patches = {}
         self.patch_env("HOME", str(self.fake_home))
+        # Path.home() reads USERPROFILE on Windows and HOME elsewhere, so
+        # both must point at the fake home or CLAUDE_SETTINGS would
+        # resolve against the developer's real ~/.claude.
+        self.patch_env("USERPROFILE", str(self.fake_home))
         # The environment contract is Curated Thoughts' own: CURATED_BRAIN_DIR.
         # There is no CT_VAULT_DIR — nothing in Curated Thoughts reads it.
         self.patch_env("CURATED_BRAIN_DIR", str(self.fake_home / ".brain"))
         self.patch_env("CURATED_BRAIN_DB", None)
         self.patch_env("CURATED_BRAIN_CONFIG", None)
+        # Claude Code's own override for the config location; it is what
+        # keeps the real ~/.claude.json out of every run.
+        self.patch_env(
+            "CLAUDE_CONFIG_PATH", str(self.fake_home / ".claude.json")
+        )
+        for key in ct_doctor.EMBED_ENV_KEYS:
+            self.patch_env(key, None)
         self.patch_env("OLLAMA_HOST", "http://127.0.0.1:1")  # nothing listens
+        # Re-resolve module-level paths against the fake home: both were
+        # computed at import time, against the real one.
+        ct_doctor.CLAUDE_CONFIG = Path(os.environ["CLAUDE_CONFIG_PATH"])
+        ct_doctor.CLAUDE_SETTINGS = self.fake_home / ".claude" / "settings.json"
         self.addCleanup(self._cleanup)
 
     def _cleanup(self):
@@ -123,6 +165,12 @@ class DoctorTestCase(unittest.TestCase):
                 os.environ.pop(key, None)
             else:
                 os.environ[key] = value
+        ct_doctor.CLAUDE_CONFIG = Path(
+            os.environ.get(
+                "CLAUDE_CONFIG_PATH", str(Path.home() / ".claude.json")
+            )
+        )
+        ct_doctor.CLAUDE_SETTINGS = Path.home() / ".claude" / "settings.json"
         self._tmp.cleanup()
 
     def patch_env(self, key, value):
@@ -133,6 +181,55 @@ class DoctorTestCase(unittest.TestCase):
             os.environ[key] = value
 
     # helpers ------------------------------------------------------------
+
+    def write_config(self, body=None):
+        """Write the fake ~/.claude.json. `body` is a dict, or raw text.
+
+        The default is what `claude mcp add --scope user` produces: the
+        absolute sidecar path (never a bare name — check 2's rule is to
+        disambiguate by path) and --mcp in args.
+        """
+        cfg = self.fake_home / ".claude.json"
+        if body is None:
+            body = {
+                "mcpServers": {
+                    "curated-thoughts": {
+                        "command": str(self.mock_path),
+                        "args": ["--mcp"],
+                    }
+                }
+            }
+        cfg.write_text(body if isinstance(body, str) else json.dumps(body, indent=2))
+        return cfg
+
+    def write_settings(self, body=None):
+        """Write the fake ~/.claude/settings.json (plugin enablement).
+
+        Separate from write_config because the two halves fail separately:
+        registration decides PASS/FAIL, enablement only ever downgrades a PASS
+        to WARN.
+        """
+        path = self.fake_home / ".claude" / "settings.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if body is None:
+            body = {"enabledPlugins": {"curated-thoughts@curated-thoughts": True}}
+        path.write_text(body if isinstance(body, str) else json.dumps(body, indent=2))
+        return path
+
+    def write_project_config(self, body=None):
+        """Write a project-scope .mcp.json inside the fake home."""
+        path = self.fake_home / ".mcp.json"
+        if body is None:
+            body = {
+                "mcpServers": {
+                    "curated-thoughts": {
+                        "command": str(self.mock_path),
+                        "args": ["--mcp"],
+                    }
+                }
+            }
+        path.write_text(body if isinstance(body, str) else json.dumps(body, indent=2))
+        return path
 
     def make_brain(self, vault=True, vault_exists=True):
         """Create a brain dir with brain.db + config.json, and its vault.
@@ -156,9 +253,433 @@ class DoctorTestCase(unittest.TestCase):
     def brain_db(self):
         return self.fake_home / ".brain" / "brain.db"
 
+    def results_by_name(self, env=None):
+        results = ct_doctor.run_checks(
+            timeout=3.0,
+            env={"PATH": str(self.bin_dir) + os.pathsep + os.environ["PATH"], **(env or {})},
+        )
+        return {r.name: r for r in results}
+
     def with_path(self):
         """Return env dict putting the mock first on PATH."""
         return {"PATH": str(self.bin_dir) + os.pathsep + os.environ["PATH"]}
+
+
+@unittest.skipIf(IS_WINDOWS, MOCK_SPAWN_SKIP)
+class MockSidecarRpcTests(DoctorTestCase):
+    """The mock itself speaks protocol correctly (guards the fixture)."""
+
+    def test_mock_answers_tools_list(self):
+        tools, version, err = ct_doctor.mcp_tools_list(str(self.mock_path), timeout=5)
+        self.assertIsNone(err)
+        self.assertEqual(len(tools), 14)
+        self.assertIn("curated_add_wisdom", tools)
+        self.assertEqual(version, "2.5.0")
+
+    def test_mock_read_only_tier(self):
+        tools, _, err = ct_doctor.mcp_tools_list(
+            str(self.mock_path), timeout=5, env={"MOCK_TOOLS": TIER8}
+        )
+        self.assertIsNone(err)
+        self.assertEqual(len(tools), 8)
+
+
+class ToolCountTieringTests(DoctorTestCase):
+    @unittest.skipIf(IS_WINDOWS, MOCK_SPAWN_SKIP)
+    def test_full_tier_14_tools_pass(self):
+        r = ct_doctor.check_sidecar_reachable(
+            str(self.mock_path), timeout=5, env=self.with_path()
+        )
+        self.assertEqual(r.status, ct_doctor.PASS)
+        self.assertIn("14", r.detail)
+
+    @unittest.skipIf(IS_WINDOWS, MOCK_SPAWN_SKIP)
+    def test_read_only_tier_8_tools_warns(self):
+        r = ct_doctor.check_sidecar_reachable(
+            str(self.mock_path), timeout=5, env={**self.with_path(), "MOCK_TOOLS": TIER8}
+        )
+        self.assertEqual(r.status, ct_doctor.WARN)
+        self.assertIn("dormant", r.detail)
+        self.assertIn(">=2.5", r.hint)  # actionable: upgrade hint
+
+    @unittest.skipIf(IS_WINDOWS, MOCK_SPAWN_SKIP)
+    def test_below_tier_warns(self):
+        r = ct_doctor.check_sidecar_reachable(
+            str(self.mock_path),
+            timeout=5,
+            env={**self.with_path(), "MOCK_TOOLS": "wiki_search,wiki_context"},
+        )
+        self.assertEqual(r.status, ct_doctor.WARN)
+        self.assertIn("below every known tier", r.detail)
+
+    def test_zero_tools_fails(self):
+        """tools/list succeeding with 0 tools is a broken install, not a tier."""
+        orig = ct_doctor.mcp_tools_list
+        ct_doctor.mcp_tools_list = lambda *a, **k: ([], "2.5.0", None)
+        try:
+            r = ct_doctor.check_sidecar_reachable(str(self.mock_path), timeout=5)
+        finally:
+            ct_doctor.mcp_tools_list = orig
+        self.assertEqual(r.status, ct_doctor.FAIL)
+        self.assertIn("0 tools", r.detail)
+
+    @unittest.skipIf(IS_WINDOWS, MOCK_SPAWN_SKIP)
+    def test_unreachable_sidecar_fails(self):
+        r = ct_doctor.check_sidecar_reachable(
+            str(self.mock_path),
+            timeout=3,
+            env={**self.with_path(), "MOCK_HANG": "1"},
+        )
+        self.assertEqual(r.status, ct_doctor.FAIL)
+        self.assertIn("timed out", r.detail)
+        self.assertTrue(r.hint)  # actionable hint present
+
+    def test_crashing_sidecar_fails(self):
+        r = ct_doctor.check_sidecar_reachable(
+            str(self.mock_path),
+            timeout=3,
+            env={**self.with_path(), "MOCK_EXIT_START": "7"},
+        )
+        self.assertEqual(r.status, ct_doctor.FAIL)
+        self.assertTrue(r.hint)
+
+    def test_missing_binary_fails_with_hint(self):
+        r = ct_doctor.check_sidecar_reachable(None, timeout=3)
+        self.assertEqual(r.status, ct_doctor.FAIL)
+        # The hint must be platform-neutral: no .deb, no dpkg, no apt.
+        self.assertNotRegex(r.hint.lower(), r"\bdeb\b|dpkg|apt-get")
+        self.assertIn("Curated Thoughts", r.hint)
+
+
+class BrainDirTests(DoctorTestCase):
+    """The brain dir holds brain.db + config.json. It is not the vault."""
+
+    def test_missing_brain_dir_fails(self):
+        r = ct_doctor.check_brain_dir()
+        self.assertEqual(r.status, ct_doctor.FAIL)
+        self.assertIn("CURATED_BRAIN_DIR", r.detail)
+        self.assertIn("CURATED_BRAIN_DIR", r.hint)
+
+    def test_present_brain_dir_passes(self):
+        self.make_brain()
+        r = ct_doctor.check_brain_dir()
+        self.assertEqual(r.status, ct_doctor.PASS)
+
+    def test_brain_dir_not_a_directory_fails(self):
+        (self.fake_home / ".brain").write_text("not a dir")
+        r = ct_doctor.check_brain_dir()
+        self.assertEqual(r.status, ct_doctor.FAIL)
+
+    def test_brain_dir_without_db_or_config_warns(self):
+        (self.fake_home / ".brain").mkdir()
+        r = ct_doctor.check_brain_dir()
+        self.assertEqual(r.status, ct_doctor.WARN)
+        self.assertIn("brain.db", r.detail)
+        self.assertIn("config.json", r.detail)
+
+    def test_env_override_respected(self):
+        alt = self.fake_home / "elsewhere"
+        alt.mkdir()
+        (alt / "brain.db").write_bytes(b"")
+        (alt / "config.json").write_text("{}")
+        self.patch_env("CURATED_BRAIN_DIR", str(alt))
+        r = ct_doctor.check_brain_dir()
+        self.assertEqual(r.status, ct_doctor.PASS)
+        self.assertIn(str(alt), r.detail)
+
+    def test_explicit_db_path_moves_config_beside_it(self):
+        # CURATED_BRAIN_DB without CURATED_BRAIN_CONFIG puts config.json next
+        # to the database, matching curated-thoughts' resolve_brain_paths.
+        alt = self.fake_home / "split"
+        alt.mkdir()
+        db = alt / "brain.db"
+        db.write_bytes(b"")
+        self.patch_env("CURATED_BRAIN_DB", str(db))
+        paths = ct_env.resolve_brain_paths()
+        self.assertEqual(paths.db_path, db)
+        self.assertEqual(paths.config_path, alt / "config.json")
+
+
+class VaultTests(DoctorTestCase):
+    """The vault is config.json's vault_path — machine-specific, and the
+    first thing that breaks when a brain is imported from another machine."""
+
+    def test_missing_config_fails(self):
+        (self.fake_home / ".brain").mkdir()
+        r = ct_doctor.check_vault()
+        self.assertEqual(r.status, ct_doctor.FAIL)
+        self.assertIn("not found", r.detail)
+
+    def test_malformed_config_fails(self):
+        brain = self.fake_home / ".brain"
+        brain.mkdir()
+        (brain / "config.json").write_text("{not json")
+        r = ct_doctor.check_vault()
+        self.assertEqual(r.status, ct_doctor.FAIL)
+        self.assertIn("malformed JSON", r.detail)
+
+    def test_vault_path_absent_from_config_fails(self):
+        brain = self.fake_home / ".brain"
+        brain.mkdir()
+        (brain / "config.json").write_text("{}")
+        r = ct_doctor.check_vault()
+        self.assertEqual(r.status, ct_doctor.FAIL)
+        self.assertIn("vault_path", r.detail)
+
+    def test_vault_path_wrong_type_fails(self):
+        brain = self.fake_home / ".brain"
+        brain.mkdir()
+        (brain / "config.json").write_text('{"vault_path": 42}')
+        r = ct_doctor.check_vault()
+        self.assertEqual(r.status, ct_doctor.FAIL)
+        self.assertIn("not a non-empty string", r.detail)
+
+    def test_present_vault_passes(self):
+        self.make_brain()
+        r = ct_doctor.check_vault()
+        self.assertEqual(r.status, ct_doctor.PASS)
+        self.assertIn("documents", r.detail)
+
+    def test_imported_brain_with_foreign_vault_path_fails(self):
+        # The signature import symptom: config.json names an absolute path
+        # that only ever existed on the machine the brain came from.
+        self.make_brain(vault_exists=False)
+        r = ct_doctor.check_vault()
+        self.assertEqual(r.status, ct_doctor.FAIL)
+        self.assertIn("imported from another", r.hint)
+
+    @unittest.skipIf(
+        IS_WINDOWS,
+        "POSIX-only: '~' expansion follows HOME, which the fake home patches; "
+        "on Windows os.path.expanduser uses USERPROFILE and ignores HOME "
+        "(run 34066939677)",
+    )
+    def test_tilde_in_vault_path_is_expanded(self):
+        brain = self.fake_home / ".brain"
+        brain.mkdir()
+        (brain / "config.json").write_text('{"vault_path": "~/docs-tilde"}')
+        (self.fake_home / "docs-tilde").mkdir()
+        r = ct_doctor.check_vault()
+        self.assertEqual(r.status, ct_doctor.PASS)
+        self.assertNotIn("~", r.detail)
+
+
+class RegistrationTests(DoctorTestCase):
+    """Check 7, Claude Code edition (design decision D4).
+
+    Claude Code registers MCP servers as JSON, at two scopes: user scope in
+    ~/.claude.json (what `claude mcp add --scope user` writes, and what
+    install.sh prints) and project scope in a .mcp.json beside the code.
+    Registration decides PASS/FAIL. Plugin enablement is deliberately weaker:
+    a `--plugin-dir` session records nothing on disk, so an unconfirmed
+    enablement may only downgrade a PASS to WARN.
+    """
+
+    def check(self):
+        return ct_doctor.check_claude_code_registration(cwd=self.fake_home)
+
+    def test_registered_passes(self):
+        self.write_config()
+        self.write_settings()
+        r = self.check()
+        self.assertEqual(r.status, ct_doctor.PASS, r.detail)
+        self.assertIn("curated-thoughts", r.detail)
+
+    def test_missing_config_fails(self):
+        # Nothing written at all: the harness was never configured.
+        r = self.check()
+        self.assertEqual(r.status, ct_doctor.FAIL)
+        self.assertIn("not found", r.detail)
+        self.assertIn("claude mcp add --scope user", r.hint)
+
+    def test_unregistered_config_fails(self):
+        self.write_config({"mcpServers": {"other-server": {"command": "foo"}}})
+        self.write_settings()
+        r = self.check()
+        self.assertEqual(r.status, ct_doctor.FAIL)
+        self.assertIn("curated-thoughts", r.hint)
+        self.assertIn("mcpServers", r.hint)
+
+    def test_config_without_mcp_servers_fails(self):
+        # A real ~/.claude.json carries plenty of unrelated keys; the absence
+        # of mcpServers entirely must read the same as an absent entry.
+        self.write_config({"numStartups": 12})
+        r = self.check()
+        self.assertEqual(r.status, ct_doctor.FAIL)
+
+    def test_malformed_config_fails_with_the_parse_error(self):
+        self.write_config("{not json")
+        r = self.check()
+        self.assertEqual(r.status, ct_doctor.FAIL)
+        self.assertIn("not valid JSON", r.detail)
+
+    def test_registered_without_mcp_flag_warns(self):
+        self.write_config(
+            {
+                "mcpServers": {
+                    "curated-thoughts": {"command": "curated-thoughts-mcp", "args": []}
+                }
+            }
+        )
+        self.write_settings()
+        r = self.check()
+        self.assertEqual(r.status, ct_doctor.WARN)
+        self.assertIn("--mcp", r.detail)
+        self.assertIn("claude mcp add", r.hint)
+
+    def test_registration_pointing_at_a_dev_build_warns(self):
+        # The same shadowing failure check 2 guards against, arriving through
+        # the config instead of through PATH.
+        dev = self.fake_home / "proj" / "target" / "debug" / "curated-thoughts-mcp"
+        dev.parent.mkdir(parents=True)
+        dev.write_text("#!/bin/sh\n")
+        self.write_config(
+            {
+                "mcpServers": {
+                    "curated-thoughts": {"command": str(dev), "args": ["--mcp"]}
+                }
+            }
+        )
+        self.write_settings()
+        r = self.check()
+        self.assertEqual(r.status, ct_doctor.WARN)
+        self.assertIn("development build", r.detail)
+        self.assertIn("two servers on one brain", r.hint)
+
+    def test_project_mcp_json_is_a_valid_registration(self):
+        # Claude Code supports project scope, so a .mcp.json in cwd counts —
+        # and the detail says which scope answered, because the fix differs.
+        self.write_project_config()
+        self.write_settings()
+        r = self.check()
+        self.assertEqual(r.status, ct_doctor.PASS, r.detail)
+        self.assertIn("project scope", r.detail)
+
+    def test_user_scope_wins_over_project_scope(self):
+        self.write_config()
+        self.write_project_config(
+            {"mcpServers": {"curated-thoughts": {"command": "x", "args": []}}}
+        )
+        self.write_settings()
+        r = self.check()
+        self.assertEqual(r.status, ct_doctor.PASS, r.detail)
+        self.assertNotIn("project scope", r.detail)
+
+    def test_unconfirmed_enablement_warns_and_never_fails(self):
+        # settings.json exists but has no enabledPlugins: a --plugin-dir
+        # session looks exactly like this, so it cannot be a FAIL.
+        self.write_config()
+        self.write_settings({"theme": "dark"})
+        r = self.check()
+        self.assertEqual(r.status, ct_doctor.WARN)
+        self.assertIn("registered with --mcp", r.detail)
+        self.assertIn("enablement unconfirmed", r.detail)
+        self.assertIn("--plugin-dir", r.hint)
+
+    def test_absent_settings_file_warns_and_never_fails(self):
+        self.write_config()
+        r = self.check()
+        self.assertEqual(r.status, ct_doctor.WARN)
+        self.assertIn("enablement unconfirmed", r.detail)
+
+
+class IdentityTests(DoctorTestCase):
+    """Identity is decided by 'is this a dev build', not by a Linux prefix."""
+
+    def test_linux_system_path_passes(self):
+        r = ct_doctor.check_sidecar_identity("/usr/bin/curated-thoughts-mcp", None)
+        self.assertEqual(r.status, ct_doctor.PASS)
+
+    def test_macos_app_bundle_passes(self):
+        # Tauri stages the sidecar inside the .app bundle; that is a normal
+        # install, not a shadowing dev build.
+        p = "/Applications/Curated Thoughts.app/Contents/MacOS/curated-thoughts-mcp"
+        r = ct_doctor.check_sidecar_identity(p, p)
+        self.assertEqual(r.status, ct_doctor.PASS)
+        self.assertIn("macos-app-bundle", r.detail)
+
+    def test_windows_install_path_passes(self):
+        p = r"C:\Users\me\AppData\Local\Programs\Curated Thoughts\curated-thoughts-mcp.exe"
+        r = ct_doctor.check_sidecar_identity(p, p)
+        self.assertEqual(r.status, ct_doctor.PASS)
+
+    def test_shadowing_build_warns(self):
+        # A same-named binary from a cargo target dir must WARN, with an
+        # un-shadow fix hint.
+        target = self.fake_home / "proj" / "target" / "debug" / "curated-thoughts-mcp"
+        target.parent.mkdir(parents=True)
+        target.write_text("#!/bin/sh\n")
+        target.chmod(0o755)
+        r = ct_doctor.check_sidecar_identity(str(target), str(target))
+        self.assertEqual(r.status, ct_doctor.WARN)
+        self.assertIn("PATH", r.hint)
+
+    def test_tools_crate_build_warns(self):
+        p = "/home/me/curated-thoughts/tools/curated-thoughts-mcp"
+        r = ct_doctor.check_sidecar_identity(p, p)
+        self.assertEqual(r.status, ct_doctor.WARN)
+
+    def test_no_dpkg_dependency_anywhere_in_hints(self):
+        # Guards the OS-agnostic requirement: no check may tell a macOS or
+        # Windows user to reach for a Linux package manager.
+        for r in (
+            ct_doctor.check_sidecar_binary((None, None, "none")),
+            ct_doctor.check_sidecar_identity(None, None),
+            ct_doctor.check_sidecar_reachable(None),
+            ct_doctor.check_brain_dir(),
+        ):
+            blob = (r.detail + " " + r.hint).lower()
+            self.assertNotRegex(blob, r"\bdeb\b|dpkg|apt-get|yum |\.deb")
+
+
+class PlatformDiscoveryTests(DoctorTestCase):
+    @unittest.skipIf(IS_WINDOWS, POSIX_PATHS_SKIP)
+    def test_macos_candidates_are_app_bundles(self):
+        cands = [str(p) for p in ct_env.sidecar_candidates(platform="darwin")]
+        self.assertTrue(any(".app/Contents/MacOS" in c for c in cands), cands)
+
+    def test_windows_candidates_use_exe_and_env_roots(self):
+        env = {"LOCALAPPDATA": r"C:\Users\me\AppData\Local"}
+        cands = [str(p) for p in ct_env.sidecar_candidates(platform="win32", env=env)]
+        self.assertTrue(cands)
+        self.assertTrue(all(c.endswith(".exe") for c in cands), cands)
+
+    @unittest.skipIf(IS_WINDOWS, POSIX_PATHS_SKIP)
+    def test_linux_candidates_cover_usr_and_local(self):
+        cands = [str(p) for p in ct_env.sidecar_candidates(platform="linux")]
+        self.assertTrue(any(c.startswith("/usr/bin") for c in cands), cands)
+        self.assertTrue(any(".local/bin" in c for c in cands), cands)
+
+    @unittest.skipIf(
+        IS_WINDOWS,
+        "POSIX-only: PATH lookup of an extensionless shebang script is a "
+        "POSIX mechanism; Windows shutil.which needs a PATHEXT-suffixed file",
+    )
+    def test_path_lookup_wins_over_bundled(self):
+        path, _resolved, source = ct_env.find_sidecar(
+            env={"PATH": str(self.bin_dir)}
+        )
+        self.assertEqual(path, str(self.mock_path))
+        self.assertEqual(source, "PATH")
+
+    def test_no_binary_warns(self):
+        r = ct_doctor.check_sidecar_identity(None, None)
+        self.assertEqual(r.status, ct_doctor.WARN)
+
+
+class EmbeddingTests(DoctorTestCase):
+    def test_no_backend_warns_never_fails(self):
+        r = ct_doctor.check_embedding()
+        self.assertEqual(r.status, ct_doctor.WARN)
+        self.assertIn("fastembed", r.hint)
+
+    def test_env_key_passes(self):
+        os.environ["CT_EMBED_API_KEY"] = "test-only-not-a-secret"
+        try:
+            r = ct_doctor.check_embedding()
+            self.assertEqual(r.status, ct_doctor.PASS)
+        finally:
+            del os.environ["CT_EMBED_API_KEY"]
 
 
 class NormalizerPortTests(unittest.TestCase):
@@ -267,6 +788,862 @@ class NormalizerPortTests(unittest.TestCase):
         self.assertEqual(ct_preflight.classify_source_ref(None), "null")
 
 
+class ImportPreflightTests(DoctorTestCase):
+    """The check that protects an imported graph before an agent trusts it."""
+
+    TOKEN = "librarian-" + "ab12" * 8  # 32 hex, the normative §2.2 shape
+    # A token that lost its hex to the engine's setup() rewrite: classifies
+    # as "mangled". Verified — a JSON ref classifies as "at_risk" instead.
+    MANGLED = "librarian-ab12"
+    # Whitespace-padded: the engine would rewrite it, so "at_risk".
+    AT_RISK = "  " + TOKEN
+
+    def _seed(self, rows, evidence_table=True, evidence_ids=None, unanchored=0,
+              with_source_type=True, with_deleted_at=False):
+        """Seed llm_wiki_entries (+ optional librarian_evidence).
+
+        rows: list of (entry_id, source_ref[, source_type[, deleted_at]]).
+              deleted_at defaults to None (a live row). Callers passing 2- or
+              3-tuples keep working unchanged.
+        evidence_ids: entry_ids that get a librarian_evidence row; None = all
+                      token rows.
+        """
+        import sqlite3
+
+        self.make_brain()
+        db = self.brain_db()
+        conn = sqlite3.connect(db)
+
+        def _deleted_at(row):
+            return row[3] if len(row) > 3 else None
+
+        try:
+            # Each branch projects rows to exactly the arity its own CREATE
+            # TABLE declares: positional VALUES placeholders make a mismatch a
+            # ProgrammingError, not a silent NULL.
+            if with_source_type and with_deleted_at:
+                conn.execute(
+                    "CREATE TABLE llm_wiki_entries "
+                    "(id TEXT, source_ref TEXT, source_type TEXT, "
+                    "deleted_at TEXT)"
+                )
+                conn.executemany(
+                    "INSERT INTO llm_wiki_entries VALUES (?,?,?,?)",
+                    [(r[0], r[1], r[2], _deleted_at(r)) for r in rows],
+                )
+            elif with_source_type:
+                conn.execute(
+                    "CREATE TABLE llm_wiki_entries "
+                    "(id TEXT, source_ref TEXT, source_type TEXT)"
+                )
+                conn.executemany(
+                    "INSERT INTO llm_wiki_entries VALUES (?,?,?)",
+                    [(r[0], r[1], r[2]) for r in rows],
+                )
+            elif with_deleted_at:
+                conn.execute(
+                    "CREATE TABLE llm_wiki_entries "
+                    "(id TEXT, source_ref TEXT, deleted_at TEXT)"
+                )
+                conn.executemany(
+                    "INSERT INTO llm_wiki_entries VALUES (?,?,?)",
+                    [(r[0], r[1], _deleted_at(r)) for r in rows],
+                )
+            else:
+                conn.execute("CREATE TABLE llm_wiki_entries (id TEXT, source_ref TEXT)")
+                conn.executemany(
+                    "INSERT INTO llm_wiki_entries VALUES (?,?)",
+                    [(r[0], r[1]) for r in rows],
+                )
+            if evidence_table:
+                conn.execute(
+                    "CREATE TABLE librarian_evidence "
+                    "(entry_id TEXT PRIMARY KEY, proposal_id TEXT, "
+                    "evidence_json TEXT, unanchored INTEGER NOT NULL DEFAULT 0, "
+                    "created_at INTEGER)"
+                )
+                if evidence_ids is None:
+                    evidence_ids = [
+                        r[0] for r in rows
+                        if r[1] and ct_preflight.is_token(r[1])
+                    ]
+                for i, eid in enumerate(evidence_ids):
+                    conn.execute(
+                        "INSERT INTO librarian_evidence VALUES (?,?,?,?,?)",
+                        (eid, "prop_x", '{"evidence":[]}',
+                         1 if i < unanchored else 0, 0),
+                    )
+            conn.commit()
+        finally:
+            conn.close()
+        return db
+
+    # --- the pinned regression (PR #188 §2.5.1 census-scope test) ----------
+
+    # --- fixture capability: soft-deleted rows (2026-09-10 live-scope) -----
+
+    def test_seed_can_express_soft_deleted_rows(self):
+        """The fixture must be able to build a corpse, or nothing else can."""
+        import sqlite3
+
+        db = self._seed(
+            [
+                ("e1", self.TOKEN, "librarian_inferred"),
+                ("e2", '{"json":"dead"}', "librarian_inferred", "2026-01-01"),
+            ],
+            with_deleted_at=True,
+        )
+        conn = sqlite3.connect(db)
+        try:
+            rows = conn.execute(
+                "SELECT id, deleted_at FROM llm_wiki_entries ORDER BY id"
+            ).fetchall()
+        finally:
+            conn.close()
+        self.assertEqual(rows, [("e1", None), ("e2", "2026-01-01")])
+
+    def test_evidence_lookup_matches_integer_entry_ids(self):
+        """INTEGER ids must still match the TEXT entry_id column.
+
+        sqlite3 binds a Python int as INTEGER and SQLite does not coerce bind
+        parameters across column affinity, so an uncoerced IN batch silently
+        matches nothing and over-reports missing evidence. The shared _seed
+        fixture declares `id TEXT`, so this case needs its own schema.
+        """
+        import sqlite3
+
+        self.make_brain()
+        db = self.brain_db()
+        conn = sqlite3.connect(db)
+        try:
+            conn.execute(
+                "CREATE TABLE llm_wiki_entries "
+                "(id INTEGER PRIMARY KEY, source_ref TEXT, source_type TEXT)"
+            )
+            conn.execute(
+                "INSERT INTO llm_wiki_entries VALUES (?,?,?)",
+                (1, self.TOKEN, "librarian_inferred"),
+            )
+            conn.execute(
+                "CREATE TABLE librarian_evidence "
+                "(entry_id TEXT PRIMARY KEY, proposal_id TEXT, "
+                "evidence_json TEXT, unanchored INTEGER NOT NULL DEFAULT 0, "
+                "created_at INTEGER)"
+            )
+            conn.execute(
+                "INSERT INTO librarian_evidence VALUES (?,?,?,?,?)",
+                ("1", "prop_x", '{"evidence":[]}', 0, 0),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        census = ct_preflight.census_source_refs(db)
+        self.assertIsNone(census.error)
+        self.assertEqual(census.missing_evidence_rows, 0)
+
+    def test_evidence_lookup_matches_integer_affinity_entry_id_column(self):
+        """The match must hold when *entry_id* is the INTEGER side.
+
+        Binding as str fixes the TEXT-column case but SQLite then applies the
+        column's own INTEGER affinity and hands the value back as an int, so a
+        raw `have` set would miss the str lookup in the mirror-image way.
+        Both sides are normalised, so neither affinity can break the match.
+        """
+        import sqlite3
+
+        self.make_brain()
+        db = self.brain_db()
+        conn = sqlite3.connect(db)
+        try:
+            conn.execute(
+                "CREATE TABLE llm_wiki_entries "
+                "(id INTEGER PRIMARY KEY, source_ref TEXT, source_type TEXT)"
+            )
+            conn.execute(
+                "INSERT INTO llm_wiki_entries VALUES (?,?,?)",
+                (1, self.TOKEN, "librarian_inferred"),
+            )
+            conn.execute(
+                "CREATE TABLE librarian_evidence "
+                "(entry_id INTEGER PRIMARY KEY, proposal_id TEXT, "
+                "evidence_json TEXT, unanchored INTEGER NOT NULL DEFAULT 0, "
+                "created_at INTEGER)"
+            )
+            conn.execute(
+                "INSERT INTO librarian_evidence VALUES (?,?,?,?,?)",
+                (1, "prop_x", '{"evidence":[]}', 0, 0),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        census = ct_preflight.census_source_refs(db)
+        self.assertIsNone(census.error)
+        self.assertEqual(census.missing_evidence_rows, 0)
+
+    def test_seed_supports_deleted_at_without_source_type(self):
+        """Legacy schema: deleted_at present, source_type absent."""
+        import sqlite3
+
+        db = self._seed(
+            [
+                ("e1", self.TOKEN, "librarian_inferred"),
+                ("e2", self.TOKEN, "librarian_inferred", "2026-01-01"),
+            ],
+            with_source_type=False,
+            with_deleted_at=True,
+        )
+        conn = sqlite3.connect(db)
+        try:
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(llm_wiki_entries)")}
+            rows = conn.execute(
+                "SELECT id, deleted_at FROM llm_wiki_entries ORDER BY id"
+            ).fetchall()
+        finally:
+            conn.close()
+        self.assertEqual(cols, {"id", "source_ref", "deleted_at"})
+        self.assertEqual(rows, [("e1", None), ("e2", "2026-01-01")])
+
+    def test_census_result_carries_dead_row_fields(self):
+        """__slots__ drift check: new fields exist and reach as_dict()."""
+        c = ct_preflight.CensusResult(dead_rows=505, dead_mangled=14)
+        self.assertEqual(c.dead_rows, 505)
+        self.assertEqual(c.dead_mangled, 14)
+        d = c.as_dict()
+        self.assertEqual(d["dead_rows"], 505)
+        self.assertEqual(d["dead_mangled"], 14)
+        # Additive only: every pre-existing key survives, unrenamed.
+        self.assertEqual(
+            set(d) - {"dead_rows", "dead_mangled"},
+            {
+                "table_present", "evidence_table_present",
+                "scoped_to_librarian_inferred", "total", "counts",
+                "null_ref_count", "missing_evidence_rows", "unanchored_rows",
+                "recovery_hints", "error",
+            },
+        )
+
+    def test_census_result_dead_fields_default_to_zero(self):
+        c = ct_preflight.CensusResult()
+        self.assertEqual(c.dead_rows, 0)
+        self.assertEqual(c.dead_mangled, 0)
+
+    # --- live-row scoping (2026-09-10 spec) --------------------------------
+
+    def test_soft_deleted_mangled_rows_are_excluded_from_the_census(self):
+        """The reference bug: a corpse must not flip the check to FAIL."""
+        self._seed(
+            [
+                ("live1", self.TOKEN, "librarian_inferred"),
+                ("live2", self.TOKEN, "librarian_inferred"),
+                ("dead1", self.MANGLED, "librarian_inferred", "2026-01-01"),
+                ("dead2", self.MANGLED, "librarian_inferred", "2026-01-02"),
+                ("dead3", self.TOKEN, "librarian_inferred", "2026-01-03"),
+            ],
+            with_deleted_at=True,
+        )
+        census = ct_preflight.census_source_refs(self.brain_db())
+        self.assertIsNone(census.error)
+        self.assertEqual(census.total, 2)
+        self.assertEqual(census.damaged, 0)
+        self.assertEqual(census.counts.get("token"), 2)
+        self.assertEqual(census.dead_rows, 3)
+        # Only the two truncated-token corpses are mangled; the token
+        # corpse is healthy. (A JSON corpse would classify "at_risk".)
+        self.assertEqual(census.dead_mangled, 2)
+        r = ct_doctor.check_import_preflight()
+        self.assertEqual(r.status, ct_doctor.PASS, r.detail)
+
+    def test_dead_mangled_excludes_at_risk_corpses(self):
+        """The predicate is classify == 'mangled', not 'anything unhealthy'."""
+        self.assertEqual(
+            ct_preflight.classify_source_ref(self.AT_RISK), "at_risk"
+        )
+        self.assertEqual(
+            ct_preflight.classify_source_ref(self.MANGLED), "mangled"
+        )
+        self._seed(
+            [
+                ("live1", self.TOKEN, "librarian_inferred"),
+                ("dead1", self.AT_RISK, "librarian_inferred", "2026-01-01"),
+                ("dead2", self.MANGLED, "librarian_inferred", "2026-01-02"),
+            ],
+            with_deleted_at=True,
+        )
+        census = ct_preflight.census_source_refs(self.brain_db())
+        self.assertEqual(census.dead_rows, 2)
+        self.assertEqual(census.dead_mangled, 1)
+
+    def test_dead_row_counts_are_scoped_to_librarian_inferred(self):
+        """Corpses of other source_types are not this census's business."""
+        self._seed(
+            [
+                ("live1", self.TOKEN, "librarian_inferred"),
+                ("dead1", self.MANGLED, "librarian_inferred", "2026-01-01"),
+                ("deaddoc", '{"json":"doc"}', "document", "2026-01-01"),
+            ],
+            with_deleted_at=True,
+        )
+        census = ct_preflight.census_source_refs(self.brain_db())
+        self.assertEqual(census.dead_rows, 1)
+        self.assertEqual(census.dead_mangled, 1)
+
+    def test_census_unchanged_when_deleted_at_column_absent(self):
+        """Pre-soft-delete engines: the fix is a no-op, not a silent change."""
+        self._seed([
+            ("e1", self.TOKEN, "librarian_inferred"),
+            ("e2", self.MANGLED, "librarian_inferred"),
+        ])
+        census = ct_preflight.census_source_refs(self.brain_db())
+        self.assertEqual(census.total, 2)
+        self.assertEqual(census.damaged, 1)
+        self.assertEqual(census.dead_rows, 0)
+        self.assertEqual(census.dead_mangled, 0)
+
+    def test_deleted_at_scoping_applies_on_the_legacy_unscoped_path(self):
+        """deleted_at present, source_type absent: scope by deleted_at alone."""
+        self._seed(
+            [
+                ("live1", self.TOKEN, "librarian_inferred"),
+                ("dead1", self.MANGLED, "librarian_inferred", "2026-01-01"),
+            ],
+            with_source_type=False,
+            with_deleted_at=True,
+        )
+        census = ct_preflight.census_source_refs(self.brain_db())
+        self.assertFalse(census.scoped)
+        self.assertEqual(census.total, 1)
+        self.assertEqual(census.damaged, 0)
+        # Table-wide, because there is no source_type to scope by.
+        self.assertEqual(census.dead_rows, 1)
+        self.assertEqual(census.dead_mangled, 1)
+
+    def test_dead_row_query_failure_leaves_the_live_census_intact(self):
+        """Best-effort: an informational query must never degrade the census.
+
+        Force the corpse-loop query to raise the sqlite3 error the inner
+        handler catches, proving dead counts fall back to 0 without an error
+        result and without UnboundLocalError.
+
+        Implementation note: Python 3.13 made sqlite3.Connection immutable,
+        so the planned `mock.patch.object(sqlite3.Connection, "execute", ...)`
+        raises TypeError. We instead wrap the connection returned by
+        `_connect_readonly`, which is semantically equivalent.
+        """
+        import sqlite3
+        from unittest import mock
+
+        self._seed(
+            [
+                ("live1", self.TOKEN, "librarian_inferred"),
+                ("dead1", self.MANGLED, "librarian_inferred", "2026-01-01"),
+            ],
+            with_deleted_at=True,
+        )
+
+        class _Wrap:
+            def __init__(self, conn):
+                self._conn = conn
+
+            def __getattr__(self, name):
+                return getattr(self._conn, name)
+
+            def execute(self, sql, *args, **kwargs):
+                if "deleted_at IS NOT NULL" in sql:
+                    raise sqlite3.OperationalError("simulated mid-flight failure")
+                return self._conn.execute(sql, *args, **kwargs)
+
+            def close(self):
+                self._conn.close()
+
+        real_connect = ct_preflight._connect_readonly
+
+        def fake_connect(db_path):
+            return _Wrap(real_connect(db_path))
+
+        with mock.patch.object(ct_preflight, "_connect_readonly", fake_connect):
+            census = ct_preflight.census_source_refs(self.brain_db())
+        self.assertIsNone(census.error)
+        self.assertEqual(census.total, 1)
+        self.assertEqual(census.dead_rows, 0)
+        self.assertEqual(census.dead_mangled, 0)
+
+    def test_document_sourced_255_char_path_is_never_damaged(self):
+        """A legitimate long vault path normalizes to exactly 255 chars.
+
+        Unscoped, shape/length heuristics classify it as damaged and the check
+        tells a healthy user their provenance is destroyed. §2.5.1 restricts
+        the census to source_type='librarian_inferred' precisely to prevent
+        this, and pins it as a regression test.
+        """
+        long_path = "documents_" + "a" * 245
+        self.assertEqual(len(long_path), 255)
+        self._seed([
+            ("d1", long_path, "document"),
+            ("e1", self.TOKEN, "librarian_inferred"),
+        ])
+        r = ct_doctor.check_import_preflight()
+        self.assertEqual(r.status, ct_doctor.PASS, r.detail)
+        # The document row is out of scope entirely — not counted, not judged.
+        census = ct_preflight.census_source_refs(self.brain_db())
+        self.assertEqual(census.total, 1, census.as_dict())
+        self.assertEqual(census.damaged, 0)
+        self.assertEqual(census.counts.get("token"), 1)
+
+    def test_census_is_scoped_to_librarian_inferred(self):
+        self._seed([
+            ("d1", '{"json":"doc"}', "document"),
+            ("d2", "  padded  ", "document"),
+            ("e1", self.TOKEN, "librarian_inferred"),
+        ])
+        census = ct_preflight.census_source_refs(self.brain_db())
+        self.assertTrue(census.scoped)
+        self.assertEqual(census.total, 1)
+        self.assertEqual(census.at_risk, 0, "document rows must not be judged")
+
+    def test_unscoped_schema_is_reported_not_silently_trusted(self):
+        # No source_type column: we cannot scope, so say so rather than risk
+        # the false positive silently.
+        self._seed([("e1", self.TOKEN, None)], with_source_type=False)
+        census = ct_preflight.census_source_refs(self.brain_db())
+        self.assertFalse(census.scoped)
+        r = ct_doctor.check_import_preflight()
+        self.assertIn("UNSCOPED", r.detail)
+
+    # --- corpse reporting in detail (2026-09-10 spec §3.4) -----------------
+
+    def test_pass_detail_reports_excluded_corpses(self):
+        self._seed(
+            [
+                ("live1", self.TOKEN, "librarian_inferred"),
+                ("dead1", self.MANGLED, "librarian_inferred", "2026-01-01"),
+                ("dead2", self.TOKEN, "librarian_inferred", "2026-01-02"),
+            ],
+            with_deleted_at=True,
+        )
+        r = ct_doctor.check_import_preflight()
+        self.assertEqual(r.status, ct_doctor.PASS, r.detail)
+        self.assertIn(
+            "; 2 soft-deleted rows excluded from this census "
+            "(1 with mangled source_refs)",
+            r.detail,
+        )
+
+    def test_pass_detail_omits_the_suffix_when_there_are_no_corpses(self):
+        self._seed(
+            [("live1", self.TOKEN, "librarian_inferred")],
+            with_deleted_at=True,
+        )
+        r = ct_doctor.check_import_preflight()
+        self.assertEqual(r.status, ct_doctor.PASS, r.detail)
+        self.assertNotIn("soft-deleted", r.detail)
+
+    def test_missing_evidence_warn_reports_excluded_corpses(self):
+        self._seed(
+            [
+                ("live1", self.TOKEN, "librarian_inferred"),
+                ("dead1", self.MANGLED, "librarian_inferred", "2026-01-01"),
+            ],
+            evidence_ids=[],  # evidence table exists but has no rows
+            with_deleted_at=True,
+        )
+        r = ct_doctor.check_import_preflight()
+        self.assertEqual(r.status, ct_doctor.WARN, r.detail)
+        self.assertIn(
+            "; 1 soft-deleted rows excluded from this census "
+            "(1 with mangled source_refs)",
+            r.detail,
+        )
+
+    def test_fail_detail_is_unchanged_by_corpse_reporting(self):
+        """FAIL strings carry recovery-hint text other work depends on."""
+        self._seed(
+            [
+                ("live1", self.MANGLED, "librarian_inferred"),
+                ("dead1", self.MANGLED, "librarian_inferred", "2026-01-01"),
+            ],
+            with_deleted_at=True,
+        )
+        r = ct_doctor.check_import_preflight()
+        self.assertEqual(r.status, ct_doctor.FAIL)
+        self.assertIn("1 of 1 librarian_inferred entries have a mangled", r.detail)
+        self.assertNotIn("soft-deleted", r.detail)
+
+    # --- NULL refs (§2.5.1: legitimate, visibility only) ------------------
+
+    def test_null_refs_counted_separately_and_never_damaged(self):
+        self._seed([
+            ("e1", None, "librarian_inferred"),
+            ("e2", self.TOKEN, "librarian_inferred"),
+        ])
+        census = ct_preflight.census_source_refs(self.brain_db())
+        self.assertEqual(census.null_ref_count, 1)
+        self.assertEqual(census.total, 1, "NULL rows are excluded from the judged total")
+        self.assertEqual(census.damaged, 0)
+        r = ct_doctor.check_import_preflight()
+        self.assertEqual(r.status, ct_doctor.PASS)
+        self.assertIn("null_ref_count=1", r.detail)
+
+    # --- verdicts ---------------------------------------------------------
+
+    def test_no_table_yet_passes(self):
+        self.make_brain()
+        r = ct_doctor.check_import_preflight()
+        self.assertEqual(r.status, ct_doctor.PASS)
+        self.assertIn("nothing to verify", r.detail)
+
+    def test_healthy_token_brain_passes(self):
+        self._seed([(f"e{i}", "librarian-" + f"{i:032x}", "librarian_inferred")
+                    for i in range(3)])
+        r = ct_doctor.check_import_preflight()
+        self.assertEqual(r.status, ct_doctor.PASS, r.detail)
+        self.assertIn("engine-proof", r.detail)
+
+    def test_mangled_rows_fail_with_recovery_hint(self):
+        self._seed([
+            ("e1", "evidenceproposal_idprop_" + "a" * 24, "librarian_inferred"),
+            ("e2", self.TOKEN, "librarian_inferred"),
+        ])
+        r = ct_doctor.check_import_preflight()
+        self.assertEqual(r.status, ct_doctor.FAIL)
+        self.assertIn("mangled", r.detail)
+        self.assertIn("2.5.4b", r.detail)   # recovery path surfaced
+        self.assertIn("#188", r.hint)
+
+    def test_json_refs_flagged_before_damage(self):
+        self._seed([("e1", '{"evidence":[{"chunk_id":"c1"}]}', "librarian_inferred")])
+        r = ct_doctor.check_import_preflight()
+        self.assertEqual(r.status, ct_doctor.FAIL)
+        self.assertIn("will rewrite", r.detail)
+        self.assertIn("five-predicate", r.hint)
+
+    def test_space_padded_ref_is_caught(self):
+        # Clears the GLOB, selected by TRIM. The GLOB-only port missed this.
+        self._seed([("e1", "  librarian_note.md  ", "librarian_inferred")])
+        r = ct_doctor.check_import_preflight()
+        self.assertEqual(r.status, ct_doctor.FAIL)
+        self.assertIn("will rewrite", r.detail)
+
+    def test_missing_evidence_TABLE_fails(self):
+        # Import contract broken: the export was not brain-complete.
+        self._seed([("e1", self.TOKEN, "librarian_inferred")], evidence_table=False)
+        r = ct_doctor.check_import_preflight()
+        self.assertEqual(r.status, ct_doctor.FAIL)
+        self.assertIn("provenance did not", r.hint)
+        self.assertIn("2.5.5", r.hint)
+
+    def test_missing_evidence_ROWS_warns(self):
+        # §2.3: still-grounded + loud warn, never auto-purged. A WARN, because
+        # nothing is being deleted and the graph remains usable.
+        self._seed(
+            [("e1", self.TOKEN, "librarian_inferred"),
+             ("e2", "librarian-" + "cd34" * 8, "librarian_inferred")],
+            evidence_ids=["e1"],
+        )
+        r = ct_doctor.check_import_preflight()
+        self.assertEqual(r.status, ct_doctor.WARN)
+        self.assertIn("no librarian_evidence row", r.detail)
+        self.assertIn("never auto-purged", r.hint)
+
+    def test_unanchored_rows_are_expected_under_phase_1(self):
+        # §2.4 Phase 1 deliberately writes unanchored facts to measure the
+        # drop rate. Their presence is not a defect.
+        self._seed(
+            [("e1", self.TOKEN, "librarian_inferred")],
+            evidence_ids=["e1"], unanchored=1,
+        )
+        r = ct_doctor.check_import_preflight()
+        self.assertEqual(r.status, ct_doctor.PASS, r.detail)
+        self.assertIn("unanchored", r.detail)
+        self.assertIn("Phase 1", r.detail)
+
+    def test_missing_database_warns_not_fails(self):
+        self.make_brain()
+        self.brain_db().unlink()
+        r = ct_doctor.check_import_preflight()
+        self.assertEqual(r.status, ct_doctor.WARN)
+
+    def test_census_never_writes_to_the_database(self):
+        db = self._seed([("e1", self.TOKEN, "librarian_inferred")])
+        before = db.read_bytes()
+        mtime = db.stat().st_mtime
+        ct_doctor.check_import_preflight()
+        self.assertEqual(db.read_bytes(), before, "pre-flight must not write")
+        self.assertEqual(db.stat().st_mtime, mtime)
+
+    def test_engine_version_detected_from_manifest(self):
+        pkg = (
+            self.fake_home / "node_modules" / "@equationalapplications"
+            / "core-llm-wiki" / "package.json"
+        )
+        pkg.parent.mkdir(parents=True)
+        pkg.write_text('{"version": "7.1.0"}')
+        version, source = ct_preflight.detect_engine_version(
+            env={"CT_ENGINE_PACKAGE_JSON": str(pkg)}
+        )
+        self.assertEqual(version, "7.1.0")
+        self.assertIn("core-llm-wiki", source)
+
+    def test_engine_version_unknown_is_not_an_error(self):
+        version, source = ct_preflight.detect_engine_version(env={})
+        self.assertIsNone(version)
+        self.assertIsNone(source)
+
+
+class CompatTests(DoctorTestCase):
+    def test_tier_matrix_versions(self):
+        self.assertEqual(ct_doctor._tier_for((2, 4, 3))[0], "v2.4-read")
+        self.assertEqual(ct_doctor._tier_for((2, 4, 9))[0], "v2.4-read")
+        self.assertEqual(ct_doctor._tier_for((2, 5, 0))[0], "v2.5-full")
+        self.assertEqual(ct_doctor._tier_for((2, 9, 1))[0], "v2.5-full")
+        self.assertIsNone(ct_doctor._tier_for((2, 3, 0)))
+
+    def test_version_parse(self):
+        self.assertEqual(ct_doctor._parse_version("rmcp 2.4.3"), (2, 4, 3))
+        self.assertEqual(ct_doctor._parse_version("2.5"), (2, 5, 0))
+        self.assertIsNone(ct_doctor._parse_version("no version here"))
+
+    def test_compat_file_agreement(self):
+        # The embedded tier matrix must agree with shared/compat.yaml.
+        compat = INTEGRATION.parents[1] / "shared" / "compat.yaml"
+        if not compat.exists():
+            self.skipTest("shared/compat.yaml not present")
+        text = compat.read_text()
+        self.assertIn("tools: 8", text)
+        self.assertIn("tools: 14", text)
+        self.assertIn('">=2.4,<2.5"', text)
+        self.assertIn('">=2.5"', text)
+
+
+class ExitCodeTests(DoctorTestCase):
+    def test_exit_code_mapping(self):
+        R = ct_doctor.CheckResult
+        self.assertEqual(
+            ct_doctor.exit_code_for([R("a", ct_doctor.PASS, "")]), 0
+        )
+        self.assertEqual(
+            ct_doctor.exit_code_for([R("a", ct_doctor.WARN, "")]), 2
+        )
+        self.assertEqual(
+            ct_doctor.exit_code_for(
+                [R("a", ct_doctor.WARN, ""), R("b", ct_doctor.FAIL, "")]
+            ),
+            1,
+        )
+
+
+class FullRunTests(DoctorTestCase):
+    def test_json_output_shape(self):
+        self.make_brain()
+        self.write_config()
+        self.write_settings()
+        out = subprocess.run(
+            [
+                sys.executable,
+                str(INTEGRATION / "scripts" / "ct_doctor.py"),
+                "check",
+                "--json",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            env={**os.environ, "PATH": str(self.bin_dir) + os.pathsep + os.environ["PATH"]},
+        )
+        data = json.loads(out.stdout)
+        self.assertIn("exit_code", data)
+        self.assertEqual(len(data["checks"]), len(EXPECTED_CHECKS))
+        for chk in data["checks"]:
+            self.assertIn(chk["status"], ("PASS", "WARN", "FAIL"))
+
+    def test_doctor_is_read_only(self):
+        # A full run must not create or modify anything in the fake home
+        # beyond what the test itself set up.
+        self.make_brain()
+        self.write_config()
+        self.write_settings()
+        before = sorted(str(p) for p in self.fake_home.rglob("*"))
+        ct_doctor.run_checks(timeout=3, env=self.with_path())
+        after = sorted(str(p) for p in self.fake_home.rglob("*"))
+        self.assertEqual(before, after)
+
+
+class SelfTestCliTests(unittest.TestCase):
+    """Gap: `ct_doctor.py --self-test` as a real subprocess, from a temp cwd."""
+
+    DOCTOR = (INTEGRATION / "scripts" / "ct_doctor.py").resolve()
+
+    @classmethod
+    def setUpClass(cls):
+        # ct_doctor.py --self-test runs THIS module; without this guard each
+        # spawned child would spawn another --self-test forever.
+        if os.environ.get("CT_DOCTOR_IN_SELF_TEST") == "1":
+            raise unittest.SkipTest("recursion guard: already inside --self-test child")
+
+    def _run_self_test(self):
+        with tempfile.TemporaryDirectory(prefix="ct-selftest-cwd-") as cwd:
+            return subprocess.run(
+                [sys.executable, str(self.DOCTOR), "--self-test"],
+                capture_output=True,
+                text=True,
+                timeout=180,
+                cwd=cwd,  # temp cwd proves the script resolves tests/ from __file__
+                env={**os.environ, "CT_DOCTOR_IN_SELF_TEST": "1"},
+            )
+
+    def test_self_test_exits_zero_with_ok_summary(self):
+        proc = self._run_self_test()
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        # unittest.TextTestRunner writes its summary to stderr.
+        self.assertIn("OK", proc.stderr)
+        self.assertIn("Ran ", proc.stderr)
+
+    def _run_doctor(self, *argv):
+        with tempfile.TemporaryDirectory(prefix="ct-selftest-cwd-") as cwd:
+            return subprocess.run(
+                [sys.executable, str(self.DOCTOR), *argv],
+                capture_output=True,
+                text=True,
+                timeout=180,
+                cwd=cwd,
+                env={**os.environ, "CT_DOCTOR_IN_SELF_TEST": "1"},
+            )
+
+    def test_self_test_accepted_after_subcommand(self):
+        # The regression: `check --self-test` used to exit 2 (unrecognized),
+        # because --self-test lives on the main parser. It must now run the
+        # suite and take precedence over the subcommand.
+        proc = self._run_doctor("check", "--self-test")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("Ran ", proc.stderr)
+
+    def test_self_test_wins_over_subcommand_options(self):
+        # Even alongside a subcommand option, the global flag wins: the
+        # suite runs instead of emitting check's JSON payload.
+        proc = self._run_doctor("check", "--json", "--self-test")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("Ran ", proc.stderr)
+        self.assertNotIn('"exit_code"', proc.stdout)
+
+    def test_self_test_accepted_before_subcommand(self):
+        proc = self._run_doctor("--self-test", "check")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("Ran ", proc.stderr)
+
+    def test_unknown_option_still_errors(self):
+        # Stripping --self-test must not turn the parser permissive:
+        # a typo'd option still exits 2 rather than silently running check.
+        proc = self._run_doctor("check", "--jsno")
+        self.assertEqual(proc.returncode, 2, proc.stdout)
+        self.assertIn("unrecognized arguments", proc.stderr)
+
+
+class CheckJsonCliTests(DoctorTestCase):
+    """Gap: --json shape from the real CLI path (not run_checks directly)."""
+
+    def test_json_cli_parseable_and_contracted(self):
+        self.make_brain()
+        self.write_config()
+        self.write_settings()
+        out = subprocess.run(
+            [
+                sys.executable,
+                str(INTEGRATION / "scripts" / "ct_doctor.py"),
+                "check",
+                "--json",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            env={**os.environ, "PATH": str(self.bin_dir) + os.pathsep + os.environ["PATH"]},
+        )
+        data = json.loads(out.stdout)
+        self.assertIn("exit_code", data)
+        self.assertIn("checks", data)
+        self.assertEqual(len(data["checks"]), len(EXPECTED_CHECKS))
+        names = [c["name"] for c in data["checks"]]
+        # The full contract, in order — brain-dir and vault are distinct
+        # checks, and import-preflight replaced the old static okf-hygiene.
+        self.assertEqual(names, list(EXPECTED_CHECKS))
+        for chk in data["checks"]:
+            self.assertEqual(set(chk), {"name", "status", "detail", "hint"})
+            self.assertIn(chk["status"], ("PASS", "WARN", "FAIL"))
+
+
+class VersionCompatTests(DoctorTestCase):
+    """Version is corroborating metadata; tool count is the tier authority.
+
+    The sidecar has no --version flag, and MCP serverInfo reports the rmcp
+    framework version rather than the Curated Thoughts release — which is why
+    the old serverInfo sanity-window heuristic was removed. An undiscoverable
+    version must therefore be unremarkable (PASS), never a warning that every
+    macOS and Windows user sees.
+    """
+
+    def _patch_no_dpkg(self):
+        """Force the dpkg-query branch to fail (as on macOS/Windows)."""
+        orig = ct_doctor.subprocess.run
+
+        def fake_run(cmd, *a, **k):
+            if cmd[:2] == ["dpkg-query", "-W"]:
+                raise FileNotFoundError("no dpkg on this platform")
+            return orig(cmd, *a, **k)
+
+        ct_doctor.subprocess.run = fake_run
+        self.addCleanup(setattr, ct_doctor.subprocess, "run", orig)
+
+    def _patch_dpkg_version(self, version):
+        orig = ct_doctor.subprocess.run
+
+        def fake_run(cmd, *a, **k):
+            if cmd[:2] == ["dpkg-query", "-W"]:
+                return subprocess.CompletedProcess(cmd, 0, version, "")
+            return orig(cmd, *a, **k)
+
+        ct_doctor.subprocess.run = fake_run
+        self.addCleanup(setattr, ct_doctor.subprocess, "run", orig)
+
+    def test_undiscoverable_version_with_tool_count_passes(self):
+        self._patch_no_dpkg()
+        r = ct_doctor.check_version_compat(str(self.mock_path), tool_count=14)
+        self.assertEqual(r.status, ct_doctor.PASS)
+        self.assertIn("v2.5-full", r.detail)
+        self.assertIn("tool count", r.detail)
+
+    def test_undiscoverable_version_without_tool_count_still_passes(self):
+        self._patch_no_dpkg()
+        r = ct_doctor.check_version_compat(str(self.mock_path), tool_count=None)
+        self.assertEqual(r.status, ct_doctor.PASS)
+
+    def test_dpkg_version_agreeing_with_tools_passes(self):
+        self._patch_dpkg_version("2.5.1")
+        r = ct_doctor.check_version_compat(str(self.mock_path), tool_count=14)
+        self.assertEqual(r.status, ct_doctor.PASS)
+        self.assertIn("v2.5-full", r.detail)
+
+    def test_version_disagreeing_with_tool_count_warns(self):
+        # The genuinely useful case: package says 2.5, but a stale sidecar
+        # process is still serving the 8-tool surface.
+        self._patch_dpkg_version("2.5.1")
+        r = ct_doctor.check_version_compat(str(self.mock_path), tool_count=8)
+        self.assertEqual(r.status, ct_doctor.WARN)
+        self.assertIn("disagree", r.hint)
+        self.assertIn("v2.4-read", r.detail)
+
+    def test_pre_tier_version_warns(self):
+        self._patch_dpkg_version("2.3.0")
+        r = ct_doctor.check_version_compat(str(self.mock_path), tool_count=8)
+        self.assertEqual(r.status, ct_doctor.WARN)
+        self.assertIn("outside every tier", r.detail)
+
+    def test_tier_for_tool_count(self):
+        self.assertEqual(ct_doctor._tier_for_tool_count(14), "v2.5-full")
+        self.assertEqual(ct_doctor._tier_for_tool_count(20), "v2.5-full")
+        self.assertEqual(ct_doctor._tier_for_tool_count(8), "v2.4-read")
+        self.assertIsNone(ct_doctor._tier_for_tool_count(3))
+        self.assertIsNone(ct_doctor._tier_for_tool_count(0))
+
+
 class StatusSnapshotTests(DoctorTestCase):
     """The session-start snapshot: fast, read-only, fail-open."""
 
@@ -291,6 +1668,159 @@ class StatusSnapshotTests(DoctorTestCase):
     def test_snapshot_never_raises_on_broken_env(self):
         snap = ct_status.snapshot(env={"CURATED_BRAIN_DIR": "\x00bad"})
         self.assertIn(snap["status"], (ct_status.OK, ct_status.DEGRADED, ct_status.UNKNOWN))
+
+
+class ReviewRegressionTests(DoctorTestCase):
+    """Pinned regressions from the PR #5 review."""
+
+    # --- non-string source_ref (TypeError crash) --------------------------
+
+    def test_non_string_source_ref_does_not_crash(self):
+        """SQLite is dynamically typed: an imported DB can hold INTEGER /
+        REAL / BLOB in source_ref. Reaching the token regex with one raised
+        TypeError, which the census did not catch and run_checks had no
+        boundary for — aborting `ct_doctor check` on exactly the imported
+        database this check exists to inspect."""
+        for value in (123, 4.5, b"blob"):
+            self.assertEqual(ct_preflight.classify_source_ref(value), "mangled", value)
+            self.assertFalse(ct_preflight.is_token(value))
+            self.assertFalse(ct_preflight.engine_would_rewrite(value))
+            self.assertIsNone(ct_preflight.recovery_shape(value))
+            self.assertIsNone(ct_preflight.normalize_source_ref(value))
+
+    def test_census_survives_non_text_storage_values(self):
+        import sqlite3
+
+        self.make_brain()
+        db = self.brain_db()
+        conn = sqlite3.connect(db)
+        try:
+            conn.execute(
+                "CREATE TABLE llm_wiki_entries (id TEXT, source_ref, source_type TEXT)"
+            )
+            conn.executemany(
+                "INSERT INTO llm_wiki_entries VALUES (?,?,?)",
+                [
+                    ("e1", 42, "librarian_inferred"),
+                    ("e2", b"\x00blob", "librarian_inferred"),
+                    ("e3", None, "librarian_inferred"),
+                ],
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        census = ct_preflight.census_source_refs(db)  # must not raise
+        self.assertIsNone(census.error)
+        self.assertEqual(census.null_ref_count, 1)
+        self.assertEqual(census.damaged, 2)
+        # And the whole doctor run completes rather than aborting.
+        r = ct_doctor.check_import_preflight()
+        self.assertEqual(r.status, ct_doctor.FAIL)
+
+    # --- tool count passed structurally, not scraped from prose -----------
+
+    @unittest.skipIf(IS_WINDOWS, MOCK_SPAWN_SKIP)
+    def test_probe_returns_tool_count_including_zero(self):
+        result, count = ct_doctor._probe_sidecar(
+            str(self.mock_path), timeout=5, env={**self.with_path(), "MOCK_TOOLS": ""}
+        )
+        # An empty MOCK_TOOLS yields one empty name, not zero; assert the
+        # contract that the count is an int whenever the sidecar answered.
+        self.assertIsInstance(count, int)
+        result, count = ct_doctor._probe_sidecar(None)
+        self.assertIsNone(count, "no live surface observed => None, not 0")
+
+    @unittest.skipIf(IS_WINDOWS, MOCK_SPAWN_SKIP)
+    def test_probe_count_matches_detail_for_real_tiers(self):
+        for mock_tools, expected in ((TIER8, 8), (None, 14)):
+            env = dict(self.with_path())
+            if mock_tools:
+                env["MOCK_TOOLS"] = mock_tools
+            result, count = ct_doctor._probe_sidecar(
+                str(self.mock_path), timeout=5, env=env
+            )
+            self.assertEqual(count, expected, result.detail)
+
+    def test_zero_tool_surface_contradicts_a_v25_package(self):
+        """The scrape returned None for the zero-tool detail, so version-compat
+        skipped the comparison and PASSed on a broken install."""
+        orig = ct_doctor.subprocess.run
+
+        def fake(cmd, *a, **k):
+            if cmd[:2] == ["dpkg-query", "-W"]:
+                return subprocess.CompletedProcess(cmd, 0, "2.5.1", "")
+            return orig(cmd, *a, **k)
+
+        ct_doctor.subprocess.run = fake
+        self.addCleanup(setattr, ct_doctor.subprocess, "run", orig)
+
+        r = ct_doctor.check_version_compat(str(self.mock_path), tool_count=0)
+        self.assertEqual(r.status, ct_doctor.WARN)
+        self.assertIn("below-tier (0 tools)", r.detail)
+        # None still means "nothing observed" and must not warn.
+        r_none = ct_doctor.check_version_compat(str(self.mock_path), tool_count=None)
+        self.assertEqual(r_none.status, ct_doctor.PASS)
+
+    # --- plugin enablement, which may only ever warn -----------------------
+
+    def test_enablement_key_is_matched_by_marketplace_prefix(self):
+        """enabledPlugins is keyed `<plugin>@<marketplace>`.
+
+        The marketplace half is not knowable from here, so the key is matched
+        by prefix — but the '@' must be part of that prefix, or a differently
+        named plugin sharing the stem would read as this one being enabled.
+        """
+        cases = {
+            '{"enabledPlugins": {"curated-thoughts@ct-marketplace": true}}': True,
+            '{"enabledPlugins": {"curated-thoughts@local": true}}': True,
+            '{"enabledPlugins": {"curated-thoughts-extra@local": true}}': False,
+            '{"enabledPlugins": {"curated-thoughts@local": false}}': False,
+            '{"enabledPlugins": {"other@local": true}}': False,
+            '{"enabledPlugins": []}': False,
+            '{"theme": "dark"}': False,
+        }
+        for body, confirmed in cases.items():
+            path = self.write_settings(body)
+            note = ct_doctor._plugin_enablement_note(path)
+            self.assertEqual(note is None, confirmed, body)
+
+    def test_unconfirmed_enablement_cannot_turn_a_registration_into_a_fail(self):
+        """A --plugin-dir install leaves no trace, so absence proves nothing.
+
+        The Hermes check could afford to reason about plugins.enabled because
+        Hermes writes it. Claude Code does not, so this direction is pinned:
+        every settings.json shape must leave a good registration at WARN or
+        better, never FAIL.
+        """
+        self.write_config()
+        for body in ('{"theme": "dark"}', "{not json", '{"enabledPlugins": {}}'):
+            self.write_settings(body)
+            r = ct_doctor.check_claude_code_registration(cwd=self.fake_home)
+            self.assertEqual(r.status, ct_doctor.WARN, body)
+
+
+class TestCompatConstantsAreGenerated(unittest.TestCase):
+    """The tier matrix must come from shared/compat.yaml, not from literals.
+
+    shared/compat.yaml is the single source of truth (spec §5.3). If these
+    values are ever retyped into the doctor, the compatibility matrix and the
+    doctor can disagree, which is precisely the drift the generated module
+    exists to prevent.
+    """
+
+    def test_doctor_tiers_come_from_the_generated_module(self):
+        import _compat_generated
+
+        self.assertIs(ct_doctor.COMPAT_TIERS, _compat_generated.TIERS)
+        self.assertIs(ct_doctor.FULL_TIER_TOOLS, _compat_generated.FULL_TIER_TOOLS)
+        self.assertIs(ct_doctor.READ_TIER_TOOLS, _compat_generated.READ_TIER_TOOLS)
+
+    def test_generated_tiers_match_the_shipped_expectations(self):
+        import _compat_generated
+
+        by_name = {tier[0]: tier for tier in _compat_generated.TIERS}
+        self.assertEqual(by_name["v2.4-read"][3], 8)
+        self.assertEqual(by_name["v2.5-full"][3], 14)
 
 
 def load_suite():

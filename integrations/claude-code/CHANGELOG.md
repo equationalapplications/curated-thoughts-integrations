@@ -18,3 +18,10 @@ heading format below is load-bearing: `## <version> — <date>`.
   import pre-flight census). `status` flips to `implemented`, so the
   integration now generates `scripts/_compat_generated.py` from
   `shared/compat.yaml` and appears as implemented in the README table.
+- Add `scripts/ct_doctor.py`, the read-only install/health doctor, copied from
+  `integrations/hermes/` with checks 1-6, 8 and 9 unchanged. Check 7 is the one
+  harness-specific check: `claude-code-registration` reads the JSON config
+  Claude Code writes (`~/.claude.json`, or `CLAUDE_CONFIG_PATH`) plus a
+  project-scope `.mcp.json`, and reports plugin enablement from
+  `~/.claude/settings.json` as a WARN-only note, because a `--plugin-dir`
+  install leaves nothing on disk to verify.
