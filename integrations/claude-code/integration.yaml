@@ -5,14 +5,14 @@
 # drifting.
 # Spec: docs/superpowers/specs/2026-09-11-claude-code-integration-design.md
 #
-# `status: planned` is deliberate while the scaffold lands: schema-validated,
-# but skipped for tests, packaging and release until the shipped scripts exist.
-# Task 2 flips it to `implemented`.
+# `status: implemented`: the shared scripts (ct_env, ct_status, ct_preflight)
+# are in place, so this integration is now in scope for tests, packaging,
+# generated-file checks and the release train.
 id: claude-code
 name: Curated Thoughts for Claude Code
 version: 0.1.0
 language: python
-status: planned
+status: implemented
 requires_sidecar: ">=2.5"
 compat_tier: v2.5-full
 version_mirror: .claude-plugin/plugin.json#version

@@ -13,7 +13,7 @@ common architecture.
 | [Hermes Agent](https://github.com/NousResearch/hermes-agent) | [`integrations/hermes/`](integrations/hermes/) | implemented | [0.2.2](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=hermes) |
 | DeepSeek Harness | [`integrations/deepseek/`](integrations/deepseek/) | implemented | [0.1.2](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=deepseek) |
 | OpenClaw | `integrations/openclaw/` | planned | — |
-| Claude Code | `integrations/claude-code/` | planned | — |
+| Claude Code | [`integrations/claude-code/`](integrations/claude-code/) | implemented | [0.1.0](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=claude-code) |
 
 Rows marked *planned* are placeholders — no installable artifact exists yet
 for that harness. Implemented rows link to that integration's releases.

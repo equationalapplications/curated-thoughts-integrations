@@ -11,5 +11,10 @@ heading format below is load-bearing: `## <version> — <date>`.
 - Scaffold the Claude Code plugin: `.claude-plugin/plugin.json` (plugin name
   `curated-thoughts`), the `integration.yaml` CI contract with
   `version_mirror: .claude-plugin/plugin.json#version`, and manifest tests that
-  keep the two from drifting. `status` stays `planned` until the shipped
-  scripts, hook and skills land.
+  keep the two from drifting.
+- Add the shared stdlib-only scripts, copied from `integrations/hermes/` and
+  kept logically identical: `ct_env.py` (brain/vault/sidecar resolution),
+  `ct_status.py` (session-start snapshot) and `ct_preflight.py` (read-only
+  import pre-flight census). `status` flips to `implemented`, so the
+  integration now generates `scripts/_compat_generated.py` from
+  `shared/compat.yaml` and appears as implemented in the README table.
