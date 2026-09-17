@@ -29,7 +29,8 @@
       "properties": {
         "test": {"type": "string"},
         "lint": {"type": "string"},
-        "shell": {"type": "array", "items": {"type": "string"}}
+        "shell": {"type": "array", "items": {"type": "string"}},
+        "host": {"type": "string"}
       }
     },
     "policy": {
