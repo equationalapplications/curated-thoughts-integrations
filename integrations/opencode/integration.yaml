@@ -1,0 +1,40 @@
+id: opencode
+name: Curated Thoughts for OpenCode
+version: 0.1.0
+# `planned` until the code lands: tools/ct_ci_discover.py and
+# tools/ct_ci_generate.py both filter to status == implemented, so a planned
+# integration is invisible to `discover` and generates no _compat_generated.ts.
+# The flip to `implemented` happens in the PR that adds the source.
+status: planned
+language: node
+requires_sidecar: ">=2.5"
+compat_tier: v2.5-full
+version_mirror: package.json#version
+
+matrix:
+  # OpenCode ships on macOS, Linux and Windows; sidecar discovery and path
+  # handling are exactly where that claim breaks, so Windows is not optional.
+  os: [ubuntu-latest, macos-latest, windows-latest]
+  node: ["22.x", "24.x"]
+
+checks:
+  # Build first: lib/ is gitignored, so a CI checkout has no compiled doctor to
+  # spawn and every lib-dependent test would skip. Same lesson as DeepSeek.
+  test: pnpm run build && pnpm run test
+  lint: pnpm exec tsc --noEmit
+  shell:
+    - scripts/install.sh
+  # New key; requires the schema addition above. Runs in a dedicated Bun job.
+  host: bun test tests/host/contract.test.ts
+
+policy:
+  allow_sqlite_readonly:
+    - scripts/ct_preflight.ts
+
+package:
+  include: ["**"]
+  # lib/ MUST ship: package.json's entry points (lib/src/index.js,
+  # lib/scripts/ct_doctor.js) live there. Only true build junk is excluded.
+  exclude:
+    - "**/dist/**"
+    - "**/node_modules/**"
