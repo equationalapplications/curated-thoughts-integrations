@@ -1,11 +1,7 @@
 id: opencode
 name: Curated Thoughts for OpenCode
 version: 0.1.0
-# `planned` until the code lands: tools/ct_ci_discover.py and
-# tools/ct_ci_generate.py both filter to status == implemented, so a planned
-# integration is invisible to `discover` and generates no _compat_generated.ts.
-# The flip to `implemented` happens in the PR that adds the source.
-status: planned
+status: implemented
 language: node
 requires_sidecar: ">=2.5"
 compat_tier: v2.5-full

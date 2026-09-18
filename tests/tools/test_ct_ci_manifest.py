@@ -100,9 +100,27 @@ class TestRealManifests(unittest.TestCase):
             )
         self.assertEqual(problems, [])
 
-    def test_all_four_integrations_are_declared(self):
+    def test_all_shipped_integrations_are_declared(self):
         ids = [i for i, _, _ in ct_ci_manifest.discover_manifests(REPO)]
-        self.assertEqual(ids, ["claude-code", "deepseek", "hermes", "openclaw"])
+        self.assertEqual(
+            ids, ["claude-code", "deepseek", "hermes", "openclaw", "opencode"]
+        )
+
+    def test_manifest_with_host_check_validates(self):
+        data = dict(VALID)
+        data["checks"] = dict(data["checks"])
+        data["checks"]["host"] = "bun test tests/host/contract.test.ts"
+        self.assertEqual(errs(data), [])
+
+    def test_manifest_with_unknown_check_key_rejected(self):
+        data = dict(VALID)
+        data["checks"] = dict(data["checks"])
+        data["checks"]["grpc"] = "make check"
+        messages = errs(data)
+        self.assertTrue(
+            any("grpc" in m for m in messages),
+            f"unknown checks key not flagged: {messages}",
+        )
 
     def test_hermes_version_matches_plugin_yaml(self):
         import yaml
