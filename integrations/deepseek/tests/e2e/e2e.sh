@@ -127,7 +127,7 @@ patch_has_entries() {
   [ -n "$body" ] && [ "$body" != '[]' ]
 }
 {
-  if patch_has_entries; then printf '\n'; fi
+  if patch_has_entries; then cat "$PATCH_FILE"; printf '\n'; fi
   cat <<EOF
 - id: agent-default-model
   config:
@@ -221,6 +221,15 @@ const child = spawn('curated-thoughts-mcp', ['--mcp'], {
 });
 let buf = '';
 const pending = new Map();
+let handshook = false;
+// Exiting before the handshake completes is the sidecar refusing to start.
+// 'close', not 'exit': it fires after stderr is drained into the log.
+child.on('close', (code) => {
+  if (!handshook) {
+    console.error(`sidecar exited before handshake (code=${code})`);
+    process.exit(4);
+  }
+});
 child.stdout.on('data', (d) => {
   buf += d;
   let i;
@@ -249,6 +258,7 @@ try {
     capabilities: {},
     clientInfo: { name: 'ct-e2e-tilde-check', version: '0.0.0' },
   });
+  handshook = true;
   child.stdin.write(JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) + '\n');
   const tools = await rpc('tools/list', {});
   const names = (tools.result?.tools ?? []).map((t) => t.name);
@@ -271,10 +281,14 @@ tilde_rc=$?
 if [ "$tilde_rc" -eq 0 ]; then
   bad 'sidecar now EXPANDS ~ in CURATED_BRAIN_DIR — update cordis.patch.yml and test_bundle_patch'
   sed 's/^/      /' "$OUT/tilde.log"
-elif grep -q 'brain.db not found' "$OUT/tilde.log"; then
-  # The sidecar fatal-exited on the literal-~ path before answering the MCP
-  # handshake — the does-not-expand proof, so the probe script reports rc=1.
-  ok 'sidecar treats ~ literally (shipped rows resolve paths at composition)'
+elif [ "$tilde_rc" -eq 4 ] && grep -qE '~/\.brain|brain\.db not found' "$OUT/tilde.log"; then
+  # The sidecar refused to start and named the literal-~ path (wording of the
+  # message aside) — the does-not-expand proof.
+  ok 'sidecar treats ~ literally (refuses to start on the unexpanded path)'
+elif [ "$tilde_rc" -eq 3 ] && [ -f "$HOME/.brain/brain.db" ]; then
+  # The sidecar started but the tool call failed, while $HOME/.brain holds a
+  # healthy brain — so it looked somewhere other than the expanded path.
+  ok 'sidecar treats ~ literally (tool call fails although ~/.brain is healthy)'
 else
   bad "sidecar ~ check crashed before proving either way (rc=$tilde_rc)"
   sed 's/^/      /' "$OUT/tilde.log"
@@ -290,8 +304,11 @@ check "re-apply exits 0 (rc=$reapply_rc)" test "$reapply_rc" -eq 0
 profile_after=$(find "$PROFILE_DIR" -type f ! -path '*/.pnpm*' -print0 2>/dev/null \
   | sort -z | xargs -0 sha256sum 2>/dev/null | sha256sum)
 check 'profile unchanged (manifest, bundle list, patch)' test "$profile_before" = "$profile_after"
-check 'no duplicate patch rows appended' \
-  test "$(grep -c 'dsh-curated-thoughts' "$PROFILE_DIR/cordis.patch.yml")" -le 1
+# The rows ship in the package's bundle patch; the profile patch holds only
+# the test's model row, so ANY curated-thoughts row there means the installer
+# wrote YAML it must not write.
+check 'installer wrote no curated-thoughts rows into the profile patch' \
+  sh -c "! grep -qE 'curated-thoughts' '$PROFILE_DIR/cordis.patch.yml'"
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 test "$fail" -eq 0

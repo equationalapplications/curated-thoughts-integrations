@@ -121,4 +121,17 @@ CALLS_AFTER=$(wc -l < "$DSH_STUB_LOG")
 [ "$CALLS_AFTER" -gt "$CALLS_BEFORE" ] \
   || { echo "FAIL: version change did not trigger a re-add"; exit 1; }
 
+# --- a version-less package.json is treated as not installed ----------------
+# node -p prints the string "undefined" for a missing field; the installer must
+# not report that as an installed version.
+printf '{"name": "@equational-applications/dsh-curated-thoughts"}\n' \
+  >"$DSH_HOME/profiles/headless/node_modules/$SCOPE_DIR/package.json"
+run_install apply --profile headless >"$TMP/noversion.out"
+if grep -q 'undefined' "$TMP/noversion.out"; then
+  echo "FAIL: installer reported a missing version as 'undefined'"; exit 1
+fi
+grep -q 'already installed' "$TMP/reapply.out" \
+  && ! grep -q 'already installed' "$TMP/noversion.out" \
+  || { echo "FAIL: version-less install was treated as already installed"; exit 1; }
+
 echo "OK"

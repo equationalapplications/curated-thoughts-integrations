@@ -650,6 +650,11 @@ export function checkEmbedding(env: NodeJS.ProcessEnv = process.env): CheckResul
 // --------------------------------------------------------------------------
 
 const DSH_PROFILES_DIR = 'profiles';
+// `dsh plugin add` is `pnpm add` in the profile dir, and pnpm always links a
+// direct dependency at the top level of node_modules (whatever the hoisting
+// mode — hoisting only affects transitive deps). dsh itself resolves bundle
+// patches and bare plugin names through this same path, so a package absent
+// here is not loadable by dsh either.
 const DSH_PLUGIN_PROFILE_REL = join('node_modules', DSH_PLUGIN_PACKAGE);
 
 /** Profiles under $DSH_HOME whose node_modules contain this package. */

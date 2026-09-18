@@ -9,12 +9,17 @@ import { formatStatusBlock } from './format.js';
 
 export interface Config {
   brainDir?: string;
-  sidecarCommand?: string;
 }
 
+/**
+ * The sidecar command is not configurable here: the MCP client row lives in
+ * cordis.patch.yml, so override `command` on that row from a profile patch.
+ * The brainDir default is a plain literal — Schema.default() takes a value,
+ * so an env lookup here would be frozen at module load. An ambient
+ * CURATED_BRAIN_DIR is honored in apply() instead (and by the bundle patch).
+ */
 export const Config: Schema<Config> = Schema.object({
-  brainDir: Schema.string().default(process.env.CURATED_BRAIN_DIR ?? '~/.brain'),
-  sidecarCommand: Schema.string().default('curated-thoughts-mcp'),
+  brainDir: Schema.string().default('~/.brain'),
 });
 
 /**

@@ -86,7 +86,12 @@ trap cleanup EXIT
 
 installed_version() {
   [ -f "$INSTALLED_PKG/package.json" ] || return 1
-  node -p "require('$INSTALLED_PKG/package.json').version" 2>/dev/null || return 1
+  # `|| ''` so a package.json without a version prints nothing rather than
+  # the string "undefined" — an empty result means "not (properly) installed".
+  local v
+  v=$(node -p "require('$INSTALLED_PKG/package.json').version || ''" 2>/dev/null) || return 1
+  [ -n "$v" ] || return 1
+  printf '%s\n' "$v"
 }
 
 check_prerequisites() {
