@@ -10,6 +10,7 @@ import {
   sidecarCandidates,
   looksLikeDevBuild,
   installKind,
+  expandHome,
   ENV_BRAIN_DIR,
 } from '../scripts/ct_env.js';
 
@@ -201,6 +202,30 @@ describe('looksLikeDevBuild', () => {
 
   it('does not flag a path under /usr/bin', () => {
     expect(looksLikeDevBuild('/usr/bin/curated-thoughts-mcp')).toBe(false);
+  });
+});
+
+describe('expandHome', () => {
+  it('expands ~ when HOME is set', () => {
+    const env = { HOME: '/home/user' };
+    expect(expandHome('~/.config', env)).toBe(join('/home/user', '.config'));
+  });
+
+  it('falls back to USERPROFILE when HOME is empty', () => {
+    const env = { HOME: '', USERPROFILE: '/c/users/user' };
+    expect(expandHome('~/.config', env)).toBe(join('/c/users/user', '.config'));
+  });
+
+  it('falls back to homedir() when both HOME and USERPROFILE are empty', () => {
+    const env = { HOME: '', USERPROFILE: '' };
+    // homedir() is platform-dependent, so just verify it doesn't throw
+    expect(() => expandHome('~/.config', env)).not.toThrow();
+  });
+
+  it('does not expand ~ without a leading ~ or /~/', () => {
+    const env = { HOME: '/home/user' };
+    expect(expandHome('/home/user/.config', env)).toBe('/home/user/.config');
+    expect(expandHome('config', env)).toBe('config');
   });
 });
 
