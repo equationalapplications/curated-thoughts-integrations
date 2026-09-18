@@ -3,7 +3,12 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import Database from 'better-sqlite3';
-import { censusSourceRefs, detectEngineVersion } from '../scripts/ct_preflight.js';
+import {
+  censusSourceRefs,
+  detectEngineVersion,
+  _setBetterSqlite3Loader,
+  _resetBetterSqlite3Loader,
+} from '../scripts/ct_preflight.js';
 
 // A well-formed post-#188 token: 'librarian-' + exactly 32 lowercase hex chars
 // (PR #188 §2.2). The plan's literal 'ct_token:abc123' is not a valid token
@@ -279,5 +284,45 @@ describe('lazy better-sqlite3', () => {
     const c = censusSourceRefs(join(tmpDir, 'does-not-exist.db'));
     expect(c.error).not.toBeNull();
     expect(c.tablePresent).toBe(false);
+  });
+});
+
+describe('better-sqlite3 unavailable on a present DB', () => {
+  // Use a real, present brain so existsSync() passes and the loader is the
+  // only thing standing between the census and a SQLite handle. vi.doMock
+  // cannot intercept createRequire(import.meta.url)('better-sqlite3'), so
+  // the seam in ct_preflight.ts is the deterministic control. Reset the
+  // module-level cache between tests so the unavailable-dependency case
+  // is isolated.
+  afterEach(() => {
+    _resetBetterSqlite3Loader();
+  });
+
+  it('returns a structured error when the loader throws', () => {
+    _setBetterSqlite3Loader(() => {
+      throw new Error('simulated missing native binding');
+    });
+    const c = censusSourceRefs(dbPath);
+    expect(c.error).not.toBeNull();
+    expect(c.error).toMatch(/better-sqlite3 unavailable: simulated missing native binding/);
+    expect(c.tablePresent).toBe(false);
+  });
+
+  it('a follow-up call reuses the cached unavailability (no re-load attempt)', () => {
+    let loaderCalls = 0;
+    _setBetterSqlite3Loader(() => {
+      loaderCalls += 1;
+      throw new Error('first-call failure');
+    });
+    const first = censusSourceRefs(dbPath);
+    expect(first.error).toMatch(/better-sqlite3 unavailable: first-call failure/);
+    expect(loaderCalls).toBe(1);
+    // A second call after the cache has been populated must report the
+    // shorter 'is not available' message and must NOT invoke the loader
+    // again — the doctor would abort on an exception thrown from the
+    // check hook, so the unavailable state has to be sticky.
+    const second = censusSourceRefs(dbPath);
+    expect(second.error).toMatch(/better-sqlite3 is not available/);
+    expect(loaderCalls).toBe(1);
   });
 });

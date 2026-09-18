@@ -54,9 +54,37 @@ import { EVIDENCE_TABLE, REQUIRED_TABLES, SOURCE_REF_SHAPE } from './_compat_gen
  * the module graph so that importing ct_preflight.ts — as ct_doctor.ts does
  * for detectEngineVersion — never loads the native binding until a census
  * actually needs it.
+ *
+ * The loader is behind a small seam (`_setBetterSqlite3Loader`) so tests can
+ * force the unavailable-dependency error path against a real, present brain
+ * — `vi.doMock('better-sqlite3', ...)` cannot reliably intercept the native
+ * `createRequire(import.meta.url)('better-sqlite3')` call this module uses,
+ * so the seam is the deterministic way to cover that path.
  */
 type DatabaseConstructor = typeof BetterSqlite3;
 let _databaseCtor: DatabaseConstructor | null | undefined;
+
+type BetterSqlite3Loader = () => DatabaseConstructor;
+const _defaultLoader: BetterSqlite3Loader = () => {
+  // `createRequire` + require() is the deliberate lazy-load seam here: a
+  // static import would make the optional better-sqlite3 dependency a hard
+  // one for every plugin runtime path.
+  const require = createRequire(import.meta.url);
+  return require('better-sqlite3') as DatabaseConstructor;
+};
+let _loader: BetterSqlite3Loader = _defaultLoader;
+
+/** Test seam: install a custom better-sqlite3 loader and reset the cache. */
+export function _setBetterSqlite3Loader(loader: BetterSqlite3Loader): void {
+  _loader = loader;
+  _databaseCtor = undefined;
+}
+
+/** Test seam: restore the default loader and clear the cache. */
+export function _resetBetterSqlite3Loader(): void {
+  _loader = _defaultLoader;
+  _databaseCtor = undefined;
+}
 
 function _requireDatabase(): { db: DatabaseConstructor | null; error: string | null } {
   if (_databaseCtor !== undefined) {
@@ -65,11 +93,7 @@ function _requireDatabase(): { db: DatabaseConstructor | null; error: string | n
       : { db: _databaseCtor, error: null };
   }
   try {
-    // `createRequire` + require() is the deliberate lazy-load seam here: a
-    // static import would make the optional better-sqlite3 dependency a hard
-    // one for every plugin runtime path.
-    const require = createRequire(import.meta.url);
-    _databaseCtor = require('better-sqlite3') as DatabaseConstructor;
+    _databaseCtor = _loader();
     return { db: _databaseCtor, error: null };
   } catch (e) {
     _databaseCtor = null;

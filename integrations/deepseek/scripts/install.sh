@@ -172,7 +172,15 @@ verify_with_doctor() {
 
 main() {
   say "curated-thoughts dsh installer (idempotent, no sudo)"
-  check_prerequisites || true
+  # Preserve check_prerequisites failures on the write path: with
+  # CT_INSTALL_EDIT=1 we'd otherwise `npm pack` successfully and only then
+  # see `dsh plugin add: command not found`. The preview path keeps going
+  # regardless so users can read the plan on a host that hasn't installed
+  # dsh yet.
+  if ! check_prerequisites && [ "${CT_INSTALL_EDIT:-0}" = "1" ]; then
+    warn "refusing to install until the prerequisites above are on PATH."
+    exit 1
+  fi
   plan_install
   verify_with_doctor
   say ""

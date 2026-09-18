@@ -72,6 +72,16 @@ describe('cordis.patch.yml rows', () => {
     expect(patch).not.toMatch(/CURATED_BRAIN_DIR: *['"]?~/);
   });
 
+  it('plugin and MCP rows share one brain-dir source', () => {
+    // Both rows resolve CURATED_BRAIN_DIR from the same composition-time
+    // expression so a profile override can target either uniformly. The
+    // plugin row's `brainDir` carries the same !!js form (otherwise a
+    // profile-side override of config.brainDir would drift away from the
+    // MCP sidecar's env until apply() caught up).
+    expect(patch).toMatch(/brainDir: !!js process\.env\.CURATED_BRAIN_DIR/);
+    expect(patch).toMatch(/CURATED_BRAIN_DIR: !!js process\.env\.CURATED_BRAIN_DIR/);
+  });
+
   it('never contains a bare - name: plugin row (unmatched patch target)', () => {
     // 0.1.2's installer appended `- name: ...` rows, which DSH reports as
     // unmatched patch targets and never activates.

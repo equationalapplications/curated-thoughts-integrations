@@ -86,10 +86,20 @@ check 'install.sh is executable (README runs ./scripts/install.sh)' test -x "$RE
 
 # ---------------------------------------------------------------------------
 section 'install.sh preview writes nothing'
-before=$(find "$DSH_HOME_DIR" -mindepth 1 2>/dev/null | sort | sha256sum)
+# Hash both the path set and the regular-file contents so a preview that
+# silently rewrites an existing file (or rewrites permissions only) cannot
+# pass the unchanged-filesystem check. Empty trees fall through without
+# invoking sha256sum without operands.
+dsh_home_digest() {
+  {
+    find "$DSH_HOME_DIR" -mindepth 1 2>/dev/null | LC_ALL=C sort
+    find "$DSH_HOME_DIR" -mindepth 1 -type f -exec sha256sum {} + 2>/dev/null | LC_ALL=C sort
+  } | sha256sum
+}
+before=$(dsh_home_digest)
 "$REL/scripts/install.sh" --profile "$PROFILE" >"$OUT/preview.log" 2>&1
 preview_rc=$?
-after=$(find "$DSH_HOME_DIR" -mindepth 1 2>/dev/null | sort | sha256sum)
+after=$(dsh_home_digest)
 check "preview exits 0 (rc=$preview_rc)" test "$preview_rc" -eq 0
 check 'preview leaves the filesystem untouched' test "$before" = "$after"
 check 'preview names the plugin package' grep -q 'dsh-curated-thoughts' "$OUT/preview.log"
@@ -167,8 +177,14 @@ else
   # message — require a tool/call event carrying the tool name.
   check 'session log records a tool/call for curated_proposals_list' \
     sh -c "grep 'tool/call' '$OUT/run1.session.jsonl' | grep -q 'curated_proposals_list'"
-  check 'model answered DONE only after the tool result' \
-    sh -c "grep -qx 'DONE' '$OUT/run1.out'"
+  # The session log's tool/call line for curated_proposals_list must precede
+  # any line carrying the assistant's final reply text (DONE). Use the
+  # already-pinned tool/call shape above; do not assume a literal
+  # tool/result event name — the schema is owned by dsh and not pinned in
+  # this repo. The 'final answer is DONE' check on stdout is preserved
+  # separately at line ~163.
+  check 'assistant DONE follows the tool/call in the session log' \
+    sh -c "tool_line=\$(grep -n 'tool/call' '$OUT/run1.session.jsonl' | grep 'curated_proposals_list' | head -1 | cut -d: -f1); done_line=\$(grep -nF 'DONE' '$OUT/run1.session.jsonl' | tail -1 | cut -d: -f1); [ -n \"\$tool_line\" ] && [ -n \"\$done_line\" ] && [ \"\$tool_line\" -lt \"\$done_line\" ]"
   if [ "$run_rc" -ne 0 ]; then tail -20 "$OUT/run1.err" | sed 's/^/      /'; fi
 
   # Run 2: degraded brain — probe() must see the missing CURATED_BRAIN_DIR and

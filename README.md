@@ -50,8 +50,8 @@ and registers the same three skills as Hermes at runtime. The doctor is
 `node lib/scripts/ct_doctor.js check` (nine deep checks, `--json` for
 machine-readable output). DeepSeek Harness ships on Windows as well as macOS
 and Linux, so CI verifies the integration on all three — install is
-`CT_INSTALL_EDIT=1 ./scripts/install.sh` (without it, the installer only
-prints the `cordis.yml` block to append).
+`CT_INSTALL_EDIT=1 ./scripts/install.sh --profile <profile>`. Without
+`CT_INSTALL_EDIT=1`, the installer only prints the installation plan.
 
 See each integration's README for full install and verify instructions.
 
