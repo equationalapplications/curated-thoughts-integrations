@@ -381,8 +381,7 @@ describe('checkOpencodeRegistration', () => {
     try {
       const r = checkOpencodeRegistration(fx.env);
       expect(r.status).toBe(FAIL);
-      expect(r.detail).toContain('unreadable');
-      expect(r.detail).toContain('could not parse');
+      expect(r.detail).toContain('could not be parsed');
     } finally {
       cleanupHome(fx.home);
     }

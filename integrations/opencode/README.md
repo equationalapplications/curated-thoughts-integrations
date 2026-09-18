@@ -80,6 +80,14 @@ the payload directory, the `curated-thoughts` `mcp` entry from
     plugin: bun `1.3.14` / node `24.3.0`
   - Node fallback `22.23.2`
 
+## Requirements
+
+- OpenCode (host contract verified against the versions in
+  `tests/host/compatibility.json`)
+- A POSIX shell for the installer: on Windows, run `scripts/install.sh` from
+  Git Bash or WSL (PowerShell and Command Prompt cannot run it directly)
+- Optional: `better-sqlite3`, for the doctor's import pre-flight check
+
 ## License
 
 MIT — identical to the main Curated Thoughts repository. OpenCode is a

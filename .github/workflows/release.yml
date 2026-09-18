@@ -177,6 +177,13 @@ jobs:
   publish:
     name: publish the release
     needs: [identify, verify, host-contract]
+    # host-contract skips for integrations that declare no host check; a
+    # plain `needs:` would skip publish along with it and no release would
+    # ever go out for those integrations. Spell out the acceptable matrix.
+    if: >-
+      !cancelled() && needs.identify.result == 'success' &&
+      needs.verify.result == 'success' &&
+      (needs.host-contract.result == 'success' || needs.host-contract.result == 'skipped')
     runs-on: ubuntu-latest
     permissions:
       # The only job in the repository that may write. Everything upstream of
@@ -344,9 +351,11 @@ jobs:
           HOME="$INSTALL_HOME" node - "$HOST_JSON" <<'JS'
           const fs = require("node:fs");
           const compat = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
-          const specs = [compat.opencode, compat.bun]
-            .filter(Boolean)
-            .map((v, i) => (i === 0 ? `opencode-ai@${v}` : `bun@${v}`));
+          // Keyed explicitly (not positional) so an absent key can never
+          // silently re-map another key's version onto the wrong package.
+          const specs = [];
+          if (compat.opencode) specs.push(`opencode-ai@${compat.opencode}`);
+          if (compat.bun) specs.push(`bun@${compat.bun}`);
           if (!specs.length) {
             console.error("compatibility.json declares no host binary to install");
             process.exit(1);

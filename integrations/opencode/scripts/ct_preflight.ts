@@ -64,7 +64,9 @@ function _requireDatabase(): { db: DatabaseConstructor | null; error: string | n
       : { db: _databaseCtor, error: null };
   }
   try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    // `createRequire` + require() is the deliberate lazy-load seam here: a
+    // static import would make the optional better-sqlite3 dependency a hard
+    // one for every plugin runtime path.
     const require = createRequire(import.meta.url);
     _databaseCtor = require('better-sqlite3') as DatabaseConstructor;
     return { db: _databaseCtor, error: null };

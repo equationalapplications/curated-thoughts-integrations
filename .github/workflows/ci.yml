@@ -291,11 +291,16 @@ jobs:
       - id: changes
         # Same scoping rule as `discover`'s path filter: run on main and tag
         # pushes unconditionally (main must be ground truth), on PRs only when
-        # the integration or a shared asset changed.
+        # the integration or a shared asset changed. The base ref arrives via
+        # the environment: interpolating it into the script would execute a
+        # crafted ref name as shell code.
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            git fetch --no-tags origin "${{ github.base_ref }}"
-            if git diff --name-only "origin/${{ github.base_ref }}...HEAD" \
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            git fetch --no-tags origin "$BASE_REF"
+            if git diff --name-only "origin/$BASE_REF...HEAD" \
                 -- integrations/opencode shared/ | grep -q .; then
               echo run=true >> "$GITHUB_OUTPUT"
             else
@@ -393,9 +398,15 @@ jobs:
           echo "integration=${{ needs.integration.result }}"
           echo "policy=${{ needs.policy.result }}"
           echo "host-contract=${{ needs.host-contract.result }}"
-          for result in "${{ needs.discover.result }}" "${{ needs.policy.result }}" "${{ needs.host-contract.result }}"; do
+          for result in "${{ needs.discover.result }}" "${{ needs.policy.result }}"; do
             [ "$result" = "success" ] || { echo "a required job did not succeed"; exit 1; }
           done
+          # host-contract is scoped to opencode/shared changes and skips
+          # otherwise; a skipped contract is a satisfied one.
+          case "${{ needs.host-contract.result }}" in
+            success|skipped) ;;
+            *) echo "host contract did not succeed"; exit 1 ;;
+          esac
           case "${{ needs.integration.result }}" in
             success|skipped) ;;
             *) echo "integration matrix did not succeed"; exit 1 ;;

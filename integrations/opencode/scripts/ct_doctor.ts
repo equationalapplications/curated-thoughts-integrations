@@ -226,7 +226,7 @@ export function checkSidecarBinary(
       `found ${SIDECAR_NAME} at ${f.path} (via ${f.source})`,
     );
   }
-  const searched = ctEnvSidecarCandidates().join(', ');
+  const searched = ctEnvSidecarCandidates(process.platform, env).join(', ');
   return _fail(
     'sidecar-binary',
     `${SIDECAR_NAME} not found on PATH or in any known install location`,
@@ -824,11 +824,13 @@ export function checkOpencodeRegistration(
     } else {
       const { root, error } = _parseGlobalConfigText(text);
       if (root === null) {
-        mcpVerdict = `unreadable: ${error}`;
+        mcpVerdict = 'unreadable';
+        mcpDetail = `${configPath} could not be parsed: ${error}`;
       } else {
         const mcp = root['mcp'];
         if (mcp !== undefined && !_isPlainObject(mcp)) {
-          mcpVerdict = `unreadable: "mcp" is not an object in ${configPath}`;
+          mcpVerdict = 'wrong shape';
+          mcpDetail = `"mcp" is not an object in ${configPath}`;
         } else {
           const entry = mcp?.[MCP_NAME];
           if (entry === undefined) {

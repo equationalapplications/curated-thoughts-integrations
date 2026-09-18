@@ -240,6 +240,7 @@ describe('the unpacked archive runs with no node_modules (the real user situatio
     // module resolution errors even though node_modules is absent.
     expect(output).not.toContain('ERR_MODULE_NOT_FOUND');
     expect(output).not.toContain('Cannot find package');
+    expect(output).toContain('PREVIEW');
     expect([0, 1, 2, 3]).toContain(proc.status);
   });
 });

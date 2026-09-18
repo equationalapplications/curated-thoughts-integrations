@@ -360,13 +360,9 @@ function installSkillFixtures(sb: Sandbox): string {
   const packaged = join(HERE, '..', '..', 'skills');
   for (const name of SKILL_NAMES) {
     const source = join(packaged, name);
-    if (existsSync(join(source, 'SKILL.md'))) {
-      cpSync(source, join(skillsDir, name), { recursive: true });
-    } else {
-      // Packaged skills not present yet (pre-Task-6 checkout) — fall back to
-      // the placeholder fixtures so the structural probe still runs.
-      cpSync(join(FIXTURES, 'skills', name), join(skillsDir, name), { recursive: true });
-    }
+    // No fallback: a missing packaged skill must fail the contract here,
+    // not silently verify placeholder content instead of the shipped payload.
+    cpSync(join(source, 'SKILL.md'), join(skillsDir, name, 'SKILL.md'));
   }
   return skillsDir;
 }
