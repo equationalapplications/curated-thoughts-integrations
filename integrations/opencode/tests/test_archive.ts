@@ -165,6 +165,8 @@ describe('release archive (ct_ci.py package)', () => {
     const listing = run('tar', ['-tzf', packedNpm]);
     const npmFiles = listing
       .split('\n')
+      // bsdtar on Windows lists members with path separators.
+      .map((line) => line.trim().replace(/\\/g, '/'))
       .map((line) => line.replace(/^package\//, ''))
       .filter((rel) => rel && !rel.endsWith('/'));
     for (const rel of ARCHIVE_FILES) {
