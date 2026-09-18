@@ -51,7 +51,10 @@ and registers the same three skills as Hermes at runtime. The doctor is
 machine-readable output). DeepSeek Harness ships on Windows as well as macOS
 and Linux, so CI verifies the integration on all three — install is
 `CT_INSTALL_EDIT=1 ./scripts/install.sh --profile <profile>`. Without
-`CT_INSTALL_EDIT=1`, the installer only prints the installation plan.
+`CT_INSTALL_EDIT=1`, the installer previews: when the profile already has
+the matching package version installed, it reports that and exits without
+printing the plan; otherwise it prints the installation plan without
+modifying the profile.
 
 See each integration's README for full install and verify instructions.
 

@@ -6,9 +6,14 @@ import Database from 'better-sqlite3';
 import {
   censusSourceRefs,
   detectEngineVersion,
+} from '../scripts/ct_preflight.js';
+// The loader seam lives in the underscored sibling so it isn't part of
+// ct_preflight's public surface — downstream tools importing ct_preflight
+// see only censusSourceRefs / detectEngineVersion, never the setters.
+import {
   _setBetterSqlite3Loader,
   _resetBetterSqlite3Loader,
-} from '../scripts/ct_preflight.js';
+} from '../scripts/_lazy_loader.js';
 
 // A well-formed post-#188 token: 'librarian-' + exactly 32 lowercase hex chars
 // (PR #188 §2.2). The plan's literal 'ct_token:abc123' is not a valid token
@@ -291,9 +296,9 @@ describe('better-sqlite3 unavailable on a present DB', () => {
   // Use a real, present brain so existsSync() passes and the loader is the
   // only thing standing between the census and a SQLite handle. vi.doMock
   // cannot intercept createRequire(import.meta.url)('better-sqlite3'), so
-  // the seam in ct_preflight.ts is the deterministic control. Reset the
-  // module-level cache between tests so the unavailable-dependency case
-  // is isolated.
+  // the seam in scripts/_lazy_loader.ts is the deterministic control.
+  // Reset the module-level cache between tests so the
+  // unavailable-dependency case is isolated.
   afterEach(() => {
     _resetBetterSqlite3Loader();
   });

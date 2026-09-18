@@ -86,10 +86,15 @@ trap cleanup EXIT
 
 installed_version() {
   [ -f "$INSTALLED_PKG/package.json" ] || return 1
+  # Pass the package.json path as a Node argument rather than interpolating
+  # it into the JavaScript expression: an apostrophe in DSH_HOME would
+  # otherwise break the require() parse and return failure, which would make
+  # every apply run reinstall the matching package.
   # `|| ''` so a package.json without a version prints nothing rather than
   # the string "undefined" — an empty result means "not (properly) installed".
   local v
-  v=$(node -p "require('$INSTALLED_PKG/package.json').version || ''" 2>/dev/null) || return 1
+  v=$(node -p "require(process.argv[1]).version || ''" -- \
+    "$INSTALLED_PKG/package.json" 2>/dev/null) || return 1
   [ -n "$v" ] || return 1
   printf '%s\n' "$v"
 }
@@ -115,7 +120,11 @@ plan_install() {
   say "== Plugin install (${PROFILE_DIR}) =="
   local version own
   if version="$(installed_version)"; then
-    own="$(node -p "require('$SCRIPT_SRC/package.json').version" 2>/dev/null || true)"
+    # Same argv-based pattern as installed_version() so an apostrophe in
+    # SCRIPT_SRC can't break the require() parse; the `|| true` means a
+    # failure here just produces an empty $own (treated as "unknown").
+    own="$(node -p "require(process.argv[1]).version" -- \
+      "$SCRIPT_SRC/package.json" 2>/dev/null || true)"
     if [ -n "$own" ] && [ "$version" = "$own" ]; then
       say "OK: ${PLUGIN_SCOPE}@${version} already installed in profile '${PROFILE}' — nothing to do."
       return 0

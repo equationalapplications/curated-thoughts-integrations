@@ -40,65 +40,40 @@
 
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { createRequire } from 'node:module';
 
 import type BetterSqlite3 from 'better-sqlite3';
 
 import { EVIDENCE_TABLE, REQUIRED_TABLES, SOURCE_REF_SHAPE } from './_compat_generated.js';
+import {
+  _loadBetterSqlite3,
+  type DatabaseConstructor,
+} from './_lazy_loader.js';
 
 /**
  * Lazily resolve better-sqlite3. Returns the module, or an error string.
  *
- * `createRequire(import.meta.url)` is used (not a bare `require`) because
- * this file compiles to native ESM under NodeNext. The import is kept out of
- * the module graph so that importing ct_preflight.ts — as ct_doctor.ts does
- * for detectEngineVersion — never loads the native binding until a census
- * actually needs it.
- *
- * The loader is behind a small seam (`_setBetterSqlite3Loader`) so tests can
- * force the unavailable-dependency error path against a real, present brain
- * — `vi.doMock('better-sqlite3', ...)` cannot reliably intercept the native
- * `createRequire(import.meta.url)('better-sqlite3')` call this module uses,
- * so the seam is the deterministic way to cover that path.
+ * The native binding is loaded on demand through `_lazy_loader.ts`, which
+ * owns the createRequire() call and the cached success/failure outcome.
+ * `ct_preflight.ts` deliberately re-exports neither the loader nor the
+ * setters — the test seam lives in the underscored sibling so that
+ * downstream tools importing this module don't see `_setBetterSqlite3Loader`
+ * as a public hook into the lazy-loading contract. The import is kept out
+ * of the module graph so that importing ct_preflight.ts — as ct_doctor.ts
+ * does for detectEngineVersion — never loads the native binding until a
+ * census actually needs it.
  */
-type DatabaseConstructor = typeof BetterSqlite3;
-let _databaseCtor: DatabaseConstructor | null | undefined;
-
-type BetterSqlite3Loader = () => DatabaseConstructor;
-const _defaultLoader: BetterSqlite3Loader = () => {
-  // `createRequire` + require() is the deliberate lazy-load seam here: a
-  // static import would make the optional better-sqlite3 dependency a hard
-  // one for every plugin runtime path.
-  const require = createRequire(import.meta.url);
-  return require('better-sqlite3') as DatabaseConstructor;
-};
-let _loader: BetterSqlite3Loader = _defaultLoader;
-
-/** Test seam: install a custom better-sqlite3 loader and reset the cache. */
-export function _setBetterSqlite3Loader(loader: BetterSqlite3Loader): void {
-  _loader = loader;
-  _databaseCtor = undefined;
-}
-
-/** Test seam: restore the default loader and clear the cache. */
-export function _resetBetterSqlite3Loader(): void {
-  _loader = _defaultLoader;
-  _databaseCtor = undefined;
-}
-
 function _requireDatabase(): { db: DatabaseConstructor | null; error: string | null } {
-  if (_databaseCtor !== undefined) {
-    return _databaseCtor === null
-      ? { db: null, error: 'better-sqlite3 is not available' }
-      : { db: _databaseCtor, error: null };
+  const result = _loadBetterSqlite3();
+  if (result.status === 'ok') return { db: result.ctor, error: null };
+  // First-call failure surfaces the captured loader error so the operator
+  // sees what was actually wrong (e.g. "Cannot find module 'better-sqlite3'").
+  // A follow-up call after a cached failure is reported with the shorter
+  // 'better-sqlite3 is not available' string; the verbose message would
+  // repeat on every census call and the doctor must keep producing JSON.
+  if (result.status === 'first-failure') {
+    return { db: null, error: `better-sqlite3 unavailable: ${result.error}` };
   }
-  try {
-    _databaseCtor = _loader();
-    return { db: _databaseCtor, error: null };
-  } catch (e) {
-    _databaseCtor = null;
-    return { db: null, error: `better-sqlite3 unavailable: ${(e as Error).message}` };
-  }
+  return { db: null, error: 'better-sqlite3 is not available' };
 }
 
 // --------------------------------------------------------------------------
