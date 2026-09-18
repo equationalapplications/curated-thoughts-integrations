@@ -271,6 +271,112 @@ jobs:
           print("plugin entry point OK")
           PY
 
+  host-contract:
+    # OpenCode's plugin API is pinned by real-binary verification
+    # (tests/host/contract.test.ts + tests/host/compatibility.json). That test
+    # needs the actual `opencode` binary and bun, neither of which belongs in
+    # the per-OS integration matrix: `ct_ci_discover` expands only the
+    # python/node axes, so a `bun:` axis would validate and then silently
+    # vanish from CI. A dedicated job keeps the contract enforced on every
+    # relevant change instead.
+    name: host contract (opencode)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          # The PR gate below diffs against the merge base.
+          fetch-depth: 0
+
+      - id: changes
+        # Same scoping rule as `discover`'s path filter: run on main and tag
+        # pushes unconditionally (main must be ground truth), on PRs only when
+        # the integration or a shared asset changed.
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            git fetch --no-tags origin "${{ github.base_ref }}"
+            if git diff --name-only "origin/${{ github.base_ref }}...HEAD" \
+                -- integrations/opencode shared/ | grep -q .; then
+              echo run=true >> "$GITHUB_OUTPUT"
+            else
+              echo run=false >> "$GITHUB_OUTPUT"
+            fi
+          else
+            echo run=true >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        if: steps.changes.outputs.run == 'true'
+        with:
+          node-version: 22
+
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        if: steps.changes.outputs.run == 'true'
+        with:
+          package_json_file: integrations/opencode/package.json
+
+      - name: Install dependencies
+        # Frozen: the host contract must run against exactly what the
+        # lockfile pins, or it verifies a different tree than ships.
+        if: steps.changes.outputs.run == 'true'
+        working-directory: integrations/opencode
+        run: pnpm install --frozen-lockfile
+
+      - name: Install the pinned host binary and bun (throwaway HOME)
+        # Versions come from tests/host/compatibility.json — the file the
+        # contract test itself validates against — so CI can never drift from
+        # what was actually verified. Installing opencode-ai litters the
+        # process HOME with empty opencode state dirs (recorded in
+        # compatibility.json#install.homeSideEffect), so the install runs
+        # under a throwaway HOME.
+        if: steps.changes.outputs.run == 'true'
+        working-directory: integrations/opencode
+        run: |
+          OPENCODE_VER=$(node -p "require('./tests/host/compatibility.json').opencode")
+          BUN_VER=$(node -p "require('./tests/host/compatibility.json').bun")
+          INSTALL_HOME="$RUNNER_TEMP/ct-host-install-home"
+          mkdir -p "$INSTALL_HOME"
+          HOME="$INSTALL_HOME" npm install --prefix "$RUNNER_TEMP/ct-host" \
+            "opencode-ai@$OPENCODE_VER" "bun@$BUN_VER"
+          {
+            echo "OPENCODE_BIN=$RUNNER_TEMP/ct-host/node_modules/.bin/opencode"
+            echo "BUN_BIN=$RUNNER_TEMP/ct-host/node_modules/.bin/bun"
+          } >> "$GITHUB_ENV"
+
+      - name: Pack the artifact (pnpm pack must carry the entry points)
+        # pnpm pack has no build hook dependency in CI: `prepack` runs the
+        # build. Asserting the packed lib/ here catches a `files`/`exports`
+        # disagreement before the release workflow ever sees the tag.
+        if: steps.changes.outputs.run == 'true'
+        working-directory: integrations/opencode
+        run: |
+          pnpm pack --pack-destination "$RUNNER_TEMP"
+          tar -tzf "$RUNNER_TEMP"/equational-applications-opencode-curated-thoughts-*.tgz \
+            | grep -q "lib/src/index.js"
+          tar -tzf "$RUNNER_TEMP"/equational-applications-opencode-curated-thoughts-*.tgz \
+            | grep -q "lib/scripts/ct_doctor.js"
+
+      - name: Run the declared host contract
+        # The command comes from integration.yaml's checks.host — the manifest
+        # is the contract registry, not this workflow. The test runs under a
+        # throwaway HOME/XDG so a runner's leftover opencode state cannot
+        # masquerade as a fresh install.
+        if: steps.changes.outputs.run == 'true'
+        working-directory: integrations/opencode
+        env:
+          HOST_HOME: ${{ runner.temp }}/ct-host-run-home
+        run: |
+          pip install --disable-pip-version-check -r ../../tools/requirements-ci.txt
+          HOST_CMD=$(python3 -c "import yaml; print(yaml.safe_load(open('integration.yaml'))['checks']['host'])")
+          mkdir -p "$HOST_HOME"
+          HOME="$HOST_HOME" \
+          XDG_CONFIG_HOME="$HOST_HOME/.config" \
+          XDG_DATA_HOME="$HOST_HOME/.local/share" \
+          XDG_CACHE_HOME="$HOST_HOME/.cache" \
+          XDG_STATE_HOME="$HOST_HOME/.local/state" \
+          OPENCODE_BIN="$OPENCODE_BIN" \
+            "$BUN_BIN" ${HOST_CMD#bun }
+
   ci-ok:
     # The single required status check. Branch protection names this job and
     # nothing else, so adding an integration never means editing protection
@@ -278,7 +384,7 @@ jobs:
     # cancelled dependency is not.
     name: ci-ok
     if: always()
-    needs: [discover, integration, policy]
+    needs: [discover, integration, policy, host-contract]
     runs-on: ubuntu-latest
     steps:
       - name: Check dependency results
@@ -286,7 +392,8 @@ jobs:
           echo "discover=${{ needs.discover.result }}"
           echo "integration=${{ needs.integration.result }}"
           echo "policy=${{ needs.policy.result }}"
-          for result in "${{ needs.discover.result }}" "${{ needs.policy.result }}"; do
+          echo "host-contract=${{ needs.host-contract.result }}"
+          for result in "${{ needs.discover.result }}" "${{ needs.policy.result }}" "${{ needs.host-contract.result }}"; do
             [ "$result" = "success" ] || { echo "a required job did not succeed"; exit 1; }
           done
           case "${{ needs.integration.result }}" in
