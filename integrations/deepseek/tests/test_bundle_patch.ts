@@ -78,8 +78,23 @@ describe('cordis.patch.yml rows', () => {
     // plugin row's `brainDir` carries the same !!js form (otherwise a
     // profile-side override of config.brainDir would drift away from the
     // MCP sidecar's env until apply() caught up).
-    expect(patch).toMatch(/brainDir: !!js process\.env\.CURATED_BRAIN_DIR/);
-    expect(patch).toMatch(/CURATED_BRAIN_DIR: !!js process\.env\.CURATED_BRAIN_DIR/);
+    const plugin = patch.match(/brainDir: (!!js .*)$/m)?.[1];
+    const sidecar = patch.match(/CURATED_BRAIN_DIR: (!!js .*)$/m)?.[1];
+    expect(plugin).toMatch(/^!!js process\.env\.CURATED_BRAIN_DIR/);
+    // Identical, not just similar: a fix to one copy must reach the other.
+    expect(sidecar).toBe(plugin);
+  });
+
+  it('never falls back to /.brain when no home variable is set', () => {
+    // An empty-string home would resolve to /.brain at the filesystem root;
+    // the fallback must leave a literal ~ the sidecar refuses loudly.
+    const expr = patch.match(/CURATED_BRAIN_DIR: !!js (.*)$/m)?.[1] ?? '';
+    const evalWith = (env: Record<string, string>) =>
+      new Function('process', `return (${expr});`)({ env });
+    expect(evalWith({})).toBe('~/.brain');
+    expect(evalWith({ HOME: '/home/u' })).toBe('/home/u/.brain');
+    expect(evalWith({ USERPROFILE: 'C:\\Users\\u' })).toBe('C:\\Users\\u/.brain');
+    expect(evalWith({ HOME: '/home/u', CURATED_BRAIN_DIR: '/b' })).toBe('/b');
   });
 
   it('never contains a bare - name: plugin row (unmatched patch target)', () => {

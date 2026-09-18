@@ -1,5 +1,4 @@
 import { existsSync, readFileSync } from 'node:fs';
-import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Context } from '@deepseek-ai/cordis';
@@ -133,13 +132,17 @@ type DshContext = Context & DshContextExtensions;
 export function apply(ctx: Context, config: Config): void {
   const dsh = ctx as DshContext;
 
-  // (0) probe() resolves the brain from the environment, while the declarative
-  // row config is what a user edits — mirror it into the process env (without
-  // clobbering an explicit CURATED_BRAIN_DIR), expanding a leading `~` here.
-  // The sidecar's own copy comes from the bundle patch's MCP row env.
-  if (config.brainDir && !process.env.CURATED_BRAIN_DIR) {
-    process.env.CURATED_BRAIN_DIR = config.brainDir.replace(/^~(?=$|\/)/, homedir());
-  }
+  // (0) probe() resolves the brain from the environment it is handed, while
+  // the declarative row config is what a user edits — give probe a copy of
+  // the env carrying config.brainDir (an explicit CURATED_BRAIN_DIR still
+  // wins). A copy, not process.env itself: the row config is this plugin's
+  // own state and must not leak into the host process. resolveBrainPaths
+  // expands a leading `~`. The sidecar's own copy comes from the bundle
+  // patch's MCP row env.
+  const probeEnv: NodeJS.ProcessEnv =
+    config.brainDir && !process.env.CURATED_BRAIN_DIR
+      ? { ...process.env, CURATED_BRAIN_DIR: config.brainDir }
+      : process.env;
 
   // (1) Cached health snapshot. Empty until the first session-start resolves.
   let cached: { text: string; since: number } | null = null;
@@ -158,7 +161,7 @@ export function apply(ctx: Context, config: Config): void {
   // failed probe never crashes the plugin or the session.
   dsh.on('agent/session-start', async () => {
     try {
-      const snap = probe();
+      const snap = probe(probeEnv);
       const text = formatStatusBlock(snap);
       cached = { text: text ?? '', since: Date.now() };
     } catch {

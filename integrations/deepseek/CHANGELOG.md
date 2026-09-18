@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 0.2.2 — 2026-09-18
+
+Fix empty-string fallback in brain-dir resolution. `??` operators in
+`cordis.patch.yml` treated an empty `HOME` or `USERPROFILE` as a set value,
+producing `/.brain` at the filesystem root. Both environment rows now use
+`??` with a literal `~` fallback so the sidecar refuses the path explicitly
+rather than silently opening `/.brain`.
+
 ## 0.2.1
 
 Restore executable bits on shell scripts; fix empty HOME/USERPROFILE handling in
