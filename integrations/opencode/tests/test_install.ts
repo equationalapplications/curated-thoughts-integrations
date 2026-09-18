@@ -269,6 +269,41 @@ describe('apply() safety', () => {
     expect(existsSync(sb.loaderPath)).toBe(false);
   });
 
+  it('removes its backup when the config changes between the backup and the rename', async () => {
+    const original = '{}\n';
+    writeFile(configPath(), original);
+    const proposal = propose({ env: editEnv(), packageRoot: sb.pkg });
+    await expect(
+      proposal.apply({
+        io: {
+          copyFile: (from, to) => {
+            copyFileSync(from, to);
+            writeFileSync(from, '{ "theme": "light" }\n'); // concurrent edit lands now
+          },
+        },
+      }),
+    ).rejects.toThrow(/changed on disk/);
+    expect(read(configPath())).toBe('{ "theme": "light" }\n');
+    expect(existsSync(configPath() + '.bak')).toBe(false);
+  });
+
+  it('keeps a pre-existing backup intact when the config changes between the backup and the rename', async () => {
+    writeFile(configPath(), '{}\n');
+    writeFile(configPath() + '.bak', 'older backup\n');
+    const proposal = propose({ env: editEnv(), packageRoot: sb.pkg });
+    await expect(
+      proposal.apply({
+        io: {
+          copyFile: (from, to) => {
+            copyFileSync(from, to);
+            writeFileSync(from, '{ "theme": "light" }\n');
+          },
+        },
+      }),
+    ).rejects.toThrow(/changed on disk/);
+    expect(read(configPath() + '.bak')).toBe('older backup\n');
+  });
+
   it('restores the original from the backup when the config write fails partway', async () => {
     const original = '{\n  // mine\n  "theme": "dark"\n}\n';
     writeFile(configPath(), original);

@@ -50,7 +50,7 @@ import {
 } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { pathToFileURL } from 'node:url';
 import {
   applyEdits,
   createScanner,
@@ -64,7 +64,9 @@ import {
   type Node as JsonNode,
   type ParseError,
 } from 'jsonc-parser';
-import { resolveBrainPaths, SIDECAR_NAME } from './ct_env.js';
+import { loaderTarget, resolveBrainPaths, SIDECAR_NAME, xdgDir } from './ct_env.js';
+
+export { loaderTarget };
 
 export const MCP_NAME = 'curated-thoughts';
 export const SIDECAR_COMMAND: readonly string[] = [SIDECAR_NAME, '--mcp'];
@@ -92,11 +94,6 @@ export interface RegistrationPaths {
   /** <payloadDir>/lib/src/index.js — what the loader re-exports */
   payloadEntry: string;
   warnings: string[];
-}
-
-function xdgDir(value: string | undefined, fallback: string): string {
-  // The XDG spec says relative values are invalid and must be ignored.
-  return value && isAbsolute(value) ? value : fallback;
 }
 
 function lstatOrNull(p: string): Stats | null {
@@ -178,21 +175,6 @@ export function renderLoader(template: string, payloadDir: string): string {
   // JSON.stringify then yields a valid double-quoted JS string literal.
   const specifier = JSON.stringify(pathToFileURL(entry).href);
   return template.split('{{PAYLOAD_DIR}}').join(commentSafe(payloadDir)).split('{{PAYLOAD_ENTRY_URL}}').join(specifier);
-}
-
-const LOADER_EXPORT_RE = /^[ \t]*export\s*\{\s*CuratedThoughts\s*\}\s*from\s*("(?:[^"\\\r\n]|\\.)*")\s*;?[ \t]*$/m;
-
-/** The file path a loader re-exports from, or null if it is not one of ours. */
-export function loaderTarget(contents: string): string | null {
-  const m = LOADER_EXPORT_RE.exec(contents);
-  if (!m) return null;
-  try {
-    const url = JSON.parse(m[1]!) as string;
-    if (!url.startsWith('file:')) return null;
-    return fileURLToPath(url);
-  } catch {
-    return null;
-  }
 }
 
 // --------------------------------------------------------------------------
@@ -316,6 +298,8 @@ export interface SkillCopy {
 
 export interface Io {
   rename: (from: string, to: string) => void;
+  /** Writes the config backup (`<file>.bak`). */
+  copyFile: (from: string, to: string) => void;
 }
 
 export interface ApplyOptions {
@@ -756,7 +740,7 @@ export function propose(input: ProposeInput): RegistrationProposal {
       if (env['CT_INSTALL_EDIT'] !== '1') {
         throw new Error('apply() refused: set CT_INSTALL_EDIT=1 to authorize writing');
       }
-      return applyProposal(proposal, paths, snap, { rename: renameSync, ...opts.io });
+      return applyProposal(proposal, paths, snap, { rename: renameSync, copyFile: copyFileSync, ...opts.io });
     },
   };
   return proposal;
@@ -882,9 +866,14 @@ async function applyProposal(
     const dest = paths.destination;
     const bak = `${dest}.bak`;
     assertConfigUnchanged(dest, snap);
+    // What `.bak` held before this run (null = absent), so a concurrent-edit
+    // abort can put it back instead of leaving this run's backup behind.
+    let priorBak: Buffer | null = null;
     if (snap.exists) {
-      if (lstatOrNull(bak)?.isSymbolicLink()) throw new Error(`${bak} is a symlink — refusing to write the backup`);
-      copyFileSync(dest, bak);
+      const bakSt = lstatOrNull(bak);
+      if (bakSt?.isSymbolicLink()) throw new Error(`${bak} is a symlink — refusing to write the backup`);
+      if (bakSt?.isFile()) priorBak = readFileSync(bak);
+      io.copyFile(dest, bak);
     }
     const dir = dirname(dest);
     mkdirSync(dir, { recursive: true });
@@ -895,7 +884,13 @@ async function applyProposal(
       assertConfigUnchanged(dest, snap);
       io.rename(tmp, dest);
     } catch (e) {
-      if (!(e instanceof ConcurrentEditError)) {
+      if (e instanceof ConcurrentEditError) {
+        // The config was never touched: undo the backup this run wrote.
+        if (snap.exists) {
+          if (priorBak !== null) writeFileSync(bak, priorBak);
+          else rmSync(bak, { force: true });
+        }
+      } else {
         // Restore the original: from the backup if there was one, else remove
         // whatever a torn write left behind.
         if (snap.exists) {

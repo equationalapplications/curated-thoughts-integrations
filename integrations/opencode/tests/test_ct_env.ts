@@ -250,6 +250,11 @@ describe('sidecarCandidates', () => {
     const candidates = sidecarCandidates();
     expect(candidates.some((c) => c.endsWith(join('.local', 'bin', 'curated-thoughts-mcp')))).toBe(true);
   });
+
+  it.each(['linux', 'darwin', 'win32'] as const)('lists each location once on %s', (platform) => {
+    const candidates = sidecarCandidates(platform);
+    expect(new Set(candidates).size).toBe(candidates.length);
+  });
 });
 
 describe('looksLikeDevBuild', () => {

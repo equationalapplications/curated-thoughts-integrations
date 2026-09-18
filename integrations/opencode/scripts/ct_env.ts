@@ -27,8 +27,9 @@
  */
 
 import { accessSync, constants as fsConstants, existsSync, readFileSync, realpathSync } from 'node:fs';
-import { dirname, join, sep } from 'node:path';
+import { dirname, isAbsolute, join, sep } from 'node:path';
 import { homedir, platform as osPlatform } from 'node:os';
+import { fileURLToPath } from 'node:url';
 
 export const SIDECAR_NAME = 'curated-thoughts-mcp';
 
@@ -149,6 +150,33 @@ export function resolveVaultPath(
 }
 
 // --------------------------------------------------------------------------
+// OpenCode install layout (shared by registration.ts and ct_doctor.ts, so the
+// installer's writes and the doctor's reads can never disagree)
+// --------------------------------------------------------------------------
+
+/** An XDG base directory: the env value if absolute, else the fallback. The
+ * XDG spec says relative values are invalid and must be ignored. */
+export function xdgDir(value: string | undefined, fallback: string): string {
+  return value && isAbsolute(value) ? value : fallback;
+}
+
+const LOADER_EXPORT_RE = /^[ \t]*export\s*\{\s*CuratedThoughts\s*\}\s*from\s*("(?:[^"\\\r\n]|\\.)*")\s*;?[ \t]*$/m;
+
+/** The file path a loader (rendered from loader.js.tmpl) re-exports from, or
+ * null if it is not one of ours. */
+export function loaderTarget(contents: string): string | null {
+  const m = LOADER_EXPORT_RE.exec(contents);
+  if (!m) return null;
+  try {
+    const url = JSON.parse(m[1]!) as string;
+    if (!url.startsWith('file:')) return null;
+    return fileURLToPath(url);
+  } catch {
+    return null;
+  }
+}
+
+// --------------------------------------------------------------------------
 // platform-aware sidecar discovery
 // --------------------------------------------------------------------------
 
@@ -178,11 +206,11 @@ function macosCandidates(env: NodeJS.ProcessEnv): string[] {
   ];
 }
 
-function linuxCandidates(env: NodeJS.ProcessEnv): string[] {
+function linuxCandidates(): string[] {
+  // ~/.local/bin is prepended for every platform by sidecarCandidates.
   return [
     join('/usr', 'bin', SIDECAR_NAME),
     join('/usr', 'local', 'bin', SIDECAR_NAME),
-    join(expandHome('~/.local/bin', env), SIDECAR_NAME),
     join('/opt', 'curated-thoughts', SIDECAR_NAME),
   ];
 }
@@ -202,7 +230,7 @@ export function sidecarCandidates(
   } else if (platform === 'win32' || platform.startsWith('win')) {
     platformSpecific = windowsCandidates(env);
   } else {
-    platformSpecific = linuxCandidates(env);
+    platformSpecific = linuxCandidates();
   }
   return [userLocalBin, ...platformSpecific];
 }

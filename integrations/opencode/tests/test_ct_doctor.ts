@@ -387,6 +387,32 @@ describe('checkOpencodeRegistration', () => {
     }
   });
 
+  it('hints at repairing the whole config (not the entry) when it is unparseable', () => {
+    const fx = makeRegistrationFixture({ configText: '{ this is not json ]' });
+    try {
+      const r = checkOpencodeRegistration(fx.env);
+      expect(r.status).toBe(FAIL);
+      expect(r.hint).toContain('Repair or remove');
+      expect(r.hint).not.toContain('Fix the mcp entry');
+    } finally {
+      cleanupHome(fx.home);
+    }
+  });
+
+  it.skipIf(process.platform === 'win32')('selects a dangling opencode.jsonc symlink, as the installer does', () => {
+    const fx = makeRegistrationFixture({ configText: '{ "mcp": {} }' });
+    try {
+      const jsonc = join(fx.home, '.config', 'opencode', 'opencode.jsonc');
+      symlinkSync(join(fx.home, 'nowhere.jsonc'), jsonc);
+      expect(opencodeConfigPath(fx.env)).toBe(jsonc);
+      const r = checkOpencodeRegistration(fx.env);
+      expect(r.status).toBe(FAIL);
+      expect(r.detail).toContain('not a regular file');
+    } finally {
+      cleanupHome(fx.home);
+    }
+  });
+
   it('tolerates JSONC comments and trailing commas when reading the config', () => {
     const fx = makeRegistrationFixture({
       configText:

@@ -33,10 +33,10 @@
  * Import pre-flight: scripts/ct_preflight.ts.
  */
 
-import { accessSync, constants as fsConstants, existsSync, lstatSync, readFileSync, statSync } from 'node:fs';
+import { accessSync, constants as fsConstants, existsSync, lstatSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { isAbsolute, join } from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { spawnSync } from 'node:child_process';
 
 import {
@@ -44,11 +44,13 @@ import {
   SIDECAR_NAME,
   findSidecar as ctEnvFindSidecar,
   installKind as ctEnvInstallKind,
+  loaderTarget,
   looksLikeDevBuild as ctEnvLooksLikeDevBuild,
   readBrainConfig as ctEnvReadBrainConfig,
   resolveBrainPaths as ctEnvResolveBrainPaths,
   resolveVaultPath as ctEnvResolveVaultPath,
   sidecarCandidates as ctEnvSidecarCandidates,
+  xdgDir,
   type BrainPaths,
 } from './ct_env.js';
 import * as ctPreflight from './ct_preflight.js';
@@ -665,19 +667,22 @@ export function checkEmbedding(env: NodeJS.ProcessEnv = process.env): CheckResul
 // opencode registration
 // --------------------------------------------------------------------------
 
-function _xdgDir(value: string | undefined, fallback: string): string {
-  // The XDG spec says relative values are invalid and must be ignored.
-  // Mirrors registration.ts's xdgDir.
-  return value && isAbsolute(value) ? value : fallback;
-}
-
 /** The global config file the doctor reads: opencode.jsonc if present,
  * else opencode.json. Mirrors registration.ts's resolvePaths destination
- * rule (OpenCode merges opencode.jsonc last, so it wins). */
+ * rule (OpenCode merges opencode.jsonc last, so it wins), including its use
+ * of lstat: a dangling opencode.jsonc symlink still selects .jsonc, so the
+ * doctor reports on the same file the installer would refuse to edit. */
 export function opencodeConfigPath(env: NodeJS.ProcessEnv = process.env): string {
   const home = env.HOME || env.USERPROFILE || homedir();
-  const configDir = join(_xdgDir(env.XDG_CONFIG_HOME, join(home, '.config')), 'opencode');
-  const hasJsonc = existsSync(join(configDir, 'opencode.jsonc'));
+  const configDir = join(xdgDir(env.XDG_CONFIG_HOME, join(home, '.config')), 'opencode');
+  const hasJsonc = (() => {
+    try {
+      lstatSync(join(configDir, 'opencode.jsonc'));
+      return true;
+    } catch {
+      return false;
+    }
+  })();
   return join(configDir, hasJsonc ? 'opencode.jsonc' : 'opencode.json');
 }
 
@@ -760,23 +765,6 @@ function _isPlainObject(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
 
-/** The payload path a loader re-exports from, or null. The loader is the
- * two-line file install.ts renders from loader.js.tmpl; parse it with the
- * same regex registration.ts uses instead of hoping the shape matches. */
-function _loaderTarget(contents: string): string | null {
-  // Same regex as registration.ts's LOADER_EXPORT_RE (multiline: the export
-  // sits on its own line after the two // comment lines).
-  const m = /^[ \t]*export\s*\{\s*CuratedThoughts\s*\}\s*from\s*("(?:[^"\\\r\n]|\\.)*")\s*;?[ \t]*$/m.exec(contents);
-  if (!m) return null;
-  try {
-    const url = JSON.parse(m[1]!) as string;
-    if (!url.startsWith('file:')) return null;
-    return fileURLToPath(url);
-  } catch {
-    return null;
-  }
-}
-
 /** (7) OpenCode registration — three independent pieces of evidence, none
  * implying another (spec §6 check 7):
  *   a. `mcp["curated-thoughts"]` in the global opencode.json[c];
@@ -795,7 +783,7 @@ export function checkOpencodeRegistration(
   env: NodeJS.ProcessEnv = process.env,
 ): CheckResult {
   const home = env.HOME || env.USERPROFILE || homedir();
-  const configDir = join(_xdgDir(env.XDG_CONFIG_HOME, join(home, '.config')), 'opencode');
+  const configDir = join(xdgDir(env.XDG_CONFIG_HOME, join(home, '.config')), 'opencode');
   const pluginsDir = join(configDir, 'plugins');
   const skillsDir = join(configDir, 'skills');
   const configPath = opencodeConfigPath(env);
@@ -877,7 +865,7 @@ export function checkOpencodeRegistration(
       loaderVerdict = 'unreadable';
       loaderDetail = `${loaderPath} could not be read`;
     } else {
-      const target = _loaderTarget(contents);
+      const target = loaderTarget(contents);
       if (target === null) {
         loaderVerdict = 'unrecognized';
         loaderDetail = `${loaderPath} does not re-export CuratedThoughts from a file: URL — it may belong to another install`;
@@ -934,13 +922,12 @@ export function checkOpencodeRegistration(
     + 'CT_INSTALL_EDIT=1 scripts/install.sh to apply.';
 
   if (mcpVerdict === 'unreadable') {
-    const mcpProblem = mcpDetail ?? `the global config ${configPath} could not be parsed`;
+    // Every 'unreadable' verdict is a whole-file problem (not a regular file,
+    // unreadable, or not valid JSONC); a malformed entry is reported below.
     return _fail(
       'opencode-registration',
-      mcpProblem + (localFails.length > 0 ? `; ${localFails.join('; ')}` : ''),
-      mcpProblem.startsWith('the global config')
-        ? `Repair or remove ${configPath} (it must be valid JSONC), then re-run this doctor. ${scope}`
-        : `Fix the mcp entry in ${configPath}, or re-run the installer. ${scope}`,
+      mcpDetail! + (localFails.length > 0 ? `; ${localFails.join('; ')}` : ''),
+      `Repair or remove ${configPath} (it must be a readable file of valid JSONC), then re-run this doctor. ${scope}`,
     );
   }
   if (mcpVerdict === 'wrong shape') {
@@ -953,6 +940,8 @@ export function checkOpencodeRegistration(
     );
   }
 
+  // From here on the loader is present, unrecognized or absent — never a
+  // local FAIL, which returns here whatever the mcp verdict.
   if (localFails.length > 0) {
     return _fail(
       'opencode-registration',
@@ -976,7 +965,7 @@ export function checkOpencodeRegistration(
     return _warn(
       'opencode-registration',
       `mcp["${MCP_NAME}"] in ${configPath} is explicitly disabled`
-        + (localFails.length > 0 ? '' : loaderVerdict === 'present' ? `; loader file present` : '')
+        + (loaderVerdict === 'present' ? '; loader file present' : '')
         + (skillsPresent ? '; all three skills present' : ''),
       'Set "enabled": true on the entry if you want Curated Thoughts active in OpenCode.',
     );
@@ -1160,16 +1149,19 @@ function _discoverSidecarVersion(
   path: string | null,
   env: NodeJS.ProcessEnv,
 ): { version: [number, number, number] | null; source: string | null } {
-  // dpkg is a Linux-only convenience; its absence is not a problem.
-  let dpkgRes: ReturnType<typeof spawnSync>;
-  try {
-    dpkgRes = spawnSync(
-      'dpkg-query',
-      ['-W', '-f=${Version}', 'curated-thoughts'],
-      { env: { ...process.env, ...env }, stdio: ['ignore', 'pipe', 'ignore'], encoding: 'utf8', timeout: 5000 },
-    );
-  } catch {
-    dpkgRes = undefined as unknown as ReturnType<typeof spawnSync>;
+  // dpkg is a Linux-only convenience; its absence is not a problem. Skip the
+  // spawn entirely elsewhere.
+  let dpkgRes: ReturnType<typeof spawnSync> | undefined;
+  if (process.platform === 'linux') {
+    try {
+      dpkgRes = spawnSync(
+        'dpkg-query',
+        ['-W', '-f=${Version}', 'curated-thoughts'],
+        { env: { ...process.env, ...env }, stdio: ['ignore', 'pipe', 'ignore'], encoding: 'utf8', timeout: 5000 },
+      );
+    } catch {
+      dpkgRes = undefined;
+    }
   }
   if (dpkgRes && dpkgRes.status === 0 && typeof dpkgRes.stdout === 'string' && dpkgRes.stdout.trim()) {
     const version = parseVersion(dpkgRes.stdout);
@@ -1391,12 +1383,23 @@ function main(argv: string[] = process.argv.slice(2)): number {
 }
 
 // Detect direct execution. `pathToFileURL` is the canonical "is this me?"
-// check under NodeNext ESM.
-if (
-  typeof process !== 'undefined' &&
-  process.argv[1] &&
-  import.meta.url === pathToFileURL(process.argv[1]).href
-) {
+// check under NodeNext ESM. The ESM loader realpaths the module, but argv[1]
+// is the path as typed, so compare realpaths: run through a symlinked
+// directory (macOS /var -> /private/var, a dotfiles-linked tree) the doctor
+// would otherwise exit 0 having printed nothing.
+function _isDirectRun(): boolean {
+  const argv1 = typeof process !== 'undefined' ? process.argv[1] : undefined;
+  if (!argv1) return false;
+  let real = argv1;
+  try {
+    real = realpathSync(argv1);
+  } catch {
+    // Keep argv1 as typed.
+  }
+  return import.meta.url === pathToFileURL(real).href;
+}
+
+if (_isDirectRun()) {
   try {
     process.exit(main());
   } catch (e) {
