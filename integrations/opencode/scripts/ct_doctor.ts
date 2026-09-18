@@ -830,9 +830,11 @@ export function checkOpencodeRegistration(
           const command = entry['command'];
           const shapeOk =
             (type === undefined || type === EXPECTED_MCP_TYPE) &&
+            // The whole command, as the installer writes it: without `--mcp`
+            // the sidecar binary starts the desktop app instead of the server.
             Array.isArray(command) &&
-            command.length >= 1 &&
-            command.map(String)[0] === EXPECTED_MCP_COMMAND[0];
+            command.length === EXPECTED_MCP_COMMAND.length &&
+            command.every((v, i) => v === EXPECTED_MCP_COMMAND[i]);
           if (entry['enabled'] === false) {
             // Explicit disablement is preserved by the installer (§7); the
             // doctor reports the state rather than calling it broken.
@@ -889,8 +891,9 @@ export function checkOpencodeRegistration(
   // --- (c) the three skill directories ------------------------------------
   const missingSkills = SKILL_NAMES.filter((n) => {
     try {
-      // true = MISSING (kept by filter); a nonexistent dir throws.
-      return !statSync(join(skillsDir, n)).isDirectory();
+      // true = MISSING (kept by filter); a nonexistent file throws. OpenCode
+      // loads a skill from its SKILL.md, so an empty directory is missing.
+      return !statSync(join(skillsDir, n, 'SKILL.md')).isFile();
     } catch {
       return true;
     }
@@ -934,7 +937,7 @@ export function checkOpencodeRegistration(
     return _fail(
       'opencode-registration',
       `mcp["${MCP_NAME}"] in ${configPath} has an unexpected shape `
-        + `(expected type "${EXPECTED_MCP_TYPE}", command starting with "${EXPECTED_MCP_COMMAND[0]}")`
+        + `(expected type "${EXPECTED_MCP_TYPE}", command ${JSON.stringify(EXPECTED_MCP_COMMAND)})`
         + (localFails.length > 0 ? `; ${localFails.join('; ')}` : ''),
       `Fix the entry to { "type": "${EXPECTED_MCP_TYPE}", "command": [${EXPECTED_MCP_COMMAND.map((c) => JSON.stringify(c)).join(', ')}], "enabled": true }, or re-run the installer. ${scope}`,
     );

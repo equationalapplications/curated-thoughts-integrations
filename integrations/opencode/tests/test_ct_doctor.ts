@@ -462,6 +462,23 @@ describe('checkOpencodeRegistration', () => {
     }
   });
 
+  it.each([
+    ['without --mcp', ['curated-thoughts-mcp']],
+    ['with extra arguments', ['curated-thoughts-mcp', '--mcp', '--verbose']],
+    ['with arguments reordered', ['--mcp', 'curated-thoughts-mcp']],
+  ])('fails when the mcp command is incomplete or altered (%s)', (_label, command) => {
+    const fx = makeRegistrationFixture({
+      configText: JSON.stringify({ mcp: { 'curated-thoughts': { type: 'local', command, enabled: true } } }),
+    });
+    try {
+      const r = checkOpencodeRegistration(fx.env);
+      expect(r.status).toBe(FAIL);
+      expect(r.detail).toContain('unexpected shape');
+    } finally {
+      cleanupHome(fx.home);
+    }
+  });
+
   it('warns when the entry is explicitly disabled (preserved disablement)', () => {
     const fx = makeRegistrationFixture({
       configText: JSON.stringify({
@@ -511,6 +528,23 @@ describe('checkOpencodeRegistration', () => {
       const r = checkOpencodeRegistration(fx.env);
       expect(r.status).toBe(WARN);
       expect(r.detail).toContain('skills missing');
+    } finally {
+      cleanupHome(fx.home);
+    }
+  });
+
+  it('treats a skill directory without SKILL.md as missing', () => {
+    const fx = makeRegistrationFixture({
+      configText: JSON.stringify({
+        mcp: { 'curated-thoughts': { type: 'local', command: ['curated-thoughts-mcp', '--mcp'], enabled: true } },
+      }),
+    });
+    try {
+      rmSync(join(fx.home, '.config', 'opencode', 'skills', 'curated-thoughts-ops', 'SKILL.md'));
+      const r = checkOpencodeRegistration(fx.env);
+      expect(r.status).toBe(WARN);
+      expect(r.detail).toContain('skills missing');
+      expect(r.detail).toContain('curated-thoughts-ops');
     } finally {
       cleanupHome(fx.home);
     }
