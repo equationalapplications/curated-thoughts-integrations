@@ -63,10 +63,17 @@ else
 fi
 say ""
 
-status=0
-node "$INSTALLER" "$@" || status=$?
+help=0
+for arg in ${1+"$@"}; do
+  if [ "$arg" = "-h" ] || [ "$arg" = "--help" ]; then help=1; fi
+done
 
-if [ "$edit" -eq 0 ] && [ "$status" -ne 2 ]; then
+status=0
+node "$INSTALLER" ${1+"$@"} || status=$?
+
+# Print the apply instructions only for successful previews (0) and
+# conflicted previews (3); never after --help or a hard error.
+if [ "$edit" -eq 0 ] && [ "$help" -eq 0 ] && { [ "$status" -eq 0 ] || [ "$status" -eq 3 ]; }; then
   say ""
   say "This was a preview. To apply it:"
   say "  CT_INSTALL_EDIT=1 $0${*:+ $*}"
