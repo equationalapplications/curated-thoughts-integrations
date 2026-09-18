@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 0.2.2 — 2026-09-18
+
+Fix empty-string fallback in brain-dir resolution. `??` operators in
+`cordis.patch.yml` treated an empty `HOME` or `USERPROFILE` as a set value,
+producing `/.brain` at the filesystem root. Both environment rows now use
+`||` with a literal `~` fallback so the sidecar receives a path it can
+actually open.
+
 ## 0.2.0 — 2026-09-18
 
 Fixed against DeepSeek Harness 0.1.5-rc.2 (container-verified end to end —
