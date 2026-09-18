@@ -11,7 +11,7 @@ common architecture.
 | Harness | Directory | Status | Version |
 |---------|-----------|--------|---------|
 | [Hermes Agent](https://github.com/NousResearch/hermes-agent) | [`integrations/hermes/`](integrations/hermes/) | implemented | [0.2.2](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=hermes) |
-| DeepSeek Harness | [`integrations/deepseek/`](integrations/deepseek/) | implemented | [0.1.2](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=deepseek) |
+| DeepSeek Harness | [`integrations/deepseek/`](integrations/deepseek/) | implemented | [0.2.0](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=deepseek) |
 | OpenCode | [`integrations/opencode/`](integrations/opencode/) | implemented | [0.1.0](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=opencode) |
 | OpenClaw | `integrations/openclaw/` | planned | — |
 | Claude Code | `integrations/claude-code/` | planned | — |
@@ -50,8 +50,11 @@ and registers the same three skills as Hermes at runtime. The doctor is
 `node lib/scripts/ct_doctor.js check` (nine deep checks, `--json` for
 machine-readable output). DeepSeek Harness ships on Windows as well as macOS
 and Linux, so CI verifies the integration on all three — install is
-`CT_INSTALL_EDIT=1 ./scripts/install.sh` (without it, the installer only
-prints the `cordis.yml` block to append).
+`CT_INSTALL_EDIT=1 ./scripts/install.sh --profile <profile>`. Without
+`CT_INSTALL_EDIT=1`, the installer previews: when the profile already has
+the matching package version installed, it reports that and exits without
+printing the plan; otherwise it prints the installation plan without
+modifying the profile.
 
 See each integration's README for full install and verify instructions.
 

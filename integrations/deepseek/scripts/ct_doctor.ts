@@ -6,12 +6,13 @@
  * the same order and the exit codes (0/1/2) match. Differences from Hermes:
  *
  *   - Sidecar identity uses the shared ct_env.ts helpers (Task 2).
- *   - dsh-registration checks `$DSH_HOME/cordis.yml` (default ~/.dsh/) for
- *     a list-item entry for `@equational-applications/dsh-curated-thoughts`
- *     AND a live MCP-server entry — Hermes checks
- *     ~/.hermes/config.yaml's `mcp_servers:` block + `plugins.enabled`
- *     list. Both use the same string-scan approach (no yaml dependency),
- *     so the harness-specific shape is the only thing that changes.
+ *   - dsh-registration checks that the package is installed into at least
+ *     one dsh profile under `$DSH_HOME/profiles/` (default ~/.dsh/) —
+ *     installation is what activates the shipped bundle patch. Hermes
+ *     checks ~/.hermes/config.yaml's `mcp_servers:` block + `plugins.enabled`
+ *     list; DSH has no user-editable plugin list file to scan (DSH never
+ *     reads a hand-edited cordis.yml), so the filesystem check replaces the
+ *     string-scan.
  *
  *   - Engine version + source-ref census come from ct_preflight.ts (Task 5).
  *
@@ -28,7 +29,14 @@
  * Import pre-flight: scripts/ct_preflight.ts.
  */
 
-import { accessSync, constants as fsConstants, existsSync, readFileSync, statSync } from 'node:fs';
+import {
+  accessSync,
+  constants as fsConstants,
+  existsSync,
+  readdirSync,
+  readFileSync,
+  statSync,
+} from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -75,10 +83,7 @@ export interface CheckResult {
 // dsh's plugin-list path. Default mirrors dsh's `docs/subsystems/skills.md`
 // "user-dsh" rank 400.
 const DEFAULT_DSH_HOME = join(homedir(), '.dsh');
-const CORDIS_YML = 'cordis.yml';
 const DSH_PLUGIN_PACKAGE = '@equational-applications/dsh-curated-thoughts';
-const DSH_MCP_CLIENT_PACKAGE = '@deepseek-ai/dsh-mcp-client';
-const MCP_SERVER_KEY = 'curated-thoughts';
 
 // Embedding backends: cloud keys OR a local Ollama. WARN-only check.
 const EMBED_ENV_KEYS: readonly string[] = [
@@ -145,15 +150,6 @@ export function tierForToolCount(count: number): string | null {
   if (count >= FULL_TIER_TOOLS) return 'v2.5-full';
   if (count >= READ_TIER_TOOLS) return 'v2.4-read';
   return null;
-}
-
-function _readTextFile(path: string, limit = 256 * 1024): string | null {
-  /** Read up to `limit` bytes of a text file; return null on OSError. */
-  try {
-    return readFileSync(path, { encoding: 'utf8' }).slice(0, limit);
-  } catch {
-    return null;
-  }
 }
 
 function _pass(name: string, detail: string): CheckResult {
@@ -653,114 +649,63 @@ export function checkEmbedding(env: NodeJS.ProcessEnv = process.env): CheckResul
 // dsh registration
 // --------------------------------------------------------------------------
 
-function _cordisYmlPath(env: NodeJS.ProcessEnv): string {
-  /** Locate dsh's cordis.yml. Honours $DSH_HOME; defaults to ~/.dsh/cordis.yml. */
+const DSH_PROFILES_DIR = 'profiles';
+// `dsh plugin add` is `pnpm add` in the profile dir, and pnpm always links a
+// direct dependency at the top level of node_modules (whatever the hoisting
+// mode — hoisting only affects transitive deps). dsh itself resolves bundle
+// patches and bare plugin names through this same path, so a package absent
+// here is not loadable by dsh either.
+const DSH_PLUGIN_PROFILE_REL = join('node_modules', DSH_PLUGIN_PACKAGE);
+
+/** Profiles under $DSH_HOME whose node_modules contain this package. */
+function _installedProfiles(env: NodeJS.ProcessEnv): string[] {
   const raw = env.DSH_HOME ?? DEFAULT_DSH_HOME;
   // Only a bare `~` or `~/...` names the current user's home; `~otheruser/...`
   // is left alone rather than concatenated onto this user's home. Same rule as
   // expandHome in ct_env.ts.
   const expanded = /^~(?=[/\\]|$)/.test(raw) ? join(homedir(), raw.slice(1)) : raw;
-  return join(expanded, CORDIS_YML);
-}
-
-/** True iff `name` appears as a top-level list-item name in the YAML text. */
-function _cordisYmlHasPlugin(text: string, name: string): boolean {
-  // The list-item shape is `- name: '<name>'` at column 0. Tolerate single
-  // or double quotes, and the bare unquoted form. Tolerate extra whitespace.
-  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const re = new RegExp(
-    String.raw`^-\s+name:\s*(?:['"]?)` + escaped + `(?:['"]?)\s*$`,
-    'm',
-  );
-  return re.test(text);
-}
-
-/** True iff the MCP-client list item names `curated-thoughts` as a server. */
-function _cordisYmlHasMcpServer(text: string): boolean {
-  // Look for an MCP-client list item, then check its indented `serverName:`
-  // block for a matching serverName line. End at the next list item (`- `)
-  // or end of file. Python's `\Z` (end-of-string) is a literal `Z` identity
-  // escape in JS, so the block-end lookahead uses `(?![\s\S])` — without it
-  // an mcp-client entry as the LAST list item (the common appended shape)
-  // never matches and the doctor false-FAILs a valid config.
-  const blockRe = new RegExp(
-    String.raw`^-\s+name:\s*(?:['"]?)` +
-      DSH_MCP_CLIENT_PACKAGE.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') +
-      String.raw`(?:['"]?)\s*$([\s\S]*?)(?=^-\s|(?![\s\S]))`,
-    'm',
-  );
-  const m = blockRe.exec(text);
-  if (!m) return false;
-  const block = m[1] ?? '';
-  const serverRe = new RegExp(
-    String.raw`^\s+serverName:\s*(?:['"]?)` +
-      MCP_SERVER_KEY.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') +
-      `(?:['"]?)\s*$`,
-    'm',
-  );
-  return serverRe.test(block);
+  let entries: string[];
+  try {
+    entries = readdirSync(join(expanded, DSH_PROFILES_DIR));
+  } catch {
+    // No dsh home / no profiles dir yet: nothing is installed anywhere.
+    return [];
+  }
+  const found: string[] = [];
+  for (const name of entries) {
+    if (existsSync(join(expanded, DSH_PROFILES_DIR, name, DSH_PLUGIN_PROFILE_REL))) {
+      found.push(name);
+    }
+  }
+  return found.sort();
 }
 
 export function checkDshRegistration(
   env: NodeJS.ProcessEnv = process.env,
 ): CheckResult {
-  /** (7) dsh registration: list-item entry for our plugin in cordis.yml,
-   * and the live MCP-server composition.
+  /** (7) dsh registration: the package is installed into at least one dsh
+   * profile.
    *
-   * Two sub-checks (per spec §6 check 7). The MCP server can be mounted
-   * either by our plugin (during apply()) or directly via the dsh-mcp-client
-   * list item, so the two are checked independently.
+   * Installation is what activates the shipped bundle patch (the
+   * package.json `dsh.bundle.patch` declaration): `dsh plugin add` reconciles
+   * the profile's bundle list from it. DSH never reads a hand-edited
+   * cordis.yml and ignores bare `- name:` rows in patch files, so there is
+   * no user-editable plugin list to scan — the filesystem is the registry.
    */
-  const configPath = _cordisYmlPath(env);
-  const text = _readTextFile(configPath);
-  if (text === null) {
+  const profiles = _installedProfiles(env);
+  if (profiles.length === 0) {
     return _fail(
       'dsh-registration',
-      `cordis.yml not found at ${configPath} ($DSH_HOME=${env.DSH_HOME ?? '<unset, default ~/.dsh>'})`,
-      'Run dsh once to create cordis.yml, or re-run install.sh to print the '
-        + 'list-item entry it appends. (Set DSH_HOME if dsh is installed '
-        + 'elsewhere.)',
-    );
-  }
-  const hasPlugin = _cordisYmlHasPlugin(text, DSH_PLUGIN_PACKAGE);
-  const hasMcp = _cordisYmlHasMcpServer(text);
-  if (!hasPlugin && !hasMcp) {
-    return _fail(
-      'dsh-registration',
-      `${DSH_PLUGIN_PACKAGE} is not listed in ${configPath} and no MCP `
-        + 'server entry mounts curated-thoughts',
-      `Append the list-item entry to ${configPath}:\n`
-        + `- name: '${DSH_PLUGIN_PACKAGE}'\n`
-        + '  config:\n'
-        + '    brainDir: ~/.brain\n'
-        + 'or re-run install.sh, which appends it when absent.',
-    );
-  }
-  if (hasPlugin && !hasMcp) {
-    // Our plugin mounts the MCP client on apply() — this is the expected
-    // path. Mark PASS, but record the explicit MCP entry status for callers.
-    return _pass(
-      'dsh-registration',
-      `${DSH_PLUGIN_PACKAGE} listed in ${configPath} (plugin mounts the `
-        + 'curated-thoughts MCP server on apply; no separate mcp-client '
-        + 'list item needed)',
-    );
-  }
-  if (!hasPlugin && hasMcp) {
-    return _warn(
-      'dsh-registration',
-      `MCP server ${MCP_SERVER_KEY} is mounted in ${configPath}, but `
-        + `${DSH_PLUGIN_PACKAGE} is not listed — skills and session-start `
-        + 'hook stay dormant',
-      `Add '${DSH_PLUGIN_PACKAGE}' as a list item in ${configPath}:\n`
-        + `- name: '${DSH_PLUGIN_PACKAGE}'\n`
-        + '  config:\n'
-        + '    brainDir: ~/.brain',
+      `${DSH_PLUGIN_PACKAGE} is not installed in any dsh profile `
+        + `($DSH_HOME=${env.DSH_HOME ?? '<unset, default ~/.dsh>'})`,
+      'Install with: CT_INSTALL_EDIT=1 ./scripts/install.sh --profile <name> '
+        + '(shipped profiles: web, headless, sdk, sdk-minimal, acp). '
+        + '(Set DSH_HOME if dsh is installed elsewhere.)',
     );
   }
   return _pass(
     'dsh-registration',
-    `${DSH_PLUGIN_PACKAGE} listed and curated-thoughts MCP server mounted in ${configPath}`,
+    `${DSH_PLUGIN_PACKAGE} installed in dsh profile(s): ${profiles.join(', ')}`,
   );
 }
 

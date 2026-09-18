@@ -3,7 +3,17 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import Database from 'better-sqlite3';
-import { censusSourceRefs, detectEngineVersion } from '../scripts/ct_preflight.js';
+import {
+  censusSourceRefs,
+  detectEngineVersion,
+} from '../scripts/ct_preflight.js';
+// The loader seam lives in the underscored sibling so it isn't part of
+// ct_preflight's public surface — downstream tools importing ct_preflight
+// see only censusSourceRefs / detectEngineVersion, never the setters.
+import {
+  _setBetterSqlite3Loader,
+  _resetBetterSqlite3Loader,
+} from '../scripts/_lazy_loader.js';
 
 // A well-formed post-#188 token: 'librarian-' + exactly 32 lowercase hex chars
 // (PR #188 §2.2). The plan's literal 'ct_token:abc123' is not a valid token
@@ -261,5 +271,63 @@ describe('detectEngineVersion', () => {
     const r = detectEngineVersion();
     expect(r.version).toBeNull();
     expect(r.source).toBeNull();
+  });
+});
+
+// --- better-sqlite3 is a lazy, optional dependency --------------------------
+
+describe('lazy better-sqlite3', () => {
+  it('importing the module never touches the native binding until a census runs', async () => {
+    // If better-sqlite3 were a static import, a missing native build would
+    // crash the doctor at import time from the release tarball (which ships
+    // no node_modules). Importing the compiled module in a fresh registry
+    // must therefore succeed regardless of the binding.
+    await expect(import('../scripts/ct_preflight.js')).resolves.toBeTruthy();
+  });
+
+  it('a census on a missing DB degrades to an error result without throwing', () => {
+    const c = censusSourceRefs(join(tmpDir, 'does-not-exist.db'));
+    expect(c.error).not.toBeNull();
+    expect(c.tablePresent).toBe(false);
+  });
+});
+
+describe('better-sqlite3 unavailable on a present DB', () => {
+  // Use a real, present brain so existsSync() passes and the loader is the
+  // only thing standing between the census and a SQLite handle. vi.doMock
+  // cannot intercept createRequire(import.meta.url)('better-sqlite3'), so
+  // the seam in scripts/_lazy_loader.ts is the deterministic control.
+  // Reset the module-level cache between tests so the
+  // unavailable-dependency case is isolated.
+  afterEach(() => {
+    _resetBetterSqlite3Loader();
+  });
+
+  it('returns a structured error when the loader throws', () => {
+    _setBetterSqlite3Loader(() => {
+      throw new Error('simulated missing native binding');
+    });
+    const c = censusSourceRefs(dbPath);
+    expect(c.error).not.toBeNull();
+    expect(c.error).toMatch(/better-sqlite3 unavailable: simulated missing native binding/);
+    expect(c.tablePresent).toBe(false);
+  });
+
+  it('a follow-up call reuses the cached unavailability (no re-load attempt)', () => {
+    let loaderCalls = 0;
+    _setBetterSqlite3Loader(() => {
+      loaderCalls += 1;
+      throw new Error('first-call failure');
+    });
+    const first = censusSourceRefs(dbPath);
+    expect(first.error).toMatch(/better-sqlite3 unavailable: first-call failure/);
+    expect(loaderCalls).toBe(1);
+    // A second call after the cache has been populated must report the
+    // shorter 'is not available' message and must NOT invoke the loader
+    // again — the doctor would abort on an exception thrown from the
+    // check hook, so the unavailable state has to be sticky.
+    const second = censusSourceRefs(dbPath);
+    expect(second.error).toMatch(/better-sqlite3 is not available/);
+    expect(loaderCalls).toBe(1);
   });
 });
