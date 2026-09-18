@@ -1,0 +1,19 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "zai": {
+      "npm": "@ai-sdk/anthropic",
+      "name": "Z.AI coding plan (Anthropic-compatible)",
+      "options": {
+        "baseURL": "https://api.z.ai/api/anthropic/v1",
+        "apiKey": "{env:ZAI_API_KEY}"
+      },
+      "models": {
+        "GLM-5.3-FLASH": { "name": "GLM-5.3-FLASH" }
+      }
+    }
+  },
+  "permission": {
+    "curated-thoughts_*": "allow"
+  }
+}

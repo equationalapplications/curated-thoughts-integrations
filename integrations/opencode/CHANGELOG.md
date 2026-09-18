@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-## 0.1.0 — 2026-09-17
+## 0.1.0 — 2026-09-18
 
 Initial release. OpenCode plugin wires the Curated Thoughts MCP sidecar,
 registers a bounded health snapshot in the system prompt (refreshed once per

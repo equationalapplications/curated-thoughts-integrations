@@ -3,3 +3,4 @@ node_modules/
 *.log
 .DS_Store
 tests/host/*.local.json
+tests/e2e/out/

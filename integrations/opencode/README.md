@@ -61,6 +61,22 @@ The pre-flight check degrades gracefully when the optional `better-sqlite3`
 dependency is absent — every other check is dependency-free (the plugin
 runtime has zero third-party imports).
 
+### End-to-end test (Docker, local only)
+
+```bash
+tests/e2e/run.sh
+```
+
+Builds the release artifact with `tools/ct_ci.py package`, then in a
+`node:24-bookworm-slim` container installs the Curated Thoughts `.deb`
+(default `CT_VERSION=2.12.1`) and the pinned OpenCode, runs `install.sh`
+preview and apply, the doctor, and `opencode mcp list`, and re-runs the
+installer to confirm it is a no-op. With `ZAI_API_KEY` set, a live model
+(`zai/GLM-5.3-FLASH` via Z.AI's Anthropic-compatible endpoint; override with
+`CT_E2E_MODEL`) must call `curated_proposals_list` through OpenCode. The key is
+passed to the container by name only. No embedding backend runs, so the
+embedding check is expected to WARN. Logs land in `tests/e2e/out/`.
+
 ## Uninstall
 
 Remove the loader file (`~/.config/opencode/plugins/curated-thoughts.js`),
