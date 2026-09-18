@@ -38,8 +38,11 @@ let archiveBuildError = '';
 // archive-gated tests SKIP instead of failing on a missing toolchain.
 let pythonYamlAvailable = true;
 
+/** Windows needs the .cmd shim; POSIX resolves bare `pnpm` fine. */
+const PNPM = process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm';
+
 function run(cmd: string, args: string[], opts: { cwd?: string; env?: NodeJS.ProcessEnv } = {}): string {
-  return execFileSync(cmd, args, { cwd: opts.cwd ?? REPO_ROOT, encoding: 'utf8', env: opts.env }).trim();
+  return execFileSync(cmd === 'pnpm' ? PNPM : cmd, args, { cwd: opts.cwd ?? REPO_ROOT, encoding: 'utf8', env: opts.env }).trim();
 }
 
 /** Gated at runtime: skips when the runner lacks the Python toolchain. */
@@ -143,7 +146,7 @@ describe('release archive (ct_ci.py package)', () => {
     // Both artifacts must at least carry everything package.json#files claims;
     // the manifest archive may carry more (README, integration.yaml), never less.
     const files: string[] = JSON.parse(readFileSync(join(PKG_ROOT, 'package.json'), 'utf8')).files;
-    const tsc = spawnSync('pnpm', ['exec', 'tsc', '--noEmit'], { cwd: PKG_ROOT, encoding: 'utf8' });
+    const tsc = spawnSync(PNPM, ['exec', 'tsc', '--noEmit'], { cwd: PKG_ROOT, encoding: 'utf8' });
     expect(tsc.status, tsc.stderr).toBe(0);
     for (const claimed of files) {
       expect(existsSync(join(PKG_ROOT, claimed)), `package.json#files claims ${claimed}`).toBe(true);

@@ -217,6 +217,11 @@ describe('mcpToolsList', () => {
       );
       writeFileSync(shim, `#!/bin/sh\nexec "${process.execPath}" "${shimJs}"\n`);
       chmodSync(shim, 0o755);
+      if (process.platform === 'win32') {
+        // The sh-script shim has no Windows equivalent without a POSIX shell;
+        // the real-binary handshake is covered by the host contract job.
+        return;
+      }
       const res = mcpToolsList(shim, 10, { PATH: bin } as NodeJS.ProcessEnv);
       expect(res.error).toBeNull();
       expect(res.toolNames).toHaveLength(14);

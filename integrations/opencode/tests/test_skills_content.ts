@@ -28,7 +28,10 @@ interface Frontmatter {
 }
 
 /** Minimal YAML frontmatter parser: `key: value` lines between --- markers. */
-function parseFrontmatter(text: string): { data: Frontmatter; body: string } {
+function parseFrontmatter(rawText: string): { data: Frontmatter; body: string } {
+  // Normalize CRLF: git checkout on Windows gives the skills CRLF endings,
+  // but the frontmatter contract is defined over LF-separated lines.
+  const text = rawText.replace(/\r\n/g, '\n');
   expect(text.startsWith('---\n'), 'SKILL.md must start with a --- frontmatter block').toBe(true);
   const end = text.indexOf('\n---', 4);
   expect(end).toBeGreaterThan(0);
