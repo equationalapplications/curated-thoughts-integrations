@@ -380,6 +380,12 @@ jobs:
         run: |
           pip install --disable-pip-version-check -r ../../tools/requirements-ci.txt
           HOST_CMD=$(python3 -c "import yaml; print(yaml.safe_load(open('integration.yaml'))['checks']['host'])")
+          # This job provisions bun; a non-bun host command has no runner and
+          # must fail loudly here rather than as an opaque "command not found".
+          case "$HOST_CMD" in
+            "bun "*) ;;
+            *) echo "checks.host must start with 'bun ' (got: $HOST_CMD)"; exit 1 ;;
+          esac
           mkdir -p "$HOST_HOME"
           HOME="$HOST_HOME" \
           XDG_CONFIG_HOME="$HOST_HOME/.config" \

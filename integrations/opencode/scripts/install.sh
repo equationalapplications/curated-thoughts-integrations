@@ -76,7 +76,15 @@ node "$INSTALLER" ${1+"$@"} || status=$?
 if [ "$edit" -eq 0 ] && [ "$help" -eq 0 ] && { [ "$status" -eq 0 ] || [ "$status" -eq 3 ]; }; then
   say ""
   say "This was a preview. To apply it:"
-  say "  CT_INSTALL_EDIT=1 $0${*:+ $*}"
+  # Display only; quote arguments containing specials so they render as typed.
+  display_args=""
+  for arg in ${1+"$@"}; do
+    case "$arg" in
+      *[!A-Za-z0-9_@%+=:,./-]*) display_args="$display_args '$arg'" ;;
+      *) display_args="$display_args $arg" ;;
+    esac
+  done
+  say "  CT_INSTALL_EDIT=1 $0$display_args"
 fi
 
 exit "$status"
