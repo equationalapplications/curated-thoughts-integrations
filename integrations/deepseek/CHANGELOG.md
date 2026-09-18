@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 0.2.1
+
+Restore executable bits on shell scripts; fix empty HOME/USERPROFILE handling in
+bundle patch and expandHome; update test to assert actual homedir() fallback.
+
 ## 0.2.0 — 2026-09-18
 
 Fixed against DeepSeek Harness 0.1.5-rc.2 (container-verified end to end —
