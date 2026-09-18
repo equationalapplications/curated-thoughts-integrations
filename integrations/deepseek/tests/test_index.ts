@@ -1,8 +1,12 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { apply, Config } from '../src/index.js';
+import { apply, Config, inject } from '../src/index.js';
 
+// The ctx mock encodes the real DSH 0.1.5 runtime surface: there is NO
+// `ctx.plugin(string, ...)` (cordis rejects a string plugin — the MCP client
+// is mounted by the shipped bundle patch instead), and systemPrompt.context
+// requires a named entry with a finite `order` (getContextOrder only knows
+// the built-in sections).
 function mockCtx() {
-  const pluginCalls: Array<{ name: string; cfg: unknown }> = [];
   const skillRegistrations: Array<{
     name: string;
     description: string;
@@ -10,16 +14,13 @@ function mockCtx() {
     invocation: { modelInvocable: boolean; userInvocable: boolean };
   }> = [];
   const contextRegistrations: Array<{
+    name?: string;
     order: unknown;
     text: () => string;
   }> = [];
   const sessionStartListeners: Array<() => Promise<void>> = [];
   return {
     ctx: {
-      plugin: vi.fn((name: string, cfg: unknown) => {
-        pluginCalls.push({ name, cfg });
-        return () => {};
-      }),
       skills: {
         register: vi.fn((s: unknown) => {
           skillRegistrations.push(s as (typeof skillRegistrations)[number]);
@@ -27,7 +28,6 @@ function mockCtx() {
         }),
       },
       systemPrompt: {
-        getContextOrder: vi.fn((name: string) => 100),
         context: vi.fn((c: unknown) => {
           contextRegistrations.push(c as (typeof contextRegistrations)[number]);
           return () => {};
@@ -37,12 +37,19 @@ function mockCtx() {
         if (event === 'agent/session-start') sessionStartListeners.push(listener);
       }),
     },
-    pluginCalls,
     skillRegistrations,
     contextRegistrations,
     sessionStartListeners,
   };
 }
+
+describe('inject', () => {
+  it('declares the DSH services apply() touches', () => {
+    // Without this export the host never injects systemPrompt/skills and
+    // apply() crashes with 'cannot get property "systemPrompt" without inject'.
+    expect(inject).toEqual(['systemPrompt', 'skills']);
+  });
+});
 
 describe('Config schema', () => {
   it('is defined and callable (schemastery Schema)', () => {
@@ -57,44 +64,40 @@ describe('apply', () => {
     m = mockCtx();
   });
 
-  it('mounts @deepseek-ai/dsh-mcp-client with the curated-thoughts server', () => {
-    apply(m.ctx as unknown as Parameters<typeof apply>[0], { brainDir: '/home/u/.brain' } as Parameters<typeof apply>[1]);
-    expect(m.pluginCalls).toHaveLength(1);
-    expect(m.pluginCalls[0].name).toBe('@deepseek-ai/dsh-mcp-client');
-    expect(m.pluginCalls[0].cfg).toMatchObject({
-      serverName: 'curated-thoughts',
-      transport: 'stdio',
-      command: 'curated-thoughts-mcp',
-      args: ['--mcp'],
-      env: { CURATED_BRAIN_DIR: '/home/u/.brain' },
-    });
-  });
-
-  it('uses the configured sidecar command override', () => {
-    apply(m.ctx as unknown as Parameters<typeof apply>[0], { brainDir: '/x', sidecarCommand: 'my-sidecar' } as Parameters<typeof apply>[1]);
-    expect(m.pluginCalls[0].cfg).toMatchObject({
-      command: 'my-sidecar',
-      args: ['--mcp'],
-    });
-  });
-
-  it('registers a dynamic prompt context with empty default', () => {
-    apply(m.ctx as unknown as Parameters<typeof apply>[0], { brainDir: '/x' } as Parameters<typeof apply>[1]);
+  it('registers a named dynamic prompt context with a finite order', () => {
+    apply(m.ctx as unknown as Parameters<typeof apply>[0], {} as Parameters<typeof apply>[1]);
     expect(m.contextRegistrations).toHaveLength(1);
     const ctx0 = m.contextRegistrations[0];
+    // dsh requires { name, order, text } and validates that order is a
+    // finite number; getContextOrder() only knows the built-in sections, so
+    // the order must be our own constant, not a getContextOrder() lookup.
+    expect(ctx0.name).toBe('curated-thoughts-health');
+    expect(typeof ctx0.order).toBe('number');
+    expect(Number.isFinite(ctx0.order)).toBe(true);
     // Empty first-call default — text is a function reference evaluated lazily.
     expect(typeof ctx0.text).toBe('function');
     expect(ctx0.text()).toBe('');
   });
 
+  it('publishes the health block once the session-start refresh has run', async () => {
+    apply(m.ctx as unknown as Parameters<typeof apply>[0], {} as Parameters<typeof apply>[1]);
+    expect(m.sessionStartListeners.length).toBe(1);
+    // The listener refreshes the cache fail-open; the text() reference must
+    // observe the refreshed value at the next prompt assembly.
+    await m.sessionStartListeners[0]();
+    for (const reg of m.contextRegistrations) {
+      expect(typeof reg.text()).toBe('string');
+    }
+  });
+
   it('subscribes agent/session-start for async refresh', () => {
-    apply(m.ctx as unknown as Parameters<typeof apply>[0], { brainDir: '/x' } as Parameters<typeof apply>[1]);
+    apply(m.ctx as unknown as Parameters<typeof apply>[0], {} as Parameters<typeof apply>[1]);
     expect(m.sessionStartListeners.length).toBe(1);
     expect(typeof m.sessionStartListeners[0]).toBe('function');
   });
 
   it('registers three skills', () => {
-    apply(m.ctx as unknown as Parameters<typeof apply>[0], { brainDir: '/x' } as Parameters<typeof apply>[1]);
+    apply(m.ctx as unknown as Parameters<typeof apply>[0], {} as Parameters<typeof apply>[1]);
     const names = m.skillRegistrations.map((s) => s.name).sort();
     expect(names).toEqual([
       'curated-thoughts-ops',

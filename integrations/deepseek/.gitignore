@@ -4,3 +4,4 @@ dist/
 *.tsbuildinfo
 .env
 .env.*
+tests/e2e/out/

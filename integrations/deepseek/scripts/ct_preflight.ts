@@ -29,13 +29,53 @@
  *
  * Read-only by construction: the database is opened through better-sqlite3
  * in readonly mode and no statement other than SELECT is ever issued.
+ *
+ * `better-sqlite3` is a devDependency and loaded LAZILY: the shipped tarball
+ * carries no node_modules, and a missing native build must degrade only the
+ * census (doctor check), never crash the doctor at import time. Every entry
+ * point that touches the DB funnels through `_requireDatabase()`, which
+ * resolves to a structured error on failure. Mirrors the OpenCode
+ * integration's ct_preflight.ts.
  */
 
-import Database from 'better-sqlite3';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { createRequire } from 'node:module';
+
+import type BetterSqlite3 from 'better-sqlite3';
 
 import { EVIDENCE_TABLE, REQUIRED_TABLES, SOURCE_REF_SHAPE } from './_compat_generated.js';
+
+/**
+ * Lazily resolve better-sqlite3. Returns the module, or an error string.
+ *
+ * `createRequire(import.meta.url)` is used (not a bare `require`) because
+ * this file compiles to native ESM under NodeNext. The import is kept out of
+ * the module graph so that importing ct_preflight.ts — as ct_doctor.ts does
+ * for detectEngineVersion — never loads the native binding until a census
+ * actually needs it.
+ */
+type DatabaseConstructor = typeof BetterSqlite3;
+let _databaseCtor: DatabaseConstructor | null | undefined;
+
+function _requireDatabase(): { db: DatabaseConstructor | null; error: string | null } {
+  if (_databaseCtor !== undefined) {
+    return _databaseCtor === null
+      ? { db: null, error: 'better-sqlite3 is not available' }
+      : { db: _databaseCtor, error: null };
+  }
+  try {
+    // `createRequire` + require() is the deliberate lazy-load seam here: a
+    // static import would make the optional better-sqlite3 dependency a hard
+    // one for every plugin runtime path.
+    const require = createRequire(import.meta.url);
+    _databaseCtor = require('better-sqlite3') as DatabaseConstructor;
+    return { db: _databaseCtor, error: null };
+  } catch (e) {
+    _databaseCtor = null;
+    return { db: null, error: `better-sqlite3 unavailable: ${(e as Error).message}` };
+  }
+}
 
 // --------------------------------------------------------------------------
 // normative constants — token shape (PR #188 §2.2) and evidence table
@@ -290,14 +330,14 @@ export function classifySourceRef(value: unknown): SourceRefState {
 // DB helpers — readonly connection, table-existence, column-existence
 // --------------------------------------------------------------------------
 
-function _tableExists(conn: Database.Database, name: string): boolean {
+function _tableExists(conn: BetterSqlite3.Database, name: string): boolean {
   const row = conn
     .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?")
     .get(name);
   return row !== undefined;
 }
 
-function _columns(conn: Database.Database, table: string): Set<string> {
+function _columns(conn: BetterSqlite3.Database, table: string): Set<string> {
   // SQLite cannot parameterise identifiers; EVIDENCE_TABLE / ENTRIES_TABLE
   // are repository-controlled constants, never user input.
   try {
@@ -310,8 +350,19 @@ function _columns(conn: Database.Database, table: string): Set<string> {
   }
 }
 
-function _openReadonly(dbPath: string): Database.Database {
-  return new Database(dbPath, { readonly: true, fileMustExist: true });
+function _openReadonly(
+  dbPath: string,
+): { conn: BetterSqlite3.Database | null; error: string | null } {
+  /** Open the brain read-only. Never throws: a missing or unloadable
+   * better-sqlite3 becomes a structured error so only the census degrades —
+   * the doctor must keep producing JSON output. */
+  const { db, error } = _requireDatabase();
+  if (db === null) return { conn: null, error: error ?? 'better-sqlite3 unavailable' };
+  try {
+    return { conn: new db(dbPath, { readonly: true, fileMustExist: true }), error: null };
+  } catch (e) {
+    return { conn: null, error: (e as Error).message };
+  }
 }
 
 // --------------------------------------------------------------------------
@@ -323,9 +374,15 @@ export function censusSourceRefs(dbPath: string): Census {
   if (!existsSync(dbPath)) {
     return makeCensus({ error: 'brain database not found' });
   }
-  let conn: Database.Database;
+  let conn: BetterSqlite3.Database;
   try {
-    conn = _openReadonly(dbPath);
+    const opened = _openReadonly(dbPath);
+    if (opened.conn === null) {
+      return makeCensus({
+        error: `cannot open database read-only: ${opened.error}`,
+      });
+    }
+    conn = opened.conn;
   } catch (e) {
     return makeCensus({
       error: `cannot open database read-only: ${(e as Error).message}`,
@@ -502,9 +559,11 @@ export function hasEvidenceTable(dbPath: string): boolean | null {
   if (!existsSync(dbPath)) {
     return null;
   }
-  let conn: Database.Database;
+  let conn: BetterSqlite3.Database | null;
   try {
-    conn = _openReadonly(dbPath);
+    const opened = _openReadonly(dbPath);
+    conn = opened.conn;
+    if (conn === null) return null;
   } catch {
     return null;
   }

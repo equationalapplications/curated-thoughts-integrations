@@ -1,6 +1,6 @@
 {
   "name": "@equational-applications/dsh-curated-thoughts",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "description": "Curated Thoughts memory integration for DeepSeek Harness",
   "license": "MIT",
   "type": "module",
@@ -13,8 +13,14 @@
   "files": [
     "lib",
     "skills",
-    "scripts/install.sh"
+    "scripts/install.sh",
+    "cordis.patch.yml"
   ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
   "scripts": {
     "build": "tsc",
     "test": "vitest run",

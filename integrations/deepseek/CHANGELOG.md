@@ -2,6 +2,45 @@
 
 ## Unreleased
 
+## 0.2.0 — 2026-09-18
+
+Fixed against DeepSeek Harness 0.1.5-rc.2 (container-verified end to end —
+see the e2e harness below). 0.1.2 was never tagged or released because its
+plugin could not load on current DSH at all; this release supersedes it, and
+0.1.2's census change is included here. Minor bump: the install procedure
+changed.
+
+- **Load failure fixed.** The plugin used `ctx.plugin(string, ...)`, which
+  cordis rejects (`invalid plugin ... received string`), never declared the
+  `inject` services (crash: `cannot get property "systemPrompt" without
+  inject`), and passed a non-finite prompt-context order (crash: `prompt
+  context "undefined" order must be a finite number`). The MCP client is now
+  mounted declaratively via a shipped bundle patch; the plugin declares
+  `inject = ['systemPrompt', 'skills']`; the prompt context is registered as
+  `{ name, order: 130, text }`.
+- **Install rewritten.** The old installer appended blocks to
+  `$DSH_HOME/cordis.yml`, which DSH never reads, and DSH ignores bare
+  `- name:` rows in patch files — so installing did nothing. The package now
+  ships `cordis.patch.yml` declared via package.json `dsh.bundle.patch`, and
+  `install.sh --profile <name>` packs the package and installs it with
+  `dsh plugin --profile <name> add <tarball>`. `--profile` is required;
+  DSH composes per profile and has no global plugin list.
+- **Doctor no longer crashes from the release tarball.** `ct_preflight.ts`
+  imported `better-sqlite3` statically; the tarball ships no node_modules, so
+  `ct_doctor check` died at import. It now loads lazily and degrades the
+  census check to WARN, mirroring the OpenCode integration.
+- **The doctor's `dsh-registration` check now inspects profile installs.**
+  It scanned `$DSH_HOME/cordis.yml`, which DSH never reads, and so failed
+  every correct install. It now reports which profiles have the package
+  installed — installation being what activates the bundle patch.
+- **Brain path handling.** The sidecar does not expand a leading `~`
+  (verified: it treats `~/.brain` as a relative path and exits), so the MCP
+  row resolves `CURATED_BRAIN_DIR` at composition time (ambient value wins,
+  else `$HOME/.brain`), and the plugin expands `~` itself before probing.
+- **New e2e harness** (`tests/e2e/`): Docker-based, container-verified
+  against DSH 0.1.5-rc.2 (pinned in `tests/host/compatibility.json`), sharing
+  its base image with the OpenCode harness.
+
 ## 0.1.2 — 2026-09-10
 
 - `import-preflight` no longer counts soft-deleted `llm_wiki_entries` rows as

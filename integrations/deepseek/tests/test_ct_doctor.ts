@@ -83,47 +83,41 @@ describe.skipIf(!built)('cmdCheck', () => {
 });
 
 describe('checkDshRegistration', () => {
-  function writeCordisYml(text: string): void {
-    mkdirSync(tmpHome, { recursive: true });
-    writeFileSync(join(tmpHome, 'cordis.yml'), text);
+  function installInProfile(profile: string): void {
+    // Simulate what `dsh plugin --profile <p> add` lays down: the package
+    // under the profile's node_modules (usually a symlink; a real dir here).
+    const dir = join(tmpHome, 'profiles', profile, 'node_modules', '@equational-applications', 'dsh-curated-thoughts');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'package.json'), '{"name": "@equational-applications/dsh-curated-thoughts"}');
   }
 
-  it('passes when the mcp-client entry is the LAST list item (appended shape)', () => {
-    // Regression: the block-end lookahead used Python's `\Z`, which is a
-    // literal `Z` in JS — an mcp-client entry as the final list item (the
-    // common appended shape) never matched and the doctor false-FAILed a
-    // valid config.
-    writeCordisYml(
-      [
-        "- name: '@equational-applications/dsh-curated-thoughts'",
-        '  config:',
-        '    brainDir: ~/.brain',
-        "- name: '@deepseek-ai/dsh-mcp-client'",
-        '  config:',
-        "    serverName: 'curated-thoughts'",
-        '    transport: stdio',
-        '',
-      ].join('\n'),
-    );
+  it('fails when no profile has the package installed', () => {
     const r = checkDshRegistration({ ...process.env, DSH_HOME: tmpHome });
-    expect(r.status).toBe(PASS);
+    expect(r.status).toBe(FAIL);
+    expect(r.detail).toContain('not installed in any dsh profile');
   });
 
-  it('detects the server when the mcp-client block itself contains a literal Z', () => {
-    // The old `\Z` truncated the captured block at any `Z` character.
-    // Plugin entry absent → WARN is the correct verdict for a detected
-    // server mount; the old bug produced FAIL here instead.
-    writeCordisYml(
-      [
-        "- name: '@deepseek-ai/dsh-mcp-client'",
-        '  config:',
-        '    # Zone: main',
-        "    serverName: 'curated-thoughts'",
-        '',
-      ].join('\n'),
-    );
+  it('passes when the package is installed in a profile, and names it', () => {
+    installInProfile('headless');
     const r = checkDshRegistration({ ...process.env, DSH_HOME: tmpHome });
-    expect(r.status).toBe(WARN);
+    expect(r.status).toBe(PASS);
+    expect(r.detail).toContain('headless');
+  });
+
+  it('lists every profile that has the package', () => {
+    installInProfile('headless');
+    installInProfile('web');
+    const r = checkDshRegistration({ ...process.env, DSH_HOME: tmpHome });
+    expect(r.status).toBe(PASS);
+    expect(r.detail).toContain('headless, web');
+  });
+
+  it('ignores a stray file under profiles/ (only real installs count)', () => {
+    mkdirSync(join(tmpHome, 'profiles'), { recursive: true });
+    writeFileSync(join(tmpHome, 'profiles', 'strayfile'), 'not a profile');
+    const r = checkDshRegistration({ ...process.env, DSH_HOME: tmpHome });
+    expect(r.status).toBe(FAIL);
+    expect(r.detail).toContain('not installed in any dsh profile');
   });
 });
 

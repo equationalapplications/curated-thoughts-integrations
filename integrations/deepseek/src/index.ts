@@ -1,4 +1,5 @@
 import { existsSync, readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Context } from '@deepseek-ai/cordis';
@@ -15,6 +16,33 @@ export const Config: Schema<Config> = Schema.object({
   brainDir: Schema.string().default(process.env.CURATED_BRAIN_DIR ?? '~/.brain'),
   sidecarCommand: Schema.string().default('curated-thoughts-mcp'),
 });
+
+/**
+ * The DSH services this plugin's `apply` touches. Without this export the
+ * host never injects them and apply() crashes with `cannot get property
+ * "systemPrompt" without inject`.
+ */
+export const inject = ['systemPrompt', 'skills'] as const;
+
+/**
+ * The MCP client is NOT mounted from here: cordis rejects
+ * `ctx.plugin('@deepseek-ai/dsh-mcp-client', ...)` — a plugin must be a
+ * function or an object with an `apply` method, never a string. The mount is
+ * declarative instead: `cordis.patch.yml` ships in the package (declared via
+ * package.json `dsh.bundle.patch`) and carries both this plugin's row and
+ * the `@deepseek-ai/dsh-mcp-client` stdio row, so `dsh plugin add` activates
+ * the whole set. This module is therefore only the prompt context, the
+ * session-start refresh, and the skills.
+ */
+
+/**
+ * Prompt-context position. dsh's getContextOrder() only knows its built-in
+ * sections (SANDBOX_POLICY 110, APPROVAL_POLICY 115, SUBAGENT_DELEGATION
+ * 120) and returns undefined for anything else, which fails the finite-order
+ * validation — so the order is stated here rather than looked up. 130 puts
+ * the health block after all built-ins, closest to the conversation.
+ */
+const CURATED_CONTEXT_ORDER = 130;
 
 const SKILL_NAMES = [
   'curated-thoughts-usage',
@@ -67,21 +95,23 @@ function readSkill(name: SkillName): string {
 }
 
 /**
- * DSH augments `ctx` with `ctx.plugin(string, ...)`, `ctx.systemPrompt.*`,
- * `ctx.skills.register(...)`, and `ctx.on('agent/session-start', ...)` via
- * TypeScript module augmentation from `@deepseek-ai/dsh-*` plugins that ship
- * with the dsh consumer runtime. `@deepseek-ai/cordis` alone doesn't expose
- * these — that's expected per dsh's plugin model.
+ * DSH augments `ctx` with `ctx.systemPrompt.*`, `ctx.skills.register(...)`,
+ * and `ctx.on('agent/session-start', ...)` via TypeScript module augmentation
+ * from `@deepseek-ai/dsh-*` plugins that ship with the dsh consumer runtime.
+ * `@deepseek-ai/cordis` alone doesn't expose these — that's expected per
+ * dsh's plugin model.
  *
  * We narrow the `Context` shape we actually use to keep the call sites
  * readable without `as any` at every line.
  */
 interface DshContextExtensions {
-  plugin(name: string, config: unknown): unknown;
   on(event: 'agent/session-start', listener: () => Promise<void>): unknown;
   systemPrompt: {
-    context(c: { order: unknown; text: () => string }): unknown;
-    getContextOrder(name: string): unknown;
+    context(c: {
+      name: string;
+      order: number;
+      text: () => string;
+    }): unknown;
   };
   skills: {
     register(s: {
@@ -98,31 +128,28 @@ type DshContext = Context & DshContextExtensions;
 export function apply(ctx: Context, config: Config): void {
   const dsh = ctx as DshContext;
 
-  // (1) Mount the MCP client. dsh-mcp-client is a separate dsh plugin; mounting
-  // it from inside our apply() is the cordis-native way to register a child
-  // plugin with config. Same pattern as the documented mcp-memory overlays,
-  // but expressed in TS instead of YAML.
-  dsh.plugin('@deepseek-ai/dsh-mcp-client', {
-    serverName: 'curated-thoughts',
-    transport: 'stdio',
-    command: config.sidecarCommand ?? 'curated-thoughts-mcp',
-    args: ['--mcp'],
-    env: { CURATED_BRAIN_DIR: config.brainDir ?? '~/.brain' },
-    cwd: process.cwd(),
-  });
+  // (0) probe() resolves the brain from the environment, while the declarative
+  // row config is what a user edits — mirror it into the process env (without
+  // clobbering an explicit CURATED_BRAIN_DIR), expanding a leading `~` here.
+  // The sidecar's own copy comes from the bundle patch's MCP row env.
+  if (config.brainDir && !process.env.CURATED_BRAIN_DIR) {
+    process.env.CURATED_BRAIN_DIR = config.brainDir.replace(/^~(?=$|\/)/, homedir());
+  }
 
-  // (2) Cached health snapshot. Empty until the first session-start resolves.
+  // (1) Cached health snapshot. Empty until the first session-start resolves.
   let cached: { text: string; since: number } | null = null;
 
-  // (3) Dynamic prompt context (cache-safe per dsh system-prompt subsystem).
+  // (2) Dynamic prompt context (cache-safe per dsh system-prompt subsystem).
   // text is a function reference so dsh reads the latest cached value lazily
-  // at prompt-assembly time, not at registration time.
+  // at prompt-assembly time, not at registration time. The entry must carry
+  // a name and a finite order — see CURATED_CONTEXT_ORDER above.
   dsh.systemPrompt.context({
-    order: dsh.systemPrompt.getContextOrder('curated-thoughts-health'),
+    name: 'curated-thoughts-health',
+    order: CURATED_CONTEXT_ORDER,
     text: () => cached?.text ?? '',
   });
 
-  // (4) Refresh on agent/session-start. Fail-open: swallow probe errors so a
+  // (3) Refresh on agent/session-start. Fail-open: swallow probe errors so a
   // failed probe never crashes the plugin or the session.
   dsh.on('agent/session-start', async () => {
     try {
@@ -134,16 +161,16 @@ export function apply(ctx: Context, config: Config): void {
     }
   });
 
-  // (5) Skills. dsh skills are kebab-case Markdown; the three SKILL.md files
+  // (4) Skills. dsh skills are kebab-case Markdown; the three SKILL.md files
   // are ported verbatim from Hermes — the content is agent-generic and dsh
   // reads the same Markdown. Each is registered via the runtime skills
   // provider so dsh surfaces them in <available_skills>.
   // A truncated install, a bad permission, or a broken symlink must cost us
   // the one skill it affects — not the whole plugin. This loop runs last, so
-  // an escaping throw would abort apply() after (1)-(4) already registered on
-  // this scope, leaving the mount and the prompt context to be torn down with
-  // it. Hermes' register() (plugin/__init__.py) guards both steps the same
-  // way: warn on a missing file, warn on a failed registration, keep going.
+  // an escaping throw would abort apply() after (2)-(3) already registered on
+  // this scope, leaving the prompt context to be torn down with it. Hermes'
+  // register() (plugin/__init__.py) guards both steps the same way: warn on
+  // a missing file, warn on a failed registration, keep going.
   for (const name of SKILL_NAMES) {
     let content: string;
     try {

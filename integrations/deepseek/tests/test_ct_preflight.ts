@@ -263,3 +263,21 @@ describe('detectEngineVersion', () => {
     expect(r.source).toBeNull();
   });
 });
+
+// --- better-sqlite3 is a lazy, optional dependency --------------------------
+
+describe('lazy better-sqlite3', () => {
+  it('importing the module never touches the native binding until a census runs', async () => {
+    // If better-sqlite3 were a static import, a missing native build would
+    // crash the doctor at import time from the release tarball (which ships
+    // no node_modules). Importing the compiled module in a fresh registry
+    // must therefore succeed regardless of the binding.
+    await expect(import('../scripts/ct_preflight.js')).resolves.toBeTruthy();
+  });
+
+  it('a census on a missing DB degrades to an error result without throwing', () => {
+    const c = censusSourceRefs(join(tmpDir, 'does-not-exist.db'));
+    expect(c.error).not.toBeNull();
+    expect(c.tablePresent).toBe(false);
+  });
+});

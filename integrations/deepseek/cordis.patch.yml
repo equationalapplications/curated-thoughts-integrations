@@ -1,0 +1,31 @@
+# Curated Thoughts bundle patch for DeepSeek Harness.
+#
+# Activated by the package.json declaration
+#   "dsh": { "bundle": { "patch": "./cordis.patch.yml" } }
+# when `dsh plugin --profile <name> add <this package>` installs it — no
+# YAML editing is needed. DSH stacks this layer beneath the profile's own
+# cordis.patch.yml (later layers win), and bare plugin names in inserted
+# rows resolve through the profile directory's node_modules.
+#
+# Row shapes follow docs/user/guide/mcp-memory.md. The MCP client is mounted
+# declaratively because cordis rejects a string to ctx.plugin() — see
+# src/index.ts.
+#
+# The sidecar does NOT expand a leading `~` (verified: it treats
+# CURATED_BRAIN_DIR='~/.brain' as a literal relative path and exits), so the
+# brain dir is resolved at composition time: an ambient CURATED_BRAIN_DIR
+# wins, else $HOME/.brain.
+- insert:
+    - id: curated-thoughts
+      name: '@equational-applications/dsh-curated-thoughts'
+      config:
+        brainDir: ~/.brain
+    - id: mcp-curated-thoughts
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: curated-thoughts
+        transport: stdio
+        command: curated-thoughts-mcp
+        args: [--mcp]
+        env:
+          CURATED_BRAIN_DIR: !!js process.env.CURATED_BRAIN_DIR || ((process.env.HOME || '') + '/.brain')
