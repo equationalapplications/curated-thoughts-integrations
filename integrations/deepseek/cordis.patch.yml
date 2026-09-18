@@ -26,7 +26,7 @@
     - id: curated-thoughts
       name: '@equational-applications/dsh-curated-thoughts'
       config:
-        brainDir: !!js process.env.CURATED_BRAIN_DIR || ((process.env.HOME || process.env.USERPROFILE || '~') + '/.brain')
+        brainDir: !!js process.env.CURATED_BRAIN_DIR ?? ((process.env.HOME ?? process.env.USERPROFILE ?? '~') + '/.brain')
     - id: mcp-curated-thoughts
       name: '@deepseek-ai/dsh-mcp-client'
       config:
@@ -35,4 +35,4 @@
         command: curated-thoughts-mcp
         args: [--mcp]
         env:
-          CURATED_BRAIN_DIR: !!js process.env.CURATED_BRAIN_DIR || ((process.env.HOME || process.env.USERPROFILE || '~') + '/.brain')
+          CURATED_BRAIN_DIR: !!js process.env.CURATED_BRAIN_DIR ?? ((process.env.HOME ?? process.env.USERPROFILE ?? '~') + '/.brain')

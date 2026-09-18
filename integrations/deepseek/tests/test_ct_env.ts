@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, writeFileSync, mkdirSync, rmSync, symlinkSync, chmodSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   resolveBrainPaths,
@@ -218,8 +218,7 @@ describe('expandHome', () => {
 
   it('falls back to homedir() when both HOME and USERPROFILE are empty', () => {
     const env = { HOME: '', USERPROFILE: '' };
-    // homedir() is platform-dependent, so just verify it doesn't throw
-    expect(() => expandHome('~/.config', env)).not.toThrow();
+    expect(expandHome('~/.config', env)).toBe(join(homedir(), '.config'));
   });
 
   it('does not expand ~ without a leading ~ or /~/', () => {
