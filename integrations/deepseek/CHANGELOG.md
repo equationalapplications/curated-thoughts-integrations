@@ -7,8 +7,8 @@
 Fix empty-string fallback in brain-dir resolution. `??` operators in
 `cordis.patch.yml` treated an empty `HOME` or `USERPROFILE` as a set value,
 producing `/.brain` at the filesystem root. Both environment rows now use
-`??` with a literal `~` fallback so the sidecar receives a path it can
-actually open.
+`??` with a literal `~` fallback so the sidecar refuses the path explicitly
+rather than silently opening `/.brain`.
 
 ## 0.2.1
 
