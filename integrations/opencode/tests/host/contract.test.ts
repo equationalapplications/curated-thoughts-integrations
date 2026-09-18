@@ -354,11 +354,33 @@ function loaderSource(payloadIndex: string): string {
 
 function installSkillFixtures(sb: Sandbox): string {
   // $HOME/.config/opencode/skills/<name>/SKILL.md — plural `skills/`.
+  // The REAL packaged skills, not fixtures: from Task 6 the packaged skills/
+  // tree is the payload of record, and this is the copy install.ts performs.
   const skillsDir = join(sb.home, '.config', 'opencode', 'skills');
+  const packaged = join(HERE, '..', '..', 'skills');
   for (const name of SKILL_NAMES) {
-    cpSync(join(FIXTURES, 'skills', name), join(skillsDir, name), { recursive: true });
+    const source = join(packaged, name);
+    if (existsSync(join(source, 'SKILL.md'))) {
+      cpSync(source, join(skillsDir, name), { recursive: true });
+    } else {
+      // Packaged skills not present yet (pre-Task-6 checkout) — fall back to
+      // the placeholder fixtures so the structural probe still runs.
+      cpSync(join(FIXTURES, 'skills', name), join(skillsDir, name), { recursive: true });
+    }
   }
   return skillsDir;
+}
+
+/** Minimal SKILL.md frontmatter parser (flat `key: value` lines). */
+function parseSkillFrontmatter(text: string): { data: Record<string, string>; body: string } {
+  const end = text.indexOf('\n---', 4);
+  const block = text.slice(4, end);
+  const data: Record<string, string> = {};
+  for (const line of block.split('\n')) {
+    const m = /^([A-Za-z0-9_-]+):\s?(.*)$/.exec(line);
+    if (m) data[m[1]] = m[2];
+  }
+  return { data, body: text.slice(end + 4) };
 }
 
 // ---------------------------------------------------------------------------
@@ -542,10 +564,25 @@ describe('OpenCode host contract', () => {
       const skillTool = lastChat?.body.tools?.find((t) => t.function?.name === 'skill');
       const skillDescription = skillTool?.function?.description ?? '';
       const chatSystem = probe.finalSystem.join('\n');
+      const skillSystem = probe.finalSystem.find((s) => s.includes('<skill>')) ?? '';
       expect(skillTool).toBeDefined();
       for (const name of SKILL_NAMES) {
         expect(chatSystem).toContain(`<name>${name}</name>`);
         expect(chatSystem).toContain(join(skillsDir, name, 'SKILL.md'));
+      }
+      // Task 6 (Step 6.4): OpenCode 1.18.31 lists skills in the SYSTEM PROMPT
+      // (<available_skills>), not in the `skill` tool description (the tool
+      // description only points at the system prompt — recorded below). The
+      // real binary parsed the PACKAGED skills' frontmatter: name and
+      // description from each SKILL.md appear in the host's listing.
+      for (const name of SKILL_NAMES) {
+        const { data } = parseSkillFrontmatter(readFileSync(join(skillsDir, name, 'SKILL.md'), 'utf8'));
+        expect(skillSystem, `<skill>${name}</skill> listed by the host`).toContain(
+          `<name>${name}</name>`,
+        );
+        expect(skillSystem, `frontmatter description of ${name} rendered`).toContain(
+          `<description>${data.description}</description>`,
+        );
       }
 
       // Recorded, not asserted — drives the unknown fallback and Task 3's
