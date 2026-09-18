@@ -14,7 +14,7 @@
  * shim and GATE the file-presence assertions on that having succeeded. The
  * usable-from-archive assertions (imports, doctor, installer) run either way.
  */
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, type TestContext } from 'vitest';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -32,15 +32,24 @@ let unpacked: string; // <workdir>/unpacked/<id>-<version>
 let packedNpm: string; // pnpm pack tarball path
 let archiveBuilt = false;
 let archiveBuildError = '';
+// macOS/Windows runners ship a python3 without PyYAML, so ct_ci_package
+// cannot run there. The archive itself is still built and verified on every
+// ubuntu run (matrix packaging smoke + release.yml), so on those runners the
+// archive-gated tests SKIP instead of failing on a missing toolchain.
+let pythonYamlAvailable = true;
 
 function run(cmd: string, args: string[], opts: { cwd?: string; env?: NodeJS.ProcessEnv } = {}): string {
   return execFileSync(cmd, args, { cwd: opts.cwd ?? REPO_ROOT, encoding: 'utf8', env: opts.env }).trim();
 }
 
-/** Gated at runtime: the archive builds only once the manifest flips (Task 7). */
-function requireArchive(): void {
+/** Gated at runtime: skips when the runner lacks the Python toolchain. */
+function requireArchive(ctx: TestContext): void {
   if (!archiveBuilt) {
-    console.warn(`[test_archive] release archive not built (status: planned until Task 7): ${archiveBuildError}`);
+    if (!pythonYamlAvailable) {
+      console.warn('[test_archive] skipping: python3 without PyYAML on this runner');
+      ctx.skip();
+    }
+    console.warn(`[test_archive] release archive not built: ${archiveBuildError}`);
   }
   expect(archiveBuilt, `release archive should build: ${archiveBuildError}`).toBe(true);
 }
@@ -50,16 +59,22 @@ beforeAll(() => {
   const out = join(workdir, 'out');
   mkdirSync(out, { recursive: true });
 
+  // Probe the Python toolchain before relying on it (see pythonYamlAvailable).
+  const yamlProbe = spawnSync('python3', ['-c', 'import yaml'], { encoding: 'utf8' });
+  pythonYamlAvailable = yamlProbe.status === 0;
+
   // The release artifact: same builder release.yml drives, minus the manifest
   // status gate (planned until Task 7 flips it).
-  try {
-    const tarballPath = run('python3', ['-c', RELEASE_BUILD_SHIM, TAG, out]);
-    archiveBuilt = true;
-    mkdirSync(join(workdir, 'unpacked'), { recursive: true });
-    run('tar', ['-xf', tarballPath, '-C', join(workdir, 'unpacked')]);
-  } catch (err) {
-    archiveBuildError = String(err).slice(0, 500);
-    console.error('[test_archive] archive build failed:', archiveBuildError);
+  if (pythonYamlAvailable) {
+    try {
+      const tarballPath = run('python3', ['-c', RELEASE_BUILD_SHIM, TAG, out]);
+      archiveBuilt = true;
+      mkdirSync(join(workdir, 'unpacked'), { recursive: true });
+      run('tar', ['-xf', tarballPath, '-C', join(workdir, 'unpacked')]);
+    } catch (err) {
+      archiveBuildError = String(err).slice(0, 500);
+      console.error('[test_archive] archive build failed:', archiveBuildError);
+    }
   }
 
   unpacked = join(workdir, 'unpacked', `opencode-${VERSION}`);
@@ -102,19 +117,19 @@ const ARCHIVE_FILES = [
 ];
 
 describe('release archive (ct_ci.py package)', () => {
-  it('built the tarball for the pinned version', () => {
-    requireArchive();
+  it('built the tarball for the pinned version', (ctx) => {
+    requireArchive(ctx);
   });
 
-  it('contains the plugin entry, doctor, installer and skills', () => {
-    requireArchive();
+  it('contains the plugin entry, doctor, installer and skills', (ctx) => {
+    requireArchive(ctx);
     for (const rel of ARCHIVE_FILES) {
       expect(existsSync(join(unpacked, rel)), rel).toBe(true);
     }
   });
 
-  it('ships no node_modules and the exclusion only drops build junk', () => {
-    requireArchive();
+  it('ships no node_modules and the exclusion only drops build junk', (ctx) => {
+    requireArchive(ctx);
     const noNodeModules = (dir: string): void => {
       for (const entry of readdirSync(dir, { withFileTypes: true })) {
         expect(entry.name, `${join(dir, entry.name)} must not be node_modules`).not.toBe('node_modules');
@@ -149,8 +164,8 @@ describe('release archive (ct_ci.py package)', () => {
 });
 
 describe('the unpacked archive runs with no node_modules (the real user situation)', () => {
-  it('lib/src/index.js imports nothing third-party', () => {
-    requireArchive();
+  it('lib/src/index.js imports nothing third-party', (ctx) => {
+    requireArchive(ctx);
     // Walk the runtime payload: every relative import in lib/src/*.js must be
     // a node: builtin or a relative file. No bare specifiers at all.
     const seen = new Set<string>();
@@ -173,8 +188,8 @@ describe('the unpacked archive runs with no node_modules (the real user situatio
     expect(seen.size).toBeGreaterThan(0);
   });
 
-  it('node lib/scripts/ct_doctor.js check runs; only the pre-flight check degrades without better-sqlite3', () => {
-    requireArchive();
+  it('node lib/scripts/ct_doctor.js check runs; only the pre-flight check degrades without better-sqlite3', (ctx) => {
+    requireArchive(ctx);
     const proc = spawnSync('node', [join(unpacked, 'lib', 'scripts', 'ct_doctor.js'), 'check'], {
       cwd: unpacked,
       encoding: 'utf8',
@@ -192,8 +207,8 @@ describe('the unpacked archive runs with no node_modules (the real user situatio
     expect(output).toMatch(/check|PASS|WARN|FAIL|UNKNOWN/i);
   });
 
-  it('node lib/scripts/install.js runs its preview with jsonc-parser bundled', () => {
-    requireArchive();
+  it('node lib/scripts/install.js runs its preview with jsonc-parser bundled', (ctx) => {
+    requireArchive(ctx);
     const home = join(workdir, 'home');
     const proc = spawnSync('node', [join(unpacked, 'lib', 'scripts', 'install.js')], {
       cwd: unpacked,
