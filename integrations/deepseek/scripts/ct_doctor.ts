@@ -37,7 +37,6 @@ import {
   readFileSync,
   statSync,
 } from 'node:fs';
-import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { spawnSync } from 'node:child_process';
@@ -45,6 +44,7 @@ import { spawnSync } from 'node:child_process';
 import {
   ENV_BRAIN_DIR,
   SIDECAR_NAME,
+  expandHome,
   findSidecar as ctEnvFindSidecar,
   installKind as ctEnvInstallKind,
   looksLikeDevBuild as ctEnvLooksLikeDevBuild,
@@ -82,7 +82,9 @@ export interface CheckResult {
 
 // dsh's plugin-list path. Default mirrors dsh's `docs/subsystems/skills.md`
 // "user-dsh" rank 400.
-const DEFAULT_DSH_HOME = join(homedir(), '.dsh');
+// Expanded by expandHome against the env's HOME, matching install.sh's
+// ${HOME}/.dsh default.
+const DEFAULT_DSH_HOME = '~/.dsh';
 const DSH_PLUGIN_PACKAGE = '@equational-applications/dsh-curated-thoughts';
 
 // Embedding backends: cloud keys OR a local Ollama. WARN-only check.
@@ -660,10 +662,9 @@ const DSH_PLUGIN_PROFILE_REL = join('node_modules', DSH_PLUGIN_PACKAGE);
 /** Profiles under $DSH_HOME whose node_modules contain this package. */
 function _installedProfiles(env: NodeJS.ProcessEnv): string[] {
   const raw = env.DSH_HOME ?? DEFAULT_DSH_HOME;
-  // Only a bare `~` or `~/...` names the current user's home; `~otheruser/...`
-  // is left alone rather than concatenated onto this user's home. Same rule as
-  // expandHome in ct_env.ts.
-  const expanded = /^~(?=[/\\]|$)/.test(raw) ? join(homedir(), raw.slice(1)) : raw;
+  // Only a bare `~` or `~/...` names the current user's home (HOME, then
+  // USERPROFILE, then homedir()); `~otheruser/...` is left alone.
+  const expanded = expandHome(raw, env);
   let entries: string[];
   try {
     entries = readdirSync(join(expanded, DSH_PROFILES_DIR));

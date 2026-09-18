@@ -14,7 +14,10 @@
 # The sidecar does NOT expand a leading `~` (verified: it treats
 # CURATED_BRAIN_DIR='~/.brain' as a literal relative path and exits), so the
 # brain dir is resolved at composition time on BOTH rows from one expression:
-# an ambient CURATED_BRAIN_DIR wins, else $HOME/.brain. A profile patch can
+# an ambient CURATED_BRAIN_DIR wins, else $HOME/.brain (USERPROFILE on
+# Windows). With no home variable at all it stays a literal `~/.brain`, so the
+# sidecar refuses to start naming that path rather than silently opening
+# `/.brain` at the filesystem root. A profile patch can
 # still override either row individually (e.g. config.brainDir for the
 # plugin's own probe, or env.CURATED_BRAIN_DIR for the MCP sidecar), but the
 # default source is shared so the two stay in sync without relying on the
@@ -23,7 +26,7 @@
     - id: curated-thoughts
       name: '@equational-applications/dsh-curated-thoughts'
       config:
-        brainDir: !!js process.env.CURATED_BRAIN_DIR || ((process.env.HOME || '') + '/.brain')
+        brainDir: !!js process.env.CURATED_BRAIN_DIR || ((process.env.HOME || process.env.USERPROFILE || '~') + '/.brain')
     - id: mcp-curated-thoughts
       name: '@deepseek-ai/dsh-mcp-client'
       config:
@@ -32,4 +35,4 @@
         command: curated-thoughts-mcp
         args: [--mcp]
         env:
-          CURATED_BRAIN_DIR: !!js process.env.CURATED_BRAIN_DIR || ((process.env.HOME || '') + '/.brain')
+          CURATED_BRAIN_DIR: !!js process.env.CURATED_BRAIN_DIR || ((process.env.HOME || process.env.USERPROFILE || '~') + '/.brain')

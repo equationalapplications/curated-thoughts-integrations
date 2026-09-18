@@ -47,7 +47,7 @@ export const ENV_BRAIN_CONFIG = 'CURATED_BRAIN_CONFIG';
  */
 const TILDE_HOME_RE = /^~(?=[/\\]|$)/;
 
-function expandHome(p: string, env: NodeJS.ProcessEnv = process.env): string {
+export function expandHome(p: string, env: NodeJS.ProcessEnv = process.env): string {
   /** Expand a leading ~ the way CT's doctor does, then return a string. */
   if (TILDE_HOME_RE.test(p)) {
     const home = env['HOME'] ?? env['USERPROFILE'] ?? homedir();

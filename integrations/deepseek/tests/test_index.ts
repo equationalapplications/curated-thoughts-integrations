@@ -90,6 +90,21 @@ describe('apply', () => {
     }
   });
 
+  it('probes config.brainDir without writing it into process.env', async () => {
+    const before = process.env.CURATED_BRAIN_DIR;
+    delete process.env.CURATED_BRAIN_DIR;
+    try {
+      apply(m.ctx as unknown as Parameters<typeof apply>[0], { brainDir: '/nonexistent/ct-brain' });
+      expect(process.env.CURATED_BRAIN_DIR).toBeUndefined();
+      await m.sessionStartListeners[0]();
+      // The probe looked at the configured dir, so the degraded block names it.
+      expect(m.contextRegistrations[0].text()).toContain('/nonexistent/ct-brain');
+    } finally {
+      if (before === undefined) delete process.env.CURATED_BRAIN_DIR;
+      else process.env.CURATED_BRAIN_DIR = before;
+    }
+  });
+
   it('subscribes agent/session-start for async refresh', () => {
     apply(m.ctx as unknown as Parameters<typeof apply>[0], {} as Parameters<typeof apply>[1]);
     expect(m.sessionStartListeners.length).toBe(1);

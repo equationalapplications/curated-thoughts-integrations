@@ -112,6 +112,23 @@ describe('checkDshRegistration', () => {
     expect(r.detail).toContain('headless, web');
   });
 
+  it('expands a ~ DSH_HOME against the env HOME (same rule as ct_env)', () => {
+    installInProfile('headless');
+    const r = checkDshRegistration({ ...process.env, HOME: tmpHome, DSH_HOME: '~' });
+    expect(r.status).toBe(PASS);
+    expect(r.detail).toContain('headless');
+  });
+
+  it('defaults DSH_HOME to $HOME/.dsh from the env, like install.sh', () => {
+    const dir = join(tmpHome, '.dsh', 'profiles', 'web', 'node_modules', '@equational-applications', 'dsh-curated-thoughts');
+    mkdirSync(dir, { recursive: true });
+    const env = { ...process.env, HOME: tmpHome };
+    delete env.DSH_HOME;
+    const r = checkDshRegistration(env);
+    expect(r.status).toBe(PASS);
+    expect(r.detail).toContain('web');
+  });
+
   it('ignores a stray file under profiles/ (only real installs count)', () => {
     mkdirSync(join(tmpHome, 'profiles'), { recursive: true });
     writeFileSync(join(tmpHome, 'profiles', 'strayfile'), 'not a profile');
