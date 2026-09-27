@@ -26,7 +26,9 @@
 #                         curated-thoughts` reports no existing entry.
 #                         Default: print, don't write.
 #   CLAUDE_CT_SIDECAR     absolute path to the sidecar, skipping discovery.
-#                         (The same override scripts/ct_doctor.py honours.)
+#                         Read by this installer only: ct_env.py discovers
+#                         the sidecar itself and honours no override, so
+#                         ct_doctor.py does not see this variable.
 #
 # Docs: docs/superpowers/specs/2026-09-11-claude-code-integration-design.md
 

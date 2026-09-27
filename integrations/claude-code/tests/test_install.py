@@ -232,7 +232,11 @@ class ScriptTextTests(unittest.TestCase):
         self.assertIn("--mcp", INSTALL_TEXT)
 
     def test_honours_the_claude_code_sidecar_override_not_the_hermes_one(self):
-        """The override is CLAUDE_CT_SIDECAR — the name ct_doctor.py reads."""
+        """The override is CLAUDE_CT_SIDECAR, not Hermes's HERMES_CT_SIDECAR.
+
+        Installer-only: ct_env.py honours no sidecar override, so the
+        doctor never reads this variable.
+        """
         self.assertIn("CLAUDE_CT_SIDECAR", INSTALL_TEXT)
         self.assertNotIn("HERMES_CT_SIDECAR", INSTALL_TEXT)
 
