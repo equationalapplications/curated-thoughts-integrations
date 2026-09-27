@@ -41,6 +41,16 @@ RELEASES_URL="https://github.com/equationalapplications/curated-thoughts/release
 PLACEHOLDER="<path to ${SIDECAR_NAME}>"
 
 PLUGIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Under Git Bash / MSYS -- the only way this script runs on Windows -- `pwd`
+# yields an MSYS path (/c/Users/...). Every command this script *prints* is
+# for a human to paste, quite possibly into PowerShell or cmd, and neither
+# those shells nor the native `claude` and `python3` binaries understand that
+# form. `cygpath -m` renders C:/Users/... with forward slashes, so the
+# double-quoting that already protects the space keeps working unchanged.
+# Same reasoning as the sidecar path, which is a Windows path throughout.
+if command -v cygpath >/dev/null 2>&1; then
+  PLUGIN_DIR="$(cygpath -m "${PLUGIN_DIR}")"
+fi
 
 SIDECAR=""
 SIDECAR_SOURCE="none"

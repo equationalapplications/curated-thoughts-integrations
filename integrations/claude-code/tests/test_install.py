@@ -240,6 +240,22 @@ class ScriptTextTests(unittest.TestCase):
         self.assertIn("CLAUDE_CT_SIDECAR", INSTALL_TEXT)
         self.assertNotIn("HERMES_CT_SIDECAR", INSTALL_TEXT)
 
+    def test_plugin_dir_is_normalised_out_of_msys_form(self):
+        """`pwd` under Git Bash yields /c/Users/...; printed commands need C:/.
+
+        Windows users run this script under Git Bash, where `pwd` returns an
+        MSYS path. Every path the script prints is meant to be pasted by a
+        human -- possibly into PowerShell or cmd -- and the native `claude`
+        and `python3` binaries do not understand that form. Found during the
+        Task 9 dogfood: `--plugin-dir "/c/Users/..."` was unusable as printed
+        while the sidecar path beside it was already a Windows path.
+
+        A text test, not a subprocess one, on purpose: the subprocess tests
+        skip on Windows, which is the only platform where this can regress.
+        """
+        self.assertIn("cygpath -m", INSTALL_TEXT)
+        self.assertIn('PLUGIN_DIR="$(cygpath -m "${PLUGIN_DIR}")"', INSTALL_TEXT)
+
     def test_writes_are_gated_behind_ct_install_edit(self):
         self.assertIn("CT_INSTALL_EDIT", INSTALL_TEXT)
 
