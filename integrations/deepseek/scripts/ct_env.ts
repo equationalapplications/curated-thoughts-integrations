@@ -47,10 +47,12 @@ export const ENV_BRAIN_CONFIG = 'CURATED_BRAIN_CONFIG';
  */
 const TILDE_HOME_RE = /^~(?=[/\\]|$)/;
 
-function expandHome(p: string, env: NodeJS.ProcessEnv = process.env): string {
-  /** Expand a leading ~ the way CT's doctor does, then return a string. */
+export function expandHome(p: string, env: NodeJS.ProcessEnv = process.env): string {
+  /** Expand a leading ~ the way CT's doctor does, then return a string.
+   * HOME and USERPROFILE must be non-empty; an empty value is treated as unavailable.
+   */
   if (TILDE_HOME_RE.test(p)) {
-    const home = env['HOME'] ?? env['USERPROFILE'] ?? homedir();
+    const home = (env['HOME'] || env['USERPROFILE'] || homedir());
     return join(home, p.slice(1));
   }
   return p;

@@ -29,13 +29,52 @@
  *
  * Read-only by construction: the database is opened through better-sqlite3
  * in readonly mode and no statement other than SELECT is ever issued.
+ *
+ * `better-sqlite3` is a devDependency and loaded LAZILY: the shipped tarball
+ * carries no node_modules, and a missing native build must degrade only the
+ * census (doctor check), never crash the doctor at import time. Every entry
+ * point that touches the DB funnels through `_requireDatabase()`, which
+ * resolves to a structured error on failure. Mirrors the OpenCode
+ * integration's ct_preflight.ts.
  */
 
-import Database from 'better-sqlite3';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
+import type BetterSqlite3 from 'better-sqlite3';
+
 import { EVIDENCE_TABLE, REQUIRED_TABLES, SOURCE_REF_SHAPE } from './_compat_generated.js';
+import {
+  _loadBetterSqlite3,
+  type DatabaseConstructor,
+} from './_lazy_loader.js';
+
+/**
+ * Lazily resolve better-sqlite3. Returns the module, or an error string.
+ *
+ * The native binding is loaded on demand through `_lazy_loader.ts`, which
+ * owns the createRequire() call and the cached success/failure outcome.
+ * `ct_preflight.ts` deliberately re-exports neither the loader nor the
+ * setters — the test seam lives in the underscored sibling so that
+ * downstream tools importing this module don't see `_setBetterSqlite3Loader`
+ * as a public hook into the lazy-loading contract. The import is kept out
+ * of the module graph so that importing ct_preflight.ts — as ct_doctor.ts
+ * does for detectEngineVersion — never loads the native binding until a
+ * census actually needs it.
+ */
+function _requireDatabase(): { db: DatabaseConstructor | null; error: string | null } {
+  const result = _loadBetterSqlite3();
+  if (result.status === 'ok') return { db: result.ctor, error: null };
+  // First-call failure surfaces the captured loader error so the operator
+  // sees what was actually wrong (e.g. "Cannot find module 'better-sqlite3'").
+  // A follow-up call after a cached failure is reported with the shorter
+  // 'better-sqlite3 is not available' string; the verbose message would
+  // repeat on every census call and the doctor must keep producing JSON.
+  if (result.status === 'first-failure') {
+    return { db: null, error: `better-sqlite3 unavailable: ${result.error}` };
+  }
+  return { db: null, error: 'better-sqlite3 is not available' };
+}
 
 // --------------------------------------------------------------------------
 // normative constants — token shape (PR #188 §2.2) and evidence table
@@ -290,14 +329,14 @@ export function classifySourceRef(value: unknown): SourceRefState {
 // DB helpers — readonly connection, table-existence, column-existence
 // --------------------------------------------------------------------------
 
-function _tableExists(conn: Database.Database, name: string): boolean {
+function _tableExists(conn: BetterSqlite3.Database, name: string): boolean {
   const row = conn
     .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?")
     .get(name);
   return row !== undefined;
 }
 
-function _columns(conn: Database.Database, table: string): Set<string> {
+function _columns(conn: BetterSqlite3.Database, table: string): Set<string> {
   // SQLite cannot parameterise identifiers; EVIDENCE_TABLE / ENTRIES_TABLE
   // are repository-controlled constants, never user input.
   try {
@@ -310,8 +349,19 @@ function _columns(conn: Database.Database, table: string): Set<string> {
   }
 }
 
-function _openReadonly(dbPath: string): Database.Database {
-  return new Database(dbPath, { readonly: true, fileMustExist: true });
+function _openReadonly(
+  dbPath: string,
+): { conn: BetterSqlite3.Database | null; error: string | null } {
+  /** Open the brain read-only. Never throws: a missing or unloadable
+   * better-sqlite3 becomes a structured error so only the census degrades —
+   * the doctor must keep producing JSON output. */
+  const { db, error } = _requireDatabase();
+  if (db === null) return { conn: null, error: error ?? 'better-sqlite3 unavailable' };
+  try {
+    return { conn: new db(dbPath, { readonly: true, fileMustExist: true }), error: null };
+  } catch (e) {
+    return { conn: null, error: (e as Error).message };
+  }
 }
 
 // --------------------------------------------------------------------------
@@ -323,9 +373,15 @@ export function censusSourceRefs(dbPath: string): Census {
   if (!existsSync(dbPath)) {
     return makeCensus({ error: 'brain database not found' });
   }
-  let conn: Database.Database;
+  let conn: BetterSqlite3.Database;
   try {
-    conn = _openReadonly(dbPath);
+    const opened = _openReadonly(dbPath);
+    if (opened.conn === null) {
+      return makeCensus({
+        error: `cannot open database read-only: ${opened.error}`,
+      });
+    }
+    conn = opened.conn;
   } catch (e) {
     return makeCensus({
       error: `cannot open database read-only: ${(e as Error).message}`,
@@ -502,9 +558,11 @@ export function hasEvidenceTable(dbPath: string): boolean | null {
   if (!existsSync(dbPath)) {
     return null;
   }
-  let conn: Database.Database;
+  let conn: BetterSqlite3.Database | null;
   try {
-    conn = _openReadonly(dbPath);
+    const opened = _openReadonly(dbPath);
+    conn = opened.conn;
+    if (conn === null) return null;
   } catch {
     return null;
   }

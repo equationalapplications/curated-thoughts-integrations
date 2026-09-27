@@ -1,0 +1,38 @@
+{
+  "name": "@equational-applications/opencode-curated-thoughts",
+  "version": "0.1.0",
+  "description": "Curated Thoughts memory integration for OpenCode",
+  "license": "MIT",
+  "type": "module",
+  "packageManager": "pnpm@9.15.9",
+  "main": "lib/src/index.js",
+  "exports": {
+    ".": "./lib/src/index.js",
+    "./doctor": "./lib/scripts/ct_doctor.js"
+  },
+  "files": ["lib", "skills", "scripts/install.sh", "scripts/loader.js.tmpl"],
+  "scripts": {
+    "build": "tsc && esbuild scripts/install.ts --bundle --platform=node --format=esm --target=node22 --main-fields=module,main --outfile=lib/scripts/install.js --log-level=warning",
+    "prepack": "pnpm run build",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "lint": "tsc --noEmit",
+    "test:host": "bun test tests/host/contract.test.ts"
+  },
+  "peerDependencies": {
+    "@opencode-ai/plugin": "1.18.x"
+  },
+  "devDependencies": {
+    "@opencode-ai/plugin": "1.18.31",
+    "@types/better-sqlite3": "^9.6.0",
+    "@types/node": "^22.19.0",
+    "better-sqlite3": "^13.0.3",
+    "esbuild": "^0.25.0",
+    "jsonc-parser": "^3.3.1",
+    "node-gyp": "^12.1.0",
+    "typescript": "^5.6.0",
+    "vite": "^6.4.3",
+    "vitest": "^4.1.11"
+  }
+}

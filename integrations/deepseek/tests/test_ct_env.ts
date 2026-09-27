@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, writeFileSync, mkdirSync, rmSync, symlinkSync, chmodSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   resolveBrainPaths,
@@ -10,6 +10,7 @@ import {
   sidecarCandidates,
   looksLikeDevBuild,
   installKind,
+  expandHome,
   ENV_BRAIN_DIR,
 } from '../scripts/ct_env.js';
 
@@ -201,6 +202,29 @@ describe('looksLikeDevBuild', () => {
 
   it('does not flag a path under /usr/bin', () => {
     expect(looksLikeDevBuild('/usr/bin/curated-thoughts-mcp')).toBe(false);
+  });
+});
+
+describe('expandHome', () => {
+  it('expands ~ when HOME is set', () => {
+    const env = { HOME: '/home/user' };
+    expect(expandHome('~/.config', env)).toBe(join('/home/user', '.config'));
+  });
+
+  it('falls back to USERPROFILE when HOME is empty', () => {
+    const env = { HOME: '', USERPROFILE: '/c/users/user' };
+    expect(expandHome('~/.config', env)).toBe(join('/c/users/user', '.config'));
+  });
+
+  it('falls back to homedir() when both HOME and USERPROFILE are empty', () => {
+    const env = { HOME: '', USERPROFILE: '' };
+    expect(expandHome('~/.config', env)).toBe(join(homedir(), '.config'));
+  });
+
+  it('does not expand ~ without a leading ~ or /~/', () => {
+    const env = { HOME: '/home/user' };
+    expect(expandHome('/home/user/.config', env)).toBe('/home/user/.config');
+    expect(expandHome('config', env)).toBe('config');
   });
 });
 

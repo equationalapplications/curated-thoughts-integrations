@@ -26,11 +26,9 @@ const { apply } = await import('../src/index.js');
 /** Minimal dsh context; `failRegister` makes skills.register throw for one name. */
 function mockCtx(failRegister: string | null = null) {
   const registered: string[] = [];
-  const mounted: string[] = [];
   const contexts: unknown[] = [];
   return {
     ctx: {
-      plugin: vi.fn((name: string) => { mounted.push(name); return () => {}; }),
       skills: {
         register: vi.fn((s: { name: string }) => {
           if (s.name === failRegister) throw new Error('host rejected this skill');
@@ -39,13 +37,11 @@ function mockCtx(failRegister: string | null = null) {
         }),
       },
       systemPrompt: {
-        getContextOrder: vi.fn(() => 100),
         context: vi.fn((c: unknown) => { contexts.push(c); return () => {}; }),
       },
       on: vi.fn(() => {}),
     },
     registered,
-    mounted,
     contexts,
   };
 }
@@ -68,15 +64,15 @@ describe('apply survives a broken skill', () => {
     expect(warn).not.toHaveBeenCalled();
   });
 
-  it('keeps the other skills and the mount when one SKILL.md is unreadable', () => {
+  it('keeps the prompt context when one SKILL.md is unreadable', () => {
     h.unreadable = 'curated-thoughts-ops';
     const m = mockCtx();
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     expect(() => apply(m.ctx as any, {})).not.toThrow();
     expect(m.registered).toEqual(['curated-thoughts-usage', 'curated-thoughts-sidecar']);
-    // The plugin still does its real job: the MCP mount and the prompt
-    // context must survive a bad skill file.
-    expect(m.mounted).toContain('@deepseek-ai/dsh-mcp-client');
+    // The plugin still does its real job: the prompt context must survive a
+    // bad skill file. (The MCP client is mounted by the shipped bundle
+    // patch, outside apply()'s control.)
     expect(m.contexts).toHaveLength(1);
     expect(warn).toHaveBeenCalledOnce();
   });

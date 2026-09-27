@@ -24,7 +24,7 @@ DEEPSEEK_VERSION = ct_ci_manifest.load_manifest(
 class TestSelect(unittest.TestCase):
     def test_all_selects_every_implemented_integration(self):
         entries = ct_ci_discover.select(REPO, base_ref=None, all_=True)
-        self.assertEqual({e["id"] for e in entries}, {"deepseek", "hermes"})
+        self.assertEqual({e["id"] for e in entries}, {"deepseek", "hermes", "opencode"})
 
     def test_planned_integrations_are_never_selected(self):
         entries = ct_ci_discover.select(REPO, base_ref=None, all_=True)
@@ -32,17 +32,21 @@ class TestSelect(unittest.TestCase):
 
     def test_matrix_is_the_flat_os_x_interpreter_cross_product(self):
         entries = ct_ci_discover.select(REPO, base_ref=None, all_=True)
-        self.assertEqual(len(entries), 12)  # deepseek and hermes: 3 os x 2 each
+        self.assertEqual(len(entries), 18)  # deepseek/hermes/opencode: 3 os x 2 each
         oses = ("ubuntu-latest", "macos-latest", "windows-latest")
         triples = {
             "deepseek": {(e["os"], e["node"]) for e in entries if e["id"] == "deepseek"},
             "hermes": {(e["os"], e["python"]) for e in entries if e["id"] == "hermes"},
+            "opencode": {(e["os"], e["node"]) for e in entries if e["id"] == "opencode"},
         }
         self.assertEqual(
             triples["deepseek"], {(os_name, v) for os_name in oses for v in ("22.19", "24.x")}
         )
         self.assertEqual(
             triples["hermes"], {(os_name, v) for os_name in oses for v in ("3.9", "3.13")}
+        )
+        self.assertEqual(
+            triples["opencode"], {(os_name, v) for os_name in oses for v in ("22.x", "24.x")}
         )
 
     def test_entries_carry_a_scalar_os_interpreter_dir_language_and_checks(self):
@@ -92,8 +96,8 @@ class TestCli(unittest.TestCase):
             capture_output=True, text=True, check=True,
         ).stdout
         entries = json.loads(out)
-        self.assertEqual(len(entries), 12)
-        self.assertEqual({e["id"] for e in entries}, {"deepseek", "hermes"})
+        self.assertEqual(len(entries), 18)
+        self.assertEqual({e["id"] for e in entries}, {"deepseek", "hermes", "opencode"})
 
 
 if __name__ == "__main__":

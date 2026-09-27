@@ -1,0 +1,11 @@
+# Custom provider for the e2e container, copied to $DSH_HOME/settings.yaml by
+# e2e.sh. Mirrors the shape proven in the 2026-09-18 DSH spike. The API key
+# stays in the environment (apiKeyEnv); it is never written to any file.
+llm-pi-ai:
+  providers:
+    zai-coding:
+      api: anthropic-messages
+      baseURL: https://api.z.ai/api/anthropic
+      apiKeyEnv: ZAI_API_KEY
+      models:
+        - id: GLM-5.3-FLASH
