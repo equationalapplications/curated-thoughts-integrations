@@ -2,6 +2,8 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+**Review convention:** Opus review findings are numbered by cycle (B# blocker, M# major, m# minor). A reference like "m8 from cycle 1" points into that register; unqualified mentions refer to the current cycle's batch.
+
 **Goal:** Port the Hermes wisdom auto-inclusion (PR #21) to the DeepSeek Harness integration: a `curated-thoughts-wisdom` system-prompt section that injects semantically relevant wiki entries once per agent, cache-safe, fail-open with a retry budget and circuit breaker.
 
 **Architecture:** One new module `integrations/deepseek/src/wisdom.ts` (discovery + identity probe, recall wrapper, sanitize/render, session memo, retry budget + circuit breaker, orchestrator) registered from `src/index.ts` via `ctx.systemPrompt.section()`. Read-only brain access through the `ct` CLI (`spawnSync`, argv array, never a shell). Node stdlib only.
@@ -15,15 +17,15 @@
 
 - Node stdlib only; **no new runtime dependencies** (`node:child_process` only).
 - Registration: `ctx.systemPrompt.section({ name: 'curated-thoughts-wisdom', order: 6000, interpolate: false, text: renderWisdom })` — `interpolate: false` is passed for forward compat (pinned 0.1.5-rc.2 has no such option and ignores unknown properties).
-- Identity probe: `<ct> --help` combined stdout+stderr must contain `Curated Thoughts`; probe timeout 3 s.
-- Recall argv: `[ctPath, 'recall', SEED_QUERY, '--json', '--k', '3']` via `spawnSync` with `{ timeout: 5000, maxBuffer: 4 * 1024 * 1024, cwd: os.homedir(), stdio: ['ignore', 'pipe', 'pipe'], shell: false, windowsHide: true }`.
+- Identity probe: `<ct> --help` combined stdout+stderr must contain `Curated Thoughts`; probe timeout 3 s; same spawnSync contract as recall incl. `killSignal: 'SIGKILL'` (SIGTERM lets a hung child outlive the timeout).
+- Recall argv: `[ctPath, 'recall', SEED_QUERY, '--json', '--k', '3']` via `spawnSync` with `{ timeout: 5000, killSignal: 'SIGKILL', maxBuffer: 4 * 1024 * 1024, cwd: os.homedir(), stdio: ['ignore', 'pipe', 'pipe'], shell: false, windowsHide: true }`.
 - `SEED_QUERY = 'curated thoughts agent memory wisdom procedures'` — seed constant ONLY (no cwd term; `process.cwd()` is the harness cwd, the trap the Hermes design forbids).
 - `MAX_BLOCK_CHARS = 2500` enforced on the final STRIPPED length (DSH has no host-side cap — entirely ours); per-entry truncation keeps the title line; zero usable entries → `''`.
 - Sanitizer order: (1) remove every `<!-- hermes-plugin-section` substring REPEATEDLY until stable, (2) THEN indent any line-start `## Plugin Context: ` with 4 spaces, (3) neutralize brace-runs with the lookahead form `/\{(?=\{)/g → '{ '` (single pass collapses any run; a plain `replaceAll('{{', '{ {')` is bypassable via `{{{x}}` and is FORBIDDEN). Applied to titles AND text. Unit invariant: rendered block never contains `{{`.
-- `keyOf(ctx)` is the ONE key function: `typeof agent?.id === 'string' && agent.id` → use it; else `typeof scope?.id === 'string' && scope.id` → use it; else no key. No key → return `''` with NO memo write and NO spawn.
+- `keyOf(ctx)` is the ONE key function: `typeof agent?.id === 'string' && agent.id` → use it; else `typeof scope?.id === 'string' && scope.id` → use it; else no key. No key → return `''` with NO memo write and NO spawn (and no budget/breaker interaction — a keyless render is a pure no-op).
 - Memo: module-global `Map` LRU N=256 (delete/re-insert for LRU order). No lock — Node is single-threaded and `text()` is synchronous (deliberate divergence from Hermes's lock dance).
 - Failure classes — **memoized:** discovery miss, parse error, `maxBuffer` overflow (ENOBUFS, treated like a parse error), zero hits. **Budgeted (NOT memoized, retried):** recall timeout, non-zero exit, spawn failure, probe timeout.
-- Retry budget: at most **2 attempts per agent id**, **≥60 s cooldown** between attempts, then memoize `''` for that agent. Circuit breaker: after **4 consecutive** budgeted failures process-wide, stop spawning for **5 minutes**, then allow one half-open probe attempt; a failed half-open probe re-opens the breaker. Both are per-process module state.
+- Retry budget: at most **2 attempts per agent id**, **≥60 s cooldown** between attempts, then memoize `''` for that agent (the budget-SPENT outcome IS memoized — spec L134 + carry-over C; the individual failures are not). Circuit breaker: after **4 consecutive** budgeted failures process-wide, stop spawning for **5 minutes**, then allow one half-open probe attempt; a failed half-open probe re-opens the breaker. Both are per-process module state; the governor's per-agent map is LRU-capped at 256 like the memo (unbounded failed-agent growth otherwise).
 - Discovery misses are cached process-wide with a **5-minute TTL**; probe timeouts are NOT cached. Accepted-path cache reset on spawn failure is kept, and the reset's cost is bounded by the per-agent budget (the next attempt's re-walk is that attempt's spend).
 - Discovery walk: ONE cumulative 3 s deadline over the whole walk (elapsed time counts against every subsequent probe's timeout; deadline exhaustion ends the walk as budgeted `probe_timeout`). A candidate that exists but FAILS the probe advances the walk; a probe that TIMES OUT ends the walk immediately as `probe_timeout`.
 - Windows: skip `.cmd`/`.bat` candidates entirely and skip extensionless files (spawnSync with `shell:false` fails EINVAL on patched Node for `.cmd`/`.bat` — CVE-2024-27980). Discovery must NOT use a single-result `which` + post-filter (a `.cmd` shim earlier on PATH would shadow a valid `ct.exe`); it walks ALL PATH matches in order.
@@ -32,7 +34,7 @@
 - Zero wiki entries → `''` (host drops empty sections).
 - Checks: `cd integrations/deepseek && pnpm build && pnpm test` (vitest; CI also runs `tsc --noEmit`). POSIX-only fixture-script tests are `describe.skipIf(process.platform === 'win32')` per repo precedent; mocked-`spawnSync` tests are the PRIMARY pattern (no real binary needed on any platform).
 - e2e in the isolated container ONLY (`integrations/deepseek/tests/e2e/run.sh`); never against a live harness or Kurt's config.
-- Version → **0.3.0**, CHANGELOG entry, README paragraph with EXACTLY five limitations (listed in Task 6).
+- Version → **0.3.0**, CHANGELOG entry, README paragraph with EXACTLY five limitations (listed in Task 7).
 
 ---
 
@@ -73,15 +75,18 @@ describe('keyOf', () => {
 });
 
 describe('sanitize', () => {
-  it('removes the forbidden marker repeatedly until stable (splice case)', () => {
-    const spliced = '<!-- hermes-plugin-section<!-- hermes-plugin-section-sections:start -->';
-    expect(sanitize(spliced)).toBe('-sections:start -->');
+  it('removes the marker REPEATEDLY until stable (a pass can splice a fresh marker)', () => {
+    // pass 1 removes the inner marker at offset 18, splicing '<!-- hermes-plugin' + '-section'
+    // into a NEW marker; pass 2 removes it. A single replaceAll leaves the forged frame.
+    expect(sanitize('<!-- hermes-plugin<!-- hermes-plugin-section-section')).toBe('');
+    expect(sanitize('x<!-- hermes-plugin-section<!-- hermes-plugin-section-sectiony')).toBe('xy');
   });
   it('indents a line-start heading only AFTER marker removal (order)', () => {
     expect(sanitize('## Plugin Context: x')).toBe('    ## Plugin Context: x');
-    // one pass of removal can splice a fresh marker ahead of a heading; loop-first wins
-    expect(sanitize('<!-- hermes-plugin-sect## Plugin Context: ion -->y')).not.toContain('## Plugin Context: ion -->y\n##');
-    expect(sanitize('<!-- hermes-plugin-sect## Plugin Context: ion -->y')).toBe('    ## Plugin Context: ion -->y');
+    // removal first, THEN indent: the exposed heading must still be indented
+    expect(sanitize('<!-- hermes-plugin<!-- hermes-plugin-section-section\n## Plugin Context: x')).toBe(
+      '\n    ## Plugin Context: x'
+    );
   });
   it('neutralizes brace-runs with the lookahead form in one pass', () => {
     expect(sanitize('{{a}}')).toBe('{ {a}}');
@@ -128,6 +133,18 @@ describe('renderBlock', () => {
     for (const m of out.matchAll(/\*\*T(\d+)\*\*/g)) {
       expect(renderBlock([entries[Number(m[1])]]).trim().length).toBeLessThanOrEqual(MAX_BLOCK_CHARS);
     }
+  });
+  it('drops entries that cannot even fit their title line; keeps the rest', () => {
+    // used = heading(38) + 2 = 40; entry1 title(50) exceeds the remaining 2460 → dropped;
+    // entry2 title(4) + text fits → INCLUDED (loop continues past a dropped entry)
+    const entries = [
+      { title: 'T'.repeat(50), text: 'x' },
+      { title: 'T2', text: 'small' },
+    ];
+    const out = renderBlock(entries);
+    expect(out).not.toContain('*****');
+    expect(out).not.toContain(`${'T'.repeat(50)}`);
+    expect(out).toContain('**T2**');
   });
   it('is byte-stable for identical entries', () => {
     const e = [{ title: 'A', text: 'b' }];
@@ -210,7 +227,7 @@ export function renderBlock(entries: WikiEntry[]): string {
 }
 ```
 
-Note: `homedir` import arrives with Task 3 — omit it here if the linter flags it unused.
+(`homedir` is genuinely used in Task 2's `candidatePaths`, not here — do not import it in Task 1.)
 
 - [ ] **Step 1.4:** run `pnpm vitest run tests/test_wisdom.ts` — Expected: PASS (all).
 - [ ] **Step 1.5:** `pnpm build && pnpm test` green; commit: `feat(dsh): wisdom module core — keyOf, sanitize (brace-run lookahead), renderBlock (TDD)`
@@ -227,19 +244,21 @@ Note: `homedir` import arrives with Task 3 — omit it here if the linter flags 
 **Interfaces:**
 - Consumes: nothing new.
 - Produces (ct_env.ts): `export function allPathMatches(name: string, env: NodeJS.ProcessEnv, platform: NodeJS.Platform): string[]` — every existing executable PATH hit in PATH order (win32: bare name + PATHEXT-appended forms per dir; POSIX: bare name per dir).
-- Produces (wisdom.ts): `export type ProbeVerdict = 'ok' | 'timeout' | 'reject'`; `export type DiscoveryFailure = 'probe_timeout' | null`; `export function candidatePaths(env: NodeJS.ProcessEnv, platform: string): string[]`; `export function probeIdentity(ctPath: string, opts?: { timeoutMs?: number }): ProbeVerdict`; `export function discoverCt(env?: NodeJS.ProcessEnv, opts?: { platform?: string; candidates?: string[]; probe?: (path: string, budgetMs: number) => ProbeVerdict; now?: () => number }): { path: string | null; failure: DiscoveryFailure }`; `export function resetDiscoveryCachesForTests(): void` (clears accepted-path cache AND the miss cache).
+- Produces (wisdom.ts): `export type ProbeVerdict = 'ok' | 'timeout' | 'reject'`; `export type DiscoveryFailure = 'probe_timeout' | null`; `export function candidatePaths(env: NodeJS.ProcessEnv, platform: string, pathMatches?: string[]): string[]`; `export function probeIdentity(ctPath: string, opts?: { timeoutMs?: number; spawnSync?: SpawnLike }): ProbeVerdict`; `export function discoverCt(env?: NodeJS.ProcessEnv, opts?: { platform?: string; candidates?: string[]; usable?: (p: string) => boolean; probe?: (path: string, budgetMs: number) => ProbeVerdict; now?: () => number }): { path: string | null; failure: DiscoveryFailure }`; `export function resetDiscoveryCachesForTests(): void` (clears accepted-path cache AND the miss cache). **`usable` injection exists so mocked tests skip the real filesystem gate** (Hermes patches `_usable_candidate`/`_candidate_paths` the same way); the real default is `usable = (p) => isWin ? existsSync(p) : accessSync(p, X_OK) succeeds` (POSIX `accessSync` also rejects directories; Hermes gates with `isfile` on win32 — use `statSync(p).isFile()` there).
 
 - [ ] **Step 2.1 (RED, ct_env.ts):** add to `tests/test_ct_env.ts`: `allPathMatches` returns ALL hits in PATH order (fixture tmpdir with two dirs each containing an executable `ct`, PATH `dirA:dirB` → `[dirA/ct, dirB/ct]`); win32 form (fake platform `'win32'`, PATHEXT `.exe;.cmd`): bare + appended forms per dir, missing forms skipped, order preserved; empty PATH → `[]`; nonexistent dirs skipped.
 - [ ] **Step 2.2 (GREEN, ct_env.ts):** implement `allPathMatches` by refactoring the split/exts logic out of `whichOnPath` (whichOnPath becomes `allPathMatches(...)[0] ?? null` — behavior unchanged; existing tests must stay green).
-- [ ] **Step 2.3 (RED, discovery logic — mocked, cross-platform):** in `test_wisdom.ts`, drive `discoverCt` with injected `candidates` + `probe` + `now` (NO real fs/spawn):
+- [ ] **Step 2.3 (RED, discovery logic — mocked, cross-platform):** in `test_wisdom.ts`, drive `discoverCt` with injected `usable: () => true` (the mocked tests bypass the real fs gate — without this, nonexistent fixture candidates are skipped BEFORE the probe runs) plus `candidates` + `probe` + `now` (NO real fs/spawn). Add `beforeEach(resetDiscoveryCachesForTests)` — module state (accepted path, miss cache) leaks between tests otherwise:
 
 ```ts
 const okProbe = (p: string) => (p.endsWith('real') ? 'ok' : 'reject');
+const allUsable = () => true;
 // candidate that exists but FAILS advances; ordering preserved
 it('advances past a rejecting candidate and accepts the first passing one', () => {
   const calls: string[] = [];
   const r = discoverCt(PROCESS_ENV, {
     candidates: ['/x/impostor', '/y/real'],
+    usable: allUsable,
     probe: (p) => { calls.push(p); return okProbe(p); },
   });
   expect(r).toEqual({ path: '/y/real', failure: null });
@@ -250,6 +269,7 @@ it('ends the walk on a probe timeout (later candidates not probed)', () => {
   const calls: string[] = [];
   const r = discoverCt(PROCESS_ENV, {
     candidates: ['/a/slow', '/b/real'],
+    usable: allUsable,
     probe: (p) => { calls.push(p); return 'timeout'; },
   });
   expect(r).toEqual({ path: null, failure: 'probe_timeout' });
@@ -261,6 +281,7 @@ it('exhausting the walk deadline ends it as probe_timeout', () => {
   const calls: string[] = [];
   const r = discoverCt(PROCESS_ENV, {
     candidates: ['/a', '/b', '/c'],
+    usable: allUsable,
     probe: (p) => { calls.push(p); t += 2800; return 'reject'; },
     now: () => t,
   });
@@ -294,7 +315,7 @@ Also: win32 candidate filtering (pure logic, no fs): `candidatePaths` with `plat
 - [ ] **Step 2.4 (GREEN):** implement in `wisdom.ts`:
 
 ```ts
-import { accessSync, constants as fsConstants, existsSync } from 'node:fs';
+import { accessSync, constants as fsConstants, statSync } from 'node:fs';
 
 const MISS_TTL_MS = 5 * 60_000;
 let acceptedCtPath: string | null = null;
@@ -303,46 +324,50 @@ let missCache: { until: number } | null = null;
 export type ProbeVerdict = 'ok' | 'timeout' | 'reject';
 export type DiscoveryFailure = 'probe_timeout' | null;
 
-export function candidatePaths(env: NodeJS.ProcessEnv, platform: string): string[] {
+export function candidatePaths(env: NodeJS.ProcessEnv, platform: string, pathMatches?: string[]): string[] {
   const isWin = platform.startsWith('win');
-  const pathMatches = allPathMatches('ct', env, platform as NodeJS.Platform);
+  // the optional third parameter injects a fabricated PATH-match list in tests
+  const matches = pathMatches ?? allPathMatches('ct', env, platform as NodeJS.Platform);
+  // win32 (spec): skip .cmd/.bat entirely (spawnSync shell:false fails EINVAL —
+  // CVE-2024-27980) and extensionless files; any OTHER dotted extension survives.
   const filtered = isWin
-    ? pathMatches.filter((p) => {
+    ? matches.filter((p) => {
         const base = p.split(/[\\/]/).pop() ?? '';
         const dot = base.lastIndexOf('.');
-        return dot > 0 && ['.exe'].includes(base.slice(dot).toLowerCase());
+        return dot > 0 && !['.cmd', '.bat'].includes(base.slice(dot).toLowerCase());
       })
-    : pathMatches;
+    : matches;
   const home = homedir();
-  const fallbacks = isWin
-    ? [`${(env.USERPROFILE ?? '').replace(/[\\/]+$/, '')}\\bin\\ct.exe`,
-       `${(env.LOCALAPPDATA ?? '').replace(/[\\/]+$/, '')}\\CuratedThoughts\\bin\\ct.exe`].filter((p) => p.length > 12)
-    : platform === 'darwin'
-      ? [`${home}/bin/ct`, '/usr/local/bin/ct', '/opt/homebrew/bin/ct']
-      : [`${home}/.local/bin/ct`, '/usr/bin/ct', '/usr/local/bin/ct', `${home}/bin/ct`];
+  if (isWin) {
+    // rows built conditionally — a row exists only when its env var is non-empty
+    // (Hermes `if profile:` / `if local:` guards; never a length heuristic)
+    const out = [...filtered];
+    if (env.USERPROFILE) out.push(`${env.USERPROFILE.replace(/[\\/]+$/, '')}\\bin\\ct.exe`);
+    if (env.LOCALAPPDATA) out.push(`${env.LOCALAPPDATA.replace(/[\\/]+$/, '')}\\CuratedThoughts\\bin\\ct.exe`);
+    return out;
+  }
+  const fallbacks = platform === 'darwin'
+    ? [`${home}/bin/ct`, '/usr/local/bin/ct', '/opt/homebrew/bin/ct']
+    : [`${home}/.local/bin/ct`, '/usr/bin/ct', '/usr/local/bin/ct', `${home}/bin/ct`];
   return [...filtered, ...fallbacks];
 }
 ```
-(win32 fallback rows are built CONDITIONALLY — a row is pushed only when its env var is non-empty, mirroring Hermes's `if profile:` / `if local:` guards; never a length heuristic. Replace the sketch's `[...].filter((p) => p.length > 12)` with:
 
-```ts
-const winFallbacks: string[] = [];
-if (env.USERPROFILE) winFallbacks.push(`${env.USERPROFILE.replace(/[\\/]+$/, '')}\\bin\\ct.exe`);
-if (env.LOCALAPPDATA) winFallbacks.push(`${env.LOCALAPPDATA.replace(/[\\/]+$/, '')}\\CuratedThoughts\\bin\\ct.exe`);
-```
-
-function usable(p: string, isWin: boolean): boolean {
-  if (isWin) return existsSync(p);
+function defaultUsable(p: string, isWin: boolean): boolean {
+  if (isWin) {
+    try { return statSync(p).isFile(); } catch { return false; } // isfile: a directory named ct.exe is not a candidate
+  }
   try { accessSync(p, fsConstants.X_OK); return true; } catch { return false; }
 }
 
 export function discoverCt(
   env: NodeJS.ProcessEnv = process.env,
-  opts: { platform?: string; candidates?: string[]; probe?: (path: string, budgetMs: number) => ProbeVerdict; now?: () => number } = {},
+  opts: { platform?: string; candidates?: string[]; usable?: (p: string) => boolean; probe?: (path: string, budgetMs: number) => ProbeVerdict; now?: () => number } = {},
 ): { path: string | null; failure: DiscoveryFailure } {
   const now = opts.now ?? Date.now;
   const platform = opts.platform ?? osPlatform();
   const isWin = platform.startsWith('win');
+  const usable = opts.usable ?? ((p: string) => defaultUsable(p, isWin));
   const probe = opts.probe ?? ((p, budgetMs) => probeIdentity(p, { timeoutMs: budgetMs }));
   if (acceptedCtPath) return { path: acceptedCtPath, failure: null };
   const t = now();
@@ -367,7 +392,7 @@ export function resetDiscoveryCachesForTests(): void {
 }
 ```
 
-(`allPathMatches` import comes from `../scripts/ct_env.js` — check how `src/` already imports from `scripts/` or whether the helper should live in `src/` instead; if the import direction is wrong, move `allPathMatches` into `src/wisdom.ts` and have `scripts/ct_env.ts` keep its own `whichOnPath` untouched — do NOT create a scripts→src dependency inversion that breaks the doctor's standalone build. Verify with `pnpm build`.)
+(`allPathMatches` is imported from `../scripts/ct_env.js` — the import direction is proven, not a hedge: `src/status.ts` already imports from `../scripts/ct_env.js` and `tsconfig.json` `rootDir: "."` builds both trees; `pnpm build` verifies.)
 
 - [ ] **Step 2.5 (RED/GREEN, probeIdentity — POSIX-only fixtures + mocked primary):** mocked tests (all platforms): spy-probe wrapping real spawnSync mock — inject `vi.mock('node:child_process')` at file top; cases: stdout contains `Curated Thoughts` → `'ok'`; output without it → `'reject'`; `error.code === 'ETIMEDOUT'` or `signal != null` → `'timeout'`; `error` (ENOENT) → `'reject'`. POSIX-only fixture test (`describe.skipIf(win32)`): write tmp executable shell scripts — real `ct` stub echoing the identity line → `'ok'`; `printf 'chart-testing'` → `'reject'`; `sleep 30` → `'timeout'` (assert wall time < 10 s).
 - [ ] **Step 2.6:** `pnpm build && pnpm test` green; commit: `feat(dsh): ct discovery — allPathMatches walk, identity probe, 3 s walk deadline, 5-min miss cache (TDD)`
@@ -385,7 +410,7 @@ export function resetDiscoveryCachesForTests(): void {
 - Produces: `export type RecallResult = { entries: WikiEntry[] | null; failure: 'timeout' | 'exit' | 'spawn' | null }` — `entries === null && failure === null` is the parse-error case (memoized by Task 5); `entries` non-null (possibly `[]`) is success. `export function recallWiki(ctPath: string, query: string, deps?: { spawnSync?: typeof spawnSync }): RecallResult`.
 
 - [ ] **Step 3.1 (RED, mocked — primary pattern, all platforms):** `vi.mock('node:child_process')` with a controllable `spawnSync` mock; `homedir` mocked to `/tmp/fakehome`. Cases (failure classes verbatim from Hermes `recall_wiki`):
-  - spawnSync called EXACTLY once with `[ctPath, 'recall', query, '--json', '--k', '3']` and options `{ timeout: 5000, maxBuffer: 4 * 1024 * 1024, cwd: '/tmp/fakehome', stdio: ['ignore', 'pipe', 'pipe'], shell: false, windowsHide: true }` (assert every option).
+  - spawnSync called EXACTLY once with `[ctPath, 'recall', query, '--json', '--k', '3']` and options `{ timeout: 5000, killSignal: 'SIGKILL', maxBuffer: 4 * 1024 * 1024, cwd: '/tmp/fakehome', stdio: ['ignore', 'pipe', 'pipe'], shell: false, windowsHide: true }` (assert every option — killSignal included: SIGTERM lets a hung child outlive the timeout).
   - `{ status: 0, stdout: valid wiki JSON }` → `{ entries: [{title, text}...], failure: null }` (non-string/missing title/text coerce to `''`; non-dict items skipped — same coercion as Hermes).
   - `{ status: 0, stdout: '{"results":[...]}' }` (chunks present, NO `wiki` key) → `{ entries: null, failure: null }` (parse-error class; Hermes rule: `data.wiki` must be a list).
   - `{ status: 0, stdout: 'not json' }` → `{ entries: null, failure: null }`.
@@ -408,6 +433,7 @@ export function recallWiki(ctPath: string, query: string, deps: { spawnSync?: ty
   try {
     r = run(ctPath, ['recall', query, '--json', '--k', String(RECALL_K)], {
       timeout: RECALL_TIMEOUT_MS,
+      killSignal: 'SIGKILL',
       maxBuffer: 4 * 1024 * 1024,
       cwd: homedir(),
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -518,12 +544,28 @@ export function recallWiki(ctPath: string, query: string, deps: { spawnSync?: ty
 - Produces: `apply()` additionally calls `ctx.systemPrompt.section(...)` with `{ name: 'curated-thoughts-wisdom', order: 6000, interpolate: false, text: fn }`; `inject` and the health context registration are UNCHANGED (existing tests stay green).
 
 - [ ] **Step 6.1 (RED):** extend `tests/test_index.ts`'s `mockCtx` with `systemPrompt.section: vi.fn(...)` collecting `sectionRegistrations`; assert after `apply(...)`: exactly one section registered, `name === 'curated-thoughts-wisdom'`, `order === 6000`, `interpolate === false`, `typeof text === 'function'`; the health `context()` registration still present with `order: 130` unchanged; `text({ agent: { id: 'x' } }, ...arbitrary)` returns a string (not a throw) even with all deps absent.
-- [ ] **Step 6.2 (GREEN):** in `apply()`:
+- [ ] **Step 6.2 (GREEN):** extend `DshContextExtensions.systemPrompt` in `src/index.ts` (house pattern — no ad-hoc casts at call sites) with:
 
 ```ts
-const systemPromptApi = ctx.systemPrompt as { section?: (s: unknown) => unknown };
-if (typeof systemPromptApi.section === 'function') {
-  systemPromptApi.section({
+  systemPrompt: {
+    context(c: {
+      name: string;
+      order: number;
+      text: () => string;
+    }): unknown;
+    section(s: {
+      name: string;
+      order: number;
+      interpolate: boolean;
+      text: (assembleCtx: unknown) => string;
+    }): unknown;
+  };
+```
+
+then register in `apply()`:
+
+```ts
+  dsh.systemPrompt.section({
     name: 'curated-thoughts-wisdom',
     order: 6000,
     interpolate: false,
@@ -531,10 +573,9 @@ if (typeof systemPromptApi.section === 'function') {
     // reads keyOf from that same {agent, scope, signal} shape
     text: (assembleCtx: unknown) => renderWisdom(assembleCtx),
   });
-}
 ```
 
-(The registration stays guarded like the existing one — the pinned host always provides `section`, but the guard keeps the doctor/mock paths safe. `renderWisdom` is called with the host-passed context directly; production uses the real `spawnSync` defaults — deps are for unit tests only.)
+(The existing health `context()` registration and `inject` are untouched. Production uses the real `spawnSync` defaults — deps are for unit tests only.)
 - [ ] **Step 6.3:** `pnpm build && pnpm test` green; commit: `feat(dsh): register curated-thoughts-wisdom systemPrompt section (order 6000, interpolate:false)`
 
 ---
@@ -559,7 +600,7 @@ if (typeof systemPromptApi.section === 'function') {
 
 - [ ] **Step 8.1 (cold path FIRST):** inside the container, restart/stop the sidecar (or use the freshly-started cold container) and time the FIRST wisdom recall before freezing `RECALL_TIMEOUT_MS = 5000`; record the number in the PR. If cold > 5 s, bump the constant with the measurement as justification (spec pre-authorizes this).
 - [ ] **Step 8.2:** extend `e2e.sh` checks: with the sidecar brain seeded (the container seeds wisdom in the base image setup — verify in `tests/e2e/Dockerfile` + `base.Dockerfile`; if the seed step is missing, add a `ct ingest`/seed step to the e2e setup, NOT to user-visible install), run a real DSH session and assert: exactly one `## Curated Thoughts — relevant memory` block in the system prompt; block length ≤ 2500; a second step's request byte-identical system prefix (memo replay); with the sidecar absent (uninstalled brain), the session proceeds with NO wisdom block and no error.
-- [ ] **Step 8.3:** run `tests/e2e/run.sh` (live-model step requires `ZAI_API_KEY` — ask Kurt if absent; the non-model checks run without it). Record all evidence in the PR.
+- [ ] **Step 8.3:** run `tests/e2e/run.sh`. **Toolchain fact (researched 2026-09-30):** the pinned sidecar .deb (2.12.1) does NOT ship the `ct` CLI (`dpkg -c`: only `curated-thoughts` + `curated-thoughts-mcp`); `ct` ships standalone from v2.22.0+ (`ct_2.22.0_linux_amd64.tar.gz` on GH releases). The e2e image therefore ALSO installs the `ct` tarball (curl + tar -C /usr/local/bin) in the e2e setup step — a test-only provisioning change in the e2e layer, not in user-visible install or the base image contract; if CT_VERSION is later bumped past the tarball's introduction this stays compatible. Live-model step requires `ZAI_API_KEY` — ask Kurt if absent; the non-model checks run without it. Record all evidence in the PR.
 - [ ] **Step 8.4:** push; CI green on the full matrix; triage CodeRabbit + bot reviews per dual-review-cycle; sor shadow per implementation wave (ledger-only).
 - [ ] **Step 8.5:** flip the spec's Status line to `Implemented 2026-09-30 (PR #22)` ONLY after every review converged AND e2e evidence is recorded; any open question → park, never merge past one. Squash-merge per repo convention, then verify the merge on the remote and delete the branch.
 
