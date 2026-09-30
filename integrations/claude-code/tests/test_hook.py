@@ -13,6 +13,7 @@ Run directly: python3 tests/test_hook.py
 from __future__ import annotations
 
 import json
+import re
 import os
 import shutil
 import subprocess
@@ -149,34 +150,56 @@ class DegradedTests(HookTestCase):
 
 
 class PluginRootTests(HookTestCase):
-    """CLAUDE_PLUGIN_ROOT is how Claude Code tells a plugin where it lives."""
+    """The script locates itself from __file__ and ignores the environment.
 
-    def test_plugin_root_is_honoured_over_file_location(self):
-        # Run the checkout's copy of the hook but point the root at the temp
-        # plugin: the scripts that get imported are the temp ones.
+    hooks.json expands ${CLAUDE_PLUGIN_ROOT} into the path the script is
+    invoked by, so __file__ already carries that information. Reading the
+    variable would trip Hermes's repo-wide guard for no benefit — see the
+    spec's section 11, Q6, resolved by design.
+    """
+
+    MARKER = (
+        "def context_section(env=None):\n"
+        '    return "## Curated Thoughts\\nTEMP-ROOT-MARKER"\n'
+    )
+
+    def test_scripts_come_from_the_file_location(self):
+        # The temp plugin's own copy of the hook must import the scripts
+        # sitting beside it, not the checkout's.
         (self.plugin / "scripts" / "ct_status.py").write_text(
-            "def context_section(env=None):\n"
-            '    return "## Curated Thoughts\\nTEMP-ROOT-MARKER"\n',
-            encoding="utf-8",
+            self.MARKER, encoding="utf-8"
         )
-        proc, _ = self.run_hook(script=HOOK)
+        proc, _ = self.run_hook()
         self.assertEqual(proc.returncode, 0, proc.stderr)
         context = json.loads(proc.stdout)["hookSpecificOutput"]["additionalContext"]
         self.assertIn("TEMP-ROOT-MARKER", context)
 
-    def test_broken_plugin_root_exits_zero_and_prints_nothing(self):
-        # A set-but-wrong root is not silently repaired by the __file__
-        # fallback: the import fails and the hook fails open, silently.
+    def test_a_wrong_plugin_root_is_ignored_not_obeyed(self):
+        # The point of the design: a set-but-wrong CLAUDE_PLUGIN_ROOT cannot
+        # steer the import, because the script never looks at it.
+        (self.plugin / "scripts" / "ct_status.py").write_text(
+            self.MARKER, encoding="utf-8"
+        )
         proc, _ = self.run_hook(CLAUDE_PLUGIN_ROOT=str(self.root / "nope"))
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertEqual(proc.stdout.strip(), "")
+        context = json.loads(proc.stdout)["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("TEMP-ROOT-MARKER", context)
 
-    def test_unset_plugin_root_falls_back_to_file_location(self):
+    def test_unset_plugin_root_changes_nothing(self):
         proc, _ = self.run_hook(CLAUDE_PLUGIN_ROOT=None)
         self.assertEqual(proc.returncode, 0, proc.stderr)
         directive = json.loads(proc.stdout)
-        self.assertEqual(directive["hookSpecificOutput"]["hookEventName"], "SessionStart")
+        self.assertEqual(
+            directive["hookSpecificOutput"]["hookEventName"], "SessionStart"
+        )
 
+    def test_the_source_never_reads_the_variable(self):
+        # Mirrors Hermes's RepoWideContractTests guard, asserted here too so a
+        # regression fails in this integration's own suite first.
+        pattern = re.compile(
+            r"""environ(?:\.get)?[\(\[]\s*["']CLAUDE_PLUGIN_ROOT"""
+        )
+        self.assertIsNone(pattern.search(HOOK.read_text(encoding="utf-8")))
 
 class BudgetTests(HookTestCase):
     """Session start waits on this hook; hooks.json allows it 10s."""

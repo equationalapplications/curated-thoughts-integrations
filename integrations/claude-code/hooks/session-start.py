@@ -25,17 +25,16 @@ silently rather than delaying or blocking session start.
 from __future__ import annotations
 
 import json
-import os
 import sys
 from pathlib import Path
 
-# Prefer CLAUDE_PLUGIN_ROOT (set by Claude Code for plugin-owned commands);
-# fall back to this file's location so the script also works when run
-# directly. A *set* CLAUDE_PLUGIN_ROOT wins outright, with no fallback: if
-# the harness points us somewhere wrong we fail open and stay silent rather
-# than silently reading a different copy of the scripts.
-_root = os.environ.get("CLAUDE_PLUGIN_ROOT")
-_scripts = (Path(_root) if _root else Path(__file__).resolve().parent.parent) / "scripts"
+# Resolve the scripts directory from this file's own location, and never read
+# CLAUDE_PLUGIN_ROOT. hooks.json already expands ${CLAUDE_PLUGIN_ROOT} into the
+# path this script is invoked by, so __file__ carries the same information; it
+# is also correct when the script is run directly, and it keeps Hermes's
+# repo-wide guard against reading that variable green without editing anything
+# under integrations/hermes/ (spec s11 Q6, resolved by design).
+_scripts = Path(__file__).resolve().parent.parent / "scripts"
 sys.path.insert(0, str(_scripts))
 
 
