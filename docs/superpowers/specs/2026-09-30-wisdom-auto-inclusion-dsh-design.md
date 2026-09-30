@@ -81,12 +81,17 @@ Flow (mirrors Hermes ct_wisdom.py, ported to TypeScript):
    any line-start `## Plugin Context: `), applied to titles AND text. DSH has no
    Hermes persistence-marker invariant, but the sanitizer is cheap,
    defense-in-depth against hostile wiki prose, and keeps the two ports
-   byte-comparable. Zero wiki entries → return `""` (host drops empty sections).
+   byte-comparable — the exact Hermes marker strings are kept deliberately:
+   they are the frame text CT-side wiki prose could plausibly carry
+   cross-host, which is the forgery being defused. Zero wiki entries → return `""` (host drops empty sections).
 4. **Once-semantics: memo keyed on `agent.id`** — `{sessionId → block}` module
    global, LRU N=256 (JS `Map`, delete/re-insert for LRU order). **No lock
    needed**: Node is single-threaded and `text()` is synchronous — the Hermes
    check-under-lock/setdefault dance has no race to guard here; document the
-   difference. Empty/absent `agent.id` → return `""` with no memo write.
+   difference. **Key hygiene:** only a non-empty `typeof id === "string"` value
+   becomes a memo key; empty, absent, or non-string `agent.id` (host version
+   drift) → return `""` with no memo write and no recall — a degenerate id must
+   never become a shared memo key (Hermes Opus finding, carried over).
    Compaction does NOT rotate the id (SurfaceOp replace is in-session), so —
    unlike Hermes — **no lineage-root logic and no mid-session byte change at
    compression boundaries at all**. Resume in a new harness process: memo is
