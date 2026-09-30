@@ -11,7 +11,12 @@ import {
   probeIdentity,
   resetDiscoveryCachesForTests,
   RetryGovernor,
+  renderWisdom,
+  WisdomMemo,
+  _resetWisdomStateForTests,
   type ProbeVerdict,
+  type RecallDeps,
+  type RenderOutcome,
 } from '../src/wisdom.js';
 
 describe('keyOf', () => {
@@ -591,5 +596,371 @@ describe('RetryGovernor (constructor-injected clock)', () => {
     const t2 = () => 10_000_000;
     g.setClock(t2);
     expect(g.gate('a1')).toBe('allow'); // cooldown elapsed under the new clock
+  });
+});
+
+// ── Task 5: WisdomMemo + renderWisdom orchestrator (injected deps ONLY — no real spawns) ──
+
+const WIKI_OK = '{"wiki": [{"title": "T1", "text": "body one"}]}';
+
+function okSpawn(): { fn: ReturnType<typeof vi.fn>; result: () => ReturnType<typeof spawnShape> } {
+  const fn = vi.fn(() => spawnShape({ stdout: Buffer.from(WIKI_OK) }));
+  return { fn, result: () => spawnShape({ stdout: Buffer.from(WIKI_OK) }) };
+}
+function spawnShape(o: Partial<ReturnType<typeof JSON.parse>> & { stdout?: Buffer; error?: Error; status?: number | null; signal?: null }): {
+  status: number | null;
+  signal: null;
+  stdout: Buffer | null;
+  stderr: Buffer | null;
+  error?: Error;
+} {
+  return { status: o.status ?? 0, signal: null, stdout: o.stdout ?? Buffer.alloc(0), stderr: Buffer.alloc(0), error: o.error };
+}
+
+describe('WisdomMemo (pure — no spawn mocks)', () => {
+  it('same key → byte-identical, recallFn invoked exactly once', () => {
+    let calls = 0;
+    const m = new WisdomMemo();
+    const recall = vi.fn((_k: string) => {
+      calls += 1;
+      return { block: 'B', memoize: true };
+    });
+    expect(m.renderFor('a', recall)).toBe('B');
+    expect(m.renderFor('a', recall)).toBe('B');
+    expect(recall).toHaveBeenCalledTimes(1);
+    expect(calls).toBe(1);
+  });
+
+  it('different key → second recall', () => {
+    const recall = vi.fn((k: string) => ({ block: `B-${k}`, memoize: true }));
+    const m = new WisdomMemo();
+    expect(m.renderFor('a', recall)).toBe('B-a');
+    expect(m.renderFor('b', recall)).toBe('B-b');
+    expect(recall).toHaveBeenCalledTimes(2);
+  });
+
+  it('LRU eviction at 256: key 2 hit refreshes it; key 1 re-recalls and evicts key 3 (Opus cycle-4 M3)', () => {
+    const recall = vi.fn((k: string) => ({ block: `B-${k}`, memoize: true }));
+    const m = new WisdomMemo();
+    for (let i = 1; i <= 257; i++) m.renderFor(`k${i}`, recall);
+    expect(recall).toHaveBeenCalledTimes(257);
+    m.renderFor('k2', recall); // hit + touch (refresh recency)
+    expect(recall).toHaveBeenCalledTimes(257);
+    m.renderFor('k1', recall); // k1 was EVICTED (oldest) → re-recall; insertion evicts k3
+    expect(recall).toHaveBeenCalledTimes(258);
+    expect(m.renderFor('k3', recall)).toBe('B-k3'); // k3 gone → miss
+    expect(recall).toHaveBeenCalledTimes(259);
+    expect(m.renderFor('k2', recall)).toBe('B-k2'); // k2 survived (was touched)
+    expect(recall).toHaveBeenCalledTimes(259);
+  });
+
+  it('empty key → "" with NO recallFn call and NO memo write', () => {
+    const recall = vi.fn(() => ({ block: 'B', memoize: true }));
+    const m = new WisdomMemo();
+    expect(m.renderFor('', recall)).toBe('');
+    expect(m.renderFor('', recall)).toBe('');
+    expect(recall).not.toHaveBeenCalled();
+  });
+
+  it('empty-string block memoized (hit on second call)', () => {
+    const recall = vi.fn(() => ({ block: '', memoize: true }));
+    const m = new WisdomMemo();
+    expect(m.renderFor('a', recall)).toBe('');
+    expect(m.renderFor('a', recall)).toBe('');
+    expect(recall).toHaveBeenCalledTimes(1);
+  });
+
+  it('recallFn throwing → "" and NOT memoized', () => {
+    let n = 0;
+    const recall = vi.fn((_k: string) => {
+      n += 1;
+      if (n === 1) throw new Error('boom');
+      return { block: 'B', memoize: true };
+    });
+    const m = new WisdomMemo();
+    expect(m.renderFor('a', recall)).toBe('');
+    expect(m.renderFor('a', recall)).toBe('B'); // re-recalled: throw was not memoized
+    expect(recall).toHaveBeenCalledTimes(2);
+  });
+
+  it('memoize:false result returned but NOT stored', () => {
+    const recall = vi.fn(() => ({ block: 'B', memoize: false }));
+    const m = new WisdomMemo();
+    expect(m.renderFor('a', recall)).toBe('B');
+    expect(m.renderFor('a', recall)).toBe('B');
+    expect(recall).toHaveBeenCalledTimes(2);
+  });
+});
+
+// ── orchestrator: renderWisdom ─────────────────────────────────────────────
+
+describe('renderWisdom (injected deps)', () => {
+  let t = 0;
+  beforeEach(() => {
+    _resetWisdomStateForTests();
+    t = 0;
+  });
+  const deps = (o: Partial<RecallDeps>): RecallDeps => ({ ...o, now: o.now ?? (() => t) });
+
+  it('success: block non-empty; second call memo=hit (spawn count and probe count unchanged, bytes identical)', () => {
+    const spawn = vi.fn(() => spawnShape({ stdout: Buffer.from(WIKI_OK) }));
+    const probe = vi.fn((p: string): ProbeVerdict => (p.endsWith('real') ? 'ok' : 'reject'));
+    const d = deps({ spawnSync: spawn as never, probe, candidates: ['/x/ct-real'], usable: () => true });
+    const first = renderWisdom({ agent: { id: 'a1' } }, d);
+    expect(first).toContain('**T1**');
+    expect(spawn).toHaveBeenCalledTimes(1); // recall only — the injected probe bypasses spawnSync in discovery
+    expect(probe).toHaveBeenCalledTimes(1);
+    const second = renderWisdom({ agent: { id: 'a1' } }, d);
+    expect(second).toBe(first);
+    expect(spawn).toHaveBeenCalledTimes(1); // unchanged: memo=hit, no second recall
+    expect(probe).toHaveBeenCalledTimes(1);
+  });
+
+  it('discovery miss → "", class discovery_miss, memoized (no spawn on second call)', () => {
+    const spawn = vi.fn(() => { throw new Error('must not spawn'); });
+    const probe = vi.fn((): ProbeVerdict => 'reject');
+    const outcomes: RenderOutcome[] = [];
+    const d = deps({ spawnSync: spawn as never, probe, candidates: ['/x/ct-a', '/x/ct-b'], usable: () => true, onOutcome: (o) => outcomes.push(o) });
+    expect(renderWisdom({ agent: { id: 'a1' } }, d)).toBe('');
+    expect(outcomes[0]).toEqual({ called: true, failureClass: 'discovery_miss' });
+    expect(renderWisdom({ agent: { id: 'a1' } }, d)).toBe(''); // memo hit
+    expect(spawn).not.toHaveBeenCalled();
+    expect(probe).toHaveBeenCalledTimes(2); // a1, a2 candidates — once overall
+  });
+
+  it('probe timeout → "", class probe_timeout, NOT memoized; 3rd render (after 2 budgeted failures) is memo=hit with ZERO probe calls (M3 cycle 3)', () => {
+    const probe = vi.fn((): ProbeVerdict => 'timeout');
+    const outcomes: RenderOutcome[] = [];
+    const d = deps({ probe, candidates: ['/x/ct-a'], usable: () => true, onOutcome: (o) => outcomes.push(o) });
+    expect(renderWisdom({ agent: { id: 'a1' } }, d)).toBe('');
+    t += 60_001;
+    expect(renderWisdom({ agent: { id: 'a1' } }, d)).toBe(''); // attempt 2, recordFailure → true, memoized
+    t += 60_001;
+    expect(renderWisdom({ agent: { id: 'a1' } }, d)).toBe(''); // memo hit — spent
+    expect(probe).toHaveBeenCalledTimes(2);
+    // M3 cycle 3: the '' memo landed AT render 2 (recordFailure returned true),
+    // so render 3 never reaches the outcome callable — only two entries exist
+    expect(outcomes.map((o) => [o.called, o.failureClass])).toEqual([
+      [true, 'probe_timeout'],
+      [true, 'probe_timeout'],
+    ]);
+  });
+
+  it('a fresh agent at the same clock gets its own 2 attempts (probe timeout)', () => {
+    const probe = vi.fn((): ProbeVerdict => 'timeout');
+    const d = deps({ probe, candidates: ['/x/ct-a'], usable: () => true });
+    renderWisdom({ agent: { id: 'a1' } }, d);
+    t += 60_001;
+    renderWisdom({ agent: { id: 'a1' } }, d); // a1 spent
+    t += 60_001;
+    expect(renderWisdom({ agent: { id: 'a2' } }, d)).toBe('');
+    expect(probe).toHaveBeenCalledTimes(3); // a1 ×2, a2 ×1
+  });
+
+  it.each(['timeout', 'exit'] as const)('recall %s → class %s, NOT memoized at failure time; 2nd failure memoizes', (cls) => {
+    const spawn = vi.fn((cmd: string, args: readonly string[]) =>
+      args[0] === '--help'
+        ? spawnShape({ stdout: Buffer.from('Curated Thoughts ok') })
+        : cls === 'timeout'
+          ? spawnShape({ error: Object.assign(new Error('to'), { code: 'ETIMEDOUT' }) })
+          : spawnShape({ status: 1 }),
+    );
+    const outcomes: RenderOutcome[] = [];
+    const d = deps({ spawnSync: spawn as never, candidates: ['/x/ct-real'], usable: () => true, onOutcome: (o) => outcomes.push(o) });
+    expect(renderWisdom({ agent: { id: 'a1' } }, d)).toBe('');
+    expect(outcomes[0]?.failureClass).toBe(cls);
+    t += 60_001;
+    expect(renderWisdom({ agent: { id: 'a1' } }, d)).toBe(''); // 2nd failure → budget spent → memoized
+    t += 60_001;
+    expect(renderWisdom({ agent: { id: 'a1' } }, d)).toBe(''); // memo hit
+  });
+
+  it('spawn failure (ENOENT) → class spawn; accepted-path cache reset verified: probe re-runs after ≥60 s (Opus cycle-7 M4)', () => {
+    const spawn = vi.fn((cmd: string, args: readonly string[]) =>
+      args[0] === '--help'
+        ? spawnShape({ stdout: Buffer.from('Curated Thoughts ok') })
+        : spawnShape({ error: Object.assign(new Error('nope'), { code: 'ENOENT' }) }),
+    );
+    const outcomes: RenderOutcome[] = [];
+    const d = deps({ spawnSync: spawn as never, candidates: ['/x/ct-real'], usable: () => true, onOutcome: (o) => outcomes.push(o) });
+    expect(renderWisdom({ agent: { id: 'a1' } }, d)).toBe('');
+    expect(outcomes[0]?.failureClass).toBe('spawn');
+    const probesAfterFirst = spawn.mock.calls.filter((c) => c[1][0] === '--help').length;
+    t += 60_001; // WITHOUT the advance the gate answers cooldown and nothing re-probes
+    renderWisdom({ agent: { id: 'a1' } }, d);
+    const probesAfterSecond = spawn.mock.calls.filter((c) => c[1][0] === '--help').length;
+    expect(probesAfterSecond).toBeGreaterThan(probesAfterFirst); // reset re-probed
+  });
+
+  it('two ENOENT failures for a1 (≥60 s advances) → recordFailure true → memo-hit on the third render', () => {
+    const spawn = vi.fn((cmd: string, args: readonly string[]) =>
+      args[0] === '--help'
+        ? spawnShape({ stdout: Buffer.from('Curated Thoughts ok') })
+        : spawnShape({ error: Object.assign(new Error('nope'), { code: 'ENOENT' }) }),
+    );
+    const d = deps({ spawnSync: spawn as never, candidates: ['/x/ct-real'], usable: () => true });
+    renderWisdom({ agent: { id: 'a1' } }, d);
+    t += 60_001;
+    renderWisdom({ agent: { id: 'a1' } }, d); // 2nd failure — budget just spent
+    t += 60_001;
+    const probesBefore = spawn.mock.calls.filter((c) => c[1][0] === '--help').length;
+    expect(renderWisdom({ agent: { id: 'a1' } }, d)).toBe(''); // memo hit
+    const probesAfter = spawn.mock.calls.filter((c) => c[1][0] === '--help').length;
+    expect(probesAfter).toBe(probesBefore);
+  });
+
+  it('four spawn failures across agents → a fresh agent is breaker_open (the breaker SURVIVED the resets)', () => {
+    const spawn = vi.fn((cmd: string, args: readonly string[]) =>
+      args[0] === '--help'
+        ? spawnShape({ stdout: Buffer.from('Curated Thoughts ok') })
+        : spawnShape({ error: Object.assign(new Error('nope'), { code: 'ENOENT' }) }),
+    );
+    const outcomes: RenderOutcome[] = [];
+    const d = deps({ spawnSync: spawn as never, candidates: ['/x/ct-real'], usable: () => true, onOutcome: (o) => outcomes.push(o) });
+    const ids = ['a1', 'a2', 'a3', 'a4'];
+    for (const id of ids) {
+      renderWisdom({ agent: { id } }, d);
+      t += 60_001;
+    }
+    const outcome = renderWisdom({ agent: { id: 'a5' } }, d);
+    expect(outcome).toBe('');
+    expect(outcomes.at(-1)).toEqual({ called: false, failureClass: 'breaker_open' });
+  });
+
+  it('parse error / ENOBUFS → memoized (second render: spawn count unchanged)', () => {
+    const spawn = vi.fn((cmd: string, args: readonly string[]) =>
+      args[0] === '--help'
+        ? spawnShape({ stdout: Buffer.from('Curated Thoughts ok') })
+        : spawnShape({ error: Object.assign(new Error('buf'), { code: 'ENOBUFS' }) }),
+    );
+    const d = deps({ spawnSync: spawn as never, candidates: ['/x/ct-real'], usable: () => true });
+    expect(renderWisdom({ agent: { id: 'a1' } }, d)).toBe('');
+    const callsAfterFirst = spawn.mock.calls.length;
+    expect(renderWisdom({ agent: { id: 'a1' } }, d)).toBe('');
+    expect(spawn.mock.calls.length).toBe(callsAfterFirst);
+  });
+
+  it('zero hits → "" memoized', () => {
+    const spawn = vi.fn((cmd: string, args: readonly string[]) =>
+      args[0] === '--help' ? spawnShape({ stdout: Buffer.from('Curated Thoughts ok') }) : spawnShape({ stdout: Buffer.from('{"wiki": []}') }),
+    );
+    const d = deps({ spawnSync: spawn as never, candidates: ['/x/ct-real'], usable: () => true });
+    expect(renderWisdom({ agent: { id: 'a1' } }, d)).toBe('');
+    const callsAfterFirst = spawn.mock.calls.length;
+    expect(renderWisdom({ agent: { id: 'a1' } }, d)).toBe('');
+    expect(spawn.mock.calls.length).toBe(callsAfterFirst);
+  });
+
+  it('no key (ctx = {}) → "", no memo write, NO spawnSync, NO probe', () => {
+    const spawn = vi.fn(() => { throw new Error('must not spawn'); });
+    const probe = vi.fn((): ProbeVerdict => 'ok');
+    const d = deps({ spawnSync: spawn as never, probe, candidates: ['/x/ct-real'], usable: () => true });
+    expect(renderWisdom({}, d)).toBe('');
+    expect(spawn).not.toHaveBeenCalled();
+    expect(probe).not.toHaveBeenCalled();
+  });
+
+  it('budget/breaker interplay (M3 cycle 3): a1 fails twice → 3rd render memo-hit with ZERO spawns/probes; a2 fails twice → breaker OPEN; a3 → breaker_open, zero calls', () => {
+    const probe = vi.fn((): ProbeVerdict => 'timeout');
+    const outcomes: RenderOutcome[] = [];
+    const d = deps({ probe, candidates: ['/x/ct-a'], usable: () => true, onOutcome: (o) => outcomes.push(o) });
+    renderWisdom({ agent: { id: 'a1' } }, d);
+    t += 60_001;
+    renderWisdom({ agent: { id: 'a1' } }, d); // 2nd failure → recordFailure true → memoize NOW
+    t += 60_001;
+    const probeCountAfterA1 = probe.mock.calls.length;
+    expect(renderWisdom({ agent: { id: 'a1' } }, d)).toBe(''); // memo hit
+    expect(probe).toHaveBeenCalledTimes(probeCountAfterA1);
+    // a2: 2 more consecutive failures → 4 total → breaker OPEN
+    renderWisdom({ agent: { id: 'a2' } }, d);
+    t += 60_001;
+    renderWisdom({ agent: { id: 'a2' } }, d);
+    t += 60_001;
+    expect(renderWisdom({ agent: { id: 'a3' } }, d)).toBe(''); // breaker_open — no attempt made
+    expect(outcomes.at(-1)).toEqual({ called: false, failureClass: 'breaker_open' });
+    const probeCountFinal = probe.mock.calls.length;
+    t += 60_001;
+    renderWisdom({ agent: { id: 'a3' } }, d); // still breaker_open (window not elapsed) — memo NOT written
+    expect(probe).toHaveBeenCalledTimes(probeCountFinal);
+  });
+
+  it('throw-after-allow: a throwing probe after a granted allow → "", no raise, governor consistent (next render gated)', () => {
+    const probe = vi.fn((): ProbeVerdict => {
+      throw new Error('probe exploded');
+    });
+    const outcomes: RenderOutcome[] = [];
+    const d = deps({ probe, candidates: ['/x/ct-a'], usable: () => true, onOutcome: (o) => outcomes.push(o) });
+    expect(renderWisdom({ agent: { id: 'a1' } }, d)).toBe(''); // no raise
+    expect(outcomes[0]).toEqual({ called: true, failureClass: 'spawn' });
+    // a1's attempt was recorded: the immediate next render is cooldown-gated
+    const next = renderWisdom({ agent: { id: 'a1' } }, d);
+    expect(next).toBe('');
+    expect(outcomes[1]?.failureClass).toBe('cooldown');
+  });
+
+  it('breaker half-open + the one allowed attempt throws → after the window another attempt is admitted (never wedged)', () => {
+    const probe = vi.fn((): ProbeVerdict => {
+      throw new Error('probe exploded');
+    });
+    const d = deps({ probe, candidates: ['/x/ct-a'], usable: () => true });
+    // 4 consecutive failures → breaker opens
+    for (const id of ['a1', 'a2', 'a3', 'a4']) {
+      renderWisdom({ agent: { id } }, d);
+      t += 60_001;
+    }
+    t += 5 * 60_001; // window elapses; the ONE trial goes to the next render
+    renderWisdom({ agent: { id: 'h1' } }, d); // trial consumed; the probe THROWS → recordFailure re-opens
+    t += 5 * 60_001; // the FRESH re-open window ALSO elapses (re-open stamps a new breakerOpenAt)
+    const outcomes: RenderOutcome[] = [];
+    const d2 = deps({ probe, candidates: ['/x/ct-a'], usable: () => true, onOutcome: (o) => outcomes.push(o) });
+    renderWisdom({ agent: { id: 'h2' } }, d2); // trial available again; the probe throws once more
+    expect(outcomes.at(-1)?.failureClass).toBe('spawn'); // an attempt was GRANTED (not breaker_open)
+  });
+
+  it('garbage ctx (null, 42, {agent: () => {}}) → "" never throws', () => {
+    const spawn = vi.fn(() => spawnShape({ stdout: Buffer.from(WIKI_OK) }));
+    const probe = vi.fn((): ProbeVerdict => 'ok');
+    const d = deps({ spawnSync: spawn as never, probe, candidates: ['/x/ct-real'], usable: () => true });
+    expect(renderWisdom(null, d)).toBe('');
+    expect(renderWisdom(42, d)).toBe('');
+    expect(renderWisdom({ agent: () => {} }, d)).toBe('');
+  });
+
+  it('debug logging: env set → one stderr line; env unset → nothing on stderr and console.* all silent', () => {
+    const spawn = vi.fn((cmd: string, args: readonly string[]) =>
+      args[0] === '--help' ? spawnShape({ stdout: Buffer.from('Curated Thoughts ok') }) : spawnShape({ stdout: Buffer.from(WIKI_OK) }),
+    );
+    const d = deps({ spawnSync: spawn as never, candidates: ['/x/ct-real'], usable: () => true });
+    const errSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    process.env.CT_WISDOM_DEBUG = '1';
+    try {
+      renderWisdom({ agent: { id: 'dbg1' } }, d);
+      const line = errSpy.mock.calls.map((c) => String(c[0])).join('');
+      expect(line).toContain('wisdom: render agent=dbg1');
+      expect(line).toMatch(/memo=(hit|miss) class=(ok)/);
+    } finally {
+      delete process.env.CT_WISDOM_DEBUG;
+      errSpy.mockRestore();
+    }
+    // unset: NOTHING on stderr, no console flood
+    const errSpy2 = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const debugSpy = vi.spyOn(console, 'debug').mockImplementation(() => {});
+    const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      renderWisdom({ agent: { id: 'dbg2' } }, d); // new agent → new render (memo untouched)
+      expect(errSpy2).not.toHaveBeenCalled();
+      expect(logSpy).not.toHaveBeenCalled();
+      expect(debugSpy).not.toHaveBeenCalled();
+      expect(infoSpy).not.toHaveBeenCalled();
+      expect(errorSpy).not.toHaveBeenCalled();
+    } finally {
+      errSpy2.mockRestore();
+      logSpy.mockRestore();
+      debugSpy.mockRestore();
+      infoSpy.mockRestore();
+      errorSpy.mockRestore();
+    }
   });
 });

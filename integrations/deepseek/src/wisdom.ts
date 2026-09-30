@@ -295,6 +295,161 @@ export class RetryGovernor {
 // module-level governor (renderWisdom uses it); re-clocked per call via setClock
 const moduleGovernor = new RetryGovernor();
 
+// ── Task 5: WisdomMemo + renderWisdom orchestrator ─────────────────────────
+
+export class WisdomMemo {
+  private store = new Map<string, string>();
+
+  constructor(
+    private max: number = MEMO_MAX,
+    private now?: () => number, // reserved: memo entries are permanent for v1 (no TTL)
+  ) {}
+
+  renderFor(key: string, recallFn: (k: string) => { block: string; memoize: boolean }): string {
+    if (key === '') return ''; // empty key: NO recallFn call, NO memo write
+    const hit = this.store.get(key);
+    if (hit !== undefined) {
+      // LRU touch: delete/re-insert keeps Map insertion order = recency
+      this.store.delete(key);
+      this.store.set(key, hit);
+      return hit;
+    }
+    let out: { block: string; memoize: boolean };
+    try {
+      out = recallFn(key);
+    } catch {
+      return ''; // a throwing recall is NOT memoized
+    }
+    if (out.memoize) {
+      this.store.set(key, out.block);
+      while (this.store.size > this.max) {
+        const oldest = this.store.keys().next().value;
+        if (oldest === undefined) break;
+        this.store.delete(oldest);
+      }
+    }
+    return out.block;
+  }
+
+  clear(): void {
+    this.store.clear();
+  }
+}
+
+const moduleMemo = new WisdomMemo();
+
+/** TEST-ONLY: single owner of ALL module wisdom state (m13 cycle 2 / m3 cycle 5 — no duplicated governor clear). */
+export function _resetWisdomStateForTests(): void {
+  resetDiscoveryCachesForTests(); // owns discovery caches AND the governor
+  moduleMemo.clear();
+}
+
+export type RenderOutcome = { called: boolean; failureClass: string | null };
+
+export type RecallDeps = {
+  spawnSync?: SpawnLike;
+  probe?: (path: string, budgetMs: number) => ProbeVerdict;
+  candidates?: string[];
+  usable?: (p: string) => boolean;
+  now?: () => number;
+  env?: NodeJS.ProcessEnv;
+  onOutcome?: (o: RenderOutcome) => void;
+};
+
+// failure class -> (block, memoize) mapping — the SOLE such mapping (M3 cycle 3:
+// recordFailure's return drives memoization AT the moment the budget is spent —
+// the spec's "then memoize ''" lands in that same render, not one late):
+//   discovery_miss -> ('', true) + recordSuccess   probe_timeout -> ('', false)
+//   timeout/exit/spawn -> ('', false)   parse_error/zero_hits -> (''/block, true) + recordSuccess
+//   recordFailure returned true (budget just spent) -> ('', true) — memoize '' now
+//   'cooldown'/'spent'/'breaker_open' verdict -> ('', false) — no spawn, no memo write
+//   ok -> (renderBlock(entries), true) + recordSuccess
+// spawn calls the PRIVATE invalidateAcceptedPath() (acceptedCtPath = null ONLY —
+// Opus cycle-7 M1: NEVER resetDiscoveryCachesForTests, which also resets the
+// governor and would dissolve the breaker/budget, un-bounding the stall).
+// recordSuccess is called on every non-budgeted, non-breaker outcome (closes a
+// half-open breaker; M2 cycle 2). The outcome callable wraps its OWN body in
+// try/catch (Opus cycle-4 M1: WisdomMemo.renderFor swallows recallFn throws, so
+// only THIS layer can route an exception to recordFailure — an outer catch in
+// renderWisdom is dead code); renderWisdom's outer catch is a last-resort
+// backstop with the same recording.
+const debugEnabled = (): boolean => typeof process.env.CT_WISDOM_DEBUG === 'string' && process.env.CT_WISDOM_DEBUG !== '';
+
+export function renderWisdom(ctx: unknown, deps: RecallDeps = {}): string {
+  const now = deps.now ?? Date.now;
+  moduleGovernor.setClock(now); // ONE clock for discovery, governor, memo-driving budget (M4 cycle 3)
+  const key = keyOf(ctx);
+  if (key === '') return ''; // no key: no memo write, no spawn, no probe
+  const outcomeCallable = (agentId: string): { block: string; memoize: boolean } => {
+    try {
+      const verdict = moduleGovernor.gate(agentId);
+      if (verdict !== 'allow') {
+        if (debugEnabled()) process.stderr.write(`wisdom: render agent=${agentId} memo=miss class=${verdict}\n`);
+        deps.onOutcome?.({ called: false, failureClass: verdict });
+        return { block: '', memoize: false };
+      }
+      const { path, failure } = discoverCt(deps.env ?? process.env, {
+        candidates: deps.candidates,
+        usable: deps.usable,
+        probe: deps.probe,
+        spawnSync: deps.spawnSync,
+        now,
+      });
+      if (failure === 'probe_timeout') {
+        const memoized = moduleGovernor.recordFailure(agentId); // budgeted; true when the budget JUST became spent (M3 cycle 3)
+        if (debugEnabled()) process.stderr.write(`wisdom: render agent=${agentId} memo=miss class=probe_timeout\n`);
+        deps.onOutcome?.({ called: true, failureClass: 'probe_timeout' });
+        return { block: '', memoize: memoized };
+      }
+      if (path === null) {
+        moduleGovernor.recordSuccess(agentId); // discovery_miss: non-budgeted outcome
+        if (debugEnabled()) process.stderr.write(`wisdom: render agent=${agentId} memo=miss class=discovery_miss\n`);
+        deps.onOutcome?.({ called: true, failureClass: 'discovery_miss' });
+        return { block: '', memoize: true };
+      }
+      const recall = recallWiki(path, SEED_QUERY, { spawnSync: deps.spawnSync, env: deps.env });
+      if (recall.failure !== null) {
+        invalidateAcceptedPath(); // spawn-class cache invalidation ONLY (never the governor)
+        const memoized = moduleGovernor.recordFailure(agentId); // budgeted
+        if (debugEnabled()) process.stderr.write(`wisdom: render agent=${agentId} memo=miss class=${recall.failure}\n`);
+        deps.onOutcome?.({ called: true, failureClass: recall.failure });
+        return { block: '', memoize: memoized }; // true ONLY when the budget JUST became spent (M3 cycle 3)
+      }
+      if (recall.entries === null) {
+        moduleGovernor.recordSuccess(agentId); // parse error (incl. ENOBUFS): memoized, non-budgeted
+        if (debugEnabled()) process.stderr.write(`wisdom: render agent=${agentId} memo=miss class=parse_error\n`);
+        deps.onOutcome?.({ called: true, failureClass: 'parse_error' });
+        return { block: '', memoize: true };
+      }
+      if (recall.entries.length === 0) {
+        moduleGovernor.recordSuccess(agentId); // zero hits
+        if (debugEnabled()) process.stderr.write(`wisdom: render agent=${agentId} memo=miss class=zero_hits\n`);
+        deps.onOutcome?.({ called: true, failureClass: 'zero_hits' });
+        return { block: '', memoize: true };
+      }
+      moduleGovernor.recordSuccess(agentId); // ok: resets attempts, closes a half-open breaker
+      if (debugEnabled()) process.stderr.write(`wisdom: render agent=${agentId} memo=miss class=ok\n`);
+      deps.onOutcome?.({ called: true, failureClass: 'ok' });
+      return { block: renderBlock(recall.entries), memoize: true };
+    } catch {
+      // throw-after-allow backstop (Opus cycle-4 M1): route ANY exception to
+      // recordFailure so the budget stays consistent — classed 'spawn'
+      moduleGovernor.recordFailure(agentId);
+      if (debugEnabled()) process.stderr.write(`wisdom: render agent=${agentId} memo=miss class=spawn\n`);
+      deps.onOutcome?.({ called: true, failureClass: 'spawn' });
+      return { block: '', memoize: false };
+    }
+  };
+  const memoHitBefore = debugEnabled();
+  const block = moduleMemo.renderFor(key, (k) => outcomeCallable(k));
+  if (memoHitBefore && debugEnabled()) {
+    // memo-hit render: the outcome callable never ran (its gate/miss lines are
+    // not emitted) — emit the hit line here so every debugged render gets one
+    process.stderr.write(`wisdom: render agent=${key} memo=hit\n`);
+  }
+  return block;
+}
+
 export function resetDiscoveryCachesForTests(): void {
   acceptedCtPath = null;
   missCache = null;
