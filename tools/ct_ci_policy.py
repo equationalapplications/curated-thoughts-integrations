@@ -133,7 +133,7 @@ def gate_versions(repo_root, base_ref):
 
     for name, directory, data in ct_ci_manifest.discover_manifests(repo_root):
         rel_dir = f"integrations/{name}/"
-        manifest_path = directory / "integration.yaml"
+        manifest_path = f"{rel_dir}integration.yaml"
         problems.extend(ct_ci_manifest.validate_manifest(data, manifest_path))
 
         mirror = data.get("version_mirror")
@@ -190,7 +190,7 @@ def gate_versions(repo_root, base_ref):
         text = changelog.read_text(encoding="utf-8") if changelog.exists() else ""
         if f"## {new_version}" not in text:
             problems.append(
-                f"{changelog}: no entry for version {new_version}. Add a "
+                f"{rel_dir}CHANGELOG.md: no entry for version {new_version}. Add a "
                 f"'## {new_version} — YYYY-MM-DD' section; the release body is "
                 f"taken from it (spec §4.2, §5.1)."
             )
@@ -450,7 +450,7 @@ def gate_compat(repo_root):
     repo_root = Path(repo_root)
     if not (repo_root / "shared" / "compat.yaml").exists():
         return [
-            f"{repo_root / 'shared' / 'compat.yaml'}: missing — the compat "
+            f"shared/compat.yaml: missing — the compat "
             f"matrix is the single source of truth (spec §5.3); add it and "
             f"run `python tools/ct_ci.py generate`."
         ]
@@ -466,7 +466,7 @@ def gate_compat(repo_root):
         compat_schema = yaml.safe_load(handle)
     errors = []
     problems = []
-    ct_ci_manifest._check_schema(compat_doc, compat_schema, str(compat_path), errors)
+    ct_ci_manifest._check_schema(compat_doc, compat_schema, "shared/compat.yaml", errors)
     if errors:
         return [f"{error} (spec §5.3)." for error in errors]
     compat = compat_doc["compat"]

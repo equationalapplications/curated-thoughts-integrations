@@ -84,6 +84,11 @@ def _check_schema(data, schema, path, errors, prefix=""):
 
 def validate_manifest(data, path):
     """Return a list of error strings; empty means the manifest is valid."""
+    # Name the manifest with forward slashes on every platform, matching
+    # ct_ci_discover's "dir" and ct_ci_policy's relative paths, which both
+    # go through as_posix(). Interpolating a Path directly emits backslashes
+    # on Windows, so the same error read differently depending on the OS.
+    path = Path(path).as_posix()
     errors = []
     if not isinstance(data, dict):
         return [f"{path}: manifest must be a YAML mapping"]
