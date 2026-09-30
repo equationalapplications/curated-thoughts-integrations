@@ -13,7 +13,7 @@ Sources read this session from the pinned host version **0.1.5-rc.2**
 `@deepseek-ai/dsh-agent@0.1.5-rc.2`, `@deepseek-ai/dsh-session@0.1.5-rc.2`
 (downloaded tarballs, `lib/*.js` + `lib/**/*.d.ts` read directly).
 Cross-checked against 0.2.0-rc.2 where noted: the contracts cited below are
-**identical in both versions**. Integration code read at cti main
+identical in both versions **except where the spec records a version delta — notably `interpolate`, which exists only on 0.2.0-rc.2 `PromptSection` (the pinned host ignores unknown properties, so passing it is forward-compatible)**. Integration code read at cti main
 (`integrations/deepseek/` @ main, plugin v0.2.2).
 
 > **Headline (guardrail tripwire):** DSH's prompt architecture differs materially
@@ -229,8 +229,11 @@ order — idiomatic LRU).
   (matches Hermes precedent).
 - [A3] Seed-constant-only query still retrieves useful wisdom on the live vault
   (Hermes live evidence supports this; re-prove in e2e with the real sidecar).
-- [A4] `interpolate: false` sections are the right choice (block is prose; avoids
-  accidental `{{` handling).
+- [A4] ~~`interpolate: false` sections are the right choice~~ **SUPERSEDED (spec
+  review cycle 1): the pinned host has no `interpolate` option and interpolates
+  every section — an unknown `{{name}}` throws inside `assemble()`. The spec
+  passes `interpolate: false` for forward compatibility only; the real defense
+  is the brace-run neutralizer in the sanitizer.**
 - [A5] DSH does not support a `complete: true` section today in our targets —
   we register a normal (non-complete) section; verify at implementation time
   that no other complete section exists in the profiles we test.
@@ -266,7 +269,7 @@ Node docs: spawnSync EINVAL on .cmd/.bat with shell:false (CVE-2024-27980
 @deepseek-ai/dsh-session@0.1.5-rc.2        lib/types/*.d.ts (SessionHeader id,
   parentSession, SurfaceOp replace = compaction, session/end-seed, RequestHeaderReason)
 @deepseek-ai/dsh@0.2.0-rc.2                package.json   (version map; contracts
-  identical at 0.2.0-rc.2 where cross-checked)
+  identical at 0.2.0-rc.2 where cross-checked, except `interpolate` — present only on 0.2.0-rc.2 `PromptSection`)
 @deepseek-ai/dsh-agent-preset@0.2.0-rc.2   skills/cordis-plugin-development/
   references/practices.md ("Add prompt text with ctx.systemPrompt.section()")
 

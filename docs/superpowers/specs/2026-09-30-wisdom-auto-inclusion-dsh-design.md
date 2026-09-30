@@ -62,10 +62,12 @@ second `context()`:
   `PromptSection` has **no `interpolate` option** and `renderPrompt`
   interpolates every section unconditionally; an unknown `{{name}}` reference
   **throws inside `assemble()`** (dsh-system-prompt lib/index.js [V]).
-  Therefore the sanitizer **neutralizes `{{` sequences** (insert a space:
-  `{{` → `{ {`) in addition to the Hermes marker rules — see Render below. We
-  still pass `interpolate: false` for forward compatibility (0.2.0-rc.2 added
-  the option; unknown properties are ignored by the pinned host [V]).
+  Therefore the sanitizer **neutralizes brace-runs with the lookahead rule
+  from Render below (`/\{(?=\{)/g → '{ ')` — the ONLY sanctioned form; a
+  plain `replaceAll('{{','{ {')` is bypassable via `{{{x}}`** (cycle-3: stale
+  earlier wording removed). We still pass `interpolate: false` for forward
+  compatibility (0.2.0-rc.2 added the option; unknown properties are ignored
+  by the pinned host [V]).
 
 Flow (mirrors Hermes ct_wisdom.py, ported to TypeScript):
 
@@ -135,12 +137,14 @@ Flow (mirrors Hermes ct_wisdom.py, ported to TypeScript):
    Budget counters and the breaker are per-process (module state alongside the
    memo); the discovery-cache reset on spawn failure is kept but the RESET
    ITSELF is budgeted (a candidate re-probe costs up to 3 s frozen).
-   Worst-case stall invariant, stated PER PROCESS (cycle-2 R2 — the per-agent
-   figure alone lets subagent fan-out multiply the cost): **one agent's full
-   budget is ≤16 s frozen (2×(probe 3 s + recall 5 s)); the process-wide
-   breaker caps the total at ≤16 s + (K−1)×5 s + probes within any 5-minute
-   window, then dark — regardless of how many agents fan out**. Every failure
-   collapses to `""`; nothing raises into prompt assembly. Logging at debug.
+   Worst-case stall invariant, stated PER PROCESS (cycle-2 R2, corrected
+   cycle-3): **each budgeted attempt costs ≤ probe 3 s + recall 5 s = 8 s; the
+   breaker opens after K = 4 consecutive budgeted failures, so the frozen
+   total is ≤ 4 × 8 s = 32 s before the breaker opens, then ≤ 8 s per
+   5-minute half-open probe; a failed half-open probe re-opens the breaker
+   for another 5 minutes — regardless of how many agents fan out**. Every
+   failure collapses to `""`; nothing raises into prompt assembly. Logging at
+   debug.
 
 **Rejected for DSH (beyond the Hermes rejected list):** second runtime
 `context()` for wisdom (position after history; see Approach); memoizing
@@ -239,11 +243,16 @@ compaction: no effect — same SessionId, memo replays identical bytes
   order); discovery walks it, **skipping `.cmd`/`.bat` candidates entirely on
   win32** (`spawnSync` with `shell:false` fails EINVAL on patched Node for
   those — CVE-2024-27980), skipping extensionless files on win32 too, and
-  probes the remaining candidates in order (identity probe as below; a
-  failed probe advances to the next candidate). Platform fallback
-  candidates after PATH: Hermes's list (`%USERPROFILE%\bin\ct.exe`,
-  `%LOCALAPPDATA%\CuratedThoughts\bin\ct.exe`). Windows shadowing case gets
-  a unit test.
+  probes the remaining candidates in order (identity probe as below).
+  **Probe walk rule (cycle-3 N1, matching Hermes): a candidate that exists
+  but FAILS the identity probe (wrong output) advances the walk to the next
+  candidate; a candidate whose probe TIMES OUT ends the walk immediately as
+  a budgeted `probe_timeout` failure** (otherwise N stale PATH hits freeze
+  the harness 3 s × N and break the stall invariant). Unit tests for both
+  the Windows shadowing case and the timeout-ends-walk rule. Platform
+  fallback candidates after PATH, per platform (cycle-3 N2): Linux/macOS —
+  `~/.local/bin/ct`, `~/bin/ct`, `/usr/local/bin/ct`; Windows —
+  `%USERPROFILE%\bin\ct.exe`, `%LOCALAPPDATA%\CuratedThoughts\bin\ct.exe`.
 - **Subagents (cycle-1 m5):** each DSH subagent is its own `Agent`/SessionId, so
   each pays its own recall on its first step (memo is per agent). v1 **accepts
   the per-agent cost and documents it**; a process-wide result cache keyed on
