@@ -125,7 +125,9 @@ class TestVersionGate(unittest.TestCase):
         )
         self.change("integrations/demo/plugin.yaml", "name: demo\nversion: 0.2.0\n")
         problems = ct_ci_policy.gate_versions(self.root, base)
-        self.assertTrue(any("CHANGELOG" in p for p in problems), problems)
+        self.assertTrue(
+            any(p.startswith("integrations/demo/CHANGELOG.md: ") for p in problems), problems
+        )
 
     def test_bump_with_changelog_entry_passes(self):
         base = subprocess.run(
@@ -147,7 +149,13 @@ class TestVersionGate(unittest.TestCase):
     def test_mirror_mismatch_fails_even_with_no_change(self):
         self.change("integrations/demo/plugin.yaml", "name: demo\nversion: 9.9.9\n")
         problems = ct_ci_policy.gate_versions(self.root, "HEAD")
-        self.assertTrue(any("plugin.yaml#version" in p for p in problems), problems)
+        self.assertTrue(
+            any(
+                p.startswith("integrations/demo/integration.yaml: ") and "plugin.yaml#version" in p
+                for p in problems
+            ),
+            problems,
+        )
 
     def test_lowered_version_fails(self):
         base = subprocess.run(
@@ -192,7 +200,12 @@ class TestRobustness(unittest.TestCase):
         self.change("integrations/demo/plugin.yaml", "name: demo\nversion: v2.0.0\n")
         problems = ct_ci_policy.gate_versions(self.root, base)
         self.assertTrue(
-            any("cannot be compared" in p and "§5.1" in p for p in problems), problems
+            any(
+                p.startswith("integrations/demo/integration.yaml: ")
+                and "cannot be compared" in p and "§5.1" in p
+                for p in problems
+            ),
+            problems,
         )
 
     def test_bad_base_ref_is_clean_usage_error(self):

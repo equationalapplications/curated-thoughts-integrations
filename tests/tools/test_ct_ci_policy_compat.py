@@ -113,6 +113,7 @@ class TestCompatGate(unittest.TestCase):
         joined = "\n".join(problems)
         self.assertIn("missing required field", joined, problems)
         self.assertIn("compat.engine", joined, problems)
+        self.assertTrue(all(p.startswith("shared/compat.yaml: ") for p in problems), problems)
         self.assertIn("§5.3", joined)
 
 
