@@ -5,6 +5,8 @@ import type { Context } from '@deepseek-ai/cordis';
 import Schema from '@deepseek-ai/schemastery';
 import { probe } from './status.js';
 import { formatStatusBlock } from './format.js';
+import { renderWisdom } from './wisdom.js';
+import { expandHome } from '../scripts/ct_env.js';
 
 export interface Config {
   brainDir?: string;
@@ -47,6 +49,14 @@ export const inject = ['systemPrompt', 'skills'] as const;
  * the health block after all built-ins, closest to the conversation.
  */
 const CURATED_CONTEXT_ORDER = 130;
+
+/**
+ * Wisdom section position (spec L54 names the section). 6000 sits behind the
+ * health block and every built-in: memory is the least urgent system-prompt
+ * content and must never crowd out policy sections. Named constant like
+ * CURATED_CONTEXT_ORDER above (cycle-8 m4).
+ */
+export const CURATED_WISDOM_SECTION_ORDER = 6000;
 
 const SKILL_NAMES = [
   'curated-thoughts-usage',
@@ -116,6 +126,12 @@ interface DshContextExtensions {
       order: number;
       text: () => string;
     }): unknown;
+    section(s: {
+      name: string;
+      order: number;
+      interpolate: boolean;
+      text: (assembleCtx: unknown) => string;
+    }): unknown;
   };
   skills: {
     register(s: {
@@ -156,6 +172,37 @@ export function apply(ctx: Context, config: Config): void {
     order: CURATED_CONTEXT_ORDER,
     text: () => cached?.text ?? '',
   });
+
+  // (2b) Wisdom section. Opus cycle-6 M1: same precedence as the health
+  // probeEnv — an AMBIENT CURATED_BRAIN_DIR wins over the row default
+  // ('~/.brain'); expandHome whichever wins (the row default is a literal
+  // '~/.brain' and ct's Rust resolver does NOT expand tildes — cycle-5 M2).
+  // SNAPSHOT NOTE (m13 cycle 6): wisdomEnv copies process.env at apply() time;
+  // later PATH/env changes in the harness process are not seen — accepted for
+  // v1. Opus cycle-8 M1: on Windows a spread copy of process.env keeps the
+  // ORIGINAL key spelling (`Path`), so wisdomEnv.PATH would be undefined and
+  // allPathMatches would find nothing. DISCOVERY candidates are built from
+  // process.env (case-insensitive PATH lookup); wisdomEnv is used ONLY as the
+  // spawn `env` option.
+  const brainDirRaw = process.env.CURATED_BRAIN_DIR || config.brainDir;
+  const wisdomEnv: NodeJS.ProcessEnv = brainDirRaw
+    ? { ...process.env, CURATED_BRAIN_DIR: expandHome(brainDirRaw) }
+    : process.env;
+  try {
+    dsh.systemPrompt.section({
+      name: 'curated-thoughts-wisdom',
+      order: CURATED_WISDOM_SECTION_ORDER, // 6000 — named per spec L54 / house CURATED_CONTEXT_ORDER pattern (cycle-8 m4)
+      interpolate: false,
+      // the host invokes text(assembleCtx) on every model step; renderWisdom
+      // reads keyOf from that same {agent, scope, signal} shape; wisdomEnv
+      // carries the EXPANDED CURATED_BRAIN_DIR (probe + recall use it)
+      text: (assembleCtx: unknown) => renderWisdom(assembleCtx, { env: wisdomEnv }),
+    });
+  } catch (error) {
+    // Host API variance: a throw from section() must not take down what is
+    // already registered (mirrors the skills-loop guards).
+    console.warn('curated-thoughts: could not register wisdom section:', error);
+  }
 
   // (3) Refresh on agent/session-start. Fail-open: swallow probe errors so a
   // failed probe never crashes the plugin or the session.

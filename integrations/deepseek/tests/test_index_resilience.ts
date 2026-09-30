@@ -27,6 +27,7 @@ const { apply } = await import('../src/index.js');
 function mockCtx(failRegister: string | null = null) {
   const registered: string[] = [];
   const contexts: unknown[] = [];
+  const sections: unknown[] = [];
   return {
     ctx: {
       skills: {
@@ -38,11 +39,13 @@ function mockCtx(failRegister: string | null = null) {
       },
       systemPrompt: {
         context: vi.fn((c: unknown) => { contexts.push(c); return () => {}; }),
+        section: vi.fn((s: unknown) => { sections.push(s); return () => {}; }),
       },
       on: vi.fn(() => {}),
     },
     registered,
     contexts,
+    sections,
   };
 }
 
