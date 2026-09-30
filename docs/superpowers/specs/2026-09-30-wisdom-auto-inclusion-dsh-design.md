@@ -1,6 +1,6 @@
 # curated-thoughts-integrations — DeepSeek Harness wisdom-layer auto-inclusion design
 
-**Date:** 2026-09-30 · **Status:** Draft (pre-implementation; review pending) · **Priority:** high (Kurt directive 2026-09-30: DSH port first)
+**Date:** 2026-09-30 · **Status:** APPROVED WITH NITS (Opus spec cycle 4 = final verify; implementation underway — PR #22) · **Priority:** high (Kurt directive 2026-09-30: DSH port first)
 
 Forked from the Hermes design
 ([`2026-09-30-wisdom-auto-inclusion-design.md`](2026-09-30-wisdom-auto-inclusion-design.md),
@@ -298,9 +298,11 @@ debug one-liners with a `wisdom` prefix.
   extend the existing DSH e2e to assert exactly one wisdom block in the system
   node when the sidecar brain has seeded wisdom; memo replay byte-identical
   across a second step; real `ct recall` in the render path (live sidecar .deb
-  in the container); degraded/no-sidecar case renders `""` and the session
-  proceeds. The container is the isolated harness instance — this satisfies the
-  never-Kurt's-live-config guardrail by construction.
+  plus the standalone `ct` tarball installed in the container — the 2.12.1 .deb
+  does not ship the CLI; see the plan's Task 8 research); degraded/no-sidecar
+  case renders `""` and the session proceeds. The container is the isolated
+  harness instance — this satisfies the never-Kurt's-live-config guardrail by
+  construction.
 - **CI:** existing matrix + `tsc --noEmit`; no new runtime deps (Node stdlib
   `child_process` only).
 
