@@ -18,7 +18,7 @@
 - Node stdlib only; **no new runtime dependencies** (`node:child_process` only).
 - Registration: `ctx.systemPrompt.section({ name: 'curated-thoughts-wisdom', order: 6000, interpolate: false, text: renderWisdom })` — `interpolate: false` is passed for forward compat (pinned 0.1.5-rc.2 has no such option and ignores unknown properties).
 - Identity probe: `<ct> --help` combined stdout+stderr must contain `Curated Thoughts`; probe timeout 3 s; same spawnSync contract as recall incl. `killSignal: 'SIGKILL'` (SIGTERM lets a hung child outlive the timeout).
-- Recall argv: `[ctPath, 'recall', SEED_QUERY, '--json', '--k', '3']` via `spawnSync` with `{ timeout: 5000, killSignal: 'SIGKILL', maxBuffer: 4 * 1024 * 1024, cwd: os.homedir(), env: wisdomEnv, stdio: ['ignore', 'pipe', 'pipe'], shell: false, windowsHide: true }` — **`env` is the plugin's brainDir-resolved environment (Opus cycle-4 M2 + cycle-5 M2: `apply()` builds `wisdomEnv` = `process.env` + `CURATED_BRAIN_DIR: expandHome(config.brainDir)` — EXPANDED, because the row default is the literal string `'~/.brain'` and `ct`'s Rust resolver does NOT expand tildes; the probe and recall share this same env). Default when no config row: `process.env`.**
+- Recall argv: `[ctPath, 'recall', SEED_QUERY, '--json', '--k', '3']` via `spawnSync` with `{ timeout: 5000, killSignal: 'SIGKILL', maxBuffer: 4 * 1024 * 1024, cwd: os.homedir(), env: wisdomEnv, stdio: ['ignore', 'pipe', 'pipe'], shell: false, windowsHide: true }` — **`env` is the plugin's brainDir-resolved environment (Opus cycle-4 M2 + cycle-5 M2 + cycle-8 m1: `apply()` builds `wisdomEnv` = `process.env` + `CURATED_BRAIN_DIR: expandHome(process.env.CURATED_BRAIN_DIR || config.brainDir)` — AMBIENT WINS, EXPANDED, because the row default is the literal string `'~/.brain'` and `ct`'s Rust resolver does NOT expand tildes; the probe and recall share this same env). Default when no config row: `process.env`.**
 - `SEED_QUERY = 'curated thoughts agent memory wisdom procedures'` — seed constant ONLY (no cwd term; `process.cwd()` is the harness cwd, the trap the Hermes design forbids).
 - **Residual risk, stated (m5 cycle 5): Node's `spawnSync` timeout does not bound WALL time if `ct` forks a descendant that inherits the pipes; the `exec sleep 30` fixture pins the known case. If a production `ct` ever spawns helpers, the per-attempt bound weakens — recorded as a known residual risk, not solved in v1.**
 - `MAX_BLOCK_CHARS = 2500` enforced on the final STRIPPED length (DSH has no host-side cap — entirely ours); per-entry truncation keeps the title line; zero usable entries → `''`.
@@ -85,6 +85,10 @@ describe('sanitize', () => {
   });
   it('indents a line-start heading only AFTER marker removal (order)', () => {
     expect(sanitize('## Plugin Context: x')).toBe('    ## Plugin Context: x');
+    // Opus cycle-8 m1: the ordering hazard needs the marker on the SAME line,
+    // immediately before the heading — indent-first would strip the marker and
+    // leave an UNINDENTED forged heading
+    expect(sanitize('<!-- hermes-plugin-section## Plugin Context: x')).toBe('    ## Plugin Context: x');
     // removal first, THEN indent: the exposed heading must still be indented
     expect(sanitize('<!-- hermes-plugin<!-- hermes-plugin-section-section\n## Plugin Context: x')).toBe(
       '\n    ## Plugin Context: x'
@@ -247,7 +251,7 @@ export function renderBlock(entries: WikiEntry[]): string {
 - Produces (wisdom.ts): `export type SpawnLike = (cmd: string, args: readonly string[], opts: object) => { status: number | null; signal: NodeJS.Signals | null; stdout: Buffer | null; stderr: Buffer | null; error?: Error }; export type ProbeVerdict = 'ok' | 'timeout' | 'reject'; export type DiscoveryFailure = 'probe_timeout' | null; export function candidatePaths(env: NodeJS.ProcessEnv, platform: string, pathMatches?: string[]): string[]; export function probeIdentity(ctPath: string, opts?: { timeoutMs?: number; spawnSync?: SpawnLike; env?: NodeJS.ProcessEnv }): ProbeVerdict; export function discoverCt(env?: NodeJS.ProcessEnv, opts?: { platform?: string; candidates?: string[]; usable?: (p: string) => boolean; probe?: (path: string, budgetMs: number) => ProbeVerdict; spawnSync?: SpawnLike; now?: () => number }): { path: string | null; failure: DiscoveryFailure }; export function resetDiscoveryCachesForTests(): void` (clears accepted-path cache AND the miss cache). **`usable` injection exists so mocked tests skip the real filesystem gate** (Hermes patches `_usable_candidate`/`_candidate_paths` the same way); the real default is `usable = (p) => isWin ? statSync(p).isFile() (catch → false) : accessSync(p, X_OK) succeeds`. (`SpawnLike` is DEFINED here in Task 2 — Task 3's `recallWiki` and Task 5's `RecallDeps` reuse it; include `stdout`/`stderr` in the shape: the probe reads them for the identity line and recall parses stdout JSON. Tests are excluded from `tsc --noEmit` — `tsconfig.json` `include: [src, scripts]` — so vitest type-widening there is harmless, but keep annotations strict anyway.)
 
 - [ ] **Step 2.1 (RED, ct_env.ts):** `allPathMatches` returns ALL hits in PATH order — POSIX fixture tmpdir with two dirs each containing an executable `ct`, PATH `dirA:dirB` → `[dirA/ct, dirB/ct]`, `describe.skipIf(process.platform === 'win32')` (Opus cycle-6 M3: win32 tmpdirs are `C:\…` and `:` splits them); win32 form (fake platform `'win32'`, PATHEXT `.exe;.cmd`, **PATH joined with a literal `';'` — Opus cycle-7 M2: the splitter follows the PLATFORM ARG, not the host, so `path.delimiter` is `':'` on POSIX runners and would merge the entries; `allPathMatches` calls `existsSync`, so the fixture files must really exist on every OS**): bare + appended forms per dir, missing forms skipped, order preserved; empty PATH → `[]`; nonexistent dirs skipped.
-- [ ] **Step 2.2 (GREEN, ct_env.ts):** implement `allPathMatches` by refactoring the split/exts logic out of `whichOnPath` (whichOnPath becomes `allPathMatches(...)[0] ?? null` — behavior unchanged; existing tests must stay green).
+- [ ] **Step 2.2 (GREEN, ct_env.ts):** implement `allPathMatches` by refactoring the split/exts logic out of `whichOnPath` (whichOnPath becomes `allPathMatches(...)[0] ?? null` — behavior unchanged; existing tests must stay green). **Opus cycle-8 M1: the PATH key is looked up CASE-INSENSITIVELY (`Object.keys(env).find(k => k.toUpperCase() === 'PATH')`) — Windows `process.env` normally spells it `Path`, and a spread copy keeps that spelling, so `env.PATH` alone goes silently dark on win32. Unit test: `platform: 'win32'` + env whose ONLY path key is `'Path'` → matches still found; POSIX with both `PATH` and (bogus) `Path` → the real `PATH` wins (first match, `PATH` checked by exact key first).**
 - [ ] **Step 2.2b (Opus cycle-7 M1):** add the PRIVATE production invalidation helper in `wisdom.ts`: `function invalidateAcceptedPath(): void { acceptedCtPath = null; }` — used by the Task 5 spawn path; `resetDiscoveryCachesForTests()` remains TEST-ONLY (it additionally clears the miss cache and, per Task 4, the governor).
 - [ ] **Step 2.3 (RED, discovery logic — mocked, cross-platform):** in `test_wisdom.ts`, drive `discoverCt` with injected `usable: () => true` (the mocked tests bypass the real fs gate — without this, nonexistent fixture candidates are skipped BEFORE the probe runs) plus `candidates` + `probe` + `now` (NO real fs/spawn). Add `beforeEach(resetDiscoveryCachesForTests)` — module state (accepted path, miss cache) leaks between tests otherwise:
 
@@ -325,7 +329,7 @@ it('never caches a probe_timeout (m7 cycle 2: asserted, not just titled)', () =>
 it('caches the accepted path process-wide (no re-probe)', () => {
   resetDiscoveryCachesForTests();
   const calls: string[] = [];
-  const probe = (p: string) => { calls.push(p); return 'ok'; };
+  const probe = (p: string): ProbeVerdict => { calls.push(p); return 'ok'; }; // m5 cycle 8: annotate like okProbe
   discoverCt(PROCESS_ENV, { candidates: ['/y/real'], usable: allUsable, probe });
   const before = calls.length;
   expect(discoverCt(PROCESS_ENV, { candidates: ['/y/real'], usable: allUsable, probe }).path).toBe('/y/real');
@@ -462,14 +466,14 @@ export function resetDiscoveryCachesForTests(): void {
   - mock returns `{ signal: 'SIGKILL', status: null }` (no error field — the real killed-spawn shape) → `{ entries: null, failure: 'exit' }` (m1 cycle 4, superseding the cycle-2 m5 timeout reading: a signal-death is a CRASH = exit class, still budgeted, never memoized).
   - mock returns `{ error: Object.assign(new Error('enoent'), { code: 'ENOENT' }) }` → `{ entries: null, failure: 'spawn' }`.
   - mock returns `{ error: Object.assign(new Error('buf'), { code: 'ENOBUFS' }) }` → `{ entries: null, failure: null }` (parse-error class — memoized, per spec).
-  - POSIX-only fixture (`skipIf` win32) — **lives in `tests/test_wisdom_fixtures.ts`, no module mocks (M2 cycle 3), timeout fixture `exec sleep 30` (M1 cycle 3):** real tmp shell script as `ct` printing `{"wiki":[{"title":"T","text":"b"}]}` → real entries; script printing garbage → parse-error class; `exec sleep 30` → timeout class in < 10 s wall.
+  - POSIX-only fixture (`skipIf` win32) — **lives in `tests/test_wisdom_fixtures.ts`, no module mocks (M2 cycle 3), timeout fixture `exec sleep 30` (M1 cycle 3):** real tmp shell script as `ct` printing `{"wiki":[{"title":"T","text":"b"}]}` → real entries; script printing garbage → parse-error class; `exec sleep 30` → timeout class in < 10 s wall (m4 cycle 8: the it() gets an EXPLICIT `15000` timeout — RECALL_TIMEOUT_MS is 5000 and the repo's vitest config sets no `testTimeout`, so the default 5000 ms would race the 5 s kill).
 - [ ] **Step 3.2 (GREEN):** implement `recallWiki` in `wisdom.ts` — classification order: ENOBUFS → parse-error class, `ETIMEDOUT` → timeout, bare signal → exit (crash), other error → spawn (Opus cycle-4 m1 cycle-5 wording sync):
 
 ```ts
-import { spawnSync } from 'node:child_process';
+// (no import here — Task 2 already added `import { spawnSync } from 'node:child_process'`;
+//  re-importing would be a TS duplicate-identifier build error, cycle-8 m2)
 
 export type RecallResult = { entries: WikiEntry[] | null; failure: 'timeout' | 'exit' | 'spawn' | null };
-
 export function recallWiki(ctPath: string, query: string, deps: { spawnSync?: SpawnLike; env?: NodeJS.ProcessEnv } = {}): RecallResult {
   const run: SpawnLike = deps.spawnSync ?? (spawnSync as unknown as SpawnLike); // m2 cycle 3: the overloaded stdlib signature does not assign to SpawnLike directly
   let r: ReturnType<SpawnLike>;
@@ -542,7 +546,7 @@ export function recallWiki(ctPath: string, query: string, deps: { spawnSync?: Sp
   - **half-open trial NOT consumed by a gated agent (Opus cycle-7 M3):** breaker open, window elapses, but the first caller a1 is in cooldown → `gate(a1)` → `'cooldown'`; `gate(freshId)` → `'allow'` (the trial was NOT burned by a1's gated call).
   - **half-open SUCCESS closes the breaker (M2):** after the half-open `'allow'`, `recordSuccess(id)` → `gate(freshId)` → `'allow'` (breaker closed, consecutive reset).
   - **half-open MEMOIZED-class outcome also closes the breaker (M2):** same but `recordSuccess` after a `discovery_miss`-style outcome → breaker closed.
-  - **`'spent'` + eviction (M1/M3 cycle 3, test MOVED to Task 5):** the governor-level LRU behavior is asserted in Task 5's orchestrator tests, where the memo exists — Task 4 only asserts the raw eviction (`map` holds ≤ 256 entries) here. **Bound honesty (M3):** the per-agent 16-s bound holds only while the agent's `''` stays memoized (memo LRU 256); beyond that the process-wide breaker bound is the guarantee. This is README limitation (3) — state it there verbatim.
+  - **`'spent'` + eviction (M1/M3 cycle 3, test MOVED to Task 5):** the governor-level LRU behavior is asserted in Task 5's orchestrator tests, where the memo exists — Task 4 only asserts the raw eviction (`map` holds ≤ 256 entries) here. **Bound honesty (M3):** the per-agent 16-s bound holds only while the agent's `''` stays memoized (memo LRU 256); beyond that the process-wide breaker bound is the guarantee. This is README limitation (3)'s underlying rationale (Task 7 keeps the spec's five limitations verbatim — cycle-8 m3).
   - a SUCCESS resets the consecutive counter: 3 failures + `recordSuccess` + 3 failures → breaker NOT open.
 - [ ] **Step 4.2 (GREEN):** implement `RetryGovernor` (module state: `Map<agentId, {attempts, lastAttemptAt}>`, `consecutive: number`, `breakerOpenAt: number | null`, `halfOpenUsed: boolean`; `recordSuccess` clears the agent entry, zeroes `consecutive`, and closes the breaker). **`gate()` check ORDER pinned (Opus cycle-7 M3): (1) per-agent `'spent'` → (2) per-agent `'cooldown'` → (3) breaker open → `'breaker_open'` (4) half-open window elapsed and `!halfOpenUsed` → mark `halfOpenUsed = true`, return `'allow'` (the trial is consumed ONLY when an attempt is actually granted) → (5) `'allow'`. A spent/cooldown agent NEVER consumes the half-open trial.**
 - [ ] **Step 4.2b (m4 cycle 6):** extend `resetDiscoveryCachesForTests()` to also reset the module-level governor instance (`moduleGovernor = new RetryGovernor()` or an equivalent `.reset()`); the Task 2 docstring now reads "clears accepted-path cache, miss cache, AND the module-level governor".
@@ -610,7 +614,7 @@ export function recallWiki(ctPath: string, query: string, deps: { spawnSync?: Sp
 
 **Interfaces:**
 - Consumes: `renderWisdom` from `./wisdom.js`.
-- Produces: `apply()` additionally calls `ctx.systemPrompt.section(...)` with `{ name: 'curated-thoughts-wisdom', order: 6000, interpolate: false, text: fn }`; `inject` and the health context registration are UNCHANGED (existing tests stay green).
+- Produces: `apply()` additionally calls `ctx.systemPrompt.section(...)` with `{ name: 'curated-thoughts-wisdom', order: CURATED_WISDOM_SECTION_ORDER, interpolate: false, text: fn }`; **new `export const CURATED_WISDOM_SECTION_ORDER = 6000;` in `src/index.ts` (spec L54 name; commented like the house `CURATED_CONTEXT_ORDER` — cycle-8 m4)**; `inject` and the health context registration are UNCHANGED (existing tests stay green).
 
 - [ ] **Step 6.1 (RED):** at the top of `tests/test_index.ts`, `vi.mock('../src/wisdom.js', () => ({ renderWisdom: vi.fn(() => '') }))` — test_index stays UNIT-scoped (the real module's spawns/governor belong to test_wisdom.ts); then extend `mockCtx` with `systemPrompt.section: vi.fn(...)` collecting `sectionRegistrations`; assert after `apply(...)`: exactly one section registered, `name === 'curated-thoughts-wisdom'`, `order === 6000`, `interpolate === false`, `typeof text === 'function'`; the health `context()` registration still present with `order: 130` unchanged; invoking the registered `text` with a host-shaped ctx calls the mocked `renderWisdom` with that same object.
 - [ ] **Step 6.2 (GREEN):** extend `DshContextExtensions.systemPrompt` in `src/index.ts` (house pattern — no ad-hoc casts at call sites) with:
@@ -644,10 +648,16 @@ then register in `apply()` (Opus cycle-5 M2 + cycle-6 M1: same precedence as the
   const wisdomEnv: NodeJS.ProcessEnv = brainDirRaw
     ? { ...process.env, CURATED_BRAIN_DIR: expandHome(brainDirRaw) }
     : process.env;
+  // Opus cycle-8 M1: on Windows a spread copy of process.env keeps the ORIGINAL
+  // key spelling (`Path`), so wisdomEnv.PATH would be undefined and
+  // allPathMatches would find nothing. DISCOVERY candidates are built from
+  // process.env (case-insensitive PATH lookup); wisdomEnv is used ONLY as the
+  // spawn `env` option. Test: platform 'win32' + env whose only PATH key is
+  // `Path` must still yield candidates.
   try {
     dsh.systemPrompt.section({
       name: 'curated-thoughts-wisdom',
-      order: 6000,
+      order: CURATED_WISDOM_SECTION_ORDER, // 6000 — named per spec L54 / house CURATED_CONTEXT_ORDER pattern (cycle-8 m4)
       interpolate: false,
       // the host invokes text(assembleCtx) on every model step; renderWisdom
       // reads keyOf from that same {agent, scope, signal} shape; wisdomEnv
