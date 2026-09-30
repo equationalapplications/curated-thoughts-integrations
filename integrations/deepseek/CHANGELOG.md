@@ -2,6 +2,32 @@
 
 ## Unreleased
 
+## 0.3.0 — 2026-09-30
+
+New system-prompt section: **wisdom auto-inclusion**. Once per agent, the
+plugin recalls the brain's wisdom layer via the standalone `ct` CLI
+(`ct recall --json --k 3`) and renders a sanitized digest (max 2500 chars) as
+a `curated-thoughts-wisdom` prompt section. Memoized per agent id, so host
+re-renders at compression boundaries are byte-identical.
+
+The section is a **no-op** when the `ct` binary is absent or not identifiable,
+when the brain has no wiki wisdom, or when the backend times out. Failure
+handling is budgeted: two recall attempts per agent (≥ 60 s apart), then the
+agent's block stays absent for the process; a process-wide circuit breaker
+(four consecutive failures → five-minute open, one half-open probe) bounds
+the worst case.
+
+**Limitations (v1):** (1) after a harness restart on a resumed session the
+memo is cold — the first step re-recalls and the block may change bytes once;
+(2) the same one-time cost applies if the first recall attempt fails
+transiently and a later render succeeds; (3) memo eviction beyond 256 live
+agents per process; (4) when the `ct` backend is down, a session stops trying
+after two failed attempts (its block stays absent for the session's life in
+that process); (5) while the backend is down, the harness may pause briefly
+(seconds) on recall attempts, bounded per process by the retry budget +
+circuit breaker. Set `CT_WISDOM_DEBUG=1` to emit a per-render diagnostic line
+on stderr.
+
 ## 0.2.2 — 2026-09-18
 
 Fix empty-string fallback in brain-dir resolution. `??` operators in
