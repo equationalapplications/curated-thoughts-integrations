@@ -306,3 +306,121 @@ describe('probeIdentity (mocked spawnSync injection — all platforms)', () => {
     expect(probeIdentity('/bin/ct', { spawnSync: spawn as never })).toBe('ok');
   });
 });
+
+// ── Task 3: recallWiki — pinned argv + failure classes (mocked, all platforms) ──
+
+import { recallWiki } from '../src/wisdom.js';
+
+const wisdomEnv = { CURATED_BRAIN_DB: '/tmp/brain.db' } as NodeJS.ProcessEnv;
+
+function spawnResult(partial: Record<string, unknown>) {
+  return {
+    status: 0,
+    signal: null,
+    stdout: null,
+    stderr: null,
+    ...partial,
+  };
+}
+
+describe('recallWiki (mocked spawnSync injection — all platforms)', () => {
+  it('pins argv, all recall options, and the identity of the env object', () => {
+    const runSpy = vi.fn(() => spawnResult({ stdout: Buffer.from('{"wiki": []}') }));
+    const r = recallWiki('/bin/ct', 'procedures', { spawnSync: runSpy as never, env: wisdomEnv });
+    expect(r).toEqual({ entries: [], failure: null });
+    expect(runSpy).toHaveBeenCalledTimes(1);
+    expect(runSpy).toHaveBeenCalledWith('/bin/ct', ['recall', 'procedures', '--json', '--k', '3'], {
+      timeout: 5000,
+      killSignal: 'SIGKILL',
+      maxBuffer: 4 * 1024 * 1024,
+      cwd: homedir(),
+      env: wisdomEnv,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      shell: false,
+      windowsHide: true,
+    });
+    // deep equality alone does not prove identity — assert the same object
+    expect((runSpy.mock.calls[0]![2] as { env: NodeJS.ProcessEnv }).env).toBe(wisdomEnv);
+  });
+
+  it('parses valid wiki JSON with full coercion rules', () => {
+    const stdout = Buffer.from(
+      JSON.stringify({
+        wiki: [
+          { title: 'T1', text: 'body' },
+          { text: 'no title' }, // missing title → ''
+          { title: 'no text' }, // missing text → ''
+          { title: 42, text: null }, // non-string → ''
+          'a string item', // non-dict → skipped
+          ['array', 'item'], // arrays are not dicts → skipped
+        ],
+      }),
+    );
+    const spawn = vi.fn(() => spawnResult({ stdout }));
+    const r = recallWiki('/bin/ct', 'q', { spawnSync: spawn as never });
+    expect(r).toEqual({
+      entries: [
+        { title: 'T1', text: 'body' },
+        { title: '', text: 'no title' },
+        { title: 'no text', text: '' },
+        { title: '', text: '' },
+      ],
+      failure: null,
+    });
+  });
+
+  it('chunks without a wiki key → parse-error class (entries null, failure null)', () => {
+    const stdout = Buffer.from(JSON.stringify({ results: [{ title: 'x', text: 'y' }] }));
+    const spawn = vi.fn(() => spawnResult({ stdout }));
+    expect(recallWiki('/bin/ct', 'q', { spawnSync: spawn as never })).toEqual({ entries: null, failure: null });
+  });
+
+  it("stdout 'not json' → parse-error class", () => {
+    const spawn = vi.fn(() => spawnResult({ stdout: Buffer.from('not json') }));
+    expect(recallWiki('/bin/ct', 'q', { spawnSync: spawn as never })).toEqual({ entries: null, failure: null });
+  });
+
+  it('empty wiki list → zero hits success', () => {
+    const spawn = vi.fn(() => spawnResult({ stdout: Buffer.from('{"wiki": []}') }));
+    expect(recallWiki('/bin/ct', 'q', { spawnSync: spawn as never })).toEqual({ entries: [], failure: null });
+  });
+
+  it('non-zero exit → exit class', () => {
+    const spawn = vi.fn(() => spawnResult({ status: 3, stdout: Buffer.from(''), stderr: Buffer.from('boom') }));
+    expect(recallWiki('/bin/ct', 'q', { spawnSync: spawn as never })).toEqual({ entries: null, failure: 'exit' });
+  });
+
+  it('ETIMEDOUT error → timeout class', () => {
+    const err = Object.assign(new Error('kill'), { code: 'ETIMEDOUT' });
+    const spawn = vi.fn(() => spawnResult({ error: err }));
+    expect(recallWiki('/bin/ct', 'q', { spawnSync: spawn as never })).toEqual({ entries: null, failure: 'timeout' });
+  });
+
+  it('bare signal-kill (no error field) → EXIT class, not timeout (crash)', () => {
+    const spawn = vi.fn(() => spawnResult({ signal: 'SIGKILL', status: null }));
+    expect(recallWiki('/bin/ct', 'q', { spawnSync: spawn as never })).toEqual({ entries: null, failure: 'exit' });
+  });
+
+  it('ENOENT error → spawn class', () => {
+    const err = Object.assign(new Error('enoent'), { code: 'ENOENT' });
+    const spawn = vi.fn(() => spawnResult({ error: err }));
+    expect(recallWiki('/bin/ct', 'q', { spawnSync: spawn as never })).toEqual({ entries: null, failure: 'spawn' });
+  });
+
+  it('ENOBUFS error → parse-error class (memoized by the orchestrator, per spec)', () => {
+    const err = Object.assign(new Error('buf'), { code: 'ENOBUFS' });
+    const spawn = vi.fn(() => spawnResult({ error: err }));
+    expect(recallWiki('/bin/ct', 'q', { spawnSync: spawn as never })).toEqual({ entries: null, failure: null });
+  });
+
+  it('a throwing spawnSync → spawn class (defensive; spawnSync never throws in practice)', () => {
+    const spawn = vi.fn(() => { throw new Error('nul byte'); });
+    expect(recallWiki('/bin/ct', 'q', { spawnSync: spawn as never })).toEqual({ entries: null, failure: 'spawn' });
+  });
+
+  it('defaults env to process.env when deps.env is absent', () => {
+    const runSpy = vi.fn(() => spawnResult({ stdout: Buffer.from('{"wiki": []}') }));
+    recallWiki('/bin/ct', 'q', { spawnSync: runSpy as never });
+    expect((runSpy.mock.calls[0]![2] as { env: NodeJS.ProcessEnv }).env).toBe(process.env);
+  });
+});

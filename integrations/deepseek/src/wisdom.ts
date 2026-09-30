@@ -205,3 +205,53 @@ export function resetDiscoveryCachesForTests(): void {
   acceptedCtPath = null;
   missCache = null;
 }
+
+// ── Task 3: recallWiki — pinned argv, failure classes ──────────────────────
+// (no child_process import here — Task 2 already added `import { spawnSync }
+// from 'node:child_process'`; re-importing would be a duplicate identifier)
+
+export type RecallResult = { entries: WikiEntry[] | null; failure: 'timeout' | 'exit' | 'spawn' | null };
+
+export function recallWiki(ctPath: string, query: string, deps: { spawnSync?: SpawnLike; env?: NodeJS.ProcessEnv } = {}): RecallResult {
+  const run: SpawnLike = deps.spawnSync ?? (spawnSync as unknown as SpawnLike); // m2 cycle 3: the overloaded stdlib signature does not assign to SpawnLike directly
+  let r: ReturnType<SpawnLike>;
+  try {
+    r = run(ctPath, ['recall', query, '--json', '--k', String(RECALL_K)], {
+      ...RECALL_OPTION_BASE,
+      timeout: RECALL_TIMEOUT_MS,
+      env: deps.env ?? process.env, // Opus cycle-4 M2: brainDir-resolved env from the plugin row
+    });
+  } catch {
+    return { entries: null, failure: 'spawn' }; // spawnSync never throws; defensive only
+  }
+  // classification ORDER (cycle-2 M4, revised m1 cycle 4): ENOBUFS first (parse-
+  // error class), then ETIMEDOUT (timeout), then a bare signal-kill = EXIT (a
+  // crash, never memoized as a timeout — Hermes: negative returncode = exit),
+  // then other errors = spawn. A signal-kill falling into the parse-error path
+  // would MEMOIZE a transient crash; classing it 'timeout' would let a crashing
+  // impostor pin probe_timeout on every discovery walk.
+  if (r.error && (r.error as NodeJS.ErrnoException).code === 'ENOBUFS') {
+    return { entries: null, failure: null }; // overflow ≙ parse error (spec)
+  }
+  if (r.error && (r.error as NodeJS.ErrnoException).code === 'ETIMEDOUT') {
+    return { entries: null, failure: 'timeout' };
+  }
+  if (r.signal != null) return { entries: null, failure: 'exit' }; // crash (m1 cycle 4)
+  if (r.error) return { entries: null, failure: 'spawn' };
+  if (typeof r.status === 'number' && r.status !== 0) return { entries: null, failure: 'exit' };
+  let data: unknown;
+  try {
+    data = JSON.parse((r.stdout ?? Buffer.alloc(0)).toString('utf8'));
+  } catch {
+    return { entries: null, failure: null };
+  }
+  const wiki = (data as { wiki?: unknown } | null)?.wiki;
+  if (!Array.isArray(wiki)) return { entries: null, failure: null };
+  const entries: WikiEntry[] = [];
+  for (const item of wiki) {
+    if (typeof item !== 'object' || item === null || Array.isArray(item)) continue; // arrays are not dicts (m5 cycle 2)
+    const o = item as { title?: unknown; text?: unknown };
+    entries.push({ title: typeof o.title === 'string' ? o.title : '', text: typeof o.text === 'string' ? o.text : '' });
+  }
+  return { entries, failure: null };
+}

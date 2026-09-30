@@ -2,7 +2,7 @@ import { describe, it, expect, afterEach } from 'vitest';
 import { mkdtempSync, writeFileSync, chmodSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { probeIdentity } from '../src/wisdom.js';
+import { probeIdentity, recallWiki } from '../src/wisdom.js';
 
 // POSIX-only REAL-executable fixtures — NO module mocks anywhere in this file
 // (M2 cycle 3: vi.mock is file-wide-hoisted and would poison these real spawns).
@@ -63,4 +63,36 @@ describe.skipIf(isWin)('probeIdentity — real executable fixtures (POSIX)', () 
     expect(probeIdentity(p)).toBe('reject');
     expect(Date.now() - start).toBeLessThan(10_000);
   });
+});
+
+describe.skipIf(isWin)('recallWiki — real executable fixtures (POSIX, no module mocks)', () => {
+  let dir: string;
+
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('a real ct printing wiki JSON yields real entries', () => {
+    dir = mkdtempSync(join(tmpdir(), 'ct-wisdom-fixture-'));
+    const ct = makeScript(dir, 'ct', `printf '{"wiki":[{"title":"T","text":"b"}]}'`);
+    expect(recallWiki(ct, 'q')).toEqual({ entries: [{ title: 'T', text: 'b' }], failure: null });
+  });
+
+  it('a real ct printing garbage yields the parse-error class', () => {
+    dir = mkdtempSync(join(tmpdir(), 'ct-wisdom-fixture-'));
+    const ct = makeScript(dir, 'ct', "printf 'garbage not json'");
+    expect(recallWiki(ct, 'q')).toEqual({ entries: null, failure: null });
+  });
+
+  it(
+    'a hung real ct (exec sleep 30) is SIGKILLed → timeout class in < 10 s wall',
+    { timeout: 15_000 },
+    () => {
+      dir = mkdtempSync(join(tmpdir(), 'ct-wisdom-fixture-'));
+      const ct = makeScript(dir, 'ct', 'exec sleep 30');
+      const start = Date.now();
+      expect(recallWiki(ct, 'q')).toEqual({ entries: null, failure: 'timeout' });
+      expect(Date.now() - start).toBeLessThan(10_000);
+    },
+  );
 });
