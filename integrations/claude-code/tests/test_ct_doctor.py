@@ -562,11 +562,22 @@ class RegistrationTests(DoctorTestCase):
         r = self.check()
         self.assertEqual(r.status, ct_doctor.FAIL)
 
-    def test_malformed_config_fails_with_the_parse_error(self):
+    def test_malformed_config_warns_with_the_parse_error(self):
+        # A config that exists but will not parse is not proof the sidecar is
+        # unregistered, so it warns rather than failing.
         self.write_config("{not json")
         r = self.check()
-        self.assertEqual(r.status, ct_doctor.FAIL)
+        self.assertEqual(r.status, ct_doctor.WARN)
         self.assertIn("not valid JSON", r.detail)
+        self.assertIn("not proof", r.hint)
+
+    def test_config_that_is_not_a_json_object_warns(self):
+        # Same reasoning as a parse error: the question is unanswered, not
+        # answered in the negative.
+        self.write_config("[]")
+        r = self.check()
+        self.assertEqual(r.status, ct_doctor.WARN)
+        self.assertIn("does not hold a JSON object", r.detail)
 
     def test_registered_without_mcp_flag_warns(self):
         self.write_config(

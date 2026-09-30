@@ -134,6 +134,27 @@ class OutputShapeTests(HookTestCase):
         # Hermes emits {"context": ...}; Claude Code ignores that shape.
         proc, _ = self.run_hook()
         self.assertNotIn("context", json.loads(proc.stdout))
+    def test_a_none_section_prints_nothing_at_all(self):
+        # context_section() returns None when its internal snapshot() raises.
+        # The hook must print nothing rather than an empty additionalContext,
+        # the same `if section:` guard the Hermes hook uses.
+        (self.plugin / "scripts" / "ct_status.py").write_text(
+            "def context_section(env=None):\n    return None\n",
+            encoding="utf-8",
+        )
+        proc, _ = self.run_hook()
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout.strip(), "")
+
+    def test_an_empty_section_prints_nothing_at_all(self):
+        (self.plugin / "scripts" / "ct_status.py").write_text(
+            'def context_section(env=None):\n    return ""\n',
+            encoding="utf-8",
+        )
+        proc, _ = self.run_hook()
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout.strip(), "")
+
 
 
 class DegradedTests(HookTestCase):

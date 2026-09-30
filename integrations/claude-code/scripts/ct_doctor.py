@@ -621,9 +621,11 @@ def check_claude_code_registration(cwd=None):
     `.mcp.json` beside the code. Either is a real registration, so both are
     consulted — user scope first, since that is the one install.sh writes.
 
-    Plain `json`; no yaml dependency. The registration decides PASS or FAIL,
-    and plugin enablement can only downgrade a PASS to WARN, because a
-    `--plugin-dir` install leaves nothing on disk to verify.
+    Plain `json`; no yaml dependency. Every input resolves to exactly one
+    verdict: a registration with `--mcp` is PASS, no registration at all is
+    FAIL, and the two "cannot tell" cases are WARN -- a config that exists but
+    will not parse, and a registration whose plugin enablement cannot be
+    confirmed because a `--plugin-dir` install leaves nothing on disk.
     """
     project_config = (
         Path(cwd) / PROJECT_MCP_CONFIG if cwd else Path(PROJECT_MCP_CONFIG)
@@ -632,9 +634,10 @@ def check_claude_code_registration(cwd=None):
     entry = _mcp_entry(user_data)
     source = CLAUDE_CONFIG
     scope_note = ""
+    project_err = None
 
     if entry is None:
-        project_data, _project_err = _read_json_file(project_config)
+        project_data, project_err = _read_json_file(project_config)
         project_entry = _mcp_entry(project_data)
         if project_entry is not None:
             entry = project_entry
@@ -645,6 +648,32 @@ def check_claude_code_registration(cwd=None):
             )
 
     if entry is None:
+        # A config that exists but cannot be read is not proof of absence, so
+        # it warns instead of failing (the verdict table in the spec's §7).
+        # Only "not found" means the harness was never configured at that
+        # scope; an unparseable file or a non-object top level leaves the
+        # question genuinely unanswered.
+        unreadable = [
+            (path, err)
+            for path, err in (
+                (CLAUDE_CONFIG, user_err),
+                (project_config, project_err),
+            )
+            if err and err != "not found"
+        ]
+        if unreadable:
+            bad_path, bad_err = unreadable[0]
+            return CheckResult(
+                "claude-code-registration",
+                WARN,
+                f"no mcpServers.{MCP_SERVER_KEY} registration found, but "
+                f"{bad_path} {bad_err}",
+                f"A config that cannot be parsed is not proof that the "
+                f"sidecar is unregistered, so this is a warning rather than a "
+                f"failure. Fix the JSON in {bad_path} and re-run the check. "
+                f"If it turns out nothing registers the sidecar:\n"
+                + _registration_hint(CLAUDE_CONFIG),
+            )
         if user_data is None:
             return CheckResult(
                 "claude-code-registration",
@@ -660,7 +689,6 @@ def check_claude_code_registration(cwd=None):
             f"{project_config} registers it either",
             _registration_hint(CLAUDE_CONFIG),
         )
-
     args = entry.get("args")
     args = [str(a) for a in args] if isinstance(args, list) else []
     if "--mcp" not in args:
