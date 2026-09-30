@@ -18,6 +18,11 @@
 #      path and refuses to start (driven directly over MCP stdio) — this pins
 #      why the shipped patch rows resolve the brain dir at composition time;
 #   7. re-running the installer is a no-op.
+#   8. (always) a seeded wiki entry reaches the wisdom section: `ct` (installed
+#      test-only in the image) ingests a one-note vault, the cold `ct recall`
+#      is timed against RECALL_TIMEOUT_MS, run 1's prompt carries EXACTLY ONE
+#      wisdom block containing the seeded entry, and the degraded run 2
+#      (missing brain dir) carries NO wisdom block (silent no-op).
 #
 # No embedding backend runs here (no Ollama, no fastembed download): the live
 # call uses curated_proposals_list, which needs neither.
@@ -70,6 +75,47 @@ printf '1\n0\n1\n' | curated-thoughts-mcp --onboard --vault "$HOME/vault" --forc
 curated-thoughts-mcp >"$OUT/migrate.log" 2>&1 || true
 check 'brain config written' test -f "$HOME/.brain/config.json"
 check 'brain.db migrated' test -s "$HOME/.brain/brain.db"
+
+# ---------------------------------------------------------------------------
+section 'seed wisdom (ct CLI + vault ingest)'
+# Test-only provisioning (plan Step 8.3): the wisdom section recalls the brain's
+# wiki layer through the standalone `ct` binary. Seed one wiki-bearing note so
+# recall has something to return; without this the wisdom checks below would
+# pass vacuously (a no-op section renders '').
+if ct --help 2>/dev/null | grep -q 'Curated Thoughts'; then
+  mkdir -p "$HOME/vault/notes"
+  cat >"$HOME/vault/notes/e2e-wisdom-seed.md" <<'EOF'
+---
+okf_version: 0.1
+profile: llm-wiki/1
+title: E2E wisdom seed — tire pressure is 42 psi
+entity_type: fact
+created_at: 2026-09-30T00:00:00Z
+---
+
+The e2e wisdom seed fact is: the fleet tire pressure is 42 psi.
+EOF
+  ct ingest --yes >"$OUT/ingest.log" 2>&1
+  ingest_rc=$?
+  check "ct ingest exits 0 (rc=$ingest_rc)" test "$ingest_rc" -eq 0
+  # Prove recall returns the entry BEFORE any dsh session runs (cold-path
+  # timing also lands here: plan Step 8.1 measures the first real recall).
+  recall_start=$(date +%s%N)
+  ct recall 'tire pressure' --json --k 3 >"$OUT/recall.json" 2>"$OUT/recall.err"
+  recall_rc=$?
+  recall_ms=$(( ($(date +%s%N) - recall_start) / 1000000 ))
+  check "ct recall exits 0 (rc=$recall_rc, cold ${recall_ms}ms)" test "$recall_rc" -eq 0
+  echo "      cold recall: ${recall_ms}ms (RECALL_TIMEOUT_MS budget: 5000ms)"
+  check 'recall JSON carries the seeded entry' \
+    sh -c "grep -q 'tire pressure' '$OUT/recall.json'"
+  if [ "$recall_ms" -gt 5000 ]; then
+    bad "cold recall ${recall_ms}ms exceeds RECALL_TIMEOUT_MS=5000 — bump the constant per spec pre-authorization"
+  else
+    ok "cold recall within the 5000ms budget"
+  fi
+else
+  bad 'ct CLI not on PATH — wisdom seed skipped, wisdom checks would be vacuous'
+fi
 
 # Provider settings: the key stays in the environment (apiKeyEnv); this file
 # only names it. Written before any dsh boot.
@@ -202,6 +248,18 @@ else
     sh -c "grep -q 'Memory sidecar DEGRADED' '$OUT/run2.session.jsonl'"
   check 'routing reminder reaches the prompt' \
     sh -c "grep -q 'Curated Thoughts memory is available over MCP' '$OUT/run2.session.jsonl'"
+  # Wisdom assertions (plan Step 8.2): Run 1 has a healthy seeded brain, so its
+  # system prompt must carry exactly one wisdom block with the seeded entry.
+  check 'wisdom block reaches the system prompt' \
+    sh -c "grep -q '## Curated Thoughts — relevant memory' '$OUT/run1.session.jsonl'"
+  check 'wisdom block carries the seeded entry' \
+    sh -c "grep -q 'tire pressure is 42 psi' '$OUT/run1.session.jsonl'"
+  check 'exactly one wisdom block in the prompt' \
+    sh -c "[ \"\$(grep -c '## Curated Thoughts — relevant memory' '$OUT/run1.session.jsonl')\" -eq 1 ]"
+  # Degraded run 2 points at a MISSING brain dir: the wisdom section must be a
+  # silent no-op there (no block, no error text).
+  check 'degraded run has NO wisdom block (missing brain → no-op)' \
+    sh -c "! grep -q '## Curated Thoughts — relevant memory' '$OUT/run2.session.jsonl'"
   if [ "$run2_rc" -ne 0 ]; then tail -20 "$OUT/run2.err" | sed 's/^/      /'; fi
 fi
 

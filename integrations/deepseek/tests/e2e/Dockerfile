@@ -17,6 +17,18 @@ USER root
 RUN npm install -g "@deepseek-ai/dsh@${DSH_VERSION}" "pnpm@${PNPM_VERSION}" \
     && dsh --version \
     && pnpm --version
+USER root
+# ct CLI (test-only provisioning; NOT part of the user-visible install): the
+# pinned sidecar .deb (2.12.1) does not ship `ct` — it ships standalone from
+# v2.22.0+. Wisdom recall in the e2e needs the real binary on PATH.
+ARG CT_CLI_VERSION=2.22.0
+RUN set -eux; \
+    curl -fsSL -o /tmp/ct.tar.gz \
+      "https://github.com/equationalapplications/curated-thoughts/releases/download/v${CT_CLI_VERSION}/ct_${CT_CLI_VERSION}_linux_amd64.tar.gz"; \
+    echo "37f3bacd6e45d15eb2cf84d2597213faebbbdb7f6bf456386eae1ee269a3c62d  /tmp/ct.tar.gz" | sha256sum -c -; \
+    tar -xzf /tmp/ct.tar.gz -C /usr/local/bin ct; \
+    rm /tmp/ct.tar.gz; \
+    ct --help | grep -q 'Curated Thoughts'
 USER tester
 
 COPY --chown=tester:tester dist/ /home/tester/dist/
