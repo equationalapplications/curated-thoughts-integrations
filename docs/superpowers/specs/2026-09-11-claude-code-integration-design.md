@@ -232,8 +232,12 @@ the brain where it is supposed to be". Deep verification is the doctor's job.
 
 `hooks/session-start.py` is the Claude Code adapter around it:
 
-1. Resolve the scripts directory from `CLAUDE_PLUGIN_ROOT`, falling back to this
-   file's own location so the script also works when run directly.
+1. Resolve the scripts directory from this file's own location
+   (`Path(__file__).resolve().parent.parent / "scripts"`). The script does **not**
+   read `CLAUDE_PLUGIN_ROOT` from the environment: `hooks.json` already expands that
+   variable into the script's path, so `__file__` carries the same information, is
+   also correct when the script is run directly, and keeps Hermes's repo-wide guard
+   green (§11 Q6).
 2. Drain stdin — Claude Code sends a JSON payload there, and leaving it unread
    can leave the writer blocked. None of its fields are needed.
 3. Call `ct_status.context_section()`.
@@ -312,9 +316,15 @@ PLUGIN_NAME = "curated-thoughts"
 stdlib `json` module — no regex scanning, because unlike Hermes's YAML this file
 is JSON and the stdlib can read it properly. Verdicts:
 
-- **FAIL** — file missing, or `mcpServers.curated-thoughts` absent. The hint is
-  the exact `claude mcp add --scope user curated-thoughts -- "<path>" --mcp`
-  one-liner with the discovered path substituted, plus the JSON block.
+- **FAIL** — `mcpServers.curated-thoughts` is in neither `~/.claude.json` nor
+  `cwd/.mcp.json`, and both files are missing or parse cleanly (a missing
+  `~/.claude.json` counts as "not registered at user scope", not as an immediate
+  FAIL). The hint is the exact `claude mcp add --scope user curated-thoughts --
+  "<path>" --mcp` one-liner with the discovered path substituted, plus the JSON
+  block.
+- **WARN** — no registration found, but one of those files exists and is not
+  valid JSON. A broken config is not proof of absence; the detail names the file
+  and the hint says to fix it first. The check never raises on malformed input.
 - **PASS (with a note)** — a project-level `.mcp.json` in `cwd` registers the
   server. Claude Code supports project scope, and a user who registered there has
   a working install; the doctor must not call that broken.
@@ -388,10 +398,15 @@ enablement via `--plugin-dir` or the marketplace, and a note that a project-leve
 `.mcp.json` is equally valid. The ops skill's numbered check list also gets check
 7 renamed to match the doctor.
 
-`tests/test_skills_content.py` pins the invariants: each file has frontmatter with
-a `description`; the three rules ("one sidecar", "never touch the vault
-out-of-band", "fail open") each appear; no `~/.hermes` or `config.yaml` string
-survives; no absolute paths.
+`tests/test_skills_content.py` pins the invariants. The load-bearing one is the
+same as DeepSeek's `test_skills_content.ts`: with frontmatter stripped and the
+three harness-specific regions normalized on both sides (doctor-invocation
+sentence, check-list item 7, the `## Registration in <Harness>` section), each
+body **equals** its Hermes original. Hermes files are read by path, and the test
+skips when the sibling tree is absent, as it is in the release tarball.
+Alongside that: each file has frontmatter with a `description`; the three
+rules ("one sidecar", "never touch the vault out-of-band", "fail open") each
+appear; no `~/.hermes` or `config.yaml` string survives; no absolute paths.
 
 ## 10. Testing and CI
 
@@ -419,9 +434,12 @@ the top of every module.
 
 Hermes currently skips 28 tests on Windows, most of them because its mock sidecar
 is an extensionless shebang script that Windows `CreateProcess` cannot execute
-(WinError 193) and `shutil.which` will not resolve. This integration ships an
-additional `curated-thoughts-mcp.bat` next to the Python mock, containing
-`@python "%~dp0mock_sidecar.py" %*`, so the MCP-spawn tests run on Windows too.
+(WinError 193) and `shutil.which` will not resolve. On Windows this integration's
+test `setUp` generates a `curated-thoughts-mcp.bat` next to the Python mock,
+containing `@"<sys.executable>" "%~dp0mock_sidecar.py" %*`. It embeds the running
+interpreter's quoted absolute path rather than a bare `python`, which can resolve
+to the Microsoft Store alias stub. With the shim in place, the MCP-spawn tests run
+on Windows too.
 Skips are kept only for tests that assert POSIX-absolute candidate paths and for
 `install.sh` (a bash script; Windows runners have no bash on PATH).
 
@@ -507,27 +525,26 @@ supported: `read_mirror` handles subdirectories and `.json` files
 ([`tools/ct_ci_policy.py`](../../../tools/ct_ci_policy.py)). No tooling change
 needed.
 
-> **Q6: a Hermes test forbids `CLAUDE_PLUGIN_ROOT` repository-wide, and this
-> integration must read it.** `integrations/hermes/tests/test_install.py`'s
+> **Q6 (resolved): a Hermes test forbids reading `CLAUDE_PLUGIN_ROOT`
+> repository-wide.** `integrations/hermes/tests/test_install.py`'s
 > `RepoWideContractTests.test_claude_plugin_root_is_never_read` walks **every**
 > text file in the repository — `REPO = INTEGRATION.parents[1]` — and fails if any
 > of them matches `environ(\.get)?[\(\[]\s*["']CLAUDE_PLUGIN_ROOT`. It was written
 > when Hermes was shedding a Claude Code-shaped plugin layout it had inherited by
 > mistake, and its reasoning ("Hermes sets `PLUGIN_ROOT`, so any expansion of
 > `CLAUDE_PLUGIN_ROOT` silently resolves to an empty path under Hermes") is about
-> Hermes, not about the repository. `hooks/session-start.py` in this integration
-> must read exactly that variable — it is how Claude Code tells a plugin where it
-> lives.
+> Hermes, not about the repository.
 >
-> The natural fix is one line in that Hermes test: scope `_repo_text_files()` to
-> `INTEGRATION` instead of `REPO`, keeping the guard's real intent (no
-> `CLAUDE_PLUGIN_ROOT` *inside Hermes*) while letting siblings use their own
-> harness's variables. That is a test-only change, exempt from the version gate —
-> but it is still a change under `integrations/hermes/`, which this spec otherwise
-> commits not to touch.
+> **Resolved by design (no maintainer answer needed):** `hooks/session-start.py`
+> never reads the variable. Claude Code expands `${CLAUDE_PLUGIN_ROOT}` inside
+> `hooks.json` — shell syntax, which the guard deliberately does not match — so
+> the script is invoked by its absolute path, and `Path(__file__)` locates the
+> plugin as reliably as the environment would (§5). No file under
+> `integrations/hermes/` changes, and Task 4 is unblocked. The plan's Task 4 gate
+> runs the Hermes suite to prove it.
 >
-> **Which is preferred: scope the guard in this PR's sibling implementation PR, a
-> separate one-line Hermes PR first, or something else?** This blocks Task 4.
+> Scoping the guard to `INTEGRATION` remains a reasonable Hermes cleanup for a
+> separate PR, but nothing here depends on it.
 
 ### Observations from the live 2.10.1 install (not blocking, but worth a decision)
 

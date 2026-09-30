@@ -217,20 +217,22 @@ PLUGIN_NAME = "curated-thoughts"
 
 - [ ] **Step 3.3: Write `check_claude_code_registration(cwd=None)`** per spec §7 / D4. Parse with the stdlib `json` module, not a regex — this config is JSON and can be read properly. Verdicts, in evaluation order:
 
-  1. `~/.claude.json` unreadable or missing → **FAIL**, hint = the exact `claude mcp add --scope user curated-thoughts -- "<path>" --mcp` line plus the JSON block.
-  2. `mcpServers.curated-thoughts` absent → check `cwd/.mcp.json` for the same key; if present → **PASS** with a note that registration is project-scoped; else → **FAIL** as above.
-  3. `args` lacks `--mcp` → **WARN**.
+  1. Look up `mcpServers.curated-thoughts` in `~/.claude.json`, then in `cwd/.mcp.json`. For each file, three outcomes: **missing** (not registered there), **malformed** (exists but does not parse as a JSON object — remember it, treat as not registered there), or **parsed**.
+  2. Entry in neither file:
+     - if either file was malformed → **WARN** ("cannot confirm registration: `<file>` is not valid JSON"), hint = fix the file, then the `claude mcp add` line. A broken config is not proof of absence, so it is not a FAIL;
+     - else → **FAIL**, hint = the exact `claude mcp add --scope user curated-thoughts -- "<path>" --mcp` line plus the JSON block. A missing `~/.claude.json` lands here — it is not a separate, earlier FAIL, because a project `.mcp.json` alone is a working install.
+  3. Take the entry found (user scope wins over project scope; a project-scope entry adds a note to the detail). `args` lacks `--mcp` → **WARN**.
   4. `command` satisfies `ct_env.looks_like_dev_build` → **WARN** (reuse the function; do not reimplement the marker list).
-  5. No `curated-thoughts@…` key under `enabledPlugins` in `~/.claude/settings.json` → **WARN**, with detail text saying plainly that a `--plugin-dir` install is invisible to this file.
-  6. Otherwise → **PASS**.
+  5. No `curated-thoughts@…` key under `enabledPlugins` in `~/.claude/settings.json` — including when that file is missing or malformed → **WARN**, with detail text saying plainly that a `--plugin-dir` install is invisible to this file. (Q3 gates this verdict.)
+  6. Otherwise → **PASS** (with the project-scope note if applicable).
 
-  Malformed JSON in either file is a WARN, never an uncaught exception: the doctor must complete a run even on a broken config, which is exactly when a user runs it.
+  No input — missing file, malformed JSON, a non-object at any level, `args` not a list — ever raises out of the check: the doctor must complete a run even on a broken config, which is exactly when a user runs it. Every verdict above is the only one for its input; there is no path on which the same file state yields FAIL in one reading and WARN in another.
 
 - [ ] **Step 3.4: Keep the check-name list and order** — `sidecar-binary, sidecar-identity, sidecar-mcp, brain-dir, vault, embedding-backend, claude-code-registration, import-preflight, version-compat`. `check --json` consumers depend on it. Update `EXPECTED_CHECKS` in the test module to match.
 
 - [ ] **Step 3.5: Update the hints.** The Hermes "Add the block to config.yaml" text becomes the `claude mcp add` one-liner plus the JSON snippet. Scan the whole file for stale `~/.hermes`, `config.yaml`, `mcp_servers` and `plugins.enabled` strings; none may remain outside a provenance comment.
 
-- [ ] **Step 3.6: Rewrite the registration tests** in `test_ct_doctor.py`, replacing the Hermes ones. Cases: PASS with a well-formed `~/.claude.json`; FAIL when the file is missing; FAIL when the key is missing; WARN when `--mcp` is absent; WARN when `command` points into `target/debug`; PASS via a project `.mcp.json` in `cwd`; WARN-not-FAIL when `settings.json` has no `enabledPlugins`; WARN on malformed JSON. Drive them with `CLAUDE_CONFIG_PATH` plus `HOME`/`USERPROFILE` overrides so nothing on the host is read — `CLAUDE_CONFIG_PATH` exists precisely because `expanduser` follows `HOME` on POSIX and `USERPROFILE` on Windows.
+- [ ] **Step 3.6: Rewrite the registration tests** in `test_ct_doctor.py`, replacing the Hermes ones. Cases: PASS with a well-formed `~/.claude.json`; FAIL when the file is missing; FAIL when the key is missing; WARN when `--mcp` is absent; WARN when `command` points into `target/debug`; PASS via a project `.mcp.json` in `cwd`; PASS via a project `.mcp.json` when `~/.claude.json` is **missing**; WARN-not-FAIL when `settings.json` has no `enabledPlugins`; WARN (not FAIL, no traceback) when `~/.claude.json` is truncated mid-object and no project registration exists; PASS when `~/.claude.json` is malformed but the project `.mcp.json` registers the server; WARN when `settings.json` is malformed. Drive them with `CLAUDE_CONFIG_PATH` plus `HOME`/`USERPROFILE` overrides so nothing on the host is read — `CLAUDE_CONFIG_PATH` exists precisely because `expanduser` follows `HOME` on POSIX and `USERPROFILE` on Windows.
 
 - [ ] **Step 3.7: Gate + commit.**
 
@@ -260,16 +262,17 @@ git commit -m "feat(claude-code): port the doctor with a claude-code-registratio
 - [ ] **Step 4.1: Write `hooks/hooks.json`** exactly as in spec §3.2 — `SessionStart`, matcher `startup|resume|clear|compact`, `python3 … || python …` with `${CLAUDE_PLUGIN_ROOT}` double-quoted, `timeout: 10`.
 
 - [ ] **Step 4.2: Write `hooks/session-start.py`,** adapting the Hermes script. Differences from the Hermes original, all deliberate:
-  - resolve the scripts directory from `CLAUDE_PLUGIN_ROOT` (Hermes uses `PLUGIN_ROOT`), falling back to `Path(__file__).resolve().parent.parent / "scripts"`;
+  - resolve the scripts directory **only** from `Path(__file__).resolve().parent.parent / "scripts"`. Do **not** read `CLAUDE_PLUGIN_ROOT` from the environment (Hermes reads `PLUGIN_ROOT`). `hooks.json` already expands `${CLAUDE_PLUGIN_ROOT}` into the script's own path, so `__file__` carries the same information, and it is also correct when the script is run directly;
   - emit `{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext": section}}` rather than `{"context": section}`;
   - everything else — drain stdin, swallow every exception, `sys.exit(0)` unconditionally — stays.
 
-  Note the Hermes test `RepoWideContractTests.test_claude_plugin_root_is_never_read` asserts that **no file in the repo** reads `CLAUDE_PLUGIN_ROOT`. That test runs from `integrations/hermes/tests/` and walks the whole repo, so adding this file will trip it. Confirm with the maintainer how to scope it (the natural fix is to scope the walk to `integrations/hermes/`, a one-line change in a Hermes test file) **before** assuming the Hermes suite may be edited — the no-touching-Hermes constraint is explicit, and a test-only change still needs sign-off.
+  Why not read the variable: the Hermes test `RepoWideContractTests.test_claude_plugin_root_is_never_read` walks **the whole repo** and fails on any `environ[...]` / `environ.get(...)` read of `CLAUDE_PLUGIN_ROOT`. Resolving from `__file__` keeps that guard green without touching `integrations/hermes/` (spec §11 Q6, resolved). The `${CLAUDE_PLUGIN_ROOT}` expansion inside `hooks.json` is shell syntax, which the guard deliberately does not match. Gate for this step: run the Hermes suite from `integrations/hermes/` (`python -m unittest discover -s tests`) and confirm `RepoWideContractTests` still passes.
 
 - [ ] **Step 4.3: Write `tests/test_hook.py`.** Run the script as a subprocess with a fake stdin payload and a temp HOME:
   - healthy fixture brain → stdout is exactly one line, parses as JSON, has the `hookSpecificOutput.hookEventName == "SessionStart"` shape, exit 0;
   - `CURATED_BRAIN_DIR` pointed at a nonexistent directory → `additionalContext` contains `DEGRADED` and names the missing directory, exit 0;
-  - `CLAUDE_PLUGIN_ROOT` pointed at a nonexistent directory → exit 0, stdout empty (fail-open, silent);
+  - the hook copied into a temp `hooks/` directory with **no** sibling `scripts/` (so `ct_status` cannot be imported) → exit 0, stdout empty (fail-open, silent);
+  - `CLAUDE_PLUGIN_ROOT` set to a nonexistent directory → output identical to the unset case (proves the variable is not consulted);
   - stdin closed rather than a payload → exit 0;
   - wall time under 1 s.
 
@@ -278,6 +281,7 @@ git commit -m "feat(claude-code): port the doctor with a claude-code-registratio
 ```bash
 cd integrations/claude-code && python -m unittest discover -s tests
 python hooks/session-start.py < /dev/null
+cd ../hermes && python -m unittest discover -s tests   # RepoWideContractTests must stay green
 ```
 
 ```bash
@@ -337,7 +341,7 @@ This is the task that keeps the Hermes issue #14 class of bug out of this integr
 
 - [ ] **Step 6.1: Scrub `PATH` in `DoctorTestCase.setUp`.** Build the subprocess `PATH` as the fake bin directory followed by only those inherited directories that do **not** contain a `curated-thoughts-mcp` (any extension). A developer with Curated Thoughts installed must get a green suite; that is the whole point.
 
-- [ ] **Step 6.2: Add a Windows-resolvable mock.** Write the Python mock as `mock_sidecar.py` and add `curated-thoughts-mcp.bat` next to it containing `@python "%~dp0mock_sidecar.py" %*`, so `shutil.which` resolves it under PATHEXT and the MCP-spawn tests run on Windows instead of skipping. Keep the POSIX shebang script for POSIX.
+- [ ] **Step 6.2: Add a Windows-resolvable mock.** Write the Python mock as `mock_sidecar.py` and, on Windows, have `setUp` **generate** `curated-thoughts-mcp.bat` next to it containing `@"<sys.executable>" "%~dp0mock_sidecar.py" %*`. Embed the running interpreter's absolute path, double-quoted, so the shim never depends on which name resolves on PATH: a bare `python` can hit the Microsoft Store alias stub on a developer machine. `shutil.which` then resolves the shim under PATHEXT, and the MCP-spawn tests run on Windows instead of skipping. Keep the POSIX shebang script for POSIX.
 
 - [ ] **Step 6.3: Drop the now-unnecessary skips.** `MOCK_SPAWN_SKIP` guards disappear from every test that only needed a spawnable mock. Keep skips only for: tests asserting POSIX-absolute candidate paths (`POSIX_PATHS_SKIP`), the `~`-expansion test (POSIX `HOME` semantics), and `test_install.py` (bash).
 
@@ -367,12 +371,21 @@ git commit -m "test(claude-code): make the suite hermetic against a real sidecar
 
 **Step-by-step:**
 
-- [ ] **Step 7.1: Copy the three bodies verbatim** from `integrations/hermes/skills/curated-thoughts-{usage,ops,sidecar}/SKILL.md` into the new directory names. Per spec D2, drop the frontmatter `name:` key so Claude Code takes the name from the directory; keep `description:` — **pending the maintainer's answer to Q2.**
+- [ ] **Step 7.1: Copy the three bodies verbatim** from `integrations/hermes/skills/curated-thoughts-{usage,ops,sidecar}/SKILL.md` into the new directory names. Frontmatter depends on the maintainer's answer to Q2, which must be recorded on the spec PR **before this step starts** (do not start on the recommendation alone):
+  - Q2 = recommendation (spec D2): drop the frontmatter `name:` key so Claude Code takes the name from the directory; keep `description:` unchanged.
+  - Q2 = keep frontmatter identical: copy the frontmatter byte-for-byte too.
 
-- [ ] **Step 7.2: Rewrite one paragraph in `ops/SKILL.md`.** "Registration in Hermes" → "Registration in Claude Code": `~/.claude.json` under `mcpServers`, `/mcp` to verify the server is connected, plugin enablement via `--plugin-dir` or the marketplace, and a note that a project-level `.mcp.json` is equally valid. Also rename check 7 in the numbered list from "Harness registration" wording that names `mcp_servers` / `plugins.enabled` to the Claude Code equivalents. Everything else in the file stays byte-identical.
+  Either way the **body** is identical, and Step 7.3's equality test strips frontmatter before comparing, so the only thing Q2 changes is the frontmatter assertion in 7.3.
 
-- [ ] **Step 7.3: Write `tests/test_skills_content.py`.** Assertions:
-  - all three files exist and open with YAML frontmatter carrying a non-empty `description`;
+- [ ] **Step 7.2: Rewrite one paragraph in `ops/SKILL.md`.** "Registration in Hermes" → "Registration in Claude Code": `~/.claude.json` under `mcpServers`, `/mcp` to verify the server is connected, plugin enablement via `--plugin-dir` or the marketplace, and a note that a project-level `.mcp.json` is equally valid. Also rewrite check 7's description in the numbered list, which names `mcp_servers` / `plugins.enabled`, in Claude Code terms. Keep the item's `7. **Harness registration** —` prefix exactly: Step 7.3's normalizer keys on it, as does deepseek's. Keep the section heading in the form `## Registration in Claude Code` for the same reason. Everything else in the file stays byte-identical.
+
+- [ ] **Step 7.3: Write `tests/test_skills_content.py`,** porting `integrations/deepseek/tests/test_skills_content.ts`. The load-bearing assertion is **body equality with Hermes**, not substring presence:
+  - for each pair (`usage`↔`curated-thoughts-usage`, `ops`↔`curated-thoughts-ops`, `sidecar`↔`curated-thoughts-sidecar`), strip frontmatter from both files, apply a `normalize_harness_specific()` that is a line-for-line port of deepseek's `normalizeHarnessSpecific` (the doctor-invocation sentence, check-list item 7, the `## Registration in <Harness>` section), and `assertEqual` the results. Anything outside those three rules must be byte-identical;
+  - port the guard that normalization is not a no-op-everything: `normalize(body + "\nstray\n") != normalize(body)`;
+  - read the Hermes files by **path** (`Path(__file__).resolve().parents[2] / "hermes" / "skills"`), never by import. Use `skipUnless(<that dir>.is_dir())` because the release tarball ships `tests/` without the sibling tree;
+
+  plus the structural checks:
+  - all three files exist and open with YAML frontmatter carrying a non-empty `description` (and, per Q2, either no `name:` key or a `name:` equal to Hermes's);
   - the three rules appear somewhere across the set: "one sidecar" (per brain), "never touch the vault out-of-band", "fail open";
   - no `~/.hermes` and no `config.yaml` string survives anywhere;
   - no absolute or drive-letter path appears (same shape of check the architecture gate applies to `.py`);
@@ -510,6 +523,6 @@ No spec gaps.
 
 **3. Known red-until-fixed states:** after Task 2 the doctor test classes fail because `ct_doctor.py` does not exist. This is the only intentionally-red intermediate state, and Task 3 closes it. Every other task ends with all gates green.
 
-**4. Open items carried from the spec:** Q1 (registration mechanism) gates Task 5's shape; Q2 (skill frontmatter fidelity) gates Task 7's Step 7.1; Q3 (WARN vs FAIL for unconfirmable enablement) gates Task 3's Step 3.3. All three must be answered on the spec PR before the corresponding task starts. Task 4's Step 4.2 raises a fourth, narrower question: whether the Hermes test that forbids `CLAUDE_PLUGIN_ROOT` repo-wide may be scoped to Hermes.
+**4. Open items carried from the spec:** Q1 (registration mechanism) gates Task 5's shape; Q2 (skill frontmatter fidelity) gates Task 7's Step 7.1; Q3 (WARN vs FAIL for unconfirmable enablement) gates Task 3's Step 3.3. All three must be answered on the spec PR before the corresponding task starts. Q6 (the Hermes repo-wide `CLAUDE_PLUGIN_ROOT` guard) is resolved by design, not by an answer: the hook resolves its location from `__file__` and never reads the variable (Step 4.2), so no Hermes file changes and Task 4 is unblocked.
 
 **5. Placeholder scan:** no "TBD" or unfilled blocks. Every step names the file it touches and the command that proves it worked.
