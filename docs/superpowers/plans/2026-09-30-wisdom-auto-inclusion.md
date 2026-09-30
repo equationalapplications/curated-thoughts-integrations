@@ -22,8 +22,10 @@ ruff select E9/F63/F7/F82/F401. CI matrix unchanged: exactly
 **Spec:** [`docs/superpowers/specs/2026-09-30-wisdom-auto-inclusion-design.md`](../specs/2026-09-30-wisdom-auto-inclusion-design.md)
 (review-converged, APPROVE WITH NITS) — the plan argues from the spec; executors read
 both. Evidence base: [`../investigations/2026-09-30-wisdom-auto-inclusion-step0-investigation.md`](../investigations/2026-09-30-wisdom-auto-inclusion-step0-investigation.md).
-**Review:** Opus plan cycle 1 = REQUEST CHANGES (5 MAJOR, 7 MINOR) → all applied this
-revision → cycle 2 delta pending.
+**Review:** Opus plan cycles 1-2 = REQUEST CHANGES → all findings applied this
+revision → cycle 3 delta pending. Where the spec still says "INFO log-line
+expectations" (§e2e), the PLAN WINS: logging is debug-level
+(`wisdom: render …` prefix), per spec's own logging constraint.
 
 **Module contract (single source of truth for the failure classes — Opus plan M1/M2):**
 - `discover_ct(env) -> (path | None, failure_class | None)` — `failure_class` is
@@ -37,7 +39,10 @@ revision → cycle 2 delta pending.
   mapping (tests in Tasks 1-2 verify the parts; Task 4 verifies the mapping).
 - `cwd_basename` comes from `session_info["cwd"]` (host fills it via
   `resolve_context_cwd()`, `system_prompt.py:89`) — NEVER `os.getcwd()` (gateway
-  sessions would get the host process's cwd).
+  sessions would get the host process's cwd). **Owner:** a `query_for(session_info)`
+  helper in `ct_wisdom.py` computes the basename AND the degeneracy rules (empty /
+  home basename / denylist → seed-only); `recall_wiki` receives the final query term.
+  Task 2's golden tests target `query_for`.
 - The accepted `ct` path is cached process-wide after a successful probe (machine-
   scoped, like the health cache — bounds worst-case discovery cost; Opus plan m4).
 
@@ -64,6 +69,10 @@ lines 97-109; registration pattern, 131-139), `scripts/ct_env.py` (discovery pat
   with NO memo write; empty results memoized (except the failure classes above).
 - **Version:** `plugin.yaml` + `integration.yaml` → 0.3.0 in the same PR
   (`version_mirror` keeps lockstep); CHANGELOG entry under Hermes.
+- **Windows-safe tests:** behavior tests patch `ct_wisdom.subprocess.run` as the
+  PRIMARY pattern; any test needing a real fake-`ct` file on PATH is
+  `@skipIf(os.name == "nt")` (applies to ALL tasks, repo precedent
+  `test_ct_doctor.py:528`).
 - **Each task = RED (failing tests) → GREEN (implement) → repo checks
   (`python -m unittest discover -s tests`, `ruff check --select E9,F63,F7,F82,F401 .`
   within `integrations/hermes/`).**
@@ -97,7 +106,11 @@ lines 97-109; registration pattern, 131-139), `scripts/ct_env.py` (discovery pat
   (memoized). (Discovery-miss memoization is owned by the orchestrator — tested in
   Task 4.)
 - [ ] **Step 2.2 (GREEN):** implement `recall_wiki(ct_path, cwd_basename)` →
-  `(entries | None, failure_class | None)`.
+  `(entries | None, failure_class | None)`; failure classes include **`"spawn"`** —
+  `OSError` from `subprocess.run` (`FileNotFoundError`, `PermissionError`) — NOT
+  memoized. The process-wide accepted-path cache is invalidated on `"spawn"`
+  (re-discovery next render, so a reinstalled/`ct`-moved machine recovers) and has a
+  test-only reset hook so tests cannot leak an accepted path between them.
 - [ ] **Step 2.3:** checks; commit.
 
 ## Task 3: Sanitize + render (`ct_wisdom.render_block`)
@@ -110,8 +123,13 @@ lines 97-109; registration pattern, 131-139), `scripts/ct_env.py` (discovery pat
   forged-frame restore test: **vendor a pinned copy** of
   `_PLUGIN_SECTION_FRAME_RE` + `PLUGIN_SECTIONS_START/END` + the
   `"\n\nConversation started:"` suffix rule into the test file, header comment
-  citing `~/.hermes/hermes-agent/agent/system_prompt.py:34-37,138-163` (CI has no
-  Hermes install; importing `agent.system_prompt` there fails all 6 jobs).
+  citing `~/.hermes/hermes-agent/agent/system_prompt.py:34-37,138-163`, **plus a
+  pinned copy of `format_system_prompt_sections` and
+  `MAX_SYSTEM_PROMPT_SECTION_CHARS` citing
+  `~/.hermes/hermes-agent/hermes_cli/plugins.py`** (the restore equality check
+  `format_system_prompt_sections(restored) == framed` and the max-chars skip are what
+  a forged frame actually breaks; without them the test proves nothing) (CI has no
+  Hermes install; importing the host modules there fails all 6 jobs).
 - [ ] **Step 3.2 (GREEN):** implement `render_block(entries)`.
 - [ ] **Step 3.3:** checks; commit.
 
@@ -128,6 +146,15 @@ lines 97-109; registration pattern, 131-139), `scripts/ct_env.py` (discovery pat
   assert via instrumented lock).
 - [ ] **Step 4.2 (GREEN):** implement `WisdomMemo` with `render_for(session_info,
   recall_fn)`.
+- [ ] **Step 4.3 (RED):** tests for `ct_wisdom._render_wisdom(session_info)` — the
+  REAL orchestrator (lives in `ct_wisdom.py`; `__init__.py` only wires it into
+  `register_system_prompt_section`) with `discover_ct`/`recall_wiki` patched per
+  class: all six classes exercised against the real mapping — discovery miss →
+  memoized, probe_timeout → NOT memoized, recall timeout → NOT memoized, exit → NOT
+  memoized, parse error → memoized, zero hits → memoized. Debug line asserted with
+  `assertLogs(level="DEBUG")`: `wisdom: render session=<id> memo=hit|miss class=<c|ok>`.
+- [ ] **Step 4.4 (GREEN):** implement `_render_wisdom` + the debug emit (debug level,
+  never INFO — spec constraint).
 - [ ] **Step 4.3:** checks; commit.
 
 ## Task 5: Wire the section (`__init__.py`)

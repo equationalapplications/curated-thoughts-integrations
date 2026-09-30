@@ -191,7 +191,8 @@ are noisy enough).
 - **e2e (scratch profile `ct-test` ONLY — never the live default profile):** install
   branch payload → real CLI session → exactly one wisdom block in the assembled
   prompt (direct render-path invocation under `HERMES_HOME`, mechanism verified);
-  INFO log-line expectations per boundary (1 with no invalidation boundary; after
+  plugin debug-line (`wisdom: render …`) expectations per boundary (1 with no
+  invalidation boundary) — debug level, never INFO
   `/branch`//`/resume`: ZERO render lines when the restore path is taken — non-empty
   history + stored prompt matches runtime — otherwise exactly one fresh render;
   the e2e script seeds at least one exchange before branching); content hash stable
