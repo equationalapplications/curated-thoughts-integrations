@@ -550,6 +550,13 @@ class TestRenderBlock(unittest.TestCase):
         self.assertIn("**Huge**", out)
         self.assertNotIn("**Two**", out)  # budget exhausted after truncation
 
+    def test_title_too_long_skips_entry_not_whole_block(self):
+        # r2 m2: a first entry whose title alone exceeds the remaining budget
+        # is skipped; later entries still render (block never blanks).
+        out = ct_wisdom.render_block([("T" * 3000, "x"), ("Real", "body")])
+        self.assertNotIn("TTT", out)
+        self.assertIn("**Real**\nbody", out)
+
     def test_non_string_fields_defensive(self):
         out = ct_wisdom.render_block([(None, "text")])
         self.assertEqual(out, ct_wisdom.BLOCK_HEADING + "\n\n****\ntext")
@@ -980,10 +987,11 @@ class TestRenderWisdomOrchestrator(unittest.TestCase):
                 for line in cm.output),
             cm.output,
         )
-        # Second render is a memo HIT with class=ok (M1 fix: one code path).
-        self.assertTrue(
-            any("memo=hit class=ok" in line for line in cm.output), cm.output
-        )
+        # Exact order proves recall-once-then-replay (M1: the hit/miss
+        # distinction comes from a recall flag, not failure_class).
+        self.assertEqual(len(cm.output), 2, cm.output)
+        self.assertIn("memo=miss class=ok", cm.output[0])
+        self.assertIn("memo=hit class=ok", cm.output[1])
 
     def test_production_path_concurrent_renders_identical_bytes(self):
         # M1 fix: the PRODUCTION path (render -> memo -> recall) must give
@@ -1020,6 +1028,19 @@ class TestRenderWisdomOrchestrator(unittest.TestCase):
         first = results[0]
         self.assertIn("block-version-1", first)
         self.assertNotIn("block-version-8", first)
+
+    def test_mapping_proxy_session_info_accepted(self):
+        # B1 regression: the host wraps session info in
+        # types.MappingProxyType before calling a section callable. A dict
+        # isinstance check silently disabled the entire feature.
+        from types import MappingProxyType
+
+        self._patch_discover(("/fake/ct", None))
+        self._patch_recall(([("T", "X")], None))
+        with self.assertLogs("ct_wisdom", level="DEBUG"):
+            out = ct_wisdom._render_wisdom(MappingProxyType(self.SI))
+        self.assertIn("**T**", out)
+        self.assertEqual(len(self.discover_calls), 1)
 
     def test_recall_receives_query_for_output(self):
         self._patch_discover(("/fake/ct", None))
@@ -1108,6 +1129,25 @@ class TestPluginWiring(unittest.TestCase):
         self.assertEqual(
             fn({"session_id": "wire-absent-1", "cwd": "/home/user/proj"}), ""
         )
+        self.assertIsNone(mod._cached_section)  # health cache untouched
+
+    def test_wisdom_render_with_mapping_proxy_session_info(self):
+        # B1 regression at the wiring level: the REAL host passes
+        # types.MappingProxyType, not a dict. The section must recall, not
+        # short-circuit on the empty-id path.
+        from types import MappingProxyType
+
+        mod, sections = self._sections()
+        orig_d = ct_wisdom.discover_ct
+        orig_r = ct_wisdom.recall_wiki
+        ct_wisdom.discover_ct = lambda env=None: ("/fake/ct", None)
+        ct_wisdom.recall_wiki = lambda ct_path, query: ([("W", "wired")], None)
+        self.addCleanup(setattr, ct_wisdom, "discover_ct", orig_d)
+        self.addCleanup(setattr, ct_wisdom, "recall_wiki", orig_r)
+        fn, _mc = sections["curated-thoughts-wisdom"]
+        out = fn(MappingProxyType({"session_id": "wire-proxy-1", "cwd": "/x"}))
+        self.assertIn("**W**", out)
+        self.assertIn("wire-proxy-1", ct_wisdom._MODULE_MEMO._store)
         self.assertIsNone(mod._cached_section)  # health cache untouched
 
     def test_wisdom_render_empty_when_recall_raises(self):

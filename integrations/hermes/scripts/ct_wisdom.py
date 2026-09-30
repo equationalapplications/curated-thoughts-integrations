@@ -40,15 +40,19 @@ import subprocess
 import sys
 import threading
 from collections import OrderedDict
+from collections.abc import Mapping
 
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# frozen constants (spec OQ5/OQ6 — tuned at e2e, then hard-frozen)
+# constants (spec OQ5/OQ6). PROVISIONAL until the Task 7 e2e run in this PR:
+# RECALL_TIMEOUT/PROBE_TIMEOUT bound the worst-case prompt-assembly stall
+# (~3 s probe + 5 s recall); warm recall measured ~0.7 s, cold-start
+# measurement lands with Task 7, after which these hard-freeze.
 # ---------------------------------------------------------------------------
 
-SEED_QUERY = "curated thoughts agent memory wisdom procedures"
-RECALL_TIMEOUT = 5  # seconds (cold-path measurement recorded at e2e, Task 7.1)
+SEED_QUERY = "curated thoughts agent memory wisdom procedures"  # provisional; frozen at e2e
+RECALL_TIMEOUT = 5  # seconds; provisional until the Task 7 cold-path measurement
 PROBE_TIMEOUT = 3  # seconds, identity probe (`ct --help`)
 RECALL_K = 3  # top-k wiki entries
 MAX_BLOCK_CHARS = 2500  # registered max_chars; host measures STRIPPED text
@@ -208,7 +212,9 @@ def query_for(session_info):
     if not basename:
         return SEED_QUERY
     home_basename = os.path.basename(os.path.expanduser("~").rstrip("/\\"))
-    if basename == home_basename or basename.lower() in _CWD_DENYLIST:
+    if (basename == home_basename
+            or basename.lower() == home_basename.lower()
+            or basename.lower() in _CWD_DENYLIST):
         return SEED_QUERY
     return SEED_QUERY + " " + basename
 
@@ -319,18 +325,18 @@ def render_block(entries):
         clean_text = _sanitize(text)
         if not clean_title and not clean_text.strip():
             continue  # no usable content: do not burn a k=3 slot on "****\n"
-        body = "**%s**\n%s" % (clean_title, clean_text)
+        title_line = "**%s**" % clean_title
+        body = title_line + "\n" + clean_text
         sep = 2 if parts else 0  # canonical blank-line separator
         remaining = MAX_BLOCK_CHARS - used - sep
-        if remaining <= 0:
-            break
+        if remaining <= len(title_line) + 1:  # title alone cannot fit: skip
+            continue
         if len(body) <= remaining:
             parts.append(body)
             used += sep + len(body)
             continue
         # Truncate to fit: keep the title line, cut the text (with ellipsis).
         # Budget accounts for title + the newline separator + the ellipsis.
-        title_line = "**%s**" % clean_title
         text_budget = remaining - len(title_line) - 1 - len(_ELLIPSIS)
         if text_budget > 0:
             body = title_line + "\n" + clean_text[:text_budget] + _ELLIPSIS
@@ -363,7 +369,11 @@ class WisdomMemo:
 
     @staticmethod
     def _session_id(session_info):
-        if not isinstance(session_info, dict):
+        # The host freezes session info into types.MappingProxyType (NOT a
+        # dict) before calling a section callable — accept any Mapping
+        # (Opus impl-review r2, B1: a dict check silently disabled the whole
+        # feature in production).
+        if not isinstance(session_info, Mapping):
             return ""
         sid = session_info.get("session_id")
         return sid if isinstance(sid, str) else ""
@@ -385,9 +395,9 @@ class WisdomMemo:
             return ""
         with self._lock:
             cached = self._store.get(sid)
+            if isinstance(cached, str):
+                self._store.move_to_end(sid)  # LRU touch, same lock (r2 m1)
         if isinstance(cached, str):
-            with self._lock:  # LRU touch
-                self._store.move_to_end(sid)
             return cached
         try:
             block, memoize = recall_fn(session_info)
@@ -447,17 +457,24 @@ class _RecallOutcome:
 
     recall(session_info) -> (block, memoize) per the WisdomMemo contract; the
     failure-class -> memoize mapping below is the SOLE such mapping (plan
-    module contract).
+    module contract). `called` distinguishes a real recall from a memo replay
+    (M1: failure_class alone cannot — a successful recall leaves it None).
     """
 
     failure_class = None
+    called = False
 
     def recall(self, _session_info):
+        self.called = True
         path, dclass = discover_ct()
         if path is None:
             if dclass == "probe_timeout":
+                # Not memoized: next render retries discovery. Note the search
+                # stops here for THIS render — a slow impostor `ct` on PATH keeps
+                # the block dark per-session until it times out faster or is
+                # removed (r2 m3).
                 self.failure_class = "probe_timeout"
-                return "", False  # not memoized: next render retries discovery
+                return "", False
             self.failure_class = "discovery_miss"
             return "", True  # memoized: deterministic miss for this machine
         entries, rclass = recall_wiki(path, query_for(_session_info))
@@ -475,4 +492,4 @@ class _RecallOutcome:
         return render_block(entries), True
 
     def memo_state(self):
-        return "miss" if self.failure_class else "hit"
+        return "miss" if self.called else "hit"
