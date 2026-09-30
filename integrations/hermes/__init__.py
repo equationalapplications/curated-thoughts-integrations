@@ -109,6 +109,27 @@ def _system_prompt_section(session_info=None):
         return _cached_section or ""
 
 
+def _wisdom_prompt_section(session_info=None):
+    """Return the wisdom-layer block for this session, rendering on demand.
+
+    Delegates to ct_wisdom (imported lazily like ct_status, so an import
+    problem there can never take down plugin registration). Session-scoped
+    state lives entirely in ct_wisdom's module-level memo — this is per-session
+    content, deliberately unlike the machine-scoped health snapshot above.
+
+    Hermes calls section callables with a read-only session-info mapping
+    (see plugins.py::register_system_prompt_section); the wisdom render is
+    fail-open and never raises: any problem degrades to an empty section.
+    """
+    try:
+        import ct_wisdom
+
+        return ct_wisdom._render_wisdom(session_info)
+    except Exception:  # pragma: no cover - defensive
+        logger.debug("curated-thoughts: wisdom render failed", exc_info=True)
+        return ""
+
+
 def register(ctx):
     """Hermes plugin entry point. Called exactly once at startup."""
     for skill in SKILLS:
@@ -136,4 +157,12 @@ def register(ctx):
         except Exception:  # pragma: no cover - host API variance
             logger.warning(
                 "curated-thoughts: could not register system prompt section", exc_info=True
+            )
+        try:
+            register_section(
+                "curated-thoughts-wisdom", _wisdom_prompt_section, max_chars=2500
+            )
+        except Exception:  # pragma: no cover - host API variance
+            logger.warning(
+                "curated-thoughts: could not register wisdom section", exc_info=True
             )

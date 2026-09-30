@@ -977,5 +977,115 @@ class TestRenderWisdomOrchestrator(unittest.TestCase):
         self.assertTrue(any("session=<empty>" in line for line in cm.output), cm.output)
 
 
+# ---------------------------------------------------------------------------
+# Task 5: wiring the section in __init__.py
+# ---------------------------------------------------------------------------
+
+
+class _StubCtx:
+    """Minimal host context: records registrations, section support optional."""
+
+    def __init__(self, with_sections=True):
+        self.skills = []
+        self.hooks = []
+        self.sections = []
+        if with_sections:
+            self.register_system_prompt_section = self._register_section
+
+    def _register_section(self, section_id, render, max_chars=None):
+        self.sections.append((section_id, render, max_chars))
+
+    def register_skill(self, name, path):
+        self.skills.append(name)
+
+    def register_hook(self, name, fn):
+        self.hooks.append((name, fn))
+
+
+class TestPluginWiring(unittest.TestCase):
+    """__init__.py must register the wisdom section alongside the health one.
+
+    __init__.py is loaded via spec_from_file_location (it does Path(__file__)
+    + sys.path mutation; test_install.py only greps its source text).
+    """
+
+    def setUp(self):
+        ct_wisdom.reset_discovery_cache()
+
+    @staticmethod
+    def _sections():
+        import importlib.util
+
+        init_path = INTEGRATION / "__init__.py"
+        spec = importlib.util.spec_from_file_location(
+            "ct_plugin_under_test", init_path
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        ctx = _StubCtx()
+        mod.register(ctx)
+        return mod, dict((sid, (fn, mc)) for sid, fn, mc in ctx.sections)
+
+    def test_registers_two_sections(self):
+        _mod, sections = self._sections()
+        self.assertEqual(
+            sorted(sections), ["curated-thoughts", "curated-thoughts-wisdom"]
+        )
+
+    def test_wisdom_section_max_chars_2500(self):
+        _mod, sections = self._sections()
+        fn, max_chars = sections["curated-thoughts-wisdom"]
+        self.assertEqual(max_chars, 2500)
+        self.assertTrue(callable(fn))
+
+    def test_wisdom_render_empty_when_ct_absent(self):
+        mod, sections = self._sections()
+        orig = ct_wisdom.discover_ct
+        ct_wisdom.discover_ct = lambda env=None: (None, None)
+        self.addCleanup(setattr, ct_wisdom, "discover_ct", orig)
+        fn, _mc = sections["curated-thoughts-wisdom"]
+        self.assertEqual(
+            fn({"session_id": "wire-absent-1", "cwd": "/home/user/proj"}), ""
+        )
+        self.assertIsNone(mod._cached_section)  # health cache untouched
+
+    def test_wisdom_render_empty_when_recall_raises(self):
+        _mod, sections = self._sections()
+        orig_d = ct_wisdom.discover_ct
+        orig_r = ct_wisdom.recall_wiki
+        ct_wisdom.discover_ct = lambda env=None: ("/fake/ct", None)
+
+        def boom(ct_path, query):
+            raise RuntimeError("boom")
+
+        ct_wisdom.recall_wiki = boom
+        self.addCleanup(setattr, ct_wisdom, "discover_ct", orig_d)
+        self.addCleanup(setattr, ct_wisdom, "recall_wiki", orig_r)
+        fn, _mc = sections["curated-thoughts-wisdom"]
+        self.assertEqual(fn({"session_id": "wire-raise-1", "cwd": "/x"}), "")
+
+    def test_wisdom_state_is_ct_wisdom_module_level_not_health_cache(self):
+        mod, sections = self._sections()
+        orig = ct_wisdom.discover_ct
+        ct_wisdom.discover_ct = lambda env=None: (None, None)
+        self.addCleanup(setattr, ct_wisdom, "discover_ct", orig)
+        fn, _mc = sections["curated-thoughts-wisdom"]
+        fn({"session_id": "wire-state-1", "cwd": "/x"})
+        self.assertIn("wire-state-1", ct_wisdom._MODULE_MEMO._store)
+        self.assertIsNone(mod._cached_section)
+
+    def test_register_without_section_support_is_a_no_op(self):
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location(
+            "ct_plugin_under_test2", INTEGRATION / "__init__.py"
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        ctx = _StubCtx(with_sections=False)
+        mod.register(ctx)  # must not raise
+        self.assertEqual(ctx.sections, [])
+
+
 if __name__ == "__main__":
     unittest.main()

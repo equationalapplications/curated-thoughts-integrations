@@ -40,7 +40,15 @@ Each integration ships the same layers, adapted to its harness:
 **[Hermes](integrations/hermes/)** (Python + POSIX shell) registers the
 sidecar in the agent's MCP config, ships the shared doctor as
 `ct_status`/`ct_preflight`, and installs the skill files directly into the
-Hermes skills tree.
+Hermes skills tree. Since 0.3.0 it also injects a second system-prompt
+section that recalls the wisdom layer at session start — a short digest of
+relevant procedures and facts, memoized per session so re-renders are free.
+It degrades to a silent no-op: no Curated Thoughts install or unreachable
+brain simply means the block is absent. Known gaps: restored sessions
+(`/branch`, `/resume` after restart) reuse their old session id and may see a
+stale memoized block, legacy session-id rotation on compression can trigger
+one extra recall, and more than 256 concurrently live sessions evict each
+other's memos.
 
 **[DeepSeek Harness](integrations/deepseek/)** (Node/TypeScript) is a Cordis
 plugin module, `@equational-applications/dsh-curated-thoughts`. It mounts the

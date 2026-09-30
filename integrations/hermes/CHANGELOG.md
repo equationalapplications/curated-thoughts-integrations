@@ -6,6 +6,25 @@ format below is load-bearing: `## <version> — <date>`.
 
 ## Unreleased
 
+## 0.3.0 — 2026-09-30
+
+- New system-prompt section `curated-thoughts-wisdom` that recalls the wisdom
+  layer at session start and injects a short (max 2500 chars) digest of
+  relevant procedures and facts, alongside the existing health section. The
+  recall runs through the installed `ct` CLI with a seed query widened by the
+  session's working directory; results are memoized per session id (LRU,
+  256 sessions) in the `ct_wisdom` module so re-renders within a session are
+  byte-identical and free.
+- Known v1 limitations: (1) a *restored* session — including an in-process
+  `/branch`, and `/resume` after the Hermes process restarted — reuses its old
+  session id, so the memo serves a possibly stale block instead of re-recalling
+  for the new conversation; (2) legacy non-in-place compression rotates the
+  session id, which can trigger one extra recall after compaction; (3) live
+  sessions beyond the 256-slot memo window evict each other and re-recall.
+- Graceful no-op: when Curated Thoughts is not installed or the brain is
+  unreachable, the section silently renders empty — no errors, no prompt
+  noise, sessions never block on it.
+
 ## 0.2.2 — 2026-09-10
 
 - `import-preflight` no longer counts soft-deleted `llm_wiki_entries` rows as
