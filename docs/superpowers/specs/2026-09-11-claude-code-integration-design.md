@@ -157,9 +157,11 @@ No generator change is needed to support this mirror (D5 in §11).
 Two details carry weight:
 
 - **The `python3 || python` fallback.** Windows installs of Python routinely lack
-  a `python3` on PATH; POSIX installs routinely lack a bare `python`. The hook
-  script itself is fail-open, so the worst case of the fallback firing twice is a
-  second silent exit 0.
+  a `python3` on PATH; POSIX installs routinely lack a bare `python`. `||` runs
+  `python` only when the `python3` command exits non-zero — typically 127 (not
+  found) or a Store-alias stub failing. The hook script itself always exits 0, so
+  once either interpreter starts it, the fallback does not fire; the worst case is
+  a stub `python3` failing and `python` then running the script once, silently.
 - **Quoting `${CLAUDE_PLUGIN_ROOT}`.** The repository checkout path can contain a
   space, and so can the sidecar path (see §5.1). Every interpolation of a path in
   this integration is double-quoted, without exception.
@@ -240,8 +242,11 @@ the brain where it is supposed to be". Deep verification is the doctor's job.
    green (§11 Q6).
 2. Drain stdin — Claude Code sends a JSON payload there, and leaving it unread
    can leave the writer blocked. None of its fields are needed.
-3. Call `ct_status.context_section()`.
-4. Print exactly one line:
+3. Call `ct_status.context_section()`. It never raises, but returns `None` when
+   its internal `snapshot()` raises.
+4. If the section is `None` (or empty), print nothing — the same `if section:`
+   guard as the Hermes hook, never an empty `additionalContext`. Otherwise print
+   exactly one line:
 
 ```json
 {"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"## Curated Thoughts\n…"}}
@@ -338,6 +343,11 @@ is JSON and the stdlib can read it properly. Verdicts:
   setup. The detail text says so explicitly rather than leaving the user to guess.
 - **PASS** — registered with `--mcp`, an installed-looking command, and
   enablement confirmed.
+
+Both paths are resolved at import time, exactly like Hermes's `HERMES_CONFIG`, so
+setting `CLAUDE_CONFIG_PATH` or `HOME` inside a test's `setUp` does not move them
+on its own. Tests rebind the module attributes after patching the environment, as
+`integrations/hermes/tests/test_ct_doctor.py` does for `ct_doctor.HERMES_CONFIG`.
 
 The `CLAUDE_CONFIG_PATH` environment variable exists so tests can redirect the
 config without depending on `HOME`/`USERPROFILE` semantics, which differ between
@@ -436,7 +446,9 @@ Hermes currently skips 28 tests on Windows, most of them because its mock sideca
 is an extensionless shebang script that Windows `CreateProcess` cannot execute
 (WinError 193) and `shutil.which` will not resolve. On Windows this integration's
 test `setUp` generates a `curated-thoughts-mcp.bat` next to the Python mock,
-containing `@"<sys.executable>" "%~dp0mock_sidecar.py" %*`. It embeds the running
+containing two lines, `@echo off` then `"<sys.executable>" "%~dp0mock_sidecar.py" %*`
+(`@echo off` rather than a per-line `@`, because the shim's stdout is the MCP
+stdio channel and any echoed command line would corrupt it). It embeds the running
 interpreter's quoted absolute path rather than a bare `python`, which can resolve
 to the Microsoft Store alias stub. With the shim in place, the MCP-spawn tests run
 on Windows too.
@@ -529,7 +541,7 @@ needed.
 > repository-wide.** `integrations/hermes/tests/test_install.py`'s
 > `RepoWideContractTests.test_claude_plugin_root_is_never_read` walks **every**
 > text file in the repository — `REPO = INTEGRATION.parents[1]` — and fails if any
-> of them matches `environ(\.get)?[\(\[]\s*["']CLAUDE_PLUGIN_ROOT`. It was written
+> of them matches `environ(?:\.get)?[\(\[]\s*["']CLAUDE_PLUGIN_ROOT`. It was written
 > when Hermes was shedding a Claude Code-shaped plugin layout it had inherited by
 > mistake, and its reasoning ("Hermes sets `PLUGIN_ROOT`, so any expansion of
 > `CLAUDE_PLUGIN_ROOT` silently resolves to an empty path under Hermes") is about
