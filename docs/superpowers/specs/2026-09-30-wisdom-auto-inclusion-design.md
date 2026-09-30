@@ -1,6 +1,6 @@
 # curated-thoughts-integrations — Hermes wisdom-layer auto-inclusion design
 
-**Date:** 2026-09-30 · **Status:** Draft (review-converged; Implemented after merge) · **Branch:** `feat/session-start-wisdom-inclusion` · **Priority:** high (Kurt directive 2026-09-29)
+**Date:** 2026-09-30 · **Status:** Implemented 2026-09-30 (PR #21 — pending merge) (review-converged; Implemented after merge) · **Branch:** `feat/session-start-wisdom-inclusion` · **Priority:** high (Kurt directive 2026-09-29)
 **Review:** Opus spec cycle 1 = REQUEST CHANGES (3 MAJOR, 8 MINOR, 3 nits) → all
 applied (M1 cwd-pinning + measured cold start; M2 empty-id rule; M3 single-API
 contract; m1 N=256; m2 lock pattern; m3 executor citation; m4 placement wording;
