@@ -41,7 +41,9 @@ def cmd_validate(args):
     ct_ci_manifest = _import("ct_ci_manifest")
     errors = []
     for _id, _dir, data in ct_ci_manifest.discover_manifests(args.repo):
-        errors.extend(ct_ci_manifest.validate_manifest(data, _dir / "integration.yaml"))
+        errors.extend(
+            ct_ci_manifest.validate_manifest(data, f"integrations/{_id}/integration.yaml")
+        )
     for error in errors:
         print(f"FAIL {error}", file=sys.stderr)
     if errors:
