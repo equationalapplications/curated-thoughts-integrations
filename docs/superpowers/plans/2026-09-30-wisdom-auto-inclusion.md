@@ -1,0 +1,147 @@
+# Wisdom-Layer Auto-Inclusion Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** Add the `curated-thoughts-wisdom` system-prompt section to the Hermes
+integration: semantically relevant wisdom-layer entries injected at session start,
+once per session, cache-safe, fail-open — per the converged spec.
+
+**Architecture:** One new stdlib-only module `integrations/hermes/scripts/ct_wisdom.py`
+(discovery + identity probe → `ct recall` subprocess → wiki-only consumption →
+sanitize → render → session-keyed memo), wired as a second
+`register_system_prompt_section("curated-thoughts-wisdom", render, max_chars=2500)`
+call in `__init__.py` alongside the existing health section. No new dependencies, no
+sidecar contact, no brain writes.
+
+**Tech Stack:** Python stdlib only (`subprocess`, `json`, `threading`,
+`collections.OrderedDict`), unittest (repo convention, `integration.yaml` checks),
+ruff select E9/F63/F7/F82/F401. CI matrix unchanged (3 OS × py3.9–3.13).
+
+**Spec:** [`docs/superpowers/specs/2026-09-30-wisdom-auto-inclusion-design.md`](../specs/2026-09-30-wisdom-auto-inclusion-design.md)
+(review-converged, APPROVE WITH NITS) — the plan argues from the spec; executors read
+both. Evidence base: [`../investigations/2026-09-30-wisdom-auto-inclusion-step0-investigation.md`](../investigations/2026-09-30-wisdom-auto-inclusion-step0-investigation.md).
+
+**Sibling references:** `integrations/hermes/__init__.py` (lock pattern to copy,
+lines 97-109; registration pattern, 131-139), `scripts/ct_env.py` (discovery pattern),
+`scripts/ct_status.py` (fail-open probe pattern).
+
+## Global Constraints
+
+- **Scratch profile ONLY for e2e:** `~/.hermes/profiles/ct-test` (exists). NEVER the
+  live default profile — the delivery session runs inside that harness.
+- **Read-only brain access:** `ct recall` subprocess only. No SQLite, no `~/.brain`
+  writes, no sidecar contact from the new code.
+- **Single subprocess contract:** `subprocess.run([…] , stdin=DEVNULL,
+  capture_output=True, timeout=N, cwd=<pinned to user home>)`. Never `shell=True`.
+  Applies to the identity probe too (`timeout=3`).
+- **Failure-class memoization (spec, cycle 3):** memoize zero-hits, discovery miss,
+  parse error; do NOT memoize timeouts (recall or probe) or non-zero exits.
+- **Sanitization order (spec, cycle 2):** remove `<!-- hermes-plugin-section`
+  substrings REPEATEDLY until stable → THEN indent any `## Plugin Context: ` line →
+  apply to titles AND text.
+- **Memo:** `{session_id → str}`, lock-guarded check / lock-free recall /
+  `setdefault` first-writer-wins; LRU bound N=256; empty `session_id` → return `""`
+  with NO memo write; empty results memoized (except the failure classes above).
+- **Version:** `plugin.yaml` + `integration.yaml` → 0.3.0 in the same PR
+  (`version_mirror` keeps lockstep); CHANGELOG entry under Hermes.
+- **Each task = RED (failing tests) → GREEN (implement) → repo checks
+  (`python -m unittest discover -s tests`, `ruff check --select E9,F63,F7,F82,F401 .`
+  within `integrations/hermes/`).**
+- **Attribution:** commit style matches repo history.
+
+## Task 1: Discovery + identity probe (`ct_wisdom.discover_ct`)
+
+- [ ] **Step 1.1 (RED):** `integrations/hermes/tests/test_ct_wisdom.py` — tests for
+  candidate order (which → per-OS list per spec OQ2), identity probe accept (stub
+  `ct --help` printing the verified string), reject (chart-testing-style help text →
+  try next candidate), probe timeout → candidate rejected AND treated as
+  not-memoized timeout class, no candidate passes → `None`.
+- [ ] **Step 1.2 (GREEN):** implement `discover_ct(env=None)` returning the accepted
+  path or `None`; debug-log accepted/rejected paths; `os.access(X_OK)` on POSIX.
+- [ ] **Step 1.3:** run checks; commit.
+
+## Task 2: Recall wrapper + failure classes (`ct_wisdom.recall_wiki`)
+
+- [ ] **Step 2.1 (RED):** tests with a fake `ct` on PATH: list-argv invocation
+  (assert no shell), `stdin=DEVNULL` + `cwd` pinned (monkeypatch `subprocess.run` and
+  assert kwargs), JSON parse → `(title, text)` tuples from `wiki` only, `--k 3`,
+  query = seed constant + non-degenerate cwd term (golden: degenerate cwd cases →
+  seed-only, byte-stable), and the failure-class table: timeout → `(None, "timeout")`,
+  non-zero exit → `(None, "exit")`, parse error/discovery miss/zero hits → memoized
+  empty per class.
+- [ ] **Step 2.2 (GREEN):** implement `recall_wiki(ct_path, cwd_basename)` →
+  `(entries | None, failure_class | None)`.
+- [ ] **Step 2.3:** checks; commit.
+
+## Task 3: Sanitize + render (`ct_wisdom.render_block`)
+
+- [ ] **Step 3.1 (RED):** tests: marker removal repeat-until-stable (splice case
+  `<!-- hermes<!-- hermes-plugin-section-plugin-sections:start -->` → clean), indent
+  after removal (order), titles AND text sanitized, 2500-char hard cap with
+  per-entry truncation, empty input → `""`, forged-frame restore test (render a block
+  containing a forged frame pre-sanitization and assert the sanitized output parses
+  back through the host's restore regex semantics).
+- [ ] **Step 3.2 (GREEN):** implement `render_block(entries)`.
+- [ ] **Step 3.3:** checks; commit.
+
+## Task 4: Session memo (`ct_wisdom.WisdomMemo`)
+
+- [ ] **Step 4.1 (RED):** tests: same id → byte-identical (callable invoked once,
+  recorded via counter), new id → recall again, LRU eviction at N=256, empty
+  `session_id` → `""` + no memo write (counter proves no recall), empty result
+  memoized, timeout class NOT memoized (second call retries), concurrent renders for
+  one id return identical bytes (threads × barrier), lock pattern (recall outside
+  lock — assert via instrumented lock).
+- [ ] **Step 4.2 (GREEN):** implement `WisdomMemo` with `render_for(session_info,
+  recall_fn)`.
+- [ ] **Step 4.3:** checks; commit.
+
+## Task 5: Wire the section (`__init__.py`)
+
+- [ ] **Step 5.1 (RED):** test in `tests/test_install.py` style: `register(ctx)` on a
+  stub context asserts a second section registered with id
+  `curated-thoughts-wisdom` and `max_chars=2500`; render callable returns `""` (no
+  raise) when `ct` is absent; memo is module-level wisdom state (NOT the health
+  cache).
+- [ ] **Step 5.2 (GREEN):** add `_wisdom_prompt_section` + registration (guarded by
+  `callable(register_section)` like the existing one).
+- [ ] **Step 5.3:** full repo checks; commit.
+
+## Task 6: Version, CHANGELOG, README, skills drift
+
+- [ ] **Step 6.1:** bump both manifests to 0.3.0; CHANGELOG entry (feature,
+  limitations ×3, no-op behavior).
+- [ ] **Step 6.2:** README paragraph + the ONE limitations list (restored-session
+  re-render gap incl. in-process `/branch`//`/resume`; legacy-compression rotation;
+  memo eviction >256 sessions).
+- [ ] **Step 6.3:** skills drift check — grep the three SKILL.md files for
+  descriptions of the plugin context; update wording if the new section contradicts.
+- [ ] **Step 6.4:** checks; commit.
+
+## Task 7: e2e — scratch profile only
+
+- [ ] **Step 7.1 (cold path FIRST):** measure a true cold recall (embedding backend
+  restarted or idle-unloaded) before freezing `timeout=5`; record the number in the
+  PR; if > 5 s, bump the constant with the measurement as justification.
+- [ ] **Step 7.2:** install the branch payload into `~/.hermes/plugins/` targets of
+  the ct-test profile only (or point the profile at the repo checkout); verify with
+  the render-path invocation under `HERMES_HOME=~/.hermes/profiles/ct-test` (venv:
+  `~/.hermes/hermes-agent/venv/bin/python`): section ids sorted, wisdom block
+  present, ≤2500 chars, health section intact.
+- [ ] **Step 7.3:** real CLI session in the scratch profile: INFO log lines — exactly
+  1 render with no invalidation boundary; content hash stable across an induced
+  compression; ZERO extra render lines after `/branch` with non-empty history +
+  stored prompt (per spec cycle 4), else exactly one.
+- [ ] **Step 7.4:** stripped-PATH case: PATH without `~/.local/bin` → candidate
+  fallback finds `ct`; wrong-binary case: stub `ct` earlier in PATH → identity probe
+  rejects → falls through.
+- [ ] **Step 7.5:** record all evidence in the PR; commit any fixups.
+
+## Task 8: Convergence
+
+- [ ] **Step 8.1:** push; CI green on the full matrix; CodeRabbit + review bots
+  triaged per the dual-review-cycle skill (sor shadow per implementation wave,
+  ledger-only).
+- [ ] **Step 8.2:** flip spec Status → `Implemented 2026-09-30 (PR #21)` after merge
+  decision gates pass (every review converged AND e2e evidence recorded); any open
+  question → park, never merge past one.
