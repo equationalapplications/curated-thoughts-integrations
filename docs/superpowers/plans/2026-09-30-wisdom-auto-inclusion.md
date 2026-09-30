@@ -62,8 +62,9 @@ lines 97-109; registration pattern, 131-139), `scripts/ct_env.py` (discovery pat
   Applies to the identity probe too (`timeout=3`).
 - **Failure-class memoization (spec, cycle 3):** memoize zero-hits, discovery miss,
   parse error; do NOT memoize timeouts (recall or probe), non-zero exits, or
-  `"spawn"` (OSError — cache-invalidating). Seven classes total: discovery miss,
-  probe_timeout, timeout, exit, spawn, parse error, zero hits.
+  `"spawn"` (OSError — cache-invalidating; **plan-level addition**, not in the spec's
+  list — spec patch deferred to the implementation PR). Seven classes total:
+  discovery miss, probe_timeout, timeout, exit, spawn, parse error, zero hits.
 - **Sanitization order (spec, cycle 2):** remove `<!-- hermes-plugin-section`
   substrings REPEATEDLY until stable → THEN indent any `## Plugin Context: ` line →
   apply to titles AND text.
@@ -105,17 +106,17 @@ lines 97-109; registration pattern, 131-139), `scripts/ct_env.py` (discovery pat
   `--k 3`, and — targeting **`query_for(session_info)`** (golden: degenerate cwd
   cases → seed-only, byte-stable; seed constant frozen) — plus
   the failure-class table: timeout → `(None, "timeout")`, non-zero exit →
-  `(None, "exit")`, spawn (OSError) → `(None, "spawn")` + cache invalidation, zero
+  `(None, "exit")`, spawn (OSError) → `(None, "spawn")` — invalidation itself is
+  owned by the ORCHESTRATOR (sole failure-class handler per contract), zero
   hits → `([], None)` (memoized), parse error → `(None, None)` (memoized).
   (Discovery-miss memoization is owned by the orchestrator — tested in Task 4.)
-- [ ] **Step 2.2 (GREEN):** implement `recall_wiki(ct_path, cwd_basename)` →
+- [ ] **Step 2.2 (GREEN):** implement `recall_wiki(ct_path, query)` →
   `(entries | None, failure_class | None)`; failure classes include **`"spawn"`** —
   `OSError` from `subprocess.run` (`FileNotFoundError`, `PermissionError`) — NOT
   memoized. The process-wide accepted-path cache is invalidated on `"spawn"`
   (re-discovery next render, so a reinstalled/`ct`-moved machine recovers) and has a
   test-only reset hook so tests cannot leak an accepted path between them.
-- [ ] **Step 2.3:** checks; commit. (Steps renumbered: Task 2 = 2.1 recall_wiki +
-  query_for RED, 2.2 GREEN, 2.3 checks.)
+- [ ] **Step 2.3:** checks; commit.
 
 ## Task 3: Sanitize + render (`ct_wisdom.render_block`)
 
@@ -157,8 +158,8 @@ lines 97-109; registration pattern, 131-139), `scripts/ct_env.py` (discovery pat
   REAL orchestrator (lives in `ct_wisdom.py`; `__init__.py` only wires it into
   `register_system_prompt_section`) with `discover_ct`/`recall_wiki` patched per
   class: all SEVEN classes exercised against the real mapping — discovery miss →
-   probe_timeout → NOT memoized, recall timeout → NOT memoized, exit → NOT
-  memoized, spawn → NOT memoized + cache invalidated, parse error → memoized, zero
+  memoized; probe_timeout → NOT memoized; recall timeout → NOT memoized; exit → NOT
+  memoized; spawn → NOT memoized + cache invalidated; parse error → memoized; zero
   hits → memoized. Debug line asserted with
   `assertLogs(level="DEBUG")`: `wisdom: render session=<id> memo=hit|miss class=<c|ok>`.
 - [ ] **Step 4.4 (GREEN):** implement `_render_wisdom` + the debug emit (debug level,
