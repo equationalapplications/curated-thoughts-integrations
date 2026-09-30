@@ -185,9 +185,13 @@ Evidence:
   the api-catalog `systemPrompt` service surface (methods: section, context,
   tools, variable, suppress, order resolvers — no storage) **[V]**.
 
-Design consequence: `{agentId → rendered block}` module-global with the Hermes
-failure-class semantics (memoize zero-hits/discovery-miss/parse-error; never
-timeouts/exit/spawn), LRU-bounded. The DSH module is TypeScript; port the
+Design consequence: `{agentId → rendered block}` module-global with Hermes
+failure-class semantics AS SUPERSEDED BY THE SPEC (Opus spec cycle 1 B1 +
+cycle 2 R2): memoize zero-hits/discovery-miss/parse-error/ENOBUFS; budget the
+transient classes (2 attempts per agent, 60 s cooldown, then memoized) behind
+a process-wide circuit breaker — the verbatim Hermes "never memoize timeouts"
+rule would re-spawn on every model step on DSH and freeze the single-threaded
+harness. LRU-bounded. The DSH module is TypeScript; port the
 OrderedDict LRU as a `Map` with delete/re-insert (JS Maps preserve insertion
 order — idiomatic LRU).
 
@@ -237,6 +241,23 @@ order — idiomatic LRU).
 # All read as unpacked npm tarballs this session (controller-verified):
 @deepseek-ai/dsh-system-prompt@0.1.5-rc.2  lib/index.js   (assemble(), context(),
   section(), joinContextSections() "supersedes earlier runtime-context snapshots")
+@deepseek-ai/dsh-agent@0.1.5-rc.2 / 0.2.0-rc.2  lib/types/dispatch.js
+  (assembleContextFor returns { agent, scope: agent, ...signal }; emitAgentEvent
+  = fire-and-forget emit — agent/session-start listeners are NOT awaited)
+@deepseek-ai/dsh-scope@0.1.5-rc.2   lib/types/index.d.ts
+  (ScopeKey = object — opaque, identity-compared; the Agent object is passed
+  as scope, so scope.id is real today)
+@deepseek-ai/dsh-llm@0.1.5-rc.2     lib (SystemPromptUpdate = 'in-history'
+  is the only non-default mode; default = in-place system-node replace)
+dsh-system-prompt pinned lib/index.js: PromptSection has NO `interpolate`
+  (added by 0.2.0-rc.2); renderPrompt interpolates every section — unknown
+  `{{name}}` throws inside assemble()  [spec cycle-1 R3 landmine]
+dsh-system-prompt pinned lib/index.js: SECTION_ORDERS constants
+  (TOOL_* 1000-2900, TOOLS_SDK 5000, DELIVERABLE_FILE_REFERENCES 9000, ...)
+dsh-agent-loop pinned lib/index.js: SystemPromptProjection.project() —
+  `if (latest.text === rendered) return []` (no update when unchanged)
+Node docs: spawnSync EINVAL on .cmd/.bat with shell:false (CVE-2024-27980
+  patch) — Windows discovery must skip those extensions
 @deepseek-ai/dsh-agent-loop@0.1.5-rc.2     lib/index.js   (pre-step assemble call,
   RuntimeContextProjection.project retained-differs rule; README "Complete
   conversation request → KV Cache effect"; "Limitations": stable sessionId)

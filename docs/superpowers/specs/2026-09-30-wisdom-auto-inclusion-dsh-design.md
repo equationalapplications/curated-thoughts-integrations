@@ -88,50 +88,68 @@ Flow (mirrors Hermes ct_wisdom.py, ported to TypeScript):
    text, hard-capped at **2500 chars** post-sanitize (self-enforced; DSH has no
    host-side max_chars for sections). Sanitization order: remove
    `<!-- hermes-plugin-section` repeatedly until stable → indent any line-start
-   `## Plugin Context: ` → **neutralize `{{` → `{ {`** (pinned-host
+   `## Plugin Context: ` → **neutralize brace-runs: replace every `{` that is
+   directly followed by `{` with `{ ` (`/\{(?=\{)/g → '{ '), which collapses
+   any run `{{`, `{{{`, `{{{{`… to a safe form in ONE pass** (pinned-host
    `renderPrompt` interpolates sections unconditionally; an unbalanced or
    unknown `{{name}}` THROWS inside `assemble()` — pinned dsh-system-prompt
-   lib/index.js [V]). Applied to titles AND text. DSH has no Hermes
+   lib/index.js [V]; cycle-2 R1: a single `{{`→`{ {` replaceAll is bypassable
+   via `{{{x}}`, so the lookahead form is mandatory). Applied to titles AND
+   text; a unit invariant locks "rendered block never contains `{{`" for
+   brace-run and splice cases. DSH has no Hermes
    persistence-marker invariant, but the sanitizer is cheap, defense-in-depth
    against hostile wiki prose, and keeps the two ports byte-comparable — the
    exact Hermes marker strings are kept deliberately: they are the frame text
    CT-side wiki prose could plausibly carry cross-host, which is the forgery
    being defused. Zero wiki entries → return `""` (host drops empty sections).
-4. **Once-semantics: memo keyed on `agent.id`** — `{sessionId → block}` module
-   global, LRU N=256 (JS `Map`, delete/re-insert for LRU order). **No lock
-   needed**: Node is single-threaded and `text()` is synchronous — the Hermes
-   check-under-lock/setdefault dance has no race to guard here; document the
-   difference. **Key hygiene:** only a non-empty `typeof id === "string"` value
-   becomes a memo key; empty, absent, or non-string `agent.id` (host version
-   drift) → return `""` with no memo write and no recall — a degenerate id must
-   never become a shared memo key (Hermes Opus finding, carried over).
+4. **Once-semantics: memo keyed via `keyOf()`** — `{sessionId → block}` module
+   global, LRU N=256 (JS `Map`, delete/re-insert for LRU order). **Key
+   resolution — ONE function, `keyOf(ctx)`, referenced everywhere** (cycle-2
+   R3; pinned 0.1.5-rc.2 and current 0.2.0-rc.2 both pass
+   `{agent, scope: agent, signal}` [V]): `typeof agent?.id === "string" &&
+   agent.id` → use it; else `typeof scope?.id === "string" && scope.id` → use
+   it (`scope` is typed `ScopeKey = object` in dsh-scope and receives the Agent
+   object itself today [V], so `.id` exists; the guard makes the fallback
+   safe if that ever changes); else no key. **No key → return `""` with no
+   memo write and no spawn.** No lock needed: Node is single-threaded and
+   `text()` is synchronous — the Hermes check-under-lock/setdefault dance has
+   no race to guard here; document the difference.
    Compaction does NOT rotate the id (SurfaceOp replace is in-session), so —
    unlike Hermes — **no lineage-root logic and no mid-session byte change at
    compression boundaries at all**. Resume in a new harness process: memo is
    cold; a fresh block is recalled and appears as a system-node change (accepted
    v1 limitation, see below). **Fork** creates a new SessionId → fresh block in
    the child (correct).
-5. **Fail-open WITH a retry budget (DSH-specific — Opus cycle-1 B1):** failure
-   classes ported from Hermes but the retry rule is NOT verbatim. On DSH the
-   render runs on EVERY model step and `spawnSync` **freezes the single-threaded
-   harness** (TUI, streams, MCP stdio) for the spawn duration — the Hermes
-   "retry next render" rule would stall every step of every session while a
-   backend is down. Therefore: *memoized* — discovery miss, parse error, zero
-   hits, and **`maxBuffer` overflow (ENOBUFS, treated like a parse error)**;
-   *budgeted* — recall timeout, non-zero exit, spawn failure, probe timeout:
-   at most **2 attempts per agent id, ≥60 s cooldown between attempts, then
-   memoize `""` for that agent**. Budget counters are per-process (module
-   state alongside the memo); the discovery-cache reset on spawn failure is
-   kept but the RESET ITSELF is budgeted (a candidate re-probe costs up to
-   3 s frozen). Worst-case stall per agent: 2×(probe 3 s + recall 5 s) = 16 s
-   lifetime, then dark-forever — stated as the invariant. Every failure
+5. **Fail-open WITH a retry budget (DSH-specific — Opus cycle-1 B1, hardened
+   cycle-2 R2):** failure classes ported from Hermes but the retry rule is NOT
+   verbatim. On DSH the render runs on EVERY model step and `spawnSync` **freezes
+   the single-threaded harness** (TUI, streams, MCP stdio) for the spawn
+   duration — the Hermes "retry next render" rule would stall every step of
+   every session while a backend is down. Therefore: *memoized* — discovery
+   miss, parse error, zero hits, and **`maxBuffer` overflow (ENOBUFS, treated
+   like a parse error)**; *budgeted* — recall timeout, non-zero exit, spawn
+   failure, probe timeout: at most **2 attempts per agent id, ≥60 s cooldown
+   between attempts, then memoize `""` for that agent**, PLUS a **process-wide
+   circuit breaker: after 4 consecutive budgeted failures across any agents,
+   stop spawning process-wide for 5 minutes, then allow one probe attempt**.
+   Budget counters and the breaker are per-process (module state alongside the
+   memo); the discovery-cache reset on spawn failure is kept but the RESET
+   ITSELF is budgeted (a candidate re-probe costs up to 3 s frozen).
+   Worst-case stall invariant, stated PER PROCESS (cycle-2 R2 — the per-agent
+   figure alone lets subagent fan-out multiply the cost): **one agent's full
+   budget is ≤16 s frozen (2×(probe 3 s + recall 5 s)); the process-wide
+   breaker caps the total at ≤16 s + (K−1)×5 s + probes within any 5-minute
+   window, then dark — regardless of how many agents fan out**. Every failure
    collapses to `""`; nothing raises into prompt assembly. Logging at debug.
 
 **Rejected for DSH (beyond the Hermes rejected list):** second runtime
 `context()` for wisdom (position after history; see Approach); memoizing
-transient failures to protect node-0 byte-stability (a dark-forever session is
-worse than one extra cache miss — and the miss only happens when the first
-attempt failed, i.e. the prefix was already degraded); async prefetch at
+transient failures **for byte-stability's sake alone** (a dark-forever session
+is worse than one extra cache miss — and the miss only happens when the first
+attempt failed, i.e. the prefix was already degraded). Note the budgeted
+retry above is a DIFFERENT mechanism: it memoizes after the budget is spent
+to bound the stall, not to protect byte stability (cycle-2 R6 wording);
+async prefetch at
 `agent/session-start` with sync cache read (**rejection now evidence-backed,
 Opus cycle-1 M2**: `agent/session-start` is dispatched via `emitAgentEvent` —
 a fire-and-forget notification whose listeners are NOT awaited (dispatch.js,
@@ -164,10 +182,9 @@ apply(ctx) ──► ctx.systemPrompt.section({ name: 'curated-thoughts-wisdom',
                                             order: 6000, interpolate: false,
                                             text: renderWisdom })
 every model step ──► renderWisdom({agent, scope, signal})
-                       ├─ memo[agent.id] hit → stored bytes (byte-identical replay)
-                       ├─ miss + non-string/empty agent.id → "" (no memo write, no spawn)
-                       ├─ miss + budget exhausted for agent.id → "" (memoized)
-                       ├─ miss + inside cooldown → "" (no spawn)
+                       ├─ keyOf(): no key → "" (no memo write, no spawn)
+                       ├─ memo[key] hit → stored bytes (byte-identical replay)
+                       ├─ miss + budget exhausted / breaker open → "" (no spawn)
                        ├─ miss: discover ct (candidates + identity probe) → fail: "" (memoized / budgeted)
                        ├─ spawnSync: ct recall <seed> --json --k 3 (timeout 5s,
                        │      killSignal SIGKILL, maxBuffer 4 MiB, windowsHide)
@@ -184,12 +201,13 @@ compaction: no effect — same SessionId, memo replays identical bytes
 
 - **OQ1 session identity — resolved [V]:** `agent.id: SessionId`, stable across
   compaction; fork = new id; resume = same id, cold memo in a new process.
-  Memo key = the id string, with a **fallback order** (Opus cycle-1 M1):
-  `agent?.id` → `scope?.id` when it is a string → else no-op. Both pinned
-  (0.1.5-rc.2 `assembleContextFor`) and current (0.2.0-rc.2 dispatch.js)
-  pass `{agent, scope: agent, signal}` — the 0.2.0-rc.2 api-catalog
-  `AssembleContext` interface omits `agent` but the implementation passes it;
-  the fallback covers a future host that stops passing it. A host-compat unit
+  Memo key = **`keyOf(ctx)`** (single definition, Approach step 4 — cycle-2
+  R3): `agent?.id` → `scope?.id` (when a non-empty string) → else no-op.
+  Both pinned (0.1.5-rc.2 `assembleContextFor`) and current (0.2.0-rc.2
+  dispatch.js) pass `{agent, scope: agent, signal}` — the 0.2.0-rc.2
+  api-catalog `AssembleContext` interface omits `agent` but the
+  implementation passes it; `ScopeKey` is `object` (dsh-scope [V]) and
+  receives the Agent itself, so `scope?.id` is real today. A host-compat unit
   test locks the pinned shape, and the e2e asserts a non-empty block so a
   silent dark-fail is loud. (Hermes's lineage-root keying has no DSH analogue.)
 - **OQ2 re-render — resolved [V]:** every step re-invokes `text()`; the memo is
@@ -212,14 +230,20 @@ compaction: no effect — same SessionId, memo replays identical bytes
   accepted (cycle-1 m6), bounded by the retry budget.
   Identity probe: `ct --help` output must contain `"Curated Thoughts"`
   (same probe text as Hermes), timeout 3 s, same contract.
-- **Discovery candidates:** reuse the repo's existing `whichOnPath` helper from
-  `scripts/ct_env.ts` (export it; do not duplicate) with the Hermes candidate
-  order (`PATH` hit first, then platform candidates incl. Windows
-  `%USERPROFILE%\bin\ct.exe` and `%LOCALAPPDATA%\CuratedThoughts\bin\ct.exe`).
-  **Windows restriction (cycle-1 M3):** candidates matching `.cmd`/`.bat`
-  (case-insensitive) are rejected at discovery — `spawnSync` with `shell:false`
-  fails EINVAL on patched Node for those (CVE-2024-27980), which would
-  otherwise classify as spawn and burn the retry budget in a loop.
+- **Discovery (cycle-2 R5):** the plugin owns a small filtered walk over PATH —
+  it does NOT call `whichOnPath` and post-filter its single result (a
+  `.cmd` shim earlier on PATH would shadow a valid `ct.exe` later on PATH and
+  memoize a false discovery miss). Implementation: export an
+  `allPathMatches(name, env, platform)` variant from `scripts/ct_env.ts`
+  (same split/exts logic, returns every existing executable hit in PATH
+  order); discovery walks it, **skipping `.cmd`/`.bat` candidates entirely on
+  win32** (`spawnSync` with `shell:false` fails EINVAL on patched Node for
+  those — CVE-2024-27980), skipping extensionless files on win32 too, and
+  probes the remaining candidates in order (identity probe as below; a
+  failed probe advances to the next candidate). Platform fallback
+  candidates after PATH: Hermes's list (`%USERPROFILE%\bin\ct.exe`,
+  `%LOCALAPPDATA%\CuratedThoughts\bin\ct.exe`). Windows shadowing case gets
+  a unit test.
 - **Subagents (cycle-1 m5):** each DSH subagent is its own `Agent`/SessionId, so
   each pays its own recall on its first step (memo is per agent). v1 **accepts
   the per-agent cost and documents it**; a process-wide result cache keyed on
@@ -266,11 +290,16 @@ debug one-liners with a `wisdom` prefix.
 - **Subprocess safety:** argv array via `spawnSync`, never a shell string; the
   seed is a single argv element; no user-controllable input reaches a shell (v1
   has no config surface — nothing user-controlled exists).
-- **Limitations list (README, exactly three):** (1) after a harness restart on
+- **Limitations list (README, exactly five):** (1) after a harness restart on
   a resumed session the memo is cold — the first step re-recalls and the block
   may change bytes once (system-node change → one cache miss); (2) the same
   one-time cost if the first recall attempt fails transiently and a later
-  render succeeds; (3) memo eviction beyond 256 live agents per process.
+  render succeeds; (3) memo eviction beyond 256 live agents per process;
+  (4) when the `ct` backend is down, a session stops trying after two failed
+  attempts (its block stays absent for the session's life in that process);
+  (5) while the backend is down, the harness may pause briefly (seconds) on
+  recall attempts, bounded per process by the retry budget + circuit breaker.
+  (cycle-2 R6.)
 - **Skills drift check:** the three shipped CT skills describe the plugin
   context; implementation verifies their wording still matches and updates if
   needed.
