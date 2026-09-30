@@ -108,14 +108,19 @@ Flow (mirrors Hermes ct_wisdom.py, ported to TypeScript):
    global, LRU N=256 (JS `Map`, delete/re-insert for LRU order). **Key
    resolution — ONE function, `keyOf(ctx)`, referenced everywhere** (cycle-2
    R3; pinned 0.1.5-rc.2 and current 0.2.0-rc.2 both pass
-   `{agent, scope: agent, signal}` [V]): `typeof agent?.id === "string" &&
-   agent.id` → use it; else `typeof scope?.id === "string" && scope.id` → use
-   it (`scope` is typed `ScopeKey = object` in dsh-scope and receives the Agent
-   object itself today [V], so `.id` exists; the guard makes the fallback
-   safe if that ever changes); else no key. **No key → return `""` with no
-   memo write and no spawn.** No lock needed: Node is single-threaded and
-   `text()` is synchronous — the Hermes check-under-lock/setdefault dance has
-   no race to guard here; document the difference.
+   `{agent, scope: agent, signal}` [V]): the ctx is first narrowed via
+   `(ctx ?? {}) as { agent?: unknown; scope?: unknown }`, then a `pick(o)`
+   helper tests `typeof o === "object" && o !== null && typeof (o as { id?:
+   unknown }).id === "string"` and returns `(o as { id: string }).id` — **the
+   typed `agent`/`scope` values are NEVER dot-accessed directly** (CodeRabbit,
+   2026-09-30; `ScopeKey = object` in dsh-scope carries no `.id` in the type,
+   so `scope?.id` does not compile; `scope` receives the Agent object at
+   runtime [V], so the property exists as data but only the `unknown`-narrowed
+   form can read it); agent first, then scope, else no key. **No key → return
+   `""` with no memo write and no spawn.** No lock needed: Node is
+   single-threaded and `text()` is synchronous — the Hermes
+   check-under-lock/setdefault dance has no race to guard here; document the
+   difference.
    Compaction does NOT rotate the id (SurfaceOp replace is in-session), so —
    unlike Hermes — **no lineage-root logic and no mid-session byte change at
    compression boundaries at all**. Resume in a new harness process: memo is
