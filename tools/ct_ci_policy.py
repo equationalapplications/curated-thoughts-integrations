@@ -205,6 +205,7 @@ STDLIB_ALLOWLIST = frozenset(sys.stdlib_module_names) | {
     "ct_doctor",
     "ct_preflight",
     "ct_status",
+    "ct_wisdom",
 }
 
 # CONTRIBUTING rule 3 / the environment contract: these three and nothing else.
