@@ -117,6 +117,23 @@ one-liners with a `wisdom` prefix; never INFO (prompt renders are noisy enough).
   fallback.
 - **CI:** existing matrix (3 OS × py3.9-3.13) + ruff; no new deps (stdlib only).
 
+## Versioning, docs, and safety pins
+
+- **Version bump:** `integrations/hermes/plugin.yaml` and `integration.yaml` →
+  **0.3.0** (new feature, `version_mirror` keeps them in lockstep) + CHANGELOG entry
+  under the Hermes integration.
+- **Subprocess safety:** `ct` is invoked with **list argv via `subprocess.run`,
+  never `shell=True`**; the cwd basename and seed are passed as a single argv element.
+  No user-controllable input reaches a shell.
+- **README:** document the feature (one paragraph), the two accepted v1 limitations
+  (post-restart invalidation; legacy-compression rotation), and the graceful no-op
+  behavior.
+- **Skills drift check:** the three shipped CT skills describe the plugin context;
+  implementation verifies their wording still matches and updates if needed.
+- **e2e compression induction:** how to force an invalidation boundary in a scratch
+  CLI session (long transcript vs direct `invalidate_system_prompt` call in the
+  render harness) — decided in the plan, not here.
+
 ## Out of scope (v1)
 
 No CT core changes; no new MCP tools; no score-bearing recall endpoint (upgrade path
