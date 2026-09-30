@@ -32,8 +32,8 @@ the debug-line form in cycle 2.)
   `"probe_timeout"` when a candidate's identity probe times out (NOT memoized), `None`
   otherwise; `path=None, class=None` = deterministic discovery miss (memoized).
 - `recall_wiki(ct_path, query) -> (entries | None, failure_class | None)` —
-  `"timeout"` / `"exit"` / `"spawn"` are NOT memoized; `None, None` with zero entries
-  IS.
+  `"timeout"` / `"exit"` / `"spawn"` are NOT memoized; `([], None)` (zero hits) and
+  `(None, None)` (parse error) ARE memoized.
 - `recall_fn(session_info) -> (block_str, memoize: bool)` — the memo's ONLY signal.
 - ONE orchestrator, `_render_wisdom(session_info)`, combines discover → recall →
   render and maps every failure class to `memoize`; it is the sole owner of that
@@ -95,7 +95,9 @@ lines 97-109; registration pattern, 131-139), `scripts/ct_env.py` (discovery pat
 - [ ] **Step 1.2 (GREEN):** implement `discover_ct(env=None)` per the module
   contract (tuple return); debug-log accepted/rejected paths; POSIX candidates
   checked with `os.access(X_OK)`, **Windows candidates with `os.path.isfile` only**;
-  accepted path cached process-wide.
+  accepted path cached process-wide **with the test-only reset hook added HERE**
+  (every test's `setUp` calls it — Task 1's accept/reject tests must not leak cache
+  state into each other).
 - [ ] **Step 1.3:** run checks; commit.
 
 ## Task 2: Recall wrapper + failure classes (`ct_wisdom.recall_wiki`)
@@ -113,9 +115,10 @@ lines 97-109; registration pattern, 131-139), `scripts/ct_env.py` (discovery pat
 - [ ] **Step 2.2 (GREEN):** implement `recall_wiki(ct_path, query)` →
   `(entries | None, failure_class | None)`; failure classes include **`"spawn"`** —
   `OSError` from `subprocess.run` (`FileNotFoundError`, `PermissionError`) — NOT
-  memoized. The process-wide accepted-path cache is invalidated on `"spawn"`
-  (re-discovery next render, so a reinstalled/`ct`-moved machine recovers) and has a
-  test-only reset hook so tests cannot leak an accepted path between them.
+  memoized (`recall_wiki` only RETURNS the class; the orchestrator owns the
+  invalidation action, Step 4.4). The process-wide accepted-path cache has a
+  test-only reset hook (used in every `setUp`) so tests cannot leak an accepted path
+  between them.
 - [ ] **Step 2.3:** checks; commit.
 
 ## Task 3: Sanitize + render (`ct_wisdom.render_block`)
@@ -163,7 +166,9 @@ lines 97-109; registration pattern, 131-139), `scripts/ct_env.py` (discovery pat
   hits → memoized. Debug line asserted with
   `assertLogs(level="DEBUG")`: `wisdom: render session=<id> memo=hit|miss class=<c|ok>`.
 - [ ] **Step 4.4 (GREEN):** implement `_render_wisdom` + the debug emit (debug level,
-  never INFO — spec constraint).
+  never INFO — spec constraint). `_render_wisdom` is the SOLE owner of the
+  failure-class actions: on `"spawn"` it invalidates the accepted-path cache
+  (re-discovery next render, so a reinstalled/`ct`-moved machine recovers).
 - [ ] **Step 4.5:** checks; commit.
 
 ## Task 5: Wire the section (`__init__.py`)
@@ -188,6 +193,9 @@ lines 97-109; registration pattern, 131-139), `scripts/ct_env.py` (discovery pat
   memo eviction >256 sessions).
 - [ ] **Step 6.3:** skills drift check — grep the three SKILL.md files for
   descriptions of the plugin context; update wording if the new section contradicts.
+- [ ] **Step 6.3b:** patch the spec's memoization list to include the `"spawn"`
+  class (the plan-level addition; keeps spec-vs-plan audit clean before Step 8.2
+  flips the spec status).
 - [ ] **Step 6.4:** checks; commit.
 
 ## Task 7: e2e — scratch profile only
