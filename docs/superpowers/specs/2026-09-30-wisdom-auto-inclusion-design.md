@@ -8,7 +8,10 @@ m5 max_chars pin; m6 sanitization precision; m7 discovery list; m8 id behavior
 resolved [V]). Opus spec cycle 2 (delta) = REQUEST CHANGES (1 MINOR/MAJOR, 3 MINOR,
 2 nits) → all applied (cold-path honesty + timeout-empties not memoized; citation
 776-786; sanitization order + titles; identity probe for wrong-binary `ct`; /resume
-coverage; README dedupe) → cycle 3 delta pending.
+coverage; README dedupe). Opus spec cycle 3 (delta) = REQUEST CHANGES (2 mechanism, 1 probe,
+1 tests, 1 nit) → all applied (/branch//resume restore-not-recall corrected [V];
+failure classes explicit; probe text verified + under subprocess contract; 3 tests
+added; Windows path typo) → cycle 4 delta pending.
 
 Investigation: [`../investigations/2026-09-30-wisdom-auto-inclusion-step0-investigation.md`](../investigations/2026-09-30-wisdom-auto-inclusion-step0-investigation.md)
 (3 Opus cycles; every claim below marked "measured" or "verified" carries its [V] evidence there).
@@ -93,8 +96,9 @@ register(ctx) ──► register_system_prompt_section("curated-thoughts-wisdom"
                           │
 first prompt build ──► render_wisdom(session_info)
                           ├─ memo[session_id] hit → stored bytes
-                          ├─ miss: discover ct (which → candidates) → fail: ""
+                          ├─ miss: discover ct (which → candidates+probe) → fail: "" (memoized)
                           ├─ subprocess: ct recall <query> --json  (timeout 5s) → fail: "" (NOT memoized)
+                          │            non-zero exit → fail: "" (NOT memoized)
                           ├─ parse JSON → wiki[0..3] → empty: memoize "" → ""
                           ├─ sanitize → render ≤2500 → memoize → block
                           └─ all exceptions swallowed (debug log) → ""
@@ -104,25 +108,34 @@ post-restart invalidation may re-recall — documented)
 
 ## Resolved decisions (from the investigation's open questions)
 
-- **OQ1 re-render policy — resolved with observed id behavior [V]:** `/new`
-  (`cli_session_mixin.py:524`) and `/branch` (`cli_commands_mixin.py:332-340`,
-  memory-manager "session_id rotated" notification) **rotate** `session_id` → new
-  epoch → fresh recall (correct: a genuinely new conversation deserves a fresh
-  block). Rewind preserves the id → memo replay. `/resume`
-  (`cli_commands_mixin.py:333`) invalidates the prompt; in a fresh process the memo
-  is empty (see README limitation 1).
+- **OQ1 re-render policy — resolved with observed host behavior [V] (corrected in
+  spec cycle 3):** `/new` (`cli_session_mixin.py:524`) **rotates** `session_id` → new
+  epoch → the next build calls the renderer → fresh recall (correct: a genuinely new
+  conversation). **`/branch` and `/resume` do NOT re-render**: both rotate/switch the
+  id and then restore the session row's persisted prompt bytes via
+  `_sync_agent_to_session` → `restore_plugin_prompt_sections`
+  (`cli_commands_mixin.py:318-333`; `/branch` deliberately copies the parent's exact
+  prompt, `cli_commands_mixin.py:1408-1418`, to keep the cache warm) — the callable
+  is never invoked and the memo stays empty for the new id. Consequence: the first
+  compression after an in-process `/branch` or `/resume` misses the memo → fresh
+  recall → bytes can change (this is README limitation 1's mechanism; the
+  "fresh process" qualifier is REMOVED — it happens in-process too). Rewind
+  preserves id and prompt → host restore, memo unconsulted. Memo replay is the
+  mechanism ONLY at compression/rebuild boundaries, where the host clears the
+  snapshot and calls the renderer again.
   Legacy non-in-place compression also rotates (`conversation_compression.py:3357/3386`,
   default in-place `True` at 4092) with **no plugin-visible lineage signal** (Opus
-  cycle-3) → mid-session rotation there is an accepted v1 limitation, documented in
-  README.
+  cycle-3) → same accepted v1 limitation.
 - **OQ2 `ct` discovery:** `shutil.which("ct")` (handles `PATHEXT`/`.exe` on Windows),
   then explicit candidates: Linux `~/.local/bin/ct`, `/usr/bin/ct`,
   `/usr/local/bin/ct`, `~/bin/ct`; macOS `~/bin/ct`, `/usr/local/bin/ct`,
-  `/opt/homebrew/bin/ct`; Windows `%USERPROFILE%\bin\ct\ct.exe`,
+  `/opt/homebrew/bin/ct`; Windows `%USERPROFILE%\bin\ct.exe`,
   `%LOCALAPPDATA%\CuratedThoughts\bin\ct.exe`. Each candidate is **identity-probed** before acceptance
-  (`ct --help` must succeed and mention "Curated Thoughts" — chart-testing's `ct`
-  shares the name on Homebrew; Opus spec-D); first candidate passing the probe wins;
-  rejected paths logged at debug.
+  (verified 2026-09-30 [V]: `ct --help` line 1 is "`ct` — headless CLI for Curated
+  Thoughts brains" — chart-testing's `ct` shares the name on Homebrew; Opus spec-D);
+  the probe runs under the SAME subprocess contract (list argv, `stdin=DEVNULL`,
+  `timeout=3`); first candidate passing the probe wins; rejected paths logged at
+  debug.
   The plan still checks what path the dpkg package ships `ct` at.
 - **OQ3 render blocking:** synchronous with `timeout=5` in v1. Justification:
   latency **measured 2026-09-30 [V]** — warm 0.765 s, cold-from-clean-dir 0.35–0.44 s
@@ -135,10 +148,12 @@ post-restart invalidation may re-recall — documented)
   *cwd*, not a cold embedding backend (strace showed ~10 local `connect()` calls — a
   local service that may idle-unload its model). Two countermeasures: (1) the plan
   measures a true cold recall (backend restarted / idle-unloaded) before freezing
-  `timeout=5`; (2) **timeout-produced empties are NOT memoized** (only zero-hit
-  empties are — a bounded exception to the R3 rule): a transiently slow backend must
-  not darken a session forever; the next render retries. Missing binary / parse
-  errors still memoize as empty (deterministic failures).
+  `timeout=5`); (2) **failure classes are memoized EXPLICITLY** (spec cycle 3):
+    *memoize* — zero wiki hits (deterministic for this brain), discovery miss, parse
+    error; *do NOT memoize* — **timeout** and **non-zero exit** (both indicate a
+    possibly-transient backend state — restarting, idle-unloaded model, connection
+    refused; a dark-forever session is worse than a retry): the next render retries.
+    Empty-render count expectations in tests distinguish the classes.
 - **OQ5 seed constant:** `"curated thoughts agent memory wisdom procedures"` — frozen
   after e2e tuning (one change max, then hard-freeze).
 - **OQ6 caps:** `k=3`, `max_chars=2500` — frozen after e2e.
@@ -162,12 +177,16 @@ are noisy enough).
 - **Unit (stdlib unittest, mirrors `integration.yaml` checks):** fake `ct` on PATH;
   wiki-only consumption; k/truncation/sanitization; each no-op mode; query-template
   stability (golden string incl. degenerate-cwd cases); memo hit/miss/eviction/empty;
-  timeout kill path; discovery fallback order; concurrent render (thread) safety.
+  timeout kill path; discovery fallback order; concurrent render (thread) safety;
+  timeout-empty NOT memoized and next render retries; probe rejects a non-CT `ct`;
+  empty `session_id` returns "" with NO memo write.
 - **e2e (scratch profile `ct-test` ONLY — never the live default profile):** install
   branch payload → real CLI session → exactly one wisdom block in the assembled
   prompt (direct render-path invocation under `HERMES_HOME`, mechanism verified);
-  INFO log-line expectations per boundary (1 with no invalidation boundary); content
-  hash stable across an induced compression. Stripped-PATH case exercises candidate
+  INFO log-line expectations per boundary (1 with no invalidation boundary; ZERO
+  additional render lines after `/branch`//`/resume` — the host restores persisted
+  bytes and never calls the renderer); content hash stable across an induced
+  compression. Stripped-PATH case exercises candidate
   fallback.
 - **CI:** existing matrix (3 OS × py3.9-3.13) + ruff; no new deps (stdlib only).
 
@@ -180,9 +199,11 @@ are noisy enough).
   never `shell=True`**; the cwd basename and seed are passed as a single argv element.
   No user-controllable input reaches a shell.
 - **README:** document the feature (one paragraph), the graceful no-op behavior, and
-  exactly one limitations list (three items): post-restart invalidation (incl.
-  `/resume` in a fresh process — Opus spec-E); legacy-compression rotation; memo
-  eviction beyond N=256 live sessions.
+  exactly one limitations list (three items): (1) restored-session re-render gap —
+  after `/branch`, `/resume`, or a process restart, the block comes from persisted
+  bytes with an empty memo, so the first compression in that session may re-recall
+  and change bytes; (2) legacy-compression rotation; (3) memo eviction beyond N=256
+  live sessions.
 - **Skills drift check:** the three shipped CT skills describe the plugin context;
   implementation verifies their wording still matches and updates if needed.
 - **e2e compression induction:** how to force an invalidation boundary in a scratch
