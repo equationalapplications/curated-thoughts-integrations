@@ -144,7 +144,11 @@ Flow (mirrors Hermes ct_wisdom.py, ported to TypeScript):
    5-minute half-open probe; a failed half-open probe re-opens the breaker
    for another 5 minutes — regardless of how many agents fan out**. Every
    failure collapses to `""`; nothing raises into prompt assembly. Logging at
-   debug.
+   debug. **Plan carry-overs from cycle 4 (reviewer-approved deferral):**
+   (B) port Hermes `_candidate_paths` per-platform lists verbatim; (C) unit
+   tests for the budget/breaker state machine with fake timers — budget
+   exhaustion → memoized `""`, cooldown gate, breaker trips at K=4, failed
+   half-open probe re-opens the breaker.
 
 **Rejected for DSH (beyond the Hermes rejected list):** second runtime
 `context()` for wisdom (position after history; see Approach); memoizing
@@ -247,12 +251,21 @@ compaction: no effect — same SessionId, memo replays identical bytes
   **Probe walk rule (cycle-3 N1, matching Hermes): a candidate that exists
   but FAILS the identity probe (wrong output) advances the walk to the next
   candidate; a candidate whose probe TIMES OUT ends the walk immediately as
-  a budgeted `probe_timeout` failure** (otherwise N stale PATH hits freeze
-  the harness 3 s × N and break the stall invariant). Unit tests for both
-  the Windows shadowing case and the timeout-ends-walk rule. Platform
-  fallback candidates after PATH, per platform (cycle-3 N2): Linux/macOS —
-  `~/.local/bin/ct`, `~/bin/ct`, `/usr/local/bin/ct`; Windows —
-  `%USERPROFILE%\bin\ct.exe`, `%LOCALAPPDATA%\CuratedThoughts\bin\ct.exe`.
+  a budgeted `probe_timeout` failure.** **Walk bound (cycle-4 A): the whole
+  discovery walk runs under ONE cumulative 3 s deadline — elapsed walk time
+  counts against every subsequent probe's timeout, and exhausting the
+  deadline ends the walk as budgeted `probe_timeout`** (bounds a rejecting
+  nearly-3 s probe chain as well as timeouts; keeps "each budgeted attempt
+  ≤ 8 s" true). **Discovery MISSES are cached PROCESS-WIDE with a 5-minute
+  TTL** (aligned with the breaker window), not per agent — otherwise every
+  new subagent re-walks and re-probes all candidates unbounded by the
+  breaker. Unit tests for the Windows shadowing case, the
+  timeout-ends-walk rule, and the deadline exhaustion. Platform
+  fallback candidates after PATH: **copied from Hermes `_candidate_paths`
+  verbatim, per platform** (cycle-4 B — the merged list in the previous
+  revision silently dropped `/usr/bin/ct` and `/opt/homebrew/bin/ct`; the
+  plan ports Hermes's exact per-platform lists, so GUI/launchd macOS
+  contexts still find a Homebrew `ct`).
 - **Subagents (cycle-1 m5):** each DSH subagent is its own `Agent`/SessionId, so
   each pays its own recall on its first step (memo is per agent). v1 **accepts
   the per-agent cost and documents it**; a process-wide result cache keyed on
