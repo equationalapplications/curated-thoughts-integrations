@@ -16,11 +16,12 @@ format below is load-bearing: `## <version> — <date>`.
   256 sessions) in the `ct_wisdom` module so re-renders within a session are
   byte-identical and free.
 - Known v1 limitations: (1) a *restored* session — including an in-process
-  `/branch`, and `/resume` after the Hermes process restarted — reuses its old
-  session id, so the memo serves a possibly stale block instead of re-recalling
-  for the new conversation; (2) legacy non-in-place compression rotates the
-  session id, which can trigger one extra recall after compaction; (3) live
-  sessions beyond the 256-slot memo window evict each other and re-recall.
+  `/branch`, and `/resume` after the Hermes process restarted — receives its
+  persisted prompt bytes back without a recall and its new id starts with an
+  empty memo, so the first compression afterwards re-recalls and the block may
+  change; (2) legacy non-in-place compression rotates the session id, which
+  can trigger one extra recall after compaction; (3) live sessions beyond the
+  256-slot memo window evict each other and re-recall.
 - Graceful no-op: when Curated Thoughts is not installed or the brain is
   unreachable, the section silently renders empty — no errors, no prompt
   noise, sessions never block on it.

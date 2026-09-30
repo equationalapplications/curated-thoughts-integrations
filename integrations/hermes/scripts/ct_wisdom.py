@@ -93,7 +93,7 @@ def _candidate_paths(platform=None, env=None):
         if profile:
             # Literal backslash joins: os.path.join would use the host's
             # separator and this branch can be evaluated on POSIX too.
-            out.append(profile.rstrip("\\/") + "\\bin\\ct\\ct.exe")
+            out.append(profile.rstrip("\\/") + "\\bin\\ct.exe")
         if local:
             out.append(local.rstrip("\\/") + "\\CuratedThoughts\\bin\\ct.exe")
         return out
@@ -132,7 +132,7 @@ def _identity_probe(ct_path):
     except subprocess.TimeoutExpired:
         return "timeout"
     except OSError:
-        # Could not even spawn it ( vanished between the access check and
+        # Could not even spawn it (binary vanished between the access check and
         # exec, permissions on POSIX gate earlier, PATHEXT variance on
         # Windows). Treat as a rejection and keep searching.
         return "reject"
@@ -208,7 +208,7 @@ def query_for(session_info):
     if not basename:
         return SEED_QUERY
     home_basename = os.path.basename(os.path.expanduser("~").rstrip("/\\"))
-    if basename == home_basename or basename in _CWD_DENYLIST:
+    if basename == home_basename or basename.lower() in _CWD_DENYLIST:
         return SEED_QUERY
     return SEED_QUERY + " " + basename
 
@@ -293,28 +293,53 @@ def _sanitize(value):
     return "\n".join(lines)
 
 
+BLOCK_HEADING = "## Curated Thoughts \u2014 relevant memory"
+_ELLIPSIS = "\u2026"
+
+
 def render_block(entries):
     """Render sanitized wiki entries into the bounded wisdom block.
 
-    Per entry: `**{title}**\n{text}`, joined with blank lines. The hard cap is
-    2500 chars on the accumulated STRIPPED length (the host measures stripped
-    text and drops over-length sections): entries are included while they fit
-    and the rest are dropped. Zero usable entries -> "".
+    Structure: the block heading, then per entry `**{title}**\n{text}`,
+    joined with blank lines. The hard cap is MAX_BLOCK_CHARS on the final
+    STRIPPED length (the host measures stripped text and DROPS over-length
+    sections -- it never truncates). Entries that fit are included whole; the
+    first entry that does not fit whole is TRUNCATED to the remaining budget
+    (title kept -- spec cycle: every kept entry retains its title line); any
+    further entries are dropped. Entries with no content are skipped. A block
+    whose heading alone exceeds the cap renders as "".
     """
     if not entries:
         return ""
+    heading = _sanitize(BLOCK_HEADING)
     parts = []
-    total = 0
+    used = len(heading) + 2  # heading + canonical blank-line separator
     for title, text in entries:
         clean_title = _sanitize(title).strip()
         clean_text = _sanitize(text)
-        part = "**%s**\n%s" % (clean_title, clean_text)
-        candidate_len = len(part) if not parts else len(part) + 2
-        if total + candidate_len > MAX_BLOCK_CHARS:
+        if not clean_title and not clean_text.strip():
+            continue  # no usable content: do not burn a k=3 slot on "****\n"
+        body = "**%s**\n%s" % (clean_title, clean_text)
+        sep = 2 if parts else 0  # canonical blank-line separator
+        remaining = MAX_BLOCK_CHARS - used - sep
+        if remaining <= 0:
             break
-        parts.append(part)
-        total += candidate_len
-    return "\n\n".join(parts)
+        if len(body) <= remaining:
+            parts.append(body)
+            used += sep + len(body)
+            continue
+        # Truncate to fit: keep the title line, cut the text (with ellipsis).
+        # Budget accounts for title + the newline separator + the ellipsis.
+        title_line = "**%s**" % clean_title
+        text_budget = remaining - len(title_line) - 1 - len(_ELLIPSIS)
+        if text_budget > 0:
+            body = title_line + "\n" + clean_text[:text_budget] + _ELLIPSIS
+            parts.append(body)
+            used += sep + len(body)
+        break  # budget exhausted after a truncated entry
+    if not parts:
+        return ""
+    return heading + "\n\n" + "\n\n".join(parts)
 
 
 # ---------------------------------------------------------------------------
@@ -400,51 +425,54 @@ def _render_wisdom(session_info):
       success         -> block, memoized
     """
     sid = WisdomMemo._session_id(session_info)
-    label = sid if sid else "<empty>"
-
-    memo = _MODULE_MEMO
-    with memo._lock:
-        cached = memo._store.get(sid) if sid else None
-    if sid and isinstance(cached, str):
-        with memo._lock:
-            memo._store.move_to_end(sid)
-        logger.debug("wisdom: render session=%s memo=hit class=ok", label)
-        return cached
     if not sid:
-        logger.debug("wisdom: render session=%s memo=miss class=empty_id", label)
+        logger.debug("wisdom: render session=%s memo=miss class=empty_id",
+                     sid if sid else "<empty>")
         return ""
-
-    path, dclass = discover_ct()
-    if path is None:
-        if dclass == "probe_timeout":
-            logger.debug(
-                "wisdom: render session=%s memo=miss class=probe_timeout", label
-            )
-            return ""  # not memoized: next render retries discovery
-        logger.debug(
-            "wisdom: render session=%s memo=miss class=discovery_miss", label
-        )
-        memo.render_for(session_info, lambda _si: ("", True))
-        return ""  # memoized: deterministic miss for this machine
-
-    entries, rclass = recall_wiki(path, query_for(session_info))
-    if rclass is not None:
-        if rclass == "spawn":
-            reset_discovery_cache()  # cached path is bad; re-discover next render
-        logger.debug("wisdom: render session=%s memo=miss class=%s", label, rclass)
-        return ""  # timeout/exit/spawn: not memoized, next render retries
-
-    if entries is None:
-        logger.debug("wisdom: render session=%s memo=miss class=parse_error", label)
-        memo.render_for(session_info, lambda _si: ("", True))
-        return ""  # memoized: a parse error is deterministic for these bytes
-
-    if not entries:
-        logger.debug("wisdom: render session=%s memo=miss class=zero_hits", label)
-        memo.render_for(session_info, lambda _si: ("", True))
-        return ""  # memoized: zero hits for this brain are deterministic
-
-    block = render_block(entries)
-    memo.render_for(session_info, lambda _si: (block, True))
-    logger.debug("wisdom: render session=%s memo=miss class=ok", label)
+    # The memo owns the once-semantics: on a miss it calls the recall callable
+    # exactly once and its setdefault guarantees racing renders for one
+    # session get the SAME bytes (first writer wins). This function never does
+    # its own memo lookup and never bypasses render_for.
+    outcome = _RecallOutcome()
+    block = _MODULE_MEMO.render_for(session_info, outcome.recall)
+    logger.debug(
+        "wisdom: render session=%s memo=%s class=%s",
+        sid, outcome.memo_state(), outcome.failure_class or "ok",
+    )
     return block
+
+
+class _RecallOutcome:
+    """Callable record of one discovery+recall attempt.
+
+    recall(session_info) -> (block, memoize) per the WisdomMemo contract; the
+    failure-class -> memoize mapping below is the SOLE such mapping (plan
+    module contract).
+    """
+
+    failure_class = None
+
+    def recall(self, _session_info):
+        path, dclass = discover_ct()
+        if path is None:
+            if dclass == "probe_timeout":
+                self.failure_class = "probe_timeout"
+                return "", False  # not memoized: next render retries discovery
+            self.failure_class = "discovery_miss"
+            return "", True  # memoized: deterministic miss for this machine
+        entries, rclass = recall_wiki(path, query_for(_session_info))
+        if rclass is not None:
+            if rclass == "spawn":
+                reset_discovery_cache()  # cached path is bad; re-discover next time
+            self.failure_class = rclass
+            return "", False  # timeout/exit/spawn: not memoized, retry next render
+        if entries is None:
+            self.failure_class = "parse_error"
+            return "", True  # memoized: a parse error is deterministic for these bytes
+        if not entries:
+            self.failure_class = "zero_hits"
+            return "", True  # memoized: zero hits for this brain are deterministic
+        return render_block(entries), True
+
+    def memo_state(self):
+        return "miss" if self.failure_class else "hit"

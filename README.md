@@ -44,10 +44,12 @@ Hermes skills tree. Since 0.3.0 it also injects a second system-prompt
 section that recalls the wisdom layer at session start — a short digest of
 relevant procedures and facts, memoized per session so re-renders are free.
 It degrades to a silent no-op: no Curated Thoughts install or unreachable
-brain simply means the block is absent. Known gaps: restored sessions
-(`/branch`, `/resume` after restart) reuse their old session id and may see a
-stale memoized block, legacy session-id rotation on compression can trigger
-one extra recall, and more than 256 concurrently live sessions evict each
+brain simply means the block is absent. Known gaps: a *restored* session
+(`/branch`, or `/resume` after a process restart) gets its persisted prompt
+bytes back without a recall — the new id has an empty memo, so the first
+compression afterwards re-recalls and the block may change; legacy
+non-in-place compression rotates the session id, which can also trigger one
+extra recall; and more than 256 concurrently live sessions evict each
 other's memos.
 
 **[DeepSeek Harness](integrations/deepseek/)** (Node/TypeScript) is a Cordis
