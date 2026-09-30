@@ -79,7 +79,8 @@ describe('sanitize', () => {
     // pass 1 removes the inner marker at offset 18, splicing '<!-- hermes-plugin' + '-section'
     // into a NEW marker; pass 2 removes it. A single replaceAll leaves the forged frame.
     expect(sanitize('<!-- hermes-plugin<!-- hermes-plugin-section-section')).toBe('');
-    expect(sanitize('x<!-- hermes-plugin-section<!-- hermes-plugin-section-sectiony')).toBe('xy');
+    // this input leaves NO splice: after both markers are removed, '-sectiony' remains
+    expect(sanitize('x<!-- hermes-plugin-section<!-- hermes-plugin-section-sectiony')).toBe('x-sectiony');
   });
   it('indents a line-start heading only AFTER marker removal (order)', () => {
     expect(sanitize('## Plugin Context: x')).toBe('    ## Plugin Context: x');
@@ -122,9 +123,10 @@ describe('renderBlock', () => {
     expect(out).toContain('**real**');
   });
   it('hard-caps the final STRIPPED length at 2500, keeping every kept entry title', () => {
+    // heading = 37 chars → used starts at 39; T0/T1 fit whole (606/600 used); T2 truncates
     const entries = Array.from({ length: 40 }, (_, i) => ({
       title: `T${i}`,
-      text: 'x'.repeat(400),
+      text: 'x'.repeat(1000),
     }));
     const out = renderBlock(entries);
     expect(out.trim().length).toBeLessThanOrEqual(MAX_BLOCK_CHARS);
@@ -135,10 +137,10 @@ describe('renderBlock', () => {
     }
   });
   it('drops entries that cannot even fit their title line; keeps the rest', () => {
-    // used = heading(38) + 2 = 40; entry1 title(50) exceeds the remaining 2460 → dropped;
-    // entry2 title(4) + text fits → INCLUDED (loop continues past a dropped entry)
+    // used = heading(37) + 2 = 39; entry1 body = 2480+4+1+1 = 2486 > remaining 2461,
+    // truncated-text budget < 0 → dropped; entry2 fits → INCLUDED (loop continues)
     const entries = [
-      { title: 'T'.repeat(50), text: 'x' },
+      { title: 'T'.repeat(2480), text: 'x' },
       { title: 'T2', text: 'small' },
     ];
     const out = renderBlock(entries);
@@ -159,8 +161,6 @@ describe('renderBlock', () => {
 ```ts
 // Port of integrations/hermes/scripts/ct_wisdom.py (proven); DSH deltas per
 // docs/superpowers/specs/2026-09-30-wisdom-auto-inclusion-dsh-design.md.
-import { homedir } from 'node:os';
-
 export const SEED_QUERY = 'curated thoughts agent memory wisdom procedures';
 export const PROBE_TIMEOUT_MS = 3000;
 export const RECALL_TIMEOUT_MS = 5000;
@@ -227,7 +227,7 @@ export function renderBlock(entries: WikiEntry[]): string {
 }
 ```
 
-(`homedir` is genuinely used in Task 2's `candidatePaths`, not here — do not import it in Task 1.)
+(`homedir` and `platform as osPlatform` are imported in Task 2, where they are used — keep Task 1's import list empty of node builtins.)
 
 - [ ] **Step 1.4:** run `pnpm vitest run tests/test_wisdom.ts` — Expected: PASS (all).
 - [ ] **Step 1.5:** `pnpm build && pnpm test` green; commit: `feat(dsh): wisdom module core — keyOf, sanitize (brace-run lookahead), renderBlock (TDD)`
@@ -244,7 +244,7 @@ export function renderBlock(entries: WikiEntry[]): string {
 **Interfaces:**
 - Consumes: nothing new.
 - Produces (ct_env.ts): `export function allPathMatches(name: string, env: NodeJS.ProcessEnv, platform: NodeJS.Platform): string[]` — every existing executable PATH hit in PATH order (win32: bare name + PATHEXT-appended forms per dir; POSIX: bare name per dir).
-- Produces (wisdom.ts): `export type ProbeVerdict = 'ok' | 'timeout' | 'reject'`; `export type DiscoveryFailure = 'probe_timeout' | null`; `export function candidatePaths(env: NodeJS.ProcessEnv, platform: string, pathMatches?: string[]): string[]`; `export function probeIdentity(ctPath: string, opts?: { timeoutMs?: number; spawnSync?: SpawnLike }): ProbeVerdict`; `export function discoverCt(env?: NodeJS.ProcessEnv, opts?: { platform?: string; candidates?: string[]; usable?: (p: string) => boolean; probe?: (path: string, budgetMs: number) => ProbeVerdict; now?: () => number }): { path: string | null; failure: DiscoveryFailure }`; `export function resetDiscoveryCachesForTests(): void` (clears accepted-path cache AND the miss cache). **`usable` injection exists so mocked tests skip the real filesystem gate** (Hermes patches `_usable_candidate`/`_candidate_paths` the same way); the real default is `usable = (p) => isWin ? existsSync(p) : accessSync(p, X_OK) succeeds` (POSIX `accessSync` also rejects directories; Hermes gates with `isfile` on win32 — use `statSync(p).isFile()` there).
+- Produces (wisdom.ts): `export type SpawnLike = (cmd: string, args: readonly string[], opts: object) => { status: number | null; signal: NodeJS.Signals | null; stdout: Buffer | null; stderr: Buffer | null; error?: Error }; export type ProbeVerdict = 'ok' | 'timeout' | 'reject'; export type DiscoveryFailure = 'probe_timeout' | null; export function candidatePaths(env: NodeJS.ProcessEnv, platform: string, pathMatches?: string[]): string[]; export function probeIdentity(ctPath: string, opts?: { timeoutMs?: number; spawnSync?: SpawnLike }): ProbeVerdict; export function discoverCt(env?: NodeJS.ProcessEnv, opts?: { platform?: string; candidates?: string[]; usable?: (p: string) => boolean; probe?: (path: string, budgetMs: number) => ProbeVerdict; now?: () => number }): { path: string | null; failure: DiscoveryFailure }; export function resetDiscoveryCachesForTests(): void` (clears accepted-path cache AND the miss cache). **`usable` injection exists so mocked tests skip the real filesystem gate** (Hermes patches `_usable_candidate`/`_candidate_paths` the same way); the real default is `usable = (p) => isWin ? statSync(p).isFile() (catch → false) : accessSync(p, X_OK) succeeds`. (`SpawnLike` is DEFINED here in Task 2 — Task 3's `recallWiki` and Task 5's `RecallDeps` reuse it; include `stdout`/`stderr` in the shape: the probe reads them for the identity line and recall parses stdout JSON. Tests are excluded from `tsc --noEmit` — `tsconfig.json` `include: [src, scripts]` — so vitest type-widening there is harmless, but keep annotations strict anyway.)
 
 - [ ] **Step 2.1 (RED, ct_env.ts):** add to `tests/test_ct_env.ts`: `allPathMatches` returns ALL hits in PATH order (fixture tmpdir with two dirs each containing an executable `ct`, PATH `dirA:dirB` → `[dirA/ct, dirB/ct]`); win32 form (fake platform `'win32'`, PATHEXT `.exe;.cmd`): bare + appended forms per dir, missing forms skipped, order preserved; empty PATH → `[]`; nonexistent dirs skipped.
 - [ ] **Step 2.2 (GREEN, ct_env.ts):** implement `allPathMatches` by refactoring the split/exts logic out of `whichOnPath` (whichOnPath becomes `allPathMatches(...)[0] ?? null` — behavior unchanged; existing tests must stay green).
@@ -360,6 +360,14 @@ function defaultUsable(p: string, isWin: boolean): boolean {
   try { accessSync(p, fsConstants.X_OK); return true; } catch { return false; }
 }
 
+export type SpawnLike = (cmd: string, args: readonly string[], opts: object) => {
+  status: number | null;
+  signal: NodeJS.Signals | null;
+  stdout: Buffer | null;
+  stderr: Buffer | null;
+  error?: Error;
+};
+
 export function discoverCt(
   env: NodeJS.ProcessEnv = process.env,
   opts: { platform?: string; candidates?: string[]; usable?: (p: string) => boolean; probe?: (path: string, budgetMs: number) => ProbeVerdict; now?: () => number } = {},
@@ -375,7 +383,7 @@ export function discoverCt(
   missCache = null;
   const walkStart = t;
   for (const cand of opts.candidates ?? candidatePaths(env, platform)) {
-    if (!usable(cand, isWin)) continue;
+    if (!usable(cand)) continue;
     const budgetMs = PROBE_TIMEOUT_MS - (now() - walkStart);
     if (budgetMs <= 0) return { path: null, failure: 'probe_timeout' };
     const verdict = probe(cand, budgetMs);
@@ -407,7 +415,7 @@ export function resetDiscoveryCachesForTests(): void {
 
 **Interfaces:**
 - Consumes: Task 1 constants; `WikiEntry`.
-- Produces: `export type RecallResult = { entries: WikiEntry[] | null; failure: 'timeout' | 'exit' | 'spawn' | null }` — `entries === null && failure === null` is the parse-error case (memoized by Task 5); `entries` non-null (possibly `[]`) is success. `export function recallWiki(ctPath: string, query: string, deps?: { spawnSync?: typeof spawnSync }): RecallResult`.
+- Produces: `export type RecallResult = { entries: WikiEntry[] | null; failure: 'timeout' | 'exit' | 'spawn' | null }` — `entries === null && failure === null` is the parse-error case (memoized by Task 5); `entries` non-null (possibly `[]`) is success. `export function recallWiki(ctPath: string, query: string, deps?: { spawnSync?: SpawnLike }): RecallResult` (`SpawnLike` comes from Task 2).
 
 - [ ] **Step 3.1 (RED, mocked — primary pattern, all platforms):** `vi.mock('node:child_process')` with a controllable `spawnSync` mock; `homedir` mocked to `/tmp/fakehome`. Cases (failure classes verbatim from Hermes `recall_wiki`):
   - spawnSync called EXACTLY once with `[ctPath, 'recall', query, '--json', '--k', '3']` and options `{ timeout: 5000, killSignal: 'SIGKILL', maxBuffer: 4 * 1024 * 1024, cwd: '/tmp/fakehome', stdio: ['ignore', 'pipe', 'pipe'], shell: false, windowsHide: true }` (assert every option — killSignal included: SIGTERM lets a hung child outlive the timeout).
@@ -417,19 +425,20 @@ export function resetDiscoveryCachesForTests(): void {
   - `{ status: 0, stdout: '{"wiki": []}' }` → `{ entries: [], failure: null }` (zero hits).
   - `{ status: 3, stdout: '', stderr: 'boom' }` → `{ entries: null, failure: 'exit' }`.
   - mock returns `{ error: Object.assign(new Error('kill'), { code: 'ETIMEDOUT' }) }` → `{ entries: null, failure: 'timeout' }`.
+  - mock returns `{ signal: 'SIGKILL', status: null }` (no error field — the real killed-spawn shape) → `{ entries: null, failure: 'timeout' }` (m5 cycle 2).
   - mock returns `{ error: Object.assign(new Error('enoent'), { code: 'ENOENT' }) }` → `{ entries: null, failure: 'spawn' }`.
   - mock returns `{ error: Object.assign(new Error('buf'), { code: 'ENOBUFS' }) }` → `{ entries: null, failure: null }` (parse-error class — memoized, per spec).
   - POSIX-only fixture (`skipIf` win32): real tmp shell script as `ct` printing `{"wiki":[{"title":"T","text":"b"}]}` → real entries; script printing garbage → parse-error class; `sleep 30` → timeout class in < 10 s wall.
-- [ ] **Step 3.2 (GREEN):** implement `recallWiki`:
+- [ ] **Step 3.2 (GREEN):** implement `recallWiki` in `wisdom.ts` — the `error ?? signal` → timeout classification is the Node translation of Hermes's `TimeoutExpired` catch (a kill leaves `signal` set and `status` null):
 
 ```ts
-import { spawnSync } from 'node:child_process';
+import { spawnSync as realSpawnSync } from 'node:child_process';
 
 export type RecallResult = { entries: WikiEntry[] | null; failure: 'timeout' | 'exit' | 'spawn' | null };
 
-export function recallWiki(ctPath: string, query: string, deps: { spawnSync?: typeof spawnSync } = {}): RecallResult {
-  const run = deps.spawnSync ?? spawnSync;
-  let r: ReturnType<typeof spawnSync>;
+export function recallWiki(ctPath: string, query: string, deps: { spawnSync?: SpawnLike } = {}): RecallResult {
+  const run = deps.spawnSync ?? realSpawnSync;
+  let r: ReturnType<SpawnLike>;
   try {
     r = run(ctPath, ['recall', query, '--json', '--k', String(RECALL_K)], {
       timeout: RECALL_TIMEOUT_MS,
@@ -543,7 +552,7 @@ export function recallWiki(ctPath: string, query: string, deps: { spawnSync?: ty
 - Consumes: `renderWisdom` from `./wisdom.js`.
 - Produces: `apply()` additionally calls `ctx.systemPrompt.section(...)` with `{ name: 'curated-thoughts-wisdom', order: 6000, interpolate: false, text: fn }`; `inject` and the health context registration are UNCHANGED (existing tests stay green).
 
-- [ ] **Step 6.1 (RED):** extend `tests/test_index.ts`'s `mockCtx` with `systemPrompt.section: vi.fn(...)` collecting `sectionRegistrations`; assert after `apply(...)`: exactly one section registered, `name === 'curated-thoughts-wisdom'`, `order === 6000`, `interpolate === false`, `typeof text === 'function'`; the health `context()` registration still present with `order: 130` unchanged; `text({ agent: { id: 'x' } }, ...arbitrary)` returns a string (not a throw) even with all deps absent.
+- [ ] **Step 6.1 (RED):** at the top of `tests/test_index.ts`, `vi.mock('../src/wisdom.js', () => ({ renderWisdom: vi.fn(() => '') }))` — test_index stays UNIT-scoped (the real module's spawns/governor belong to test_wisdom.ts); then extend `mockCtx` with `systemPrompt.section: vi.fn(...)` collecting `sectionRegistrations`; assert after `apply(...)`: exactly one section registered, `name === 'curated-thoughts-wisdom'`, `order === 6000`, `interpolate === false`, `typeof text === 'function'`; the health `context()` registration still present with `order: 130` unchanged; invoking the registered `text` with a host-shaped ctx calls the mocked `renderWisdom` with that same object.
 - [ ] **Step 6.2 (GREEN):** extend `DshContextExtensions.systemPrompt` in `src/index.ts` (house pattern — no ad-hoc casts at call sites) with:
 
 ```ts
@@ -600,7 +609,7 @@ then register in `apply()`:
 
 - [ ] **Step 8.1 (cold path FIRST):** inside the container, restart/stop the sidecar (or use the freshly-started cold container) and time the FIRST wisdom recall before freezing `RECALL_TIMEOUT_MS = 5000`; record the number in the PR. If cold > 5 s, bump the constant with the measurement as justification (spec pre-authorizes this).
 - [ ] **Step 8.2:** extend `e2e.sh` checks: with the sidecar brain seeded (the container seeds wisdom in the base image setup — verify in `tests/e2e/Dockerfile` + `base.Dockerfile`; if the seed step is missing, add a `ct ingest`/seed step to the e2e setup, NOT to user-visible install), run a real DSH session and assert: exactly one `## Curated Thoughts — relevant memory` block in the system prompt; block length ≤ 2500; a second step's request byte-identical system prefix (memo replay); with the sidecar absent (uninstalled brain), the session proceeds with NO wisdom block and no error.
-- [ ] **Step 8.3:** run `tests/e2e/run.sh`. **Toolchain fact (researched 2026-09-30):** the pinned sidecar .deb (2.12.1) does NOT ship the `ct` CLI (`dpkg -c`: only `curated-thoughts` + `curated-thoughts-mcp`); `ct` ships standalone from v2.22.0+ (`ct_2.22.0_linux_amd64.tar.gz` on GH releases). The e2e image therefore ALSO installs the `ct` tarball (curl + tar -C /usr/local/bin) in the e2e setup step — a test-only provisioning change in the e2e layer, not in user-visible install or the base image contract; if CT_VERSION is later bumped past the tarball's introduction this stays compatible. Live-model step requires `ZAI_API_KEY` — ask Kurt if absent; the non-model checks run without it. Record all evidence in the PR.
-- [ ] **Step 8.4:** push; CI green on the full matrix; triage CodeRabbit + bot reviews per dual-review-cycle; sor shadow per implementation wave (ledger-only).
+- [ ] **Step 8.3:** run `tests/e2e/run.sh`. **Toolchain facts (researched 2026-09-30):** (1) the pinned sidecar .deb (2.12.1) does NOT ship the `ct` CLI (`dpkg -c`: only `curated-thoughts` + `curated-thoughts-mcp`); `ct` ships standalone from v2.22.0+ — `ct_2.22.0_linux_amd64.tar.gz`, sha256 `37f3bacd6e45d15eb2cf84d2597213faebbbdb7f6bf456386eae1ee269a3c62d`, contains `ct` + `README.txt`. (2) `e2e.sh` ALREADY seeds a headless brain (onboard → `~/.brain/config.json` + `brain.db`) — for a wisdom-bearing recall, extend that seed step to write at least one wiki-bearing note into `$HOME/vault` and run `ct ingest --yes` AFTER the `ct` tarball is installed (seed ordering: install `ct` first, then seed vault, then ingest). The `ct` tarball install is a test-only provisioning change in the e2e layer — not in user-visible install or the base image contract. Live-model step requires `ZAI_API_KEY` — ask Kurt if absent; the non-model checks run without it. Record all evidence in the PR.
+- [ ] **Step 8.4:** push; CI green on the full matrix; triage CodeRabbit + bot reviews per dual-review-cycle; sor shadow per implementation wave (ledger-only). **Commit-message discipline (m9 cycle 2): every commit that lands review findings names the findings it applies** (e.g. "apply Opus plan cycle 2 — m1, m2, M5...") so each review cycle maps to exactly one commit (the same convention the spec phase used).
 - [ ] **Step 8.5:** flip the spec's Status line to `Implemented 2026-09-30 (PR #22)` ONLY after every review converged AND e2e evidence is recorded; any open question → park, never merge past one. Squash-merge per repo convention, then verify the merge on the remote and delete the branch.
 
