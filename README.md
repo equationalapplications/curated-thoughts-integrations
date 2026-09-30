@@ -10,7 +10,7 @@ common architecture.
 
 | Harness | Directory | Status | Version |
 |---------|-----------|--------|---------|
-| [Hermes Agent](https://github.com/NousResearch/hermes-agent) | [`integrations/hermes/`](integrations/hermes/) | implemented | [0.2.2](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=hermes) |
+| [Hermes Agent](https://github.com/NousResearch/hermes-agent) | [`integrations/hermes/`](integrations/hermes/) | implemented | [0.3.0](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=hermes) |
 | DeepSeek Harness | [`integrations/deepseek/`](integrations/deepseek/) | implemented | [0.2.2](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=deepseek) |
 | OpenCode | [`integrations/opencode/`](integrations/opencode/) | implemented | [0.1.0](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=opencode) |
 | OpenClaw | `integrations/openclaw/` | planned | — |
@@ -40,7 +40,17 @@ Each integration ships the same layers, adapted to its harness:
 **[Hermes](integrations/hermes/)** (Python + POSIX shell) registers the
 sidecar in the agent's MCP config, ships the shared doctor as
 `ct_status`/`ct_preflight`, and installs the skill files directly into the
-Hermes skills tree.
+Hermes skills tree. Since 0.3.0 it also injects a second system-prompt
+section that recalls the wisdom layer at session start — a short digest of
+relevant procedures and facts, memoized per session so re-renders are free.
+It degrades to a silent no-op: no Curated Thoughts install or unreachable
+brain simply means the block is absent. Known gaps: a *restored* session
+(`/branch`, or `/resume` after a process restart) gets its persisted prompt
+bytes back without a recall — the new id has an empty memo, so the first
+compression afterwards re-recalls and the block may change; legacy
+non-in-place compression rotates the session id, which can also trigger one
+extra recall; and more than 256 concurrently live sessions evict each
+other's memos.
 
 **[DeepSeek Harness](integrations/deepseek/)** (Node/TypeScript) is a Cordis
 plugin module, `@equational-applications/dsh-curated-thoughts`. It mounts the
