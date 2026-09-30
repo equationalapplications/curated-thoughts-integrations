@@ -290,23 +290,31 @@ it('exhausting the walk deadline ends it as probe_timeout', () => {
   expect(calls).toEqual(['/a', '/b']);
 });
 // deterministic miss is cached 5 min; probe_timeout is NOT cached
-it('caches a discovery miss with a 5-min TTL, never a probe_timeout', () => {
+it('caches a discovery miss with a 5-min TTL', () => {
   let t = 0;
   const probe = () => 'reject';
-  expect(discoverCt(PROCESS_ENV, { candidates: ['/a'], probe, now: () => t }).path).toBeNull();
+  expect(discoverCt(PROCESS_ENV, { candidates: ['/a'], usable: allUsable, probe, now: () => t }).path).toBeNull();
   expect(discoverCt(PROCESS_ENV, { candidates: ['/a'], probe: () => { throw new Error('must not re-probe'); }, now: () => t }).path).toBeNull();
   t += 5 * 60_000 + 1;
   const calls: string[] = [];
-  expect(discoverCt(PROCESS_ENV, { candidates: ['/a'], probe: (p) => { calls.push(p); return 'reject'; }, now: () => t }).path).toBeNull();
+  expect(discoverCt(PROCESS_ENV, { candidates: ['/a'], usable: allUsable, probe: (p) => { calls.push(p); return 'reject'; }, now: () => t }).path).toBeNull();
   expect(calls).toEqual(['/a']); // TTL expired: walked again
+});
+it('never caches a probe_timeout (m7 cycle 2: asserted, not just titled)', () => {
+  resetDiscoveryCachesForTests();
+  const calls: string[] = [];
+  const tprobe = (p: string) => { calls.push(p); return 'timeout' as const; };
+  discoverCt(PROCESS_ENV, { candidates: ['/a'], usable: allUsable, probe: tprobe });
+  discoverCt(PROCESS_ENV, { candidates: ['/a'], usable: allUsable, probe: tprobe });
+  expect(calls).toEqual(['/a', '/a']); // second call walked again
 });
 it('caches the accepted path process-wide (no re-probe)', () => {
   resetDiscoveryCachesForTests();
   const calls: string[] = [];
   const probe = (p: string) => { calls.push(p); return 'ok'; };
-  discoverCt(PROCESS_ENV, { candidates: ['/y/real'], probe });
+  discoverCt(PROCESS_ENV, { candidates: ['/y/real'], usable: allUsable, probe });
   const before = calls.length;
-  expect(discoverCt(PROCESS_ENV, { candidates: ['/y/real'], probe }).path).toBe('/y/real');
+  expect(discoverCt(PROCESS_ENV, { candidates: ['/y/real'], usable: allUsable, probe }).path).toBe('/y/real');
   expect(calls.length).toBe(before);
 });
 ```
@@ -316,6 +324,8 @@ Also: win32 candidate filtering (pure logic, no fs): `candidatePaths` with `plat
 
 ```ts
 import { accessSync, constants as fsConstants, statSync } from 'node:fs';
+import { homedir, platform as osPlatform } from 'node:os';
+import { allPathMatches } from '../scripts/ct_env.js';
 
 const MISS_TTL_MS = 5 * 60_000;
 let acceptedCtPath: string | null = null;
@@ -452,12 +462,17 @@ export function recallWiki(ctPath: string, query: string, deps: { spawnSync?: Sp
   } catch {
     return { entries: null, failure: 'spawn' }; // spawnSync never throws; defensive only
   }
-  if (r.error) {
-    const code = (r.error as NodeJS.ErrnoException).code;
-    if (code === 'ENOBUFS') return { entries: null, failure: null }; // overflow ≙ parse error (spec)
-    if (code === 'ETIMEDOUT' || r.signal != null) return { entries: null, failure: 'timeout' };
-    return { entries: null, failure: 'spawn' };
+  // classification ORDER (cycle-2 M4): ENOBUFS first, then timeout (error OR a
+  // set `signal` with no error — the real killed-spawn shape), then other
+  // errors → spawn. A signal-kill falling into the parse-error path would
+  // MEMOIZE a transient crash (OOM/SIGSEGV darkens the agent permanently).
+  if (r.error && (r.error as NodeJS.ErrnoException).code === 'ENOBUFS') {
+    return { entries: null, failure: null }; // overflow ≙ parse error (spec)
   }
+  if ((r.error && (r.error as NodeJS.ErrnoException).code === 'ETIMEDOUT') || r.signal != null) {
+    return { entries: null, failure: 'timeout' };
+  }
+  if (r.error) return { entries: null, failure: 'spawn' };
   if (typeof r.status === 'number' && r.status !== 0) return { entries: null, failure: 'exit' };
   let data: unknown;
   try {
@@ -469,7 +484,7 @@ export function recallWiki(ctPath: string, query: string, deps: { spawnSync?: Sp
   if (!Array.isArray(wiki)) return { entries: null, failure: null };
   const entries: WikiEntry[] = [];
   for (const item of wiki) {
-    if (typeof item !== 'object' || item === null) continue;
+    if (typeof item !== 'object' || item === null || Array.isArray(item)) continue; // arrays are not dicts (m5 cycle 2)
     const o = item as { title?: unknown; text?: unknown };
     entries.push({ title: typeof o.title === 'string' ? o.title : '', text: typeof o.text === 'string' ? o.text : '' });
   }
@@ -488,17 +503,20 @@ export function recallWiki(ctPath: string, query: string, deps: { spawnSync?: Sp
 - Test: `integrations/deepseek/tests/test_wisdom.ts` (extend)
 
 **Interfaces:**
-- Produces: `export type BudgetVerdict = 'allow' | 'exhausted' | 'breaker_open'`; `export class RetryGovernor { constructor(now?: () => number); gate(agentId: string): BudgetVerdict; recordFailure(agentId: string): void; }` — per spec: ≤2 attempts per agent, ≥60 s cooldown between them, breaker opens after 4 consecutive budgeted failures process-wide for 5 min, half-open allows one probe, failed half-open re-opens. Verdict semantics (pinned): `'exhausted'` covers BOTH cooldown-gated and budget-spent (the caller needs one bit — "do not spawn"); `'breaker_open'` only ever comes from the process-wide breaker. `resetDiscoveryCachesForTests()` also resets the module-level governor instance.
+- Produces: `export type BudgetVerdict = 'allow' | 'cooldown' | 'spent' | 'breaker_open'`; `export class RetryGovernor { constructor(now?: () => number); gate(agentId: string): BudgetVerdict; recordFailure(agentId: string): void; recordSuccess(agentId: string): void; }` — per spec: ≤2 attempts per agent, ≥60 s cooldown between them; breaker opens after 4 consecutive budgeted failures process-wide for 5 min; half-open allows one probe; failed half-open re-opens. **Verdict semantics (cycle-2 M1/M2, replacing the earlier single-`'exhausted'` form):** `'cooldown'` and `'spent'` are distinct because the CALLER memoizes `'spent'` (spec: "then memoize `''` for that agent" — else a >256-agent process re-spawns for evicted spent agents and breaks the 16-s/agent bound) while `'cooldown'` is a plain no-op. **Attempts are counted in `gate()` when it returns `'allow'`** (one gate = one attempt). **`recordSuccess(agentId)` resets the agent's attempts, the process-wide `consecutive` counter, AND closes the breaker (clearing `halfOpenUsed`)** — the orchestrator calls it on every non-budgeted, non-breaker outcome after an `'allow'` (ok, discovery_miss, parse_error, zero_hits), so a half-open attempt that ends in a memoized class also closes the breaker (M2: without this, one transient outage darkens the process forever). The governor's per-agent map is LRU-capped at 256 like the memo. `resetDiscoveryCachesForTests()` also resets the module-level governor instance. **The default clock is a live `() => Date.now()` call, not a constructor-captured `Date.now` reference (m12 cycle 2)** — `vi.useFakeTimers` then reaches it via injected `now` in tests.
 
 - [ ] **Step 4.1 (RED):** with `vi.useFakeTimers()` and a controllable `now`:
-  - first `gate(id)` → `'allow'`; after `recordFailure(id)`, immediate `gate(id)` → `'exhausted'` (cooldown gate: < 60 s since the attempt).
-  - `now += 60_001` → `gate(id)` → `'allow'` (2nd attempt); `recordFailure(id)` again → `gate(id)` `'exhausted'` forever (budget spent) — even after `now += 1_000_000`.
+  - first `gate(id)` → `'allow'`; after `recordFailure(id)`, immediate `gate(id)` → `'cooldown'` (< 60 s since the attempt).
+  - `now += 60_001` → `gate(id)` → `'allow'` (2nd attempt); `recordFailure(id)` again → `gate(id)` → `'spent'` — even after `now += 1_000_000`.
   - fresh agent id after 1 failure → `'allow'` (budget is per agent).
   - after 4 consecutive failures across any agents → `gate(anyFreshId)` → `'breaker_open'` immediately (no cooldown wait).
   - `now += 5 * 60_001` after breaker open → `gate(id)` → `'allow'` exactly ONCE (half-open); `recordFailure(id)` there → `gate` `'breaker_open'` for another 5 min.
-  - a SUCCESS resets the consecutive counter: 3 failures + success + 3 failures → breaker NOT open.
-- [ ] **Step 4.2 (GREEN):** implement `RetryGovernor` (module state: `Map<agentId, {attempts, lastAttemptAt}>`, `consecutive: number`, `breakerOpenAt: number | null`, `halfOpenUsed: boolean`).
-- [ ] **Step 4.3:** full checks; commit: `feat(dsh): retry budget + process-wide circuit breaker (TDD, fake timers)`
+  - **half-open SUCCESS closes the breaker (M2):** after the half-open `'allow'`, `recordSuccess(id)` → `gate(freshId)` → `'allow'` (breaker closed, consecutive reset).
+  - **half-open MEMOIZED-class outcome also closes the breaker (M2):** same but `recordSuccess` after a `discovery_miss`-style outcome → breaker closed.
+  - **`'spent'` survives governor LRU eviction (M1):** fill the governor map past 256 agents after a1 is `'spent'` — the governor entry is evicted and `gate('a1')` returns `'allow'` again. **Accepted and bounded: the MEMO (Task 5) holds the spent agent's memoized `''` independently of the governor map** — the orchestrator memoizes on `'spent'`, and the memo is the durable layer; the test asserts `renderWisdom` (not `gate`) stays spawn-free for an evicted spent agent.
+  - a SUCCESS resets the consecutive counter: 3 failures + `recordSuccess` + 3 failures → breaker NOT open.
+- [ ] **Step 4.2 (GREEN):** implement `RetryGovernor` (module state: `Map<agentId, {attempts, lastAttemptAt}>`, `consecutive: number`, `breakerOpenAt: number | null`, `halfOpenUsed: boolean`; `recordSuccess` clears the agent entry, zeroes `consecutive`, and closes the breaker).
+- [ ] **Step 4.3:** full checks; commit: `feat(dsh): retry budget + circuit breaker — cooldown/spent split, closable breaker (TDD, fake timers)`
 
 ---
 
@@ -510,32 +528,37 @@ export function recallWiki(ctPath: string, query: string, deps: { spawnSync?: Sp
 
 **Interfaces:**
 - Consumes: everything above.
-- Produces: `export type RenderOutcome = { called: boolean; failureClass: string | null }`; `export type SpawnLike = (cmd: string, args: readonly string[], opts: object) => { status: number | null; signal: NodeJS.Signals | null; error?: Error }; export type RecallDeps = { spawnSync?: SpawnLike; probe?: (path: string, budgetMs: number) => ProbeVerdict; candidates?: string[]; now?: () => number }; export function renderWisdom(ctx: unknown, deps: RecallDeps = {}): string` — plus `export function _resetWisdomStateForTests(): void` (memo + discovery caches + governor + budget). Deps injection is REQUIRED for every unit test (no real spawns).
+- Produces: `export type RenderOutcome = { called: boolean; failureClass: string | null }`; `export type RecallDeps = { spawnSync?: SpawnLike; probe?: (path: string, budgetMs: number) => ProbeVerdict; candidates?: string[]; usable?: (p: string) => boolean; now?: () => number }; export function renderWisdom(ctx: unknown, deps: RecallDeps = {}): string` — reuses Task 2's `SpawnLike` (no redeclaration). `usable` is passed through to `discoverCt` (M5 cycle 2: without it, injected `candidates` are skipped by the real fs gate before the probe ever runs). Plus `export function _resetWisdomStateForTests(): void` — calls `resetDiscoveryCachesForTests()` (kept as Task 2's discovery-only hook) and additionally clears the memo, the governor, and the budget (m13 cycle 2: clear ownership — one orchestrator-level reset that delegates, no duplicated clear logic). Deps injection is REQUIRED for every unit test (no real spawns).
 
 - [ ] **Step 5.1 (RED, WisdomMemo — pure, no spawn mocks):**
   - same key → byte-identical (recallFn wrapped in a counter, invoked exactly once); different key → second recall; LRU eviction at 256 (loop 257 keys, key 1 re-recalls, key 2 does not); empty key `''` → `''` with NO recallFn call and NO memo write (counter stays 0); empty-string block memoized (hit on second call); recallFn throwing → `''`, not memoized (counter increments again); `memoize: false` result returned but NOT stored (counter increments every call).
 - [ ] **Step 5.2 (GREEN):** implement `class WisdomMemo { constructor(max = MEMO_MAX, now?); renderFor(key: string, recallFn: (k: string) => { block: string; memoize: boolean }): string }` — a `Map`, get→delete→set for LRU touch, `while (size > max) delete oldest`.
 - [ ] **Step 5.3 (RED, orchestrator — injected deps, each failure class):** patch `_resetWisdomStateForTests()` in `beforeEach`. Drive `renderWisdom({agent:{id:'a1'}}, deps)` with:
   - success: deps.spawnSync returns wiki JSON; deps.candidates resolved via injected probe `'ok'` → block non-empty, second call `'memo=hit'` (spawnSync call count still 1, probe count still 1), bytes identical.
-  - discovery miss (probe `'reject'` on all, fs-gate bypassed via injected candidates that don't exist) → `''`, class `discovery_miss`, memoized (no spawn on second call).
+  - discovery miss (probe `'reject'` on all candidates, `usable: () => true` injected — M5 cycle 2: candidates that merely don't exist are SKIPPED by the real gate, the probe never runs) → `''`, class `discovery_miss`, memoized (no spawn on second call).
   - probe timeout → `''`, class `probe_timeout`, NOT memoized. **With fake-clock control:** render 1 (failure at t=0, attempt 1); advance clock ≥ 60 s → render 2 (failure, attempt 2); advance ≥ 60 s → render 3 → class `budget_exhausted`, `''`, ZERO spawnSync calls (budget spent for a1). A fresh agent a2 at the same clock → its own 2 attempts.
   - recall timeout / non-zero exit → class `timeout`/`exit`, NOT memoized; same clock discipline as probe_timeout (advance ≥ 60 s between attempts; after the 2nd failure → `budget_exhausted`).
   - spawn failure (ENOENT) → class `spawn`, discovery cache reset verified (next render re-probes; assert probe called again), budgeted.
   - parse error / ENOBUFS → memoized (second render: spawnSync count unchanged).
   - zero hits → `''` memoized.
   - no key (`ctx = {}`) → `''`, no memo write, NO spawnSync call, NO probe call.
-  - budget/breaker interplay: agent a1 fails twice → a1 frozen; new agent a2 also fails twice; agents a3+a4 one failure each → breaker open → a5's first render is `breaker_open` with zero spawns.
+  - budget/breaker interplay: agent a1 fails twice (with ≥60 s clock advances between attempts) → a1 spent; new agent a2 also fails twice → **4 consecutive budgeted failures: the breaker is now OPEN**; a3's first render → `breaker_open`, `''`, ZERO spawns and ZERO probes (M3 cycle 2: a3/a4 cannot "fail" — no attempt is made).
   - garbage ctx objects (`null`, `42`, `{agent: () => {}}`) → `''` never throws (the render body's defensive catch).
-  - debug logging: `vi.spyOn(console, 'debug')` (or the module logger — match how `src/status.ts` logs) asserts the `wisdom: render agent=<id> memo=hit|miss class=<c|ok>` line shape, debug level only.
+  - debug logging (M7 cycle 2 — `console.debug` IS `console.log` in Node and would flood the harness TUI on every model step; `src/status.ts` has NO logger, only `console.warn` guards in index.ts): a gated module logger — emit `wisdom: render agent=<id> memo=hit|miss class=<c|ok>` ONLY when `process.env.CT_WISDOM_DEBUG` is set to a non-empty value; assert with the env var set the line shape appears and with it unset NOTHING is emitted (`vi.spyOn(console, 'log'/'debug'/'info')` all stay silent).
 - [ ] **Step 5.4 (GREEN):** implement `_RecallOutcome`-equivalent + `renderWisdom`; the class→action mapping lives in ONE place (the outcome callable), mirroring Hermes `_RecallOutcome`:
 
 ```ts
-// failure class -> (block, memoize) mapping — the SOLE such mapping:
-//   discovery_miss -> ('', true)   probe_timeout -> ('', false)
-//   timeout/exit/spawn -> ('', false)   parse_error/zero_hits -> (''/block, true)
-//   budget_exhausted/breaker_open -> ('', false) — no spawn attempted
-//   ok -> (renderBlock(entries), true)
+// failure class -> (block, memoize) mapping — the SOLE such mapping (cycle-2 M1:
+// 'spent' IS memoized — the memo is the durable layer behind the governor's
+// evictable per-agent map):
+//   discovery_miss -> ('', true) + recordSuccess   probe_timeout -> ('', false)
+//   timeout/exit/spawn -> ('', false)   parse_error/zero_hits -> (''/block, true) + recordSuccess
+//   'spent' verdict -> ('', true) — no spawn attempted (memoizes '')
+//   'cooldown'/'breaker_open' verdict -> ('', false) — no spawn, no memo write
+//   ok -> (renderBlock(entries), true) + recordSuccess
 // spawn additionally invalidates the accepted-path cache (budgeted next walk).
+// recordSuccess is called on every non-budgeted, non-breaker outcome (closes a
+// half-open breaker; M2 cycle 2).
 ```
 
 - [ ] **Step 5.5:** full checks; commit: `feat(dsh): WisdomMemo + renderWisdom orchestrator — sole failure-class mapping (TDD)`
@@ -611,5 +634,5 @@ then register in `apply()`:
 - [ ] **Step 8.2:** extend `e2e.sh` checks: with the sidecar brain seeded (the container seeds wisdom in the base image setup — verify in `tests/e2e/Dockerfile` + `base.Dockerfile`; if the seed step is missing, add a `ct ingest`/seed step to the e2e setup, NOT to user-visible install), run a real DSH session and assert: exactly one `## Curated Thoughts — relevant memory` block in the system prompt; block length ≤ 2500; a second step's request byte-identical system prefix (memo replay); with the sidecar absent (uninstalled brain), the session proceeds with NO wisdom block and no error.
 - [ ] **Step 8.3:** run `tests/e2e/run.sh`. **Toolchain facts (researched 2026-09-30):** (1) the pinned sidecar .deb (2.12.1) does NOT ship the `ct` CLI (`dpkg -c`: only `curated-thoughts` + `curated-thoughts-mcp`); `ct` ships standalone from v2.22.0+ — `ct_2.22.0_linux_amd64.tar.gz`, sha256 `37f3bacd6e45d15eb2cf84d2597213faebbbdb7f6bf456386eae1ee269a3c62d`, contains `ct` + `README.txt`. (2) `e2e.sh` ALREADY seeds a headless brain (onboard → `~/.brain/config.json` + `brain.db`) — for a wisdom-bearing recall, extend that seed step to write at least one wiki-bearing note into `$HOME/vault` and run `ct ingest --yes` AFTER the `ct` tarball is installed (seed ordering: install `ct` first, then seed vault, then ingest). The `ct` tarball install is a test-only provisioning change in the e2e layer — not in user-visible install or the base image contract. Live-model step requires `ZAI_API_KEY` — ask Kurt if absent; the non-model checks run without it. Record all evidence in the PR.
 - [ ] **Step 8.4:** push; CI green on the full matrix; triage CodeRabbit + bot reviews per dual-review-cycle; sor shadow per implementation wave (ledger-only). **Commit-message discipline (m9 cycle 2): every commit that lands review findings names the findings it applies** (e.g. "apply Opus plan cycle 2 — m1, m2, M5...") so each review cycle maps to exactly one commit (the same convention the spec phase used).
-- [ ] **Step 8.5:** flip the spec's Status line to `Implemented 2026-09-30 (PR #22)` ONLY after every review converged AND e2e evidence is recorded; any open question → park, never merge past one. Squash-merge per repo convention, then verify the merge on the remote and delete the branch.
+- [ ] **Step 8.5:** flip the spec's Status line to `Implemented 2026-09-30 (PR #22)` ONLY after this PR is actually MERGED (m8 cycle 2: a spec line naming a PR implies the PR exists and landed — flip in the immediate post-merge commit, never before); any open question → park, never merge past one. Squash-merge per repo convention, then verify the merge on the remote and delete the branch.
 
