@@ -385,7 +385,11 @@ export function renderWisdom(ctx: unknown, deps: RecallDeps = {}): string {
       const verdict = moduleGovernor.gate(agentId);
       if (verdict !== 'allow') {
         if (debugEnabled()) process.stderr.write(`wisdom: render agent=${agentId} memo=miss class=${verdict}\n`);
-        deps.onOutcome?.({ called: false, failureClass: verdict });
+        try {
+          deps.onOutcome?.({ called: false, failureClass: verdict });
+        } catch {
+          /* GLM-2: a throwing host observer must not double-record */
+        }
         return { block: '', memoize: false };
       }
       const { path, failure } = discoverCt(deps.env ?? process.env, {
@@ -398,13 +402,21 @@ export function renderWisdom(ctx: unknown, deps: RecallDeps = {}): string {
       if (failure === 'probe_timeout') {
         const memoized = moduleGovernor.recordFailure(agentId); // budgeted; true when the budget JUST became spent (M3 cycle 3)
         if (debugEnabled()) process.stderr.write(`wisdom: render agent=${agentId} memo=miss class=probe_timeout\n`);
-        deps.onOutcome?.({ called: true, failureClass: 'probe_timeout' });
+        try {
+          deps.onOutcome?.({ called: true, failureClass: 'probe_timeout' });
+        } catch {
+          /* GLM-2 */
+        }
         return { block: '', memoize: memoized };
       }
       if (path === null) {
         moduleGovernor.recordSuccess(agentId); // discovery_miss: non-budgeted outcome
         if (debugEnabled()) process.stderr.write(`wisdom: render agent=${agentId} memo=miss class=discovery_miss\n`);
-        deps.onOutcome?.({ called: true, failureClass: 'discovery_miss' });
+        try {
+          deps.onOutcome?.({ called: true, failureClass: 'discovery_miss' });
+        } catch {
+          /* GLM-2 */
+        }
         return { block: '', memoize: true };
       }
       const recall = recallWiki(path, SEED_QUERY, { spawnSync: deps.spawnSync, env: deps.env });
@@ -412,37 +424,60 @@ export function renderWisdom(ctx: unknown, deps: RecallDeps = {}): string {
         invalidateAcceptedPath(); // spawn-class cache invalidation ONLY (never the governor)
         const memoized = moduleGovernor.recordFailure(agentId); // budgeted
         if (debugEnabled()) process.stderr.write(`wisdom: render agent=${agentId} memo=miss class=${recall.failure}\n`);
-        deps.onOutcome?.({ called: true, failureClass: recall.failure });
+        try {
+          deps.onOutcome?.({ called: true, failureClass: recall.failure });
+        } catch {
+          /* GLM-2 */
+        }
         return { block: '', memoize: memoized }; // true ONLY when the budget JUST became spent (M3 cycle 3)
       }
       if (recall.entries === null) {
         moduleGovernor.recordSuccess(agentId); // parse error (incl. ENOBUFS): memoized, non-budgeted
         if (debugEnabled()) process.stderr.write(`wisdom: render agent=${agentId} memo=miss class=parse_error\n`);
-        deps.onOutcome?.({ called: true, failureClass: 'parse_error' });
+        try {
+          deps.onOutcome?.({ called: true, failureClass: 'parse_error' });
+        } catch {
+          /* GLM-2 */
+        }
         return { block: '', memoize: true };
       }
       if (recall.entries.length === 0) {
         moduleGovernor.recordSuccess(agentId); // zero hits
         if (debugEnabled()) process.stderr.write(`wisdom: render agent=${agentId} memo=miss class=zero_hits\n`);
-        deps.onOutcome?.({ called: true, failureClass: 'zero_hits' });
+        try {
+          deps.onOutcome?.({ called: true, failureClass: 'zero_hits' });
+        } catch {
+          /* GLM-2 */
+        }
         return { block: '', memoize: true };
       }
       moduleGovernor.recordSuccess(agentId); // ok: resets attempts, closes a half-open breaker
       if (debugEnabled()) process.stderr.write(`wisdom: render agent=${agentId} memo=miss class=ok\n`);
-      deps.onOutcome?.({ called: true, failureClass: 'ok' });
+      try {
+        deps.onOutcome?.({ called: true, failureClass: 'ok' });
+      } catch {
+        /* GLM-2 */
+      }
       return { block: renderBlock(recall.entries), memoize: true };
     } catch {
       // throw-after-allow backstop (Opus cycle-4 M1): route ANY exception to
       // recordFailure so the budget stays consistent — classed 'spawn'
       moduleGovernor.recordFailure(agentId);
       if (debugEnabled()) process.stderr.write(`wisdom: render agent=${agentId} memo=miss class=spawn\n`);
-      deps.onOutcome?.({ called: true, failureClass: 'spawn' });
+      try {
+        deps.onOutcome?.({ called: true, failureClass: 'spawn' });
+      } catch {
+        /* GLM-2: never let a throwing observer escape as a second failure */
+      }
       return { block: '', memoize: false };
     }
   };
-  const memoHitBefore = debugEnabled();
-  const block = moduleMemo.renderFor(key, (k) => outcomeCallable(k));
-  if (memoHitBefore && debugEnabled()) {
+  let callableRan = false;
+  const block = moduleMemo.renderFor(key, (k) => {
+    callableRan = true;
+    return outcomeCallable(k);
+  });
+  if (debugEnabled() && !callableRan) {
     // memo-hit render: the outcome callable never ran (its gate/miss lines are
     // not emitted) — emit the hit line here so every debugged render gets one
     process.stderr.write(`wisdom: render agent=${key} memo=hit\n`);

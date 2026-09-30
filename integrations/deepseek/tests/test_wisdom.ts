@@ -898,6 +898,37 @@ describe('renderWisdom (injected deps)', () => {
     expect(outcomes[1]?.failureClass).toBe('cooldown');
   });
 
+  it('GLM-2 precise: 3 single-failure agents (throwing observer) leave the breaker CLOSED for a 4th fresh agent', () => {
+    const probe = vi.fn((): ProbeVerdict => {
+      const n = (probe as unknown as { calls?: number }).calls ?? 0;
+      (probe as unknown as { calls: number }).calls = n + 1;
+      return 'timeout';
+    });
+    let boom = true;
+    const d = deps({
+      probe,
+      candidates: ['/x/ct-a'],
+      usable: () => true,
+      onOutcome: () => {
+        if (boom) throw new Error('observer exploded');
+      },
+    });
+    for (const id of ['x1', 'x2', 'x3']) {
+      renderWisdom({ agent: { id } }, d); // each records exactly ONE failure even though the observer throws
+      t += 60_001;
+    }
+    boom = false;
+    const outcomes: RenderOutcome[] = [];
+    const dClean = deps({ probe, candidates: ['/x/ct-a'], usable: () => true, onOutcome: (o) => outcomes.push(o) });
+    renderWisdom({ agent: { id: 'x4' } }, dClean);
+    // exactly-once: consecutive = 3 (not 6) → the 4th failure opens the breaker
+    expect(outcomes.at(-1)?.failureClass).toBe('probe_timeout'); // the attempt ran; the NEXT fresh agent is breaker-gated
+    const outcomes2: RenderOutcome[] = [];
+    const dClean2 = deps({ probe, candidates: ['/x/ct-a'], usable: () => true, onOutcome: (o) => outcomes2.push(o) });
+    renderWisdom({ agent: { id: 'x5' } }, dClean2);
+    expect(outcomes2[0]).toEqual({ called: false, failureClass: 'breaker_open' }); // breaker opened by 4 REAL failures
+  });
+
   it('breaker half-open + the one allowed attempt throws → after the window another attempt is admitted (never wedged)', () => {
     const probe = vi.fn((): ProbeVerdict => {
       throw new Error('probe exploded');
@@ -961,6 +992,28 @@ describe('renderWisdom (injected deps)', () => {
       debugSpy.mockRestore();
       infoSpy.mockRestore();
       errorSpy.mockRestore();
+    }
+  });
+
+  it('GLM-1: with debug on, a miss render emits EXACTLY ONE line (no spurious memo=hit alongside memo=miss)', () => {
+    const probe = vi.fn((): ProbeVerdict => 'reject'); // → discovery_miss, which IS memoized
+    const d = deps({ probe, candidates: ['/x/ct-a'], usable: () => true });
+    const errSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    process.env.CT_WISDOM_DEBUG = '1';
+    try {
+      renderWisdom({ agent: { id: 'gl1' } }, d); // miss render (discovery_miss)
+      const lines = errSpy.mock.calls.map((c) => String(c[0])).filter((s) => s.includes('wisdom: render'));
+      expect(lines).toHaveLength(1); // GLM-1: the old code emitted the miss line AND the hit line
+      expect(lines[0]).toContain('memo=miss class=discovery_miss');
+      // second render for the same agent is a real memo hit: exactly one HIT line
+      errSpy.mockClear();
+      renderWisdom({ agent: { id: 'gl1' } }, d);
+      const hitLines = errSpy.mock.calls.map((c) => String(c[0])).filter((s) => s.includes('wisdom: render'));
+      expect(hitLines).toHaveLength(1);
+      expect(hitLines[0]).toContain('memo=hit');
+    } finally {
+      delete process.env.CT_WISDOM_DEBUG;
+      errSpy.mockRestore();
     }
   });
 });
