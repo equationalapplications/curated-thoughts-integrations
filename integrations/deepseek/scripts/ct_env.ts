@@ -230,6 +230,59 @@ function isExecutable(p: string, platform: NodeJS.Platform): boolean {
 }
 
 
+/**
+ * Every PATH dir naming an existing, executable `name` candidate, in walk
+ * order — the plural generalization of `shutil.which` used by the ct
+ * discovery walk (src/wisdom.ts), which must try EVERY candidate, not just
+ * the first. Pure: reads only the passed env, never `process.env`.
+ *
+ * Platform rules mirror `whichOnPath`:
+ * - path separator follows the platform (`;` win32, `:` POSIX) — a single
+ *   Windows entry contains no `;` but does contain the drive colon;
+ * - win32 appends PATHEXT candidates (plus the bare name) per dir;
+ * - POSIX requires the X_OK bit (no-op on win32, where every file runs);
+ * - the env lookup is case-insensitive (win32 `Path`-key darkness) and the
+ *   name comparison is case-insensitive on win32 too.
+ */
+export function allPathMatches(
+  name: string,
+  env: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform = osPlatform(),
+): string[] {
+  const isWin = platform === 'win32' || platform.startsWith('win');
+  const pathSep = isWin ? ';' : ':';
+  const pathValue =
+    env['PATH'] ??
+    env[Object.keys(env).find((k) => k.toLowerCase() === 'path') ?? ''] ??
+    '';
+  const dirs = pathValue.split(pathSep).filter((d) => d.length > 0);
+  const exts = isWin
+    ? [
+        '',
+        ...(env.PATHEXT ?? '.COM;.EXE;.BAT;.CMD')
+          .split(';')
+          .filter((e) => e.length > 0)
+          .map((e) => e.toLowerCase()),
+      ]
+    : [''];
+  const out: string[] = [];
+  for (const dir of dirs) {
+    for (const ext of exts) {
+      const candidate = join(dir, name + ext);
+      if (isWin) {
+        // CreateProcess-style matching is case-insensitive; compare the
+        // basename instead of trusting the caller's casing of `name`.
+        const base = candidate.split(/[\\/]/).pop() ?? candidate;
+        if (!base.toLowerCase().includes(name.toLowerCase() + ext)) continue;
+        if (existsSync(candidate)) out.push(candidate);
+      } else if (existsSync(candidate) && isExecutable(candidate, platform)) {
+        out.push(candidate);
+      }
+    }
+  }
+  return out;
+}
+
 function whichOnPath(
   name: string,
   env: NodeJS.ProcessEnv,
@@ -245,29 +298,10 @@ function whichOnPath(
   // The separator follows the platform, not the PATH string: a single-entry
   // Windows PATH ("C:\...\bin") contains no ';' but does contain the drive
   // colon, so sniffing split on ':' and broke the probe. shutil.which uses
-  // os.pathsep; this mirrors that.
-  const pathSep = platform === 'win32' || platform.startsWith('win') ? ';' : ':';
-  const dirs = (env.PATH ?? '').split(pathSep).filter((d) => d.length > 0);
-  const exts =
-    platform === 'win32' || platform.startsWith('win')
-      ? [
-          '',
-          ...(env.PATHEXT ?? '.COM;.EXE;.BAT;.CMD')
-            .split(';')
-            .filter((e) => e.length > 0)
-            .map((e) => e.toLowerCase()),
-        ]
-      : [''];
-  for (const dir of dirs) {
-    for (const ext of exts) {
-      const candidate = join(dir, name + ext);
-      // shutil.which filters by X_OK — mirror that (no-op on win32).
-      if (existsSync(candidate) && isExecutable(candidate, platform)) {
-        return candidate;
-      }
-    }
-  }
-  return null;
+  // os.pathsep; this mirrors that. The walk generalization (allPathMatches)
+  // owns the traversal; this first-match wrapper keeps the findSidecar
+  // contract unchanged.
+  return allPathMatches(name, env, platform)[0] ?? null;
 }
 
 

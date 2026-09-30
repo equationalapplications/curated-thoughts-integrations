@@ -1,5 +1,17 @@
-import { describe, it, expect } from 'vitest';
-import { keyOf, sanitize, renderBlock, MAX_BLOCK_CHARS, BLOCK_HEADING } from '../src/wisdom.js';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { homedir } from 'node:os';
+import {
+  keyOf,
+  sanitize,
+  renderBlock,
+  MAX_BLOCK_CHARS,
+  BLOCK_HEADING,
+  candidatePaths,
+  discoverCt,
+  probeIdentity,
+  resetDiscoveryCachesForTests,
+  type ProbeVerdict,
+} from '../src/wisdom.js';
 
 describe('keyOf', () => {
   it('prefers a non-empty string agent.id', () => {
@@ -98,5 +110,199 @@ describe('renderBlock', () => {
   it('is byte-stable for identical entries', () => {
     const e = [{ title: 'A', text: 'b' }];
     expect(renderBlock(e)).toBe(renderBlock(e.map((x) => ({ ...x }))));
+  });
+});
+
+// ── Task 2: discovery — candidatePaths, discoverCt, probeIdentity ──────────
+
+const PROCESS_ENV = {} as NodeJS.ProcessEnv; // tests never read it; injects keep fs/spawn out
+const okProbe = (p: string): ProbeVerdict => (p.endsWith('real') ? 'ok' : 'reject'); // annotate: string inference would rely on tests being excluded from tsc (m12 cycle 6)
+const allUsable = () => true;
+
+beforeEach(() => {
+  resetDiscoveryCachesForTests();
+});
+
+describe('candidatePaths (win32 filtering, pure logic — no fs)', () => {
+  it('drops ct.cmd, ct.bat and extensionless ct on win32; keeps ct.exe', () => {
+    const out = candidatePaths({} as NodeJS.ProcessEnv, 'win32', [
+      '/a/ct.cmd',
+      '/b/ct.bat',
+      '/c/ct.exe',
+      '/d/ct',
+    ]);
+    expect(out).toEqual(['/c/ct.exe']);
+  });
+
+  it('keeps everything on POSIX platforms and appends the fallback list', () => {
+    const out = candidatePaths({} as NodeJS.ProcessEnv, 'linux', ['/a/ct.cmd', '/c/ct.exe', '/d/ct']);
+    expect(out.slice(0, 3)).toEqual(['/a/ct.cmd', '/c/ct.exe', '/d/ct']);
+    expect(out.slice(3)).toEqual([
+      `${homedir()}/.local/bin/ct`,
+      '/usr/bin/ct',
+      '/usr/local/bin/ct',
+      `${homedir()}/bin/ct`,
+    ]);
+  });
+
+  it('appends win32 USERPROFILE / LOCALAPPDATA rows only when the env var is non-empty', () => {
+    const out = candidatePaths(
+      { USERPROFILE: 'C:\\Users\\u', LOCALAPPDATA: 'C:\\Users\\u\\AppData\\Local' } as NodeJS.ProcessEnv,
+      'win32',
+      [],
+    );
+    expect(out).toEqual(['C:\\Users\\u\\bin\\ct.exe', 'C:\\Users\\u\\AppData\\Local\\CuratedThoughts\\bin\\ct.exe']);
+    // a trailing slash is stripped exactly once, not doubled
+    const out2 = candidatePaths({ USERPROFILE: 'C:\\Users\\u\\' } as NodeJS.ProcessEnv, 'win32', []);
+    expect(out2).toEqual(['C:\\Users\\u\\bin\\ct.exe']);
+    expect(candidatePaths({} as NodeJS.ProcessEnv, 'win32', [])).toEqual([]);
+  });
+
+  it('appends the platform fallback list after the PATH matches (darwin vs linux)', () => {
+    const linux = candidatePaths({} as NodeJS.ProcessEnv, 'linux', ['/p/ct']);
+    expect(linux.slice(0, 1)).toEqual(['/p/ct']);
+    expect(linux).toContain('/usr/bin/ct');
+    const darwin = candidatePaths({} as NodeJS.ProcessEnv, 'darwin', []);
+    expect(darwin).toEqual(['/opt/x/bin/ct'.replace('/opt/x/bin/ct', `${homedir()}/bin/ct`), '/usr/local/bin/ct', '/opt/homebrew/bin/ct']);
+  });
+});
+
+describe('discoverCt (mocked walk)', () => {
+  it('skips relative candidates entirely', () => {
+    const calls: string[] = [];
+    const r = discoverCt(PROCESS_ENV, {
+      candidates: ['ct', 'bin/ct', './ct', '/y/real'],
+      usable: allUsable,
+      probe: (p) => { calls.push(p); return okProbe(p); },
+    });
+    expect(r.path).toBe('/y/real');
+    expect(calls).toEqual(['/y/real']);
+  });
+
+  it('advances past a rejecting candidate and accepts the first passing one', () => {
+    const calls: string[] = [];
+    const r = discoverCt(PROCESS_ENV, {
+      candidates: ['/x/impostor', '/y/real'],
+      usable: allUsable,
+      probe: (p) => { calls.push(p); return okProbe(p); },
+    });
+    expect(r).toEqual({ path: '/y/real', failure: null });
+    expect(calls).toEqual(['/x/impostor', '/y/real']);
+  });
+
+  it('ends the walk on a probe timeout (later candidates not probed)', () => {
+    const calls: string[] = [];
+    const r = discoverCt(PROCESS_ENV, {
+      candidates: ['/a/slow', '/b/real'],
+      usable: allUsable,
+      probe: (p) => { calls.push(p); return 'timeout' as const; },
+    });
+    expect(r).toEqual({ path: null, failure: 'probe_timeout' });
+    expect(calls).toEqual(['/a/slow']);
+  });
+
+  it('exhausting the walk deadline ends it as probe_timeout', () => {
+    let t = 0;
+    const calls: string[] = [];
+    const r = discoverCt(PROCESS_ENV, {
+      candidates: ['/a', '/b', '/c'],
+      usable: allUsable,
+      probe: (p) => { calls.push(p); t += 2800; return 'reject' as const; },
+      now: () => t,
+    });
+    expect(r.failure).toBe('probe_timeout');
+    // /c must never be probed: /a + /b spent the whole 3 s deadline
+    expect(calls).toEqual(['/a', '/b']);
+  });
+
+  it('caches a discovery miss with a 5-min TTL', () => {
+    let t = 0;
+    const probe = (): ProbeVerdict => 'reject';
+    expect(discoverCt(PROCESS_ENV, { candidates: ['/a'], usable: allUsable, probe, now: () => t }).path).toBeNull();
+    expect(discoverCt(PROCESS_ENV, { candidates: ['/a'], usable: allUsable, probe: () => { throw new Error('must not re-probe'); }, now: () => t }).path).toBeNull();
+    t += 5 * 60_000 + 1;
+    const calls: string[] = [];
+    expect(discoverCt(PROCESS_ENV, { candidates: ['/a'], usable: allUsable, probe: (p) => { calls.push(p); return 'reject' as const; }, now: () => t }).path).toBeNull();
+    expect(calls).toEqual(['/a']); // TTL expired: walked again
+  });
+
+  it('never caches a probe_timeout (asserted, not just titled)', () => {
+    resetDiscoveryCachesForTests();
+    const calls: string[] = [];
+    const tprobe = (p: string) => { calls.push(p); return 'timeout' as const; };
+    discoverCt(PROCESS_ENV, { candidates: ['/a'], usable: allUsable, probe: tprobe });
+    discoverCt(PROCESS_ENV, { candidates: ['/a'], usable: allUsable, probe: tprobe });
+    expect(calls).toEqual(['/a', '/a']); // second call walked again
+  });
+
+  it('caches the accepted path process-wide (no re-probe)', () => {
+    resetDiscoveryCachesForTests();
+    const calls: string[] = [];
+    const probe = (p: string): ProbeVerdict => { calls.push(p); return 'ok'; };
+    discoverCt(PROCESS_ENV, { candidates: ['/y/real'], usable: allUsable, probe });
+    const before = calls.length;
+    expect(discoverCt(PROCESS_ENV, { candidates: ['/y/real'], usable: allUsable, probe }).path).toBe('/y/real');
+    expect(calls.length).toBe(before);
+  });
+
+  it('dedupes candidates preserving first-seen order', () => {
+    const calls: string[] = [];
+    const r = discoverCt(PROCESS_ENV, {
+      candidates: ['/y/real', '/y/real', '/z/other'],
+      usable: allUsable,
+      probe: (p) => { calls.push(p); return okProbe(p); },
+    });
+    expect(r.path).toBe('/y/real');
+    expect(calls).toEqual(['/y/real']);
+  });
+});
+
+describe('probeIdentity (mocked spawnSync injection — all platforms)', () => {
+  const baseOpts = { timeout: 3000, killSignal: 'SIGKILL' };
+
+  it('returns ok when combined output contains Curated Thoughts', () => {
+    const spawn = vi.fn(() => ({ status: 0, signal: null, stdout: Buffer.from('ct — headless CLI for Curated Thoughts brains\n'), stderr: null }));
+    expect(probeIdentity('/bin/ct', { spawnSync: spawn as never })).toBe('ok');
+  });
+
+  it('returns reject when output lacks the identity line', () => {
+    const spawn = vi.fn(() => ({ status: 0, signal: null, stdout: Buffer.from('chart-testing tool\n'), stderr: Buffer.from('') }));
+    expect(probeIdentity('/bin/ct', { spawnSync: spawn as never })).toBe('reject');
+  });
+
+  it('classifies ETIMEDOUT as timeout', () => {
+    const err = Object.assign(new Error('kill'), { code: 'ETIMEDOUT' });
+    const spawn = vi.fn(() => ({ status: null, signal: null, stdout: null, stderr: null, error: err }));
+    expect(probeIdentity('/bin/ct', { spawnSync: spawn as never })).toBe('timeout');
+  });
+
+  it('classifies a bare signal-kill (crash shape) as reject — NOT timeout', () => {
+    const spawn = vi.fn(() => ({ status: null, signal: 'SIGKILL', stdout: null, stderr: null }));
+    expect(probeIdentity('/bin/ct', { spawnSync: spawn as never })).toBe('reject');
+  });
+
+  it('classifies ENOENT as reject', () => {
+    const err = Object.assign(new Error('enoent'), { code: 'ENOENT' });
+    const spawn = vi.fn(() => ({ status: null, signal: null, stdout: null, stderr: null, error: err }));
+    expect(probeIdentity('/bin/ct', { spawnSync: spawn as never })).toBe('reject');
+  });
+
+  it('classifies a throwing spawnSync as reject (never escapes)', () => {
+    const spawn = vi.fn(() => { throw new Error('NUL byte in path'); });
+    expect(probeIdentity('/bin/ct', { spawnSync: spawn as never })).toBe('reject');
+  });
+
+  it('spawns [ct, --help] with the recall option set except probe timeout', () => {
+    const spawn = vi.fn(() => ({ status: 0, signal: null, stdout: Buffer.from('Curated Thoughts'), stderr: null }));
+    probeIdentity('/bin/ct', { spawnSync: spawn as never, timeoutMs: 1234 });
+    expect(spawn).toHaveBeenCalledTimes(1);
+    expect(spawn.mock.calls[0][0]).toBe('/bin/ct');
+    expect(spawn.mock.calls[0][1]).toEqual(['--help']);
+    expect(spawn.mock.calls[0][2]).toMatchObject({ ...baseOpts, timeout: 1234 });
+  });
+
+  it('reads stdout+stderr COMBINED for the identity line', () => {
+    const spawn = vi.fn(() => ({ status: 0, signal: null, stdout: Buffer.from(''), stderr: Buffer.from('Curated Thoughts v1') }));
+    expect(probeIdentity('/bin/ct', { spawnSync: spawn as never })).toBe('ok');
   });
 });
