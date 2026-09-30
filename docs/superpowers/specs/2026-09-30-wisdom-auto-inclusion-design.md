@@ -1,6 +1,6 @@
 # curated-thoughts-integrations — Hermes wisdom-layer auto-inclusion design
 
-**Date:** 2026-09-30 · **Status:** Draft · **Branch:** `feat/session-start-wisdom-inclusion` · **Priority:** high (Kurt directive 2026-09-29)
+**Date:** 2026-09-30 · **Status:** Draft (review-converged; Implemented after merge) · **Branch:** `feat/session-start-wisdom-inclusion` · **Priority:** high (Kurt directive 2026-09-29)
 **Review:** Opus spec cycle 1 = REQUEST CHANGES (3 MAJOR, 8 MINOR, 3 nits) → all
 applied (M1 cwd-pinning + measured cold start; M2 empty-id rule; M3 single-API
 contract; m1 N=256; m2 lock pattern; m3 executor citation; m4 placement wording;
@@ -11,7 +11,9 @@ resolved [V]). Opus spec cycle 2 (delta) = REQUEST CHANGES (1 MINOR/MAJOR, 3 MIN
 coverage; README dedupe). Opus spec cycle 3 (delta) = REQUEST CHANGES (2 mechanism, 1 probe,
 1 tests, 1 nit) → all applied (/branch//resume restore-not-recall corrected [V];
 failure classes explicit; probe text verified + under subprocess contract; 3 tests
-added; Windows path typo) → cycle 4 delta pending.
+added; Windows path typo). **Opus spec cycle 4 (delta) = APPROVE WITH NITS** → nits
+applied (conditional restore path cited, e2e expectation fixed, probe-timeout
+classified not-memoized). **Spec review CONVERGED (4 cycles, code cap).**
 
 Investigation: [`../investigations/2026-09-30-wisdom-auto-inclusion-step0-investigation.md`](../investigations/2026-09-30-wisdom-auto-inclusion-step0-investigation.md)
 (3 Opus cycles; every claim below marked "measured" or "verified" carries its [V] evidence there).
@@ -109,14 +111,19 @@ post-restart invalidation may re-recall — documented)
 ## Resolved decisions (from the investigation's open questions)
 
 - **OQ1 re-render policy — resolved with observed host behavior [V] (corrected in
-  spec cycle 3):** `/new` (`cli_session_mixin.py:524`) **rotates** `session_id` → new
-  epoch → the next build calls the renderer → fresh recall (correct: a genuinely new
-  conversation). **`/branch` and `/resume` do NOT re-render**: both rotate/switch the
-  id and then restore the session row's persisted prompt bytes via
-  `_sync_agent_to_session` → `restore_plugin_prompt_sections`
-  (`cli_commands_mixin.py:318-333`; `/branch` deliberately copies the parent's exact
-  prompt, `cli_commands_mixin.py:1408-1418`, to keep the cache warm) — the callable
-  is never invoked and the memo stays empty for the new id. Consequence: the first
+  spec cycles 3-4):** `/new` (`cli_session_mixin.py:524`) **rotates** `session_id` →
+  new epoch → the next build calls the renderer → fresh recall (correct: a genuinely
+  new conversation). **`/branch` and `/resume` restore rather than re-render, with
+  conditions**: `_sync_agent_to_session` (`cli_commands_mixin.py:318-333`) invalidates
+  the prompt, then the next turn `_restore_or_build_system_prompt` →
+  `restore_plugin_prompt_sections` (`conversation_loop.py:772-794`). The RESTORE path
+  is taken when the session has non-empty history AND its stored `system_prompt`
+  matches the runtime — then the callable is never invoked and the memo stays empty
+  for the new id (`/branch` deliberately copies the parent's exact prompt into the
+  child row, `cli_commands_mixin.py:1408-1418`, to keep the cache warm). Otherwise
+  the row rebuilds → one fresh render → fresh recall (also: `/branch` from a parent
+  with no stored prompt rebuilds). Both outcomes are correct: a rebuild means a new
+  id gets a fresh block while the prefix is being rewritten anyway. Consequence: the first
   compression after an in-process `/branch` or `/resume` misses the memo → fresh
   recall → bytes can change (this is README limitation 1's mechanism; the
   "fresh process" qualifier is REMOVED — it happens in-process too). Rewind
@@ -135,7 +142,8 @@ post-restart invalidation may re-recall — documented)
   Thoughts brains" — chart-testing's `ct` shares the name on Homebrew; Opus spec-D);
   the probe runs under the SAME subprocess contract (list argv, `stdin=DEVNULL`,
   `timeout=3`); first candidate passing the probe wins; rejected paths logged at
-  debug.
+  debug. A probe TIMEOUT is classified as NOT memoized (same class as a recall
+  timeout — a slow first-run binary must not darken a session; spec cycle 4 nit).
   The plan still checks what path the dpkg package ships `ct` at.
 - **OQ3 render blocking:** synchronous with `timeout=5` in v1. Justification:
   latency **measured 2026-09-30 [V]** — warm 0.765 s, cold-from-clean-dir 0.35–0.44 s
@@ -183,10 +191,11 @@ are noisy enough).
 - **e2e (scratch profile `ct-test` ONLY — never the live default profile):** install
   branch payload → real CLI session → exactly one wisdom block in the assembled
   prompt (direct render-path invocation under `HERMES_HOME`, mechanism verified);
-  INFO log-line expectations per boundary (1 with no invalidation boundary; ZERO
-  additional render lines after `/branch`//`/resume` — the host restores persisted
-  bytes and never calls the renderer); content hash stable across an induced
-  compression. Stripped-PATH case exercises candidate
+  INFO log-line expectations per boundary (1 with no invalidation boundary; after
+  `/branch`//`/resume`: ZERO render lines when the restore path is taken — non-empty
+  history + stored prompt matches runtime — otherwise exactly one fresh render;
+  the e2e script seeds at least one exchange before branching); content hash stable
+  across an induced compression. Stripped-PATH case exercises candidate
   fallback.
 - **CI:** existing matrix (3 OS × py3.9-3.13) + ruff; no new deps (stdlib only).
 
