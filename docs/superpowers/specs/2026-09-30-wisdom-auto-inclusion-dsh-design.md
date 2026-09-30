@@ -5,7 +5,8 @@
 Forked from the Hermes design
 ([`2026-09-30-wisdom-auto-inclusion-design.md`](2026-09-30-wisdom-auto-inclusion-design.md),
 review-converged, implemented in PR #21). The proven feature shape carries over;
-the host mechanisms differ in five verified ways. Every DSH claim below carries
+the host mechanisms differ in the ways verified below — three material deltas
+(constraints 1–3) and two design consequences (4–5). Every DSH claim below carries
 its evidence in
 [`../investigations/2026-09-30-wisdom-auto-inclusion-dsh-step0-investigation.md`](../investigations/2026-09-30-wisdom-auto-inclusion-dsh-step0-investigation.md)
 — cited as "Step 0 [V]" with the target number.
@@ -50,12 +51,21 @@ second `context()`:
   its position is wrong for reference material and it is paid in every request
   either way). `section()` also matches DSH's own guidance ("Add prompt text with
   `ctx.systemPrompt.section()`", agent-preset plugin practices [V]).
-- **Name:** `curated-thoughts-wisdom`. **Order:** a stated finite number placed
-  after the plugin's other contributions (same pattern as the health context's
-  `CURATED_CONTEXT_ORDER = 130` — `getContextOrder()` only resolves built-in
-  names, so the number is stated, not looked up [V, src/index.ts]).
-- **`interpolate: false`** — the block is prose and must never have `{{…}}`
-  interpreted as variable references (Step 0 A4).
+- **Name:** `curated-thoughts-wisdom`. **Order: `CURATED_WISDOM_SECTION_ORDER = 6000`**
+  — stated, not looked up (`getSectionOrder()` only resolves built-in names, same
+  pattern as the health context's `CURATED_CONTEXT_ORDER = 130` [V, src/index.ts]).
+  6000 sorts after the built-in tool sections (TOOL_* 1000–2900, TOOLS_SDK 5000)
+  and before DELIVERABLE_FILE_REFERENCES (9000)/STRUCTURED_OUTPUT (9900)/
+  HARNESS_SOURCE (10000)/DEPLOYMENT_PERSONA_SUFFIX (10200) (SECTION_ORDERS,
+  dsh-system-prompt lib/index.js, pinned [V]).
+- **`interpolate` — cannot be relied on.** The pinned host (0.1.5-rc.2)
+  `PromptSection` has **no `interpolate` option** and `renderPrompt`
+  interpolates every section unconditionally; an unknown `{{name}}` reference
+  **throws inside `assemble()`** (dsh-system-prompt lib/index.js [V]).
+  Therefore the sanitizer **neutralizes `{{` sequences** (insert a space:
+  `{{` → `{ {`) in addition to the Hermes marker rules — see Render below. We
+  still pass `interpolate: false` for forward compatibility (0.2.0-rc.2 added
+  the option; unknown properties are ignored by the pinned host [V]).
 
 Flow (mirrors Hermes ct_wisdom.py, ported to TypeScript):
 
@@ -76,14 +86,17 @@ Flow (mirrors Hermes ct_wisdom.py, ported to TypeScript):
    `session.header.cwd` would need new service injections in the render path).
 3. **Render:** `## Curated Thoughts — relevant memory` + per-entry `**title**` +
    text, hard-capped at **2500 chars** post-sanitize (self-enforced; DSH has no
-   host-side max_chars for sections). Sanitization order kept from Hermes
-   (remove `<!-- hermes-plugin-section` repeatedly until stable → then indent
-   any line-start `## Plugin Context: `), applied to titles AND text. DSH has no
-   Hermes persistence-marker invariant, but the sanitizer is cheap,
-   defense-in-depth against hostile wiki prose, and keeps the two ports
-   byte-comparable — the exact Hermes marker strings are kept deliberately:
-   they are the frame text CT-side wiki prose could plausibly carry
-   cross-host, which is the forgery being defused. Zero wiki entries → return `""` (host drops empty sections).
+   host-side max_chars for sections). Sanitization order: remove
+   `<!-- hermes-plugin-section` repeatedly until stable → indent any line-start
+   `## Plugin Context: ` → **neutralize `{{` → `{ {`** (pinned-host
+   `renderPrompt` interpolates sections unconditionally; an unbalanced or
+   unknown `{{name}}` THROWS inside `assemble()` — pinned dsh-system-prompt
+   lib/index.js [V]). Applied to titles AND text. DSH has no Hermes
+   persistence-marker invariant, but the sanitizer is cheap, defense-in-depth
+   against hostile wiki prose, and keeps the two ports byte-comparable — the
+   exact Hermes marker strings are kept deliberately: they are the frame text
+   CT-side wiki prose could plausibly carry cross-host, which is the forgery
+   being defused. Zero wiki entries → return `""` (host drops empty sections).
 4. **Once-semantics: memo keyed on `agent.id`** — `{sessionId → block}` module
    global, LRU N=256 (JS `Map`, delete/re-insert for LRU order). **No lock
    needed**: Node is single-threaded and `text()` is synchronous — the Hermes
@@ -98,19 +111,33 @@ Flow (mirrors Hermes ct_wisdom.py, ported to TypeScript):
    cold; a fresh block is recalled and appears as a system-node change (accepted
    v1 limitation, see below). **Fork** creates a new SessionId → fresh block in
    the child (correct).
-5. **Fail-open:** identical failure classes to Hermes, ported verbatim:
-   *memoized* — discovery miss, parse error, zero hits; *NOT memoized (retry
-   next render)* — recall timeout, non-zero exit, spawn failure, probe timeout;
-   spawn also invalidates the accepted-path discovery cache. Every failure
-   collapses to `""`; nothing raises into prompt assembly. All logging at debug.
+5. **Fail-open WITH a retry budget (DSH-specific — Opus cycle-1 B1):** failure
+   classes ported from Hermes but the retry rule is NOT verbatim. On DSH the
+   render runs on EVERY model step and `spawnSync` **freezes the single-threaded
+   harness** (TUI, streams, MCP stdio) for the spawn duration — the Hermes
+   "retry next render" rule would stall every step of every session while a
+   backend is down. Therefore: *memoized* — discovery miss, parse error, zero
+   hits, and **`maxBuffer` overflow (ENOBUFS, treated like a parse error)**;
+   *budgeted* — recall timeout, non-zero exit, spawn failure, probe timeout:
+   at most **2 attempts per agent id, ≥60 s cooldown between attempts, then
+   memoize `""` for that agent**. Budget counters are per-process (module
+   state alongside the memo); the discovery-cache reset on spawn failure is
+   kept but the RESET ITSELF is budgeted (a candidate re-probe costs up to
+   3 s frozen). Worst-case stall per agent: 2×(probe 3 s + recall 5 s) = 16 s
+   lifetime, then dark-forever — stated as the invariant. Every failure
+   collapses to `""`; nothing raises into prompt assembly. Logging at debug.
 
 **Rejected for DSH (beyond the Hermes rejected list):** second runtime
 `context()` for wisdom (position after history; see Approach); memoizing
 transient failures to protect node-0 byte-stability (a dark-forever session is
 worse than one extra cache miss — and the miss only happens when the first
 attempt failed, i.e. the prefix was already degraded); async prefetch at
-`agent/session-start` with sync cache read (cannot guarantee presence at the
-first request, the feature's core property, for the same node-0-change cost);
+`agent/session-start` with sync cache read (**rejection now evidence-backed,
+Opus cycle-1 M2**: `agent/session-start` is dispatched via `emitAgentEvent` —
+a fire-and-forget notification whose listeners are NOT awaited (dispatch.js,
+pinned [V]) — so a prefetch there cannot guarantee presence at the first
+request; with the retry budget (B1 fix) the sync path's worst case is bounded
+at 16 s lifetime per agent, so the added async machinery buys nothing);
 MCP-over-stdio (carried over from Hermes: rejected on complexity/audit grounds);
 `session.header.cwd` query term (needs new injections; seed-only is proven).
 
@@ -120,8 +147,9 @@ MCP-over-stdio (carried over from Hermes: rejected on complexity/audit grounds);
   the memo is filled **during that assemble**, so the section is present from
   the very first request — it is part of system node 0 from the first token and
   byte-identical thereafter. `SystemPromptProjection.project()` emits no update
-  when the rendered prompt is unchanged [V], so the cached prefix survives every
-  later step.
+  when the rendered prompt is unchanged (`if (latest.text === rendered) return
+  []`, dsh-agent-loop lib/index.js, pinned [V — cycle-1 m2 citation]), so the
+  cached prefix survives every later step.
 - Degenerate path: first recall times out (block absent at request 1, retry at
   request N) → the block's first appearance changes the system prompt → one
   provider prefix-cache miss from node 0, then stable. Accepted; logged as
@@ -133,18 +161,22 @@ MCP-over-stdio (carried over from Hermes: rejected on complexity/audit grounds);
 
 ```
 apply(ctx) ──► ctx.systemPrompt.section({ name: 'curated-thoughts-wisdom',
-                                            order: <stated>, interpolate: false,
+                                            order: 6000, interpolate: false,
                                             text: renderWisdom })
 every model step ──► renderWisdom({agent, scope, signal})
                        ├─ memo[agent.id] hit → stored bytes (byte-identical replay)
-                       ├─ miss + empty agent.id → "" (no memo write)
-                       ├─ miss: discover ct (candidates + identity probe) → fail: "" (memoized / probe-timeout NOT memoized)
-                       ├─ spawnSync: ct recall <seed> --json --k 3 (timeout 5s)
-                       │      timeout/exit/spawn → "" (NOT memoized; spawn also resets discovery cache)
+                       ├─ miss + non-string/empty agent.id → "" (no memo write, no spawn)
+                       ├─ miss + budget exhausted for agent.id → "" (memoized)
+                       ├─ miss + inside cooldown → "" (no spawn)
+                       ├─ miss: discover ct (candidates + identity probe) → fail: "" (memoized / budgeted)
+                       ├─ spawnSync: ct recall <seed> --json --k 3 (timeout 5s,
+                       │      killSignal SIGKILL, maxBuffer 4 MiB, windowsHide)
+                       │      ETIMEDOUT→timeout, other error→spawn, ENOBUFS→memoized,
+                       │      status≠0→exit — timeout/exit/spawn → "" (budgeted; spawn resets discovery cache within budget)
                        ├─ parse JSON → wiki[0..3] → empty: memoize "" → ""
-                       ├─ sanitize → render ≤2500 → memoize → block
+                       ├─ sanitize (incl. {{-neutralize) → render ≤2500 → memoize → block
                        └─ all exceptions swallowed (debug log) → ""
-resume in new process: memo cold → fresh recall → system-node update once (limitation 2)
+resume in new process: memo cold → fresh recall → system-node update once (limitation 1)
 compaction: no effect — same SessionId, memo replays identical bytes
 ```
 
@@ -152,8 +184,14 @@ compaction: no effect — same SessionId, memo replays identical bytes
 
 - **OQ1 session identity — resolved [V]:** `agent.id: SessionId`, stable across
   compaction; fork = new id; resume = same id, cold memo in a new process.
-  Memo key = `agent.id` string. (Hermes's lineage-root keying has no DSH
-  analogue — simpler here.)
+  Memo key = the id string, with a **fallback order** (Opus cycle-1 M1):
+  `agent?.id` → `scope?.id` when it is a string → else no-op. Both pinned
+  (0.1.5-rc.2 `assembleContextFor`) and current (0.2.0-rc.2 dispatch.js)
+  pass `{agent, scope: agent, signal}` — the 0.2.0-rc.2 api-catalog
+  `AssembleContext` interface omits `agent` but the implementation passes it;
+  the fallback covers a future host that stops passing it. A host-compat unit
+  test locks the pinned shape, and the e2e asserts a non-empty block so a
+  silent dark-fail is loud. (Hermes's lineage-root keying has no DSH analogue.)
 - **OQ2 re-render — resolved [V]:** every step re-invokes `text()`; the memo is
   the once-semantics mechanism (load-bearing, not an optimization).
 - **OQ3 position — resolved [V]:** `section()` (system node 0), not `context()`.
@@ -161,15 +199,32 @@ compaction: no effect — same SessionId, memo replays identical bytes
   seed-constant-only query.
 - **OQ5 memo lifetime — resolved [V]:** process-global module state; JS Map LRU;
   no locking required (single thread).
-- **Subprocess contract (DSH form):** `spawnSync` with argv array, `timeout`,
+- **Subprocess contract (DSH form):** `spawnSync` with argv array, `timeout: 5000`,
+  `killSignal: 'SIGKILL'` (Node's default SIGTERM lets a hung child outlive the
+  timeout — SIGKILL matches Hermes's `subprocess.run` semantics),
+  `maxBuffer: 4 * 1024 * 1024` (default 1 MiB can ENOBUFS on a chatty recall
+  payload; overflow is classified memoized like a parse error),
   `cwd: os.homedir()`, `stdio: ['ignore','pipe','pipe']`, `shell: false` (Node
   default when `shell` is unset — stated explicitly anyway), `windowsHide: true`.
+  `spawnSync` never throws: the result's `{error, status, signal}` fields carry
+  the failure (mapping above). `signal` from `AssembleContext` cannot be honored
+  by `spawnSync` — an abort during a stall waits out the bound; documented as
+  accepted (cycle-1 m6), bounded by the retry budget.
   Identity probe: `ct --help` output must contain `"Curated Thoughts"`
   (same probe text as Hermes), timeout 3 s, same contract.
-- **Discovery candidates:** port the Hermes list verbatim (`which("ct")` first,
-  then platform candidates incl. Windows `%USERPROFILE%\bin\ct.exe` and
-  `%LOCALAPPDATA%\CuratedThoughts\bin\ct.exe`); the plan checks what the dpkg
-  sidecar ships and where.
+- **Discovery candidates:** reuse the repo's existing `whichOnPath` helper from
+  `scripts/ct_env.ts` (export it; do not duplicate) with the Hermes candidate
+  order (`PATH` hit first, then platform candidates incl. Windows
+  `%USERPROFILE%\bin\ct.exe` and `%LOCALAPPDATA%\CuratedThoughts\bin\ct.exe`).
+  **Windows restriction (cycle-1 M3):** candidates matching `.cmd`/`.bat`
+  (case-insensitive) are rejected at discovery — `spawnSync` with `shell:false`
+  fails EINVAL on patched Node for those (CVE-2024-27980), which would
+  otherwise classify as spawn and burn the retry budget in a loop.
+- **Subagents (cycle-1 m5):** each DSH subagent is its own `Agent`/SessionId, so
+  each pays its own recall on its first step (memo is per agent). v1 **accepts
+  the per-agent cost and documents it**; a process-wide result cache keyed on
+  the (constant) query is listed as a v2 candidate, not built now (avoid a
+  second cache layer before the live cost is measured in e2e).
 
 ## Error handling
 
@@ -177,7 +232,7 @@ Identical philosophy to Hermes: every failure mode → section absent, never an
 exception in prompt assembly (DSH `assemble()` invokes `text(context)` directly
 — a throw would propagate into the loop's pre-step; the render function is
 non-raising by contract, with a defensive catch around the whole body).
-Oversize renders are pre-truncated by `render_block` (DSH has no host-side
+Oversize renders are pre-truncated by the render function (DSH has no host-side
 length guard for sections — the cap is entirely ours to enforce). Logging:
 debug one-liners with a `wisdom` prefix.
 

@@ -56,9 +56,9 @@ across compaction (the Hermes lineage-root problem does not exist here) and
 across resume **within one harness process**. Two caveats for the spec:
 
 - Memo is **process-local module state** — after a harness restart the memo is
-  cold and a resumed session gets a fresh (second) injection as a new
-  runtime-context user message. That matches Hermes's accepted resume behavior
-  (A2 in the Hermes investigation) **[A]**.
+  cold and a resumed session gets a fresh (second) injection as a changed
+  system-prompt section (system node update). That matches Hermes's accepted
+  resume behavior (A2 in the Hermes investigation) **[A]**.
 - Whether `agent.id` equals `session.header.id` byte-for-byte in every composition
   path — pinned loop constructs the agent with the session id; e2e asserts it
   (plan Task: "session-keyed memo" tests will lock the expectation) **[A→e2e]**.
@@ -131,8 +131,8 @@ the Hermes property "static block = cache-prefix-safe" as closely as DSH allows.
 Registering wisdom as a second `context()` (mirroring health) would instead put a
 wisdom user-message mid-history; simpler, but the block then sits after
 potentially large history and reads as an interruption. Decision for the spec:
-**section, ordered after the existing system content, `interpolate: false`**
-(literal text — our block contains prose, no `{{vars}}`).
+**section, ordered after the existing system content, with `{{` neutralized in
+the sanitizer** (the pinned host has no `interpolate: false`; see spec).
 
 ## Target 4 — Mapping/wrapping: what type does DSH pass to the render callback?
 
