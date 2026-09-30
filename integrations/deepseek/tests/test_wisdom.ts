@@ -10,6 +10,7 @@ import {
   discoverCt,
   probeIdentity,
   resetDiscoveryCachesForTests,
+  RetryGovernor,
   type ProbeVerdict,
 } from '../src/wisdom.js';
 
@@ -422,5 +423,173 @@ describe('recallWiki (mocked spawnSync injection — all platforms)', () => {
     const runSpy = vi.fn(() => spawnResult({ stdout: Buffer.from('{"wiki": []}') }));
     recallWiki('/bin/ct', 'q', { spawnSync: runSpy as never });
     expect((runSpy.mock.calls[0]![2] as { env: NodeJS.ProcessEnv }).env).toBe(process.env);
+  });
+});
+
+// ── Task 4: RetryGovernor — budget + circuit breaker (injected clock; NO vi.useFakeTimers, M4 cycle 3) ──
+
+describe('RetryGovernor (constructor-injected clock)', () => {
+  it('first gate allows; after one failure the immediate gate is cooldown', () => {
+    let t = 0;
+    const g = new RetryGovernor(() => t);
+    expect(g.gate('a1')).toBe('allow');
+    // 1st attempt granted then failed: budget NOT yet spent (both attempts
+    // must be granted for recordFailure to return true — M3 cycle 3)
+    g.recordFailure('a1');
+    expect(g.gate('a1')).toBe('cooldown'); // < 60 s since the attempt
+  });
+
+  it('after 60s the 2nd attempt is allowed; the 2nd recordFailure returns true (budget JUST spent); gate is then spent forever', () => {
+    let t = 0;
+    const g = new RetryGovernor(() => t);
+    expect(g.gate('a1')).toBe('allow');
+    g.recordFailure('a1');
+    t += 60_001;
+    expect(g.gate('a1')).toBe('allow'); // 2nd attempt
+    expect(g.recordFailure('a1')).toBe(true); // M3 cycle 3: spent THIS render
+    t += 1_000_000;
+    expect(g.gate('a1')).toBe('spent');
+  });
+
+  it('budget is per agent: a fresh id after 1 failure is allowed', () => {
+    let t = 0;
+    const g = new RetryGovernor(() => t);
+    expect(g.gate('a1')).toBe('allow');
+    g.recordFailure('a1');
+    expect(g.gate('a2')).toBe('allow');
+  });
+
+  it('opens the breaker after 4 consecutive failures across agents; any fresh id is breaker_open immediately', () => {
+    let t = 0;
+    const g = new RetryGovernor(() => t);
+    for (const id of ['a1', 'a2', 'a3', 'a4']) {
+      expect(g.gate(id)).toBe('allow');
+      g.recordFailure(id);
+      t += 60_001; // keep each agent's own gate legal
+    }
+    expect(g.gate('fresh1')).toBe('breaker_open'); // no cooldown wait
+  });
+
+  it('after the 5-min window elapses exactly ONE half-open attempt is granted; a failed half-open re-opens', () => {
+    let t = 0;
+    const g = new RetryGovernor(() => t);
+    for (const id of ['a1', 'a2', 'a3', 'a4']) {
+      g.gate(id);
+      g.recordFailure(id);
+      t += 60_001;
+    }
+    t += 5 * 60_001;
+    expect(g.gate('h1')).toBe('allow'); // half-open trial consumed by the grant (cycle-7 M3)
+    g.recordFailure('h1'); // failed probe RE-OPENS for a fresh 5-min window (plan line 545)
+    t += 4 * 60_001; // still INSIDE the fresh window
+    expect(g.gate('fresh2')).toBe('breaker_open'); // re-opened for another 5 min
+  });
+
+  it('a cooldown agent gets cooldown (not breaker_open) while the breaker is OPEN — pinned gate order', () => {
+    let t = 0;
+    const g = new RetryGovernor(() => t);
+    g.gate('a1');
+    g.recordFailure('a1'); // a1 cooldown: t=0..60s
+    t += 59_000;
+    // 4 more consecutive failures → breaker opens at t=59_000, still < 60s since a1's attempt
+    for (const id of ['a2', 'a3', 'a4', 'a5']) {
+      g.gate(id);
+      g.recordFailure(id);
+    }
+    // order (2) before (3): a1 is answered cooldown, not breaker_open; the breaker stays open
+    expect(g.gate('a1')).toBe('cooldown');
+    expect(g.gate('fresh1')).toBe('breaker_open');
+  });
+
+  it('a half-open trial is NOT consumed by a gated (spent) agent', () => {
+    let t = 0;
+    const g = new RetryGovernor(() => t);
+    // a1 burns BOTH attempts BEFORE the breaker opens → 'spent' forever
+    expect(g.gate('a1')).toBe('allow');
+    g.recordFailure('a1');
+    t += 60_001;
+    expect(g.gate('a1')).toBe('allow');
+    expect(g.recordFailure('a1')).toBe(true);
+    // a2..a4: 3 more consecutive failures → breaker opens (consecutive = 5)
+    for (const id of ['a2', 'a3', 'a4']) {
+      g.gate(id);
+      g.recordFailure(id);
+      t += 60_001;
+    }
+    t += 5 * 60_001; // window elapses
+    // order (1) before (3): a1 is spent, checked BEFORE the breaker — must not burn the trial
+    expect(g.gate('a1')).toBe('spent');
+    expect(g.gate('freshId')).toBe('allow'); // trial still available for a fresh agent
+  });
+
+  it('half-open SUCCESS closes the breaker (consecutive reset)', () => {
+    let t = 0;
+    const g = new RetryGovernor(() => t);
+    for (const id of ['a1', 'a2', 'a3', 'a4']) {
+      g.gate(id);
+      g.recordFailure(id);
+      t += 60_001;
+    }
+    t += 5 * 60_001;
+    expect(g.gate('h1')).toBe('allow');
+    g.recordSuccess('h1');
+    expect(g.gate('freshId')).toBe('allow');
+  });
+
+  it('half-open MEMOIZED-class outcome (recordSuccess) also closes the breaker', () => {
+    let t = 0;
+    const g = new RetryGovernor(() => t);
+    for (const id of ['a1', 'a2', 'a3', 'a4']) {
+      g.gate(id);
+      g.recordFailure(id);
+      t += 60_001;
+    }
+    t += 5 * 60_001;
+    expect(g.gate('h1')).toBe('allow');
+    // discovery_miss-style outcome: recordSuccess, not recordFailure
+    g.recordSuccess('h1');
+    expect(g.gate('freshId')).toBe('allow');
+  });
+
+  it('the per-agent map is LRU-capped at 256 entries (raw eviction)', () => {
+    let t = 0;
+    const g = new RetryGovernor(() => t);
+    // grants only: the RAW eviction test must not trip the process-wide
+    // breaker (recordFailure here would be 256 consecutive failures — plan
+    // line 549 keeps breaker interplay in Task 5's orchestrator tests)
+    for (let i = 0; i < 256; i++) {
+      expect(g.gate(`agent-${i}`)).toBe('allow');
+    }
+    // one more agent evicts the OLDEST entry (agent-0) without breaking anything
+    expect(g.gate('agent-256')).toBe('allow');
+    // agent-0 was evicted: its budget is fresh again (allow, not cooldown)
+    expect(g.gate('agent-0')).toBe('allow');
+  });
+
+  it('a SUCCESS resets the consecutive counter: 3 failures + success + 3 failures → breaker NOT open', () => {
+    let t = 0;
+    const g = new RetryGovernor(() => t);
+    for (const id of ['a1', 'a2', 'a3']) {
+      g.gate(id);
+      g.recordFailure(id);
+      t += 60_001;
+    }
+    g.recordSuccess('ok-agent');
+    for (const id of ['b1', 'b2', 'b3']) {
+      g.gate(id);
+      g.recordFailure(id);
+      t += 60_001;
+    }
+    expect(g.gate('fresh')).toBe('allow'); // only 3 consecutive since the success
+  });
+
+  it('setClock swaps the clock for later gates', () => {
+    let t = 0;
+    const g = new RetryGovernor(() => t);
+    g.gate('a1');
+    g.recordFailure('a1');
+    const t2 = () => 10_000_000;
+    g.setClock(t2);
+    expect(g.gate('a1')).toBe('allow'); // cooldown elapsed under the new clock
   });
 });

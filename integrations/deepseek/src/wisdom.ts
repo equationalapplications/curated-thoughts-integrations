@@ -201,9 +201,104 @@ function invalidateAcceptedPath(): void {
 }
 void invalidateAcceptedPath;
 
+// ── Task 4: retry budget + circuit breaker ─────────────────────────────────
+// ≤2 attempts per agent id, ≥60 s cooldown between them; process-wide breaker
+// opens after 4 consecutive budgeted failures for 5 min, then allows ONE
+// half-open attempt; a failed half-open re-opens. The per-agent map is
+// LRU-capped at MEMO_MAX like the memo (unbounded failed-agent growth else).
+
+export type BudgetVerdict = 'allow' | 'cooldown' | 'spent' | 'breaker_open';
+
+const COOLDOWN_MS = 60_000;
+const BREAKER_WINDOW_MS = 5 * 60_000;
+const BREAKER_THRESHOLD = 4;
+
+export class RetryGovernor {
+  private clock: () => number;
+  private agents = new Map<string, { attempts: number; lastAttemptAt: number }>();
+  private consecutive = 0;
+  private breakerOpenAt: number | null = null;
+  private halfOpenUsed = false;
+
+  /** TEST-ONLY deep reset (m4 cycle 6): `resetDiscoveryCachesForTests` is the single owner (`_resetWisdomStateForTests`). */
+  _resetForTests(): void {
+    this.agents.clear();
+    this.consecutive = 0;
+    this.breakerOpenAt = null;
+    this.halfOpenUsed = false;
+  }
+
+  constructor(now?: () => number) {
+    this.clock = now ?? (() => Date.now()); // live call, not a captured Date.now ref (m12 cycle 2)
+  }
+
+  setClock(fn: () => number): void {
+    this.clock = fn;
+  }
+
+  gate(agentId: string): BudgetVerdict {
+    const t = this.clock();
+    // check ORDER pinned (Opus cycle-7 M3): spent → cooldown → breaker →
+    // half-open grant → allow. A spent/cooldown agent NEVER consumes the
+    // half-open trial — the trial is consumed ONLY when an attempt is granted.
+    const rec = this.agents.get(agentId);
+    if (rec) {
+      if (rec.attempts >= 2) return 'spent';
+      if (t - rec.lastAttemptAt < COOLDOWN_MS) return 'cooldown';
+    }
+    if (this.breakerOpenAt !== null) {
+      if (t - this.breakerOpenAt < BREAKER_WINDOW_MS) return 'breaker_open';
+      if (this.halfOpenUsed) return 'breaker_open'; // trial consumed; re-open happens at recordFailure
+      this.halfOpenUsed = true; // trial consumed ONLY when an attempt is granted (fall through)
+    }
+    // one gate = one attempt: count it here, at the moment of the grant
+    if (rec) rec.attempts += 1;
+    else this.agents.set(agentId, { attempts: 1, lastAttemptAt: t });
+    // LRU touch + cap (delete/re-insert keeps Map insertion order = recency)
+    const entry = this.agents.get(agentId)!;
+    this.agents.delete(agentId);
+    this.agents.set(agentId, entry);
+    entry.lastAttemptAt = t;
+    while (this.agents.size > MEMO_MAX) {
+      const oldest = this.agents.keys().next().value;
+      if (oldest === undefined) break;
+      this.agents.delete(oldest);
+    }
+    return 'allow';
+  }
+
+  /** Returns true when the agent's budget JUST became spent (2nd failure, both attempts granted) — the caller memoizes '' on THAT render (M3 cycle 3). */
+  recordFailure(agentId: string): boolean {
+    const rec = this.agents.get(agentId);
+    const attempts = rec ? rec.attempts : 0;
+    if (rec) rec.lastAttemptAt = this.clock();
+    this.consecutive += 1;
+    if (this.breakerOpenAt !== null && this.halfOpenUsed) {
+      // a failed half-open probe re-opens for a FRESH 5-min window
+      this.breakerOpenAt = this.clock();
+      this.halfOpenUsed = false;
+    } else if (this.consecutive >= BREAKER_THRESHOLD && this.breakerOpenAt === null) {
+      this.breakerOpenAt = this.clock();
+      this.halfOpenUsed = false;
+    }
+    return attempts >= 2; // both attempts granted and failed → spent THIS render
+  }
+
+  recordSuccess(agentId: string): void {
+    this.agents.delete(agentId); // resets the agent's attempts
+    this.consecutive = 0;
+    this.breakerOpenAt = null; // closes the breaker
+    this.halfOpenUsed = false;
+  }
+}
+
+// module-level governor (renderWisdom uses it); re-clocked per call via setClock
+const moduleGovernor = new RetryGovernor();
+
 export function resetDiscoveryCachesForTests(): void {
   acceptedCtPath = null;
   missCache = null;
+  moduleGovernor._resetForTests(); // m4 cycle 6: the reset also resets the module-level governor
 }
 
 // ── Task 3: recallWiki — pinned argv, failure classes ──────────────────────
