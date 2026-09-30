@@ -8,7 +8,8 @@ once per session, cache-safe, fail-open — per the converged spec.
 
 **Architecture:** One new stdlib-only module `integrations/hermes/scripts/ct_wisdom.py`
 (discovery + identity probe → `ct recall` subprocess → wiki-only consumption →
-sanitize → render → session-keyed memo), wired as a second
+sanitize → render → session-keyed memo; `query_for(session_info)` builds the query term),
+ wired as a second
 `register_system_prompt_section("curated-thoughts-wisdom", render, max_chars=2500)`
 call in `__init__.py` alongside the existing health section. No new dependencies, no
 sidecar contact, no brain writes.
@@ -22,17 +23,17 @@ ruff select E9/F63/F7/F82/F401. CI matrix unchanged: exactly
 **Spec:** [`docs/superpowers/specs/2026-09-30-wisdom-auto-inclusion-design.md`](../specs/2026-09-30-wisdom-auto-inclusion-design.md)
 (review-converged, APPROVE WITH NITS) — the plan argues from the spec; executors read
 both. Evidence base: [`../investigations/2026-09-30-wisdom-auto-inclusion-step0-investigation.md`](../investigations/2026-09-30-wisdom-auto-inclusion-step0-investigation.md).
-**Review:** Opus plan cycles 1-2 = REQUEST CHANGES → all findings applied this
-revision → cycle 3 delta pending. Where the spec still says "INFO log-line
-expectations" (§e2e), the PLAN WINS: logging is debug-level
-(`wisdom: render …` prefix), per spec's own logging constraint.
+**Review:** Opus plan cycles 1-3 = REQUEST CHANGES → all findings applied this
+revision → cycle 4 delta pending. (History: the spec's §e2e wording was patched to
+the debug-line form in cycle 2.)
 
 **Module contract (single source of truth for the failure classes — Opus plan M1/M2):**
 - `discover_ct(env) -> (path | None, failure_class | None)` — `failure_class` is
   `"probe_timeout"` when a candidate's identity probe times out (NOT memoized), `None`
   otherwise; `path=None, class=None` = deterministic discovery miss (memoized).
-- `recall_wiki(ct_path, cwd_basename) -> (entries | None, failure_class | None)` —
-  `"timeout"` / `"exit"` are NOT memoized; `None, None` with zero entries IS.
+- `recall_wiki(ct_path, query) -> (entries | None, failure_class | None)` —
+  `"timeout"` / `"exit"` / `"spawn"` are NOT memoized; `None, None` with zero entries
+  IS.
 - `recall_fn(session_info) -> (block_str, memoize: bool)` — the memo's ONLY signal.
 - ONE orchestrator, `_render_wisdom(session_info)`, combines discover → recall →
   render and maps every failure class to `memoize`; it is the sole owner of that
@@ -60,7 +61,9 @@ lines 97-109; registration pattern, 131-139), `scripts/ct_env.py` (discovery pat
   capture_output=True, timeout=N, cwd=<pinned to user home>)`. Never `shell=True`.
   Applies to the identity probe too (`timeout=3`).
 - **Failure-class memoization (spec, cycle 3):** memoize zero-hits, discovery miss,
-  parse error; do NOT memoize timeouts (recall or probe) or non-zero exits.
+  parse error; do NOT memoize timeouts (recall or probe), non-zero exits, or
+  `"spawn"` (OSError — cache-invalidating). Seven classes total: discovery miss,
+  probe_timeout, timeout, exit, spawn, parse error, zero hits.
 - **Sanitization order (spec, cycle 2):** remove `<!-- hermes-plugin-section`
   substrings REPEATEDLY until stable → THEN indent any `## Plugin Context: ` line →
   apply to titles AND text.
@@ -96,22 +99,23 @@ lines 97-109; registration pattern, 131-139), `scripts/ct_env.py` (discovery pat
 
 ## Task 2: Recall wrapper + failure classes (`ct_wisdom.recall_wiki`)
 
-- [ ] **Step 2.1 (RED):** tests with a fake `ct` on PATH: list-argv invocation
-  (assert no shell), `stdin=DEVNULL` + `cwd` pinned (monkeypatch `subprocess.run` and
-  assert kwargs), JSON parse → `(title, text)` tuples from `wiki` only, `--k 3`,
-  query = seed constant + non-degenerate cwd term built from
-  `session_info["cwd"]` (golden: degenerate cwd cases → seed-only, byte-stable), and
+- [ ] **Step 2.1 (RED):** tests (patch `ct_wisdom.subprocess.run`; fake-`ct`-file
+  variants `skipIf(nt)`): list-argv invocation (assert no shell), `stdin=DEVNULL` +
+  `cwd` pinned (assert kwargs), JSON parse → `(title, text)` tuples from `wiki` only,
+  `--k 3`, and — targeting **`query_for(session_info)`** (golden: degenerate cwd
+  cases → seed-only, byte-stable; seed constant frozen) — plus
   the failure-class table: timeout → `(None, "timeout")`, non-zero exit →
-  `(None, "exit")`, zero hits → `([], None)` (memoized), parse error → `(None, None)`
-  (memoized). (Discovery-miss memoization is owned by the orchestrator — tested in
-  Task 4.)
+  `(None, "exit")`, spawn (OSError) → `(None, "spawn")` + cache invalidation, zero
+  hits → `([], None)` (memoized), parse error → `(None, None)` (memoized).
+  (Discovery-miss memoization is owned by the orchestrator — tested in Task 4.)
 - [ ] **Step 2.2 (GREEN):** implement `recall_wiki(ct_path, cwd_basename)` →
   `(entries | None, failure_class | None)`; failure classes include **`"spawn"`** —
   `OSError` from `subprocess.run` (`FileNotFoundError`, `PermissionError`) — NOT
   memoized. The process-wide accepted-path cache is invalidated on `"spawn"`
   (re-discovery next render, so a reinstalled/`ct`-moved machine recovers) and has a
   test-only reset hook so tests cannot leak an accepted path between them.
-- [ ] **Step 2.3:** checks; commit.
+- [ ] **Step 2.3:** checks; commit. (Steps renumbered: Task 2 = 2.1 recall_wiki +
+  query_for RED, 2.2 GREEN, 2.3 checks.)
 
 ## Task 3: Sanitize + render (`ct_wisdom.render_block`)
 
@@ -124,9 +128,12 @@ lines 97-109; registration pattern, 131-139), `scripts/ct_env.py` (discovery pat
   `_PLUGIN_SECTION_FRAME_RE` + `PLUGIN_SECTIONS_START/END` + the
   `"\n\nConversation started:"` suffix rule into the test file, header comment
   citing `~/.hermes/hermes-agent/agent/system_prompt.py:34-37,138-163`, **plus a
-  pinned copy of `format_system_prompt_sections` and
-  `MAX_SYSTEM_PROMPT_SECTION_CHARS` citing
-  `~/.hermes/hermes-agent/hermes_cli/plugins.py`** (the restore equality check
+  pinned copy of the full formatting layer citing
+  `~/.hermes/hermes-agent/hermes_cli/plugins_dispatch.py:70-96`:
+  `format_system_prompt_section` (the `hermes-plugin-section-chars:{len}` framer),
+  `_SYSTEM_PROMPT_SECTION_HEADING_PREFIX`, `format_system_prompt_sections`,
+  `MAX_SYSTEM_PROMPT_SECTION_CHARS`, `PLUGIN_SECTIONS_START/END` (75-76), and a
+  minimal `.id`/`.content` namedtuple** (the restore equality check
   `format_system_prompt_sections(restored) == framed` and the max-chars skip are what
   a forged frame actually breaks; without them the test proves nothing) (CI has no
   Hermes install; importing the host modules there fails all 6 jobs).
@@ -149,13 +156,14 @@ lines 97-109; registration pattern, 131-139), `scripts/ct_env.py` (discovery pat
 - [ ] **Step 4.3 (RED):** tests for `ct_wisdom._render_wisdom(session_info)` — the
   REAL orchestrator (lives in `ct_wisdom.py`; `__init__.py` only wires it into
   `register_system_prompt_section`) with `discover_ct`/`recall_wiki` patched per
-  class: all six classes exercised against the real mapping — discovery miss →
-  memoized, probe_timeout → NOT memoized, recall timeout → NOT memoized, exit → NOT
-  memoized, parse error → memoized, zero hits → memoized. Debug line asserted with
+  class: all SEVEN classes exercised against the real mapping — discovery miss →
+   probe_timeout → NOT memoized, recall timeout → NOT memoized, exit → NOT
+  memoized, spawn → NOT memoized + cache invalidated, parse error → memoized, zero
+  hits → memoized. Debug line asserted with
   `assertLogs(level="DEBUG")`: `wisdom: render session=<id> memo=hit|miss class=<c|ok>`.
 - [ ] **Step 4.4 (GREEN):** implement `_render_wisdom` + the debug emit (debug level,
   never INFO — spec constraint).
-- [ ] **Step 4.3:** checks; commit.
+- [ ] **Step 4.5:** checks; commit.
 
 ## Task 5: Wire the section (`__init__.py`)
 
