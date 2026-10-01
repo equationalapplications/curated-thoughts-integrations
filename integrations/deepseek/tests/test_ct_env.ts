@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, writeFileSync, mkdirSync, rmSync, symlinkSync, chmodSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, delimiter } from 'node:path';
 import {
   resolveBrainPaths,
   readBrainConfig,
@@ -11,6 +11,7 @@ import {
   looksLikeDevBuild,
   installKind,
   expandHome,
+  allPathMatches,
   ENV_BRAIN_DIR,
 } from '../scripts/ct_env.js';
 
@@ -129,6 +130,78 @@ describe('resolveVaultPath', () => {
     expect(error).toBeNull();
     expect(vault).toBe('~someone/Documents');
     expect(vault).not.toBe(join(tmpHome, 'someone', 'Documents'));
+  });
+});
+
+describe('allPathMatches', () => {
+  it.skipIf(process.platform === 'win32')('returns every PATH dir naming an existing executable file, in order', () => {
+    const bin1 = join(tmpHome, 'bin1');
+    const bin2 = join(tmpHome, 'bin2');
+    mkdirSync(bin1);
+    mkdirSync(bin2);
+    const a = join(bin1, 'ct');
+    const b = join(bin2, 'ct');
+    writeFileSync(a, '#!/bin/sh\n');
+    writeFileSync(b, '#!/bin/sh\n');
+    chmodSync(a, 0o755);
+    chmodSync(b, 0o755);
+    const env = { PATH: `${bin1}${delimiter}${bin2}` };
+    expect(allPathMatches('ct', env, 'linux')).toEqual([a, b]);
+  });
+
+  it.skipIf(process.platform === 'win32')('skips dirs whose entry is missing or non-executable (POSIX shutil.which parity)', () => {
+    const empty = join(tmpHome, 'empty');
+    const noExec = join(tmpHome, 'noexec');
+    const good = join(tmpHome, 'good');
+    mkdirSync(empty);
+    mkdirSync(noExec);
+    mkdirSync(good);
+    const nonExec = join(noExec, 'ct');
+    writeFileSync(nonExec, '#!/bin/sh\n');
+    chmodSync(nonExec, 0o644); // exists, but no X_OK
+    const ok = join(good, 'ct');
+    writeFileSync(ok, '#!/bin/sh\n');
+    chmodSync(ok, 0o755);
+    const env = { PATH: [empty, noExec, good].join(delimiter) };
+    expect(allPathMatches('ct', env, 'linux')).toEqual([ok]);
+  });
+
+  it('appends PATHEXT candidates in win32 mode (all exts per dir, dirs outer loop)', () => {
+    const bin1 = join(tmpHome, 'bin1');
+    const bin2 = join(tmpHome, 'bin2');
+    mkdirSync(bin1);
+    mkdirSync(bin2);
+    const a = join(bin1, 'ct.exe');
+    const b = join(bin2, 'ct.cmd');
+    writeFileSync(a, 'ok');
+    writeFileSync(b, 'ok');
+    const env = {
+      PATH: `${bin1};${bin2}`,
+      PATHEXT: '.EXE;.CMD',
+    };
+    expect(allPathMatches('ct', env, 'win32')).toEqual([a, b]);
+  });
+
+  it('resolves a `Path` env key on win32 (Windows env is case-insensitive)', () => {
+    // Opus cycle-8: a PATH spelled `Path` must still resolve — env lookup
+    // falls back to the case-insensitive key match.
+    const binDir = join(tmpHome, 'bin');
+    mkdirSync(binDir);
+    const a = join(binDir, 'ct.exe');
+    writeFileSync(a, 'ok');
+    const env = { Path: `${binDir};`, PATHEXT: '.EXE' };
+    expect(allPathMatches('ct', env, 'win32')).toEqual([a]);
+  });
+
+  it('returns [] for empty/absent PATH', () => {
+    expect(allPathMatches('ct', { PATH: '' }, 'linux')).toEqual([]);
+    expect(allPathMatches('ct', {}, 'linux')).toEqual([]);
+  });
+
+  it('does not mutate the caller env or consult process.env (pure)', () => {
+    const env = { PATH: '' };
+    allPathMatches('ct', env, 'linux');
+    expect(env).toEqual({ PATH: '' });
   });
 });
 

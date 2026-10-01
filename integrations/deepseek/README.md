@@ -23,6 +23,24 @@ discipline.
   backend / dsh registration / import pre-flight / version compat).
 - **Idempotent installer** — `scripts/install.sh`.
 
+- **Wisdom auto-inclusion** — a `curated-thoughts-wisdom` system-prompt
+  section (system node 0, after the health snapshot). Once per agent the
+  plugin recalls the brain's wisdom layer through the standalone `ct` CLI and
+  renders a sanitized digest; the block is memoized so host re-renders are
+  byte-identical. It is a no-op when `ct` is absent, the brain has no wiki
+  wisdom, or the backend is down.
+
+  **Limitations (v1):** (1) after a harness restart on a resumed session the
+  memo is cold — the first step re-recalls and the block may change bytes
+  once; (2) the same one-time cost if the first recall attempt fails
+  transiently and a later render succeeds; (3) memo eviction beyond 256 live
+  agents per process; (4) when the `ct` backend is down, a session stops
+  trying after two failed attempts (its block stays absent for the session's
+  life in that process); (5) while the backend is down, the harness may pause
+  briefly (seconds) on recall attempts, bounded per process by the retry
+  budget + circuit breaker. Troubleshooting: set `CT_WISDOM_DEBUG=1` to emit
+  a per-render `wisdom:` line on stderr.
+
 ## Install
 
 From the release tarball (what `scripts/install.sh` automates):
