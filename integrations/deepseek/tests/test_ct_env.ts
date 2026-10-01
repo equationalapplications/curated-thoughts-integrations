@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, writeFileSync, mkdirSync, rmSync, symlinkSync, chmodSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, delimiter } from 'node:path';
 import {
   resolveBrainPaths,
   readBrainConfig,
@@ -150,20 +150,20 @@ describe('allPathMatches', () => {
   });
 
   it('skips dirs whose entry is missing or non-executable (POSIX shutil.which parity)', () => {
-    const bin1 = join(tmpHome, 'bin1');
-    const bin2 = join(tmpHome, 'bin2');
-    mkdirSync(bin1);
-    mkdirSync(bin2);
-    const missing = join(bin1, 'ct');
-    const nonExec = join(bin1, 'missing-ct');
-    const ok = join(bin2, 'ct');
-    writeFileSync(join(bin1, 'missing-ct'), '#!/bin/sh\n'); // deliberately NOT chmod +x
+    const empty = join(tmpHome, 'empty');
+    const noExec = join(tmpHome, 'noexec');
+    const good = join(tmpHome, 'good');
+    mkdirSync(empty);
+    mkdirSync(noExec);
+    mkdirSync(good);
+    const nonExec = join(noExec, 'ct');
+    writeFileSync(nonExec, '#!/bin/sh\n');
+    chmodSync(nonExec, 0o644); // exists, but no X_OK
+    const ok = join(good, 'ct');
     writeFileSync(ok, '#!/bin/sh\n');
     chmodSync(ok, 0o755);
-    const env = { PATH: `${bin1}${require('node:path').delimiter}${bin2}` };
+    const env = { PATH: [empty, noExec, good].join(delimiter) };
     expect(allPathMatches('ct', env, 'linux')).toEqual([ok]);
-    expect(missing).not.toBe(ok);
-    expect(nonExec).not.toBe(ok);
   });
 
   it('appends PATHEXT candidates in win32 mode (all exts per dir, dirs outer loop)', () => {

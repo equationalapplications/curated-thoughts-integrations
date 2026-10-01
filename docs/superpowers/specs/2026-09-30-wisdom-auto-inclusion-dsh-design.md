@@ -185,6 +185,20 @@ MCP-over-stdio (carried over from Hermes: rejected on complexity/audit grounds);
   request N) → the block's first appearance changes the system prompt → one
   provider prefix-cache miss from node 0, then stable. Accepted; logged as
   limitation (2).
+- **LRU eviction (CodeRabbit cycle-5):** the memo AND the retry governor's
+  per-agent map are both LRU-capped at `MEMO_MAX = 256` (JS `Map` delete +
+  re-insert for recency, eviction of insertion-order head when over cap).
+  Eviction of a governor record discards its cooldown clock and spent-budget
+  flag — a later render for that agent gets a FRESH budget. A retained `''`
+  memo, by contrast, still prevents spawning for the cached agent until THAT
+  memo entry is itself evicted (a single render writes either the rendered
+  block or `''`). The two maps are independent: governor eviction is silent,
+  memo eviction is observable as a single fresh-block render and the one
+  prefix-cache miss that follows. Both bounds are explicit; we do not protect
+  governor records from LRU eviction, and we do not bound total per-agent
+  cost beyond `MEMO_MAX`. Process-wide stall remains bounded by the circuit
+  breaker (independent of any per-agent state). This is the rationale for
+  README limitation (3).
 - The health context is untouched: it stays a `context()`; its value-dedupe
   semantics are unchanged by this feature.
 
@@ -223,6 +237,17 @@ compaction: no effect — same SessionId, memo replays identical bytes
   receives the Agent itself, so `scope?.id` is real today. A host-compat unit
   test locks the pinned shape, and the e2e asserts a non-empty block so a
   silent dark-fail is loud. (Hermes's lineage-root keying has no DSH analogue.)
+  **Malformed ctx (aws-cloud-agent cycle-1 review):** if the host ever passes
+  an `assembleCtx` shape without `agent` or `scope` (e.g. `{ signal: {} }`),
+  `keyOf` returns `''` because both `pick(c.agent)` and `pick(c.scope)` yield
+  `''` (each guarded by `typeof === "object" && !== null && typeof .id ===
+  "string"`); there is no dot-access on the typed values and no path on which
+  an `undefined` propagates. `renderWisdom` then short-circuits on `key === ''`
+  with NO memo write and NO spawn (Approach step 4, "No key → …"). This
+  silent no-op is by design — an unrecognized host shape MUST NOT raise into
+  `assemble()`, and the system node 0 absence is the correct outcome. The
+  wisdom-layer section simply stays empty, the prefix cache survives
+  unchanged, and the session proceeds.
 - **OQ2 re-render — resolved [V]:** every step re-invokes `text()`; the memo is
   the once-semantics mechanism (load-bearing, not an optimization).
 - **OQ3 position — resolved [V]:** `section()` (system node 0), not `context()`.
