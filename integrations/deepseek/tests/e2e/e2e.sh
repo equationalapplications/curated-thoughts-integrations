@@ -118,8 +118,12 @@ EOF
   check "ct ingest exits 0 (rc=$ingest_rc)" test "$ingest_rc" -eq 0
   # Prove recall returns the entry BEFORE any dsh session runs (cold-path
   # timing also lands here: plan Step 8.1 measures the first real recall).
+  # Enforce the recall deadline (CodeRabbit cycle-6 stability): elapsed-time
+  # measurement AFTER the call can't bound the script's wait if `ct` hangs;
+  # GNU timeout SIGTERMs at 5 s and SIGKILLs 1 s later. exit 124 = timed out,
+  # which trips the rc-check below loudly.
   recall_start=$(date +%s%N)
-  ct recall 'tire pressure' --json --k 3 >"$OUT/recall.json" 2>"$OUT/recall.err"
+  timeout --kill-after=1s 5s ct recall 'tire pressure' --json --k 3 >"$OUT/recall.json" 2>"$OUT/recall.err"
   recall_rc=$?
   recall_ms=$(( ($(date +%s%N) - recall_start) / 1000000 ))
   check "ct recall exits 0 (rc=$recall_rc, cold ${recall_ms}ms)" test "$recall_rc" -eq 0
