@@ -192,6 +192,6 @@ describe('wisdom section', () => {
     m.sectionRegistrations[0].text({ agent: { id: 'e2' } });
     const deps = vi.mocked(renderWisdom).mock.calls[0]![1] as { env: NodeJS.ProcessEnv };
     expect(deps.env.CURATED_BRAIN_DIR).not.toMatch(/^~/);
-    expect(deps.env.CURATED_BRAIN_DIR).toContain('/.brain');
+    expect(deps.env.CURATED_BRAIN_DIR).toMatch(/[\\/]\.brain$/);
   });
 });

@@ -134,7 +134,7 @@ describe('resolveVaultPath', () => {
 });
 
 describe('allPathMatches', () => {
-  it('returns every PATH dir naming an existing executable file, in order', () => {
+  it.skipIf(process.platform === 'win32')('returns every PATH dir naming an existing executable file, in order', () => {
     const bin1 = join(tmpHome, 'bin1');
     const bin2 = join(tmpHome, 'bin2');
     mkdirSync(bin1);
@@ -145,11 +145,11 @@ describe('allPathMatches', () => {
     writeFileSync(b, '#!/bin/sh\n');
     chmodSync(a, 0o755);
     chmodSync(b, 0o755);
-    const env = { PATH: `${bin1}${require('node:path').delimiter}${bin2}` };
+    const env = { PATH: `${bin1}${delimiter}${bin2}` };
     expect(allPathMatches('ct', env, 'linux')).toEqual([a, b]);
   });
 
-  it('skips dirs whose entry is missing or non-executable (POSIX shutil.which parity)', () => {
+  it.skipIf(process.platform === 'win32')('skips dirs whose entry is missing or non-executable (POSIX shutil.which parity)', () => {
     const empty = join(tmpHome, 'empty');
     const noExec = join(tmpHome, 'noexec');
     const good = join(tmpHome, 'good');
