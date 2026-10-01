@@ -513,10 +513,33 @@ class VaultTests(DoctorTestCase):
         brain = self.fake_home / ".brain"
         brain.mkdir()
         (brain / "config.json").write_text('{"vault_path": "~/docs-tilde"}')
-        (self.fake_home / "docs-tilde").mkdir()
+        vault = self.fake_home / "docs-tilde"
+        vault.mkdir()
         r = ct_doctor.check_vault()
         self.assertEqual(r.status, ct_doctor.PASS)
-        self.assertNotIn("~", r.detail)
+        # Assert the expansion by naming the resolved directory rather than by
+        # forbidding "~" anywhere in the detail: see the next test for why a
+        # fully expanded path can still contain one.
+        self.assertIn(str(vault), r.detail)
+        self.assertNotIn("~/docs-tilde", r.detail)
+        self.assertNotIn("~" + os.sep + "docs-tilde", r.detail)
+
+    def test_expansion_holds_when_the_expanded_path_contains_a_tilde(self):
+        # GitHub's windows-latest runner reports its temp dir as an 8.3 short
+        # name (C:\Users\RUNNER~1\...), so a tilde survives in a path that was
+        # expanded perfectly well. An assertNotIn("~", detail) check fails
+        # there and passes everywhere else, which is how it reached CI unseen.
+        brain = self.fake_home / ".brain"
+        brain.mkdir()
+        (brain / "config.json").write_text('{"vault_path": "~/DOCS~1"}')
+        vault = self.fake_home / "DOCS~1"
+        vault.mkdir()
+        r = ct_doctor.check_vault()
+        self.assertEqual(r.status, ct_doctor.PASS, r.detail)
+        self.assertIn(str(vault), r.detail)
+        self.assertNotIn("~/DOCS~1", r.detail)
+
+
 
 
 class RegistrationTests(DoctorTestCase):
