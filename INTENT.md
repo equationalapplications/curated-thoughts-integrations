@@ -1,0 +1,99 @@
+# INTENT — curated-thoughts-integrations (Intuitive Memory & Harness Injection)
+
+**Read this file first.** It explains why this repo exists, the business rules
+every harness integration must obey, what is out of scope, and the workflow.
+This file wins on *intent*; specs win on *detail*.
+
+## Why CTI exists
+
+Curated Thoughts (CT) is a local second brain with a curated wisdom layer.
+This repo carries the harness integrations (Hermes, DeepSeek Harness, and
+followers) that make CT's wisdom appear in an agent's context automatically.
+Each integration implements the same algorithm — "intuitive wisdom" (Kurt,
+2026-10-01; reference spec: PR #21, ported in PR #22).
+
+## The intuitive-wisdom algorithm (what every integration implements)
+
+1. **Analyze:** at bootstrap there is no conversation yet — recall is driven by
+   the frozen seed constant plus session context, per PR #21 (`ct recall
+   "<seed>" --json`); the seed does the semantic work.
+2. **Match:** find wisdom-layer facts via CT's recall (semantic similarity).
+3. **Judge (in CT, optional):** if System One is configured, CT's recall
+   applies its relevance judgment before returning results. Integrations never
+   call System One directly and never wire their own judges.
+4. **Traverse — deferred:** deeper graph traversal is NOT part of
+   session-start injection in v1 (edges are sparse; it stays in `wiki_context`
+   on demand). Any injection-time traversal needs a new CT decision first.
+5. **Inject:** append the surviving facts to the prompt under the invariants
+   below.
+
+## Injection invariants (non-negotiable)
+
+1. **Exactly once (scope b).** A fact never appears twice anywhere in a
+   session's context: once in the injected block, never again via tool
+   results. The ledger lives in CT's session context (keyed by session id);
+   CT recall tools filter against it. Dedup keys on the deterministic fact id
+   after supersession resolution. A replacement surfaced mid-session is
+   delivered with an explicit "supersedes <id>" marker; the frozen block is
+   never edited. (Ledger ownership and the supersession marker are new work —
+   pending decisions.)
+2. **Cache safety.** The block is computed once, frozen as ONE contiguous
+   static region at bootstrap, once per session, additive with existing plugin
+   context. The rendered block and the session ledger are persisted per
+   session and REPLAYED on resume and compaction, never recomputed (PR #22
+   memo-replay is the pattern; per-host conformance is pending RR-6).
+   Mid-session learning arrives only as tool results; the system prompt is
+   never rewritten.
+3. **Graceful degradation.** Recall unavailable, sidecar down, timeout, empty
+   corpus → the integration is a silent no-op (no empty block, nothing
+   emitted), logged locally, never surfaced as a session error. A bounded
+   recall timeout prevents a hung sidecar from stalling bootstrap. An agent
+   session must never fail because its brain is unreachable.
+4. **Provenance labeling.** Every injected fact is labeled with its provenance
+   class from a fixed vocabulary OWNED BY CT and emitted by `ct recall`
+   (whether `ct recall` exposes this today is unverified — RR-C; until then
+   this invariant is forward-looking). Integrations never present agent-tier
+   wisdom as verified knowledge.
+5. **Bound the block.** The injection block has a size/item cap with values
+   set by CT (PR #21 pins `max_chars=2500`); the cap is never raised locally
+   to compensate for weak matching.
+
+## Read-only retrieval
+
+- Integration CODE never writes to CT. Agents running inside the harness may
+  use CT's deposit tools (`wisdom_deposit`, `wisdom_propose_supersession`)
+  — which write files under `immutable-source-files/agents/` and report
+  `pending ingest` honestly. Integrations never call row-level
+  insert/update/approve/archive tools.
+- Injection never reads uningested vault files — no lexical grepping, no
+  query-time embedding. Freshness is CT's deposit-kicked-ingest job, not ours.
+- Integrations only READ the brain via the sanctioned recall surface (`ct
+  recall` subprocess / read-only sidecar tools). No direct brain DB access.
+- Reuse proven decisions: new ports fork the converged Hermes design and
+  record deliberate divergences (PR #22 is the model).
+
+## Non-goals
+
+- No general-purpose CT client library; bind thinly to each host's extension
+  points.
+- No recall-quality logic (scoring models, judges, expansion, ranking) — that
+  lives in CT; integrations consume results and never call System One.
+- No human review/attestation UX — that lives in the CT app.
+- No support for harnesses lacking the needed extension points (a stable
+  system-prompt region + a read-only recall path).
+
+## Workflow
+
+1. Spec first under `docs/superpowers/specs/`, from a Step-0 investigation
+   with `[V]`-evidenced answers from pinned host sources (PR #22 is the
+   standard).
+2. TDD: unit-test the invariant logic (dedup ledger, memo-replay byte
+   stability, sanitizer); e2e in the isolated container on a scratch profile —
+   never the live default profile or live brain.
+3. Dual review to convergence (GLM + Opus) before merge; open questions park
+   the PR.
+4. Version bump + CHANGELOG + README table per integration.
+5. The invariants ARE the test surface: any injection-touching PR must
+   demonstrate exactly-once across randomized sessions with mid-session tool
+   results, byte-identical injected blocks after first render, and the
+   supersession gate (no superseded fact is ever injected).
