@@ -82,7 +82,25 @@ section 'seed wisdom (ct CLI + vault ingest)'
 # wiki layer through the standalone `ct` binary. Seed one wiki-bearing note so
 # recall has something to return; without this the wisdom checks below would
 # pass vacuously (a no-op section renders '').
-if ct --help 2>/dev/null | grep -q 'Curated Thoughts'; then
+#
+# CONDITIONAL on an embedding backend, like the live-model block: `ct ingest`
+# and `ct recall` embed through Ollama (localhost:11434 by default) — the same
+# dependency that keeps the container's live MCP check on
+# curated_proposals_list. With no backend these checks SKIP (rc=2 in 2026-09-30
+# run 3 proved it: ingest 0/1, recall refused on connect), and the wisdom
+# behavior is covered at unit level (test_wisdom.ts, mocked recall). To run the
+# full wisdom e2e, provide an embedder in the container.
+WISDOM_E2E=1
+if ! ct --help 2>/dev/null | grep -q 'Curated Thoughts'; then
+  bad 'ct CLI not on PATH — wisdom seed skipped, wisdom checks would be vacuous'
+  WISDOM_E2E=0
+else
+  if ! ct status >/dev/null 2>&1; then
+    echo 'SKIP  no embedding backend for ct ingest/recall — wisdom e2e covered at unit level'
+    WISDOM_E2E=0
+  fi
+fi
+if [ "$WISDOM_E2E" -eq 1 ]; then
   mkdir -p "$HOME/vault/notes"
   cat >"$HOME/vault/notes/e2e-wisdom-seed.md" <<'EOF'
 ---
@@ -113,8 +131,6 @@ EOF
   else
     ok "cold recall within the 5000ms budget"
   fi
-else
-  bad 'ct CLI not on PATH — wisdom seed skipped, wisdom checks would be vacuous'
 fi
 
 # Provider settings: the key stays in the environment (apiKeyEnv); this file
@@ -248,14 +264,21 @@ else
     sh -c "grep -q 'Memory sidecar DEGRADED' '$OUT/run2.session.jsonl'"
   check 'routing reminder reaches the prompt' \
     sh -c "grep -q 'Curated Thoughts memory is available over MCP' '$OUT/run2.session.jsonl'"
-  # Wisdom assertions (plan Step 8.2): Run 1 has a healthy seeded brain, so its
-  # system prompt must carry exactly one wisdom block with the seeded entry.
-  check 'wisdom block reaches the system prompt' \
-    sh -c "grep -q '## Curated Thoughts — relevant memory' '$OUT/run1.session.jsonl'"
-  check 'wisdom block carries the seeded entry' \
-    sh -c "grep -q 'tire pressure is 42 psi' '$OUT/run1.session.jsonl'"
-  check 'exactly one wisdom block in the prompt' \
-    sh -c "[ \"\$(grep -c '## Curated Thoughts — relevant memory' '$OUT/run1.session.jsonl')\" -eq 1 ]"
+  # Wisdom assertions (plan Step 8.2): Run 1 has a healthy brain, so its
+  # system prompt behavior depends on the wisdom seed — assert only when the
+  # seed ran (WISDOM_E2E=1); with no embedder the section is a silent no-op
+  # (recall fails → memoized '') in run 1, still worth pinning:
+  if [ "$WISDOM_E2E" -eq 1 ]; then
+    check 'wisdom block reaches the system prompt' \
+      sh -c "grep -q '## Curated Thoughts — relevant memory' '$OUT/run1.session.jsonl'"
+    check 'wisdom block carries the seeded entry' \
+      sh -c "grep -q 'tire pressure is 42 psi' '$OUT/run1.session.jsonl'"
+    check 'exactly one wisdom block in the prompt' \
+      sh -c "[ \"\$(grep -c '## Curated Thoughts — relevant memory' '$OUT/run1.session.jsonl')\" -eq 1 ]"
+  else
+    check 'wisdom section is a silent no-op without a backend (no block, no error)' \
+      sh -c "! grep -q '## Curated Thoughts — relevant memory' '$OUT/run1.session.jsonl' && ! grep -qiE 'wisdom.*(error|fail)' '$OUT/run1.err'"
+  fi
   # Degraded run 2 points at a MISSING brain dir: the wisdom section must be a
   # silent no-op there (no block, no error text).
   check 'degraded run has NO wisdom block (missing brain → no-op)' \
