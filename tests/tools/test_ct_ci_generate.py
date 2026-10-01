@@ -75,7 +75,7 @@ class TestFreshness(unittest.TestCase):
 
     def test_targets_covers_implemented_python_integrations_only(self):
         names = [p.parent.parent.name for p in ct_ci_generate.targets(REPO)]
-        self.assertEqual(names, ["hermes"])
+        self.assertEqual(names, ["claude-code", "hermes"])
 
 
 if __name__ == "__main__":
