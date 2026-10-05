@@ -671,6 +671,137 @@ class RegistrationTests(DoctorTestCase):
         self.assertEqual(r.status, ct_doctor.WARN)
         self.assertIn("enablement unconfirmed", r.detail)
 
+    def test_local_scope_registration_under_projects_is_a_pass(self):
+        # Plain `claude mcp add` (no --scope) writes into the user's
+        # .claude.json under projects[<cwd>].mcpServers. That must count
+        # as a registration, not a FAIL that pushes the user into a
+        # second user-scope registration.
+        body = {
+            "projects": {
+                str(self.fake_home): {
+                    "mcpServers": {
+                        "curated-thoughts": {
+                            "command": str(self.mock_path),
+                            "args": ["--mcp"],
+                        }
+                    }
+                }
+            }
+        }
+        self.write_config(body)
+        self.write_settings()
+        r = self.check()
+        self.assertEqual(r.status, ct_doctor.PASS, r.detail)
+        self.assertIn("local scope", r.detail)
+
+    def test_local_scope_under_a_different_cwd_does_not_count(self):
+        # The local-scope key is the cwd at registration time; a doctor
+        # run from a different cwd must not pick up someone else's
+        # registration.
+        body = {
+            "projects": {
+                str(self.fake_home / "other"): {
+                    "mcpServers": {
+                        "curated-thoughts": {
+                            "command": str(self.mock_path),
+                            "args": ["--mcp"],
+                        }
+                    }
+                }
+            }
+        }
+        self.write_config(body)
+        r = self.check()
+        self.assertEqual(r.status, ct_doctor.FAIL, r.detail)
+
+    def test_user_scope_wins_over_local_scope(self):
+        body = {
+            "mcpServers": {
+                "curated-thoughts": {
+                    "command": str(self.mock_path),
+                    "args": ["--mcp"],
+                }
+            },
+            "projects": {
+                str(self.fake_home): {
+                    "mcpServers": {
+                        "curated-thoughts": {
+                            "command": "/some/dev/build",
+                            "args": ["--mcp"],
+                        }
+                    }
+                }
+            },
+        }
+        self.write_config(body)
+        self.write_settings()
+        r = self.check()
+        self.assertEqual(r.status, ct_doctor.PASS, r.detail)
+        self.assertNotIn("local scope", r.detail)
+
+    def test_claude_config_dir_relocates_both_config_files(self):
+        # CLAUDE_CONFIG_DIR is Claude Code's own override and relocates
+        # both ~/.claude.json AND ~/.claude/settings.json. A doctor run
+        # under that override must read from the new directory, not the
+        # developer's home.
+        alt_dir = self.fake_home / "alt-config"
+        alt_dir.mkdir()
+        (alt_dir / ".claude.json").write_text(
+            json.dumps(
+                {
+                    "mcpServers": {
+                        "curated-thoughts": {
+                            "command": str(self.mock_path),
+                            "args": ["--mcp"],
+                        }
+                    }
+                }
+            )
+        )
+        (alt_dir / "settings.json").write_text(
+            json.dumps({"enabledPlugins": {"curated-thoughts@curated-thoughts": True}})
+        )
+        # Drop the test-only CLAUDE_*_PATH overrides so the production
+        # CLAUDE_CONFIG_DIR resolution path is what runs here.
+        saved_config = ct_doctor.CLAUDE_CONFIG
+        saved_settings = ct_doctor.CLAUDE_SETTINGS
+        self.patch_env("CLAUDE_CONFIG_PATH", None)
+        self.patch_env("CLAUDE_SETTINGS_PATH", None)
+        self.patch_env("CLAUDE_CONFIG_DIR", str(alt_dir))
+        ct_doctor.CLAUDE_CONFIG = Path(
+            os.environ.get(
+                "CLAUDE_CONFIG_PATH",
+                str(
+                    Path(
+                        os.environ.get(
+                            "CLAUDE_CONFIG_DIR", str(Path.home() / ".claude")
+                        )
+                    )
+                    / ".claude.json"
+                ),
+            )
+        )
+        ct_doctor.CLAUDE_SETTINGS = Path(
+            os.environ.get(
+                "CLAUDE_SETTINGS_PATH",
+                str(
+                    Path(
+                        os.environ.get(
+                            "CLAUDE_CONFIG_DIR", str(Path.home() / ".claude")
+                        )
+                    )
+                    / "settings.json"
+                ),
+            )
+        )
+        try:
+            r = ct_doctor.check_claude_code_registration(cwd=self.fake_home)
+        finally:
+            ct_doctor.CLAUDE_CONFIG = saved_config
+            ct_doctor.CLAUDE_SETTINGS = saved_settings
+        self.assertEqual(r.status, ct_doctor.PASS, r.detail)
+        self.assertIn("plugin 'curated-thoughts' enabled", r.detail)
+
 
 class IdentityTests(DoctorTestCase):
     """Identity is decided by 'is this a dev build', not by a Linux prefix."""
@@ -1549,9 +1680,28 @@ class FullRunTests(DoctorTestCase):
         self.write_config()
         self.write_settings()
         before = sorted(str(p) for p in self.fake_home.rglob("*"))
+
+        def _strip_os_junk(paths):
+            # macOS Python builds a ~/Library/Caches/com.apple.python/ tree
+            # the first time the system interpreter runs from a fresh HOME
+            # (Xcode Python, used when the mock sidecar is launched). That
+            # is a side effect of the spawned Python, not of the doctor,
+            # and it is gated on darwin so Linux CI is unchanged.
+            if sys.platform != "darwin":
+                return paths
+            keep = []
+            for p in paths:
+                rel = p[len(str(self.fake_home)) + 1:]
+                # Strip the "Library" subtree entirely, including the
+                # leading "Library" and "Library/Caches" directories.
+                if rel == "Library" or rel.startswith("Library/"):
+                    continue
+                keep.append(p)
+            return keep
+
         ct_doctor.run_checks(timeout=3, env=self.with_path())
         after = sorted(str(p) for p in self.fake_home.rglob("*"))
-        self.assertEqual(before, after)
+        self.assertEqual(_strip_os_junk(before), _strip_os_junk(after))
 
 
 class SelfTestCliTests(unittest.TestCase):

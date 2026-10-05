@@ -21,19 +21,27 @@ heading format below is load-bearing: `## <version> — <date>`.
 - Add `scripts/ct_doctor.py`, the read-only install/health doctor, copied from
   `integrations/hermes/` with checks 1-6, 8 and 9 unchanged. Check 7 is the one
   harness-specific check: `claude-code-registration` reads the JSON config
-  Claude Code writes (`~/.claude.json`, or `CLAUDE_CONFIG_PATH`) plus a
+  Claude Code writes (`~/.claude.json`, honored through `CLAUDE_CONFIG_DIR`
+  for the directory, or the test-only `CLAUDE_CONFIG_PATH` for the single
+  file) plus the local-scope `projects[<cwd>].mcpServers` and a
   project-scope `.mcp.json`, and reports plugin enablement from
-  `~/.claude/settings.json` as a WARN-only note, because a `--plugin-dir`
-  install leaves nothing on disk to verify.
+  `~/.claude/settings.json` (also relocatable through `CLAUDE_CONFIG_DIR`,
+  or the test-only `CLAUDE_SETTINGS_PATH`) as a WARN-only note, because a
+  `--plugin-dir` install leaves nothing on disk to verify.
 - Add the SessionStart hook: `hooks/hooks.json` registers
   `hooks/session-start.py` for the `startup|resume|clear|compact` sources with
   a 10s timeout, invoked as `python3 ... || python ...` so one manifest works
   on Windows and POSIX. The script is adapted from `integrations/hermes/` —
-  same stdin drain, fail-open and always-exit-0 discipline — but resolves the
-  scripts directory from `CLAUDE_PLUGIN_ROOT` and emits Claude Code's
-  `hookSpecificOutput` / `additionalContext` envelope instead of Hermes's bare
-  `context` key. A set-but-wrong `CLAUDE_PLUGIN_ROOT` is not repaired by the
-  `__file__` fallback: the hook stays silent and exits 0.
+  same stdin drain, fail-open and always-exit-0 discipline — and emits Claude
+  Code's `hookSpecificOutput` / `additionalContext` envelope instead of
+  Hermes's bare `context` key. It resolves the scripts directory from
+  `__file__`, never from `CLAUDE_PLUGIN_ROOT`: the manifest already
+  substitutes `${CLAUDE_PLUGIN_ROOT}` into the hook's invocation path (shell
+  syntax), so `__file__` carries the same information and remains correct
+  under direct execution too. `CLAUDE_PLUGIN_ROOT` is read by nothing in the
+  integration, and the repo-wide guard against reading it stays green without
+  editing anything under `integrations/hermes/` (spec §11 Q6, resolved by
+  design).
 - Add `scripts/install.sh`, the registration helper. Per design decision D1 it
   copies nothing — a Claude Code plugin loads in place — and registers the
   sidecar by absolute path through `claude mcp add --scope user`, not through a

@@ -45,15 +45,35 @@ import ct_preflight  # noqa: E402
 
 SIDECAR_NAME = ct_env.SIDECAR_NAME
 
-# Where Claude Code records user-scope MCP servers: `claude mcp add --scope
-# user` writes them into ~/.claude.json. CLAUDE_CONFIG_PATH is Claude Code's
-# own override for that location, and is what keeps the tests off the
-# developer's real config.
+# Claude Code honors CLAUDE_CONFIG_DIR to relocate the *entire* config
+# directory (both ~/.claude.json and ~/.claude/settings.json follow it).
+# CLAUDE_CONFIG_PATH is a test-only escape hatch that redirects just the
+# .claude.json path — useful for hermetic tests that need the two files in
+# separate places, not a real Claude Code behavior. Without CLAUDE_CONFIG_DIR
+# set, the directory is ~/.claude, the same default Claude Code uses.
+def _claude_config_dir():
+    return Path(
+        os.environ.get("CLAUDE_CONFIG_DIR", str(Path.home() / ".claude"))
+    )
+
+
+# User-scope MCP servers: `claude mcp add --scope user` writes them into
+# .claude.json under `mcpServers`. CLAUDE_CONFIG_PATH overrides this single
+# file for tests; CLAUDE_CONFIG_DIR relocates the whole directory in
+# production.
 CLAUDE_CONFIG = Path(
-    os.environ.get("CLAUDE_CONFIG_PATH", str(Path.home() / ".claude.json"))
+    os.environ.get(
+        "CLAUDE_CONFIG_PATH", str(_claude_config_dir() / ".claude.json")
+    )
 )
-# Plugin enablement lives in settings.json, not in .claude.json.
-CLAUDE_SETTINGS = Path.home() / ".claude" / "settings.json"
+# Plugin enablement lives in settings.json — same directory as the .claude.json
+# above, so CLAUDE_CONFIG_DIR relocates it too. CLAUDE_SETTINGS_PATH is the
+# test-only override.
+CLAUDE_SETTINGS = Path(
+    os.environ.get(
+        "CLAUDE_SETTINGS_PATH", str(_claude_config_dir() / "settings.json")
+    )
+)
 # Project-scope alternative: a .mcp.json committed beside the code.
 PROJECT_MCP_CONFIG = ".mcp.json"
 MCP_SERVER_KEY = "curated-thoughts"
@@ -555,6 +575,43 @@ def _mcp_entry(data):
     return entry if isinstance(entry, dict) else None
 
 
+def _local_scope_entry(data, cwd):
+    """The curated-thoughts entry under projects[cwd].mcpServers, or None.
+
+    Plain `claude mcp add` (no --scope) writes into `projects[<absolute path
+    of the cwd at registration time>].mcpServers` inside the *same* .claude.json
+    the user-scope form writes to. Keys are absolute paths; comparison here
+    resolves both sides so tilde, symlink, or trailing-separator differences
+    do not silently miss the registration.
+    """
+    if not isinstance(data, dict):
+        return None
+    projects = data.get("projects")
+    if not isinstance(projects, dict):
+        return None
+    try:
+        wanted = str(Path(cwd).resolve())
+    except OSError:
+        wanted = str(Path(cwd))
+    for raw_key, project in projects.items():
+        if not isinstance(raw_key, str) or not isinstance(project, dict):
+            continue
+        try:
+            key = str(Path(raw_key).resolve())
+        except OSError:
+            key = raw_key
+        if key != wanted:
+            continue
+        servers = project.get("mcpServers")
+        if not isinstance(servers, dict):
+            return None
+        entry = servers.get(MCP_SERVER_KEY)
+        if isinstance(entry, dict):
+            return entry
+        return None
+    return None
+
+
 def _registration_hint(config_path):
     """The command that registers the sidecar, and the JSON it produces."""
     return "\n".join(
@@ -616,25 +673,43 @@ PLUGIN_ENABLEMENT_HINT = (
 def check_claude_code_registration(cwd=None):
     """(7) curated-thoughts registered as an MCP server for Claude Code.
 
-    Claude Code keeps user-scope servers in ~/.claude.json under `mcpServers`
-    (what `claude mcp add --scope user` writes) and project-scope servers in a
-    `.mcp.json` beside the code. Either is a real registration, so both are
-    consulted — user scope first, since that is the one install.sh writes.
+    Claude Code keeps registrations in three places, consulted in priority
+    order:
 
-    Plain `json`; no yaml dependency. Every input resolves to exactly one
-    verdict: a registration with `--mcp` is PASS, no registration at all is
-    FAIL, and the two "cannot tell" cases are WARN -- a config that exists but
-    will not parse, and a registration whose plugin enablement cannot be
-    confirmed because a `--plugin-dir` install leaves nothing on disk.
+      1. user scope: ~/.claude.json `mcpServers` — what
+         `claude mcp add --scope user` writes, and what install.sh prints.
+      2. local scope: ~/.claude.json `projects[<cwd>].mcpServers` — what a
+         bare `claude mcp add` (no --scope) writes, keyed by the absolute path
+         of the working directory at registration time.
+      3. project scope: a `.mcp.json` beside the code.
+
+    `cwd` defaults to the process's cwd so a doctor run from anywhere still
+    answers the question, but a hermetic test (or a server that relocates
+    itself) can pass it through explicitly. A registration with `--mcp` is
+    PASS, no registration at all is FAIL, and the two "cannot tell" cases are
+    WARN — a config that exists but will not parse, and a registration whose
+    plugin enablement cannot be confirmed because a `--plugin-dir` install
+    leaves nothing on disk.
+
+    Plain `json`; no yaml dependency.
     """
-    project_config = (
-        Path(cwd) / PROJECT_MCP_CONFIG if cwd else Path(PROJECT_MCP_CONFIG)
-    )
+    effective_cwd = Path(cwd) if cwd else Path(os.getcwd())
+    project_config = effective_cwd / PROJECT_MCP_CONFIG
     user_data, user_err = _read_json_file(CLAUDE_CONFIG)
     entry = _mcp_entry(user_data)
     source = CLAUDE_CONFIG
     scope_note = ""
     project_err = None
+
+    if entry is None:
+        local_entry = _local_scope_entry(user_data, effective_cwd)
+        if local_entry is not None:
+            entry = local_entry
+            source = CLAUDE_CONFIG
+            scope_note = (
+                f" (local scope, projects[{effective_cwd}]; user-scope "
+                f"mcpServers in {CLAUDE_CONFIG} does not register it)"
+            )
 
     if entry is None:
         project_data, project_err = _read_json_file(project_config)
@@ -685,7 +760,8 @@ def check_claude_code_registration(cwd=None):
         return CheckResult(
             "claude-code-registration",
             FAIL,
-            f"no mcpServers.{MCP_SERVER_KEY} entry in {CLAUDE_CONFIG}, and no "
+            f"no mcpServers.{MCP_SERVER_KEY} entry in {CLAUDE_CONFIG} (under "
+            f"either user scope or projects[{effective_cwd}]), and no "
             f"{project_config} registers it either",
             _registration_hint(CLAUDE_CONFIG),
         )
@@ -979,8 +1055,14 @@ def check_version_compat(path, tool_count=None):
 # runner
 # --------------------------------------------------------------------------
 
-def run_checks(timeout=MCP_TIMEOUT, env=None):
-    """Run all checks; returns list of CheckResult."""
+def run_checks(timeout=MCP_TIMEOUT, env=None, cwd=None):
+    """Run all checks; returns list of CheckResult.
+
+    `cwd` is passed to check_claude_code_registration so its project-scope
+    .mcp.json lookup is hermetic: callers in a different directory (or a
+    test) can pin it, and the CLI default of os.getcwd() keeps a normal
+    run answering the question about where it was launched.
+    """
     results = []
     path, resolved, source = find_sidecar()
     brain_paths = ct_env.resolve_brain_paths()
@@ -997,7 +1079,7 @@ def run_checks(timeout=MCP_TIMEOUT, env=None):
     results.append(check_brain_dir(brain_paths))
     results.append(check_vault(brain_paths))
     results.append(check_embedding())
-    results.append(check_claude_code_registration())
+    results.append(check_claude_code_registration(cwd=cwd))
     results.append(check_import_preflight(path=path, brain_paths=brain_paths))
     results.append(check_version_compat(path, tool_count=tool_count))
     return results

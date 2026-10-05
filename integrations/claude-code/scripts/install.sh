@@ -47,10 +47,22 @@ PLUGIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # those shells nor the native `claude` and `python3` binaries understand that
 # form. `cygpath -m` renders C:/Users/... with forward slashes, so the
 # double-quoting that already protects the space keeps working unchanged.
-# Same reasoning as the sidecar path, which is a Windows path throughout.
+# Same reasoning applies to the sidecar path, which is also a Windows path
+# throughout — applied to both PLUGIN_DIR and SIDECAR below.
 if command -v cygpath >/dev/null 2>&1; then
   PLUGIN_DIR="$(cygpath -m "${PLUGIN_DIR}")"
 fi
+
+# Run a path through cygpath -m if it is available; pass through unchanged
+# otherwise (POSIX). Called on the resolved sidecar path so the printed
+# `claude mcp add` and JSON `"command"` are usable on every shell.
+msys_path() {
+  if command -v cygpath >/dev/null 2>&1; then
+    cygpath -m "$1"
+  else
+    printf '%s' "$1"
+  fi
+}
 
 SIDECAR=""
 SIDECAR_SOURCE="none"
@@ -129,7 +141,11 @@ resolve_sidecar() {
   local cand
   while IFS= read -r cand; do
     [ -n "$cand" ] || continue
-    if [ -f "$cand" ]; then
+    # [ -x ] matters: ct_env.find_sidecar also requires it, so the installer
+    # and the doctor must agree on what counts as a usable candidate. A
+    # non-executable file that `claude mcp add` then tries to spawn would be
+    # a registration that fails check 1, not a working install.
+    if [ -f "$cand" ] && [ -x "$cand" ]; then
       SIDECAR="$cand"
       SIDECAR_SOURCE="bundled"
       return 0
@@ -160,10 +176,12 @@ report_sidecar() {
 # --------------------------------------------------------------------------
 
 # The path as it appears in printed shell commands. Always double-quoted: the
-# Windows install directory is "Curated Thoughts", with a space in it.
+# Windows install directory is "Curated Thoughts", with a space in it. MSYS
+# paths (/c/Users/...) are normalised to forward-slash form via cygpath, so
+# the line is pasteable into PowerShell and cmd as well as bash.
 quoted_sidecar() {
   if [ -n "$SIDECAR" ]; then
-    printf '"%s"' "$SIDECAR"
+    printf '"%s"' "$(msys_path "$SIDECAR")"
   else
     printf '"%s"' "$PLACEHOLDER"
   fi
@@ -180,7 +198,7 @@ mcp_add_command() {
 mcp_json_block() {
   local path
   if [ -n "$SIDECAR" ]; then
-    path="$(slashes "$SIDECAR")"
+    path="$(msys_path "$SIDECAR")"
   else
     path="$PLACEHOLDER"
   fi
@@ -224,7 +242,7 @@ print_plugin_enablement() {
   say "Once the plugin is published to a marketplace, the permanent form is:"
   say ""
   say "  claude plugin marketplace add equationalapplications/curated-thoughts-integrations"
-  say "  claude plugin install ${PLUGIN_NAME}"
+  say "  claude plugin install ${PLUGIN_NAME}@equationalapplications/curated-thoughts-integrations"
   say ""
   say "Check either with /plugin inside a session."
 }
@@ -255,6 +273,30 @@ maybe_register() {
     warn "Install Curated Thoughts (${RELEASES_URL}) or set CLAUDE_CT_SIDECAR."
     return 0
   fi
+
+  # Validate before `claude mcp add`. `claude mcp add` itself does not reject
+  # a missing or relative file — it would happily register one that no
+  # `claude` invocation could ever spawn, so doctor check 1 fails on a
+  # working install. The two checks below match what ct_env.find_sidecar
+  # requires (file exists and is executable).
+  if [ ! -f "$SIDECAR" ]; then
+    warn "CT_INSTALL_EDIT=1 but '${SIDECAR}' does not exist; nothing was written."
+    warn "Re-run after Curated Thoughts is installed, or set CLAUDE_CT_SIDECAR."
+    return 0
+  fi
+  if [ ! -x "$SIDECAR" ]; then
+    warn "CT_INSTALL_EDIT=1 but '${SIDECAR}' is not executable; nothing was written."
+    warn "Fix permissions (e.g. chmod +x '${SIDECAR}') and re-run."
+    return 0
+  fi
+  case "$SIDECAR" in
+    /*|[A-Za-z]:[\\/]*|[A-Za-z]:/*) ;;  # POSIX-absolute or Windows-absolute
+    *)
+      warn "CT_INSTALL_EDIT=1 but '${SIDECAR}' is not an absolute path; nothing was written."
+      warn "Set CLAUDE_CT_SIDECAR to the absolute path of the sidecar and re-run."
+      return 0
+      ;;
+  esac
 
   if claude mcp get "$MCP_SERVER_KEY" >/dev/null 2>&1; then
     say "OK: '${MCP_SERVER_KEY}' is already registered — nothing changed."
