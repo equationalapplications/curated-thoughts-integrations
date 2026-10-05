@@ -40,6 +40,7 @@ In `INTENT.md`:
 
 1. **Invariant 3 (lines 68–72):** replace "sidecar down" with "**recall backend unavailable**" (Hermes has no sidecar contact); document the **empty-session_id no-op class** (a session with no session id is a silent no-op — nothing emitted, invariant's graceful-degradation behavior).
 2. **Invariant 4 (lines 73–77):** keep RR-C forward-looking framing, add: recall currently returns **title+text only** — `recall_wiki` discards provenance fields; closing RR-C needs parser changes per integration.
+   > **ERRATUM (2026-10-05, review delta):** this sentence was written from a stale field list. Verified ground truth: `ct recall --json` exposes `entity_id`, `doc_path`, `score` — **no title**. The implemented INTENT.md invariant 4 carries the correct fields; this line is preserved as review history and superseded by the erratum in the spec (§ m4).
 3. **Invariant 5 (lines 78–80):** replace "values set by CT" with **host/spec-pinned values** (`max_chars=2500` is the Hermes host registration in `__init__.py`; `RECALL_K=3` is local to `ct_wisdom.py`); the never-raised-locally rule stays.
 4. **Read-only retrieval (line 89–90):** replace "no query-time embedding" with "**no query-time embedding of vault files; no ad-hoc indexing**" (recall itself embeds the query).
 5. **v1 mechanism step 1 (lines 37–39):** name the actual command: `ct recall "<seed>" --json --k 3` plus cwd widening.

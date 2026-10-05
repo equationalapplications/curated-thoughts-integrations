@@ -127,13 +127,14 @@ work**, not settled by this file; open questions carried from the invariants
 1. Spec first under `docs/superpowers/specs/`, from a Step-0 investigation
    with `[V]`-evidenced answers from pinned host sources (PR #22 is the
    standard).
-2. TDD: unit-test the invariant logic (dedup ledger, memo-replay byte
-   stability, sanitizer); e2e in the isolated container on a scratch profile —
-   never the live default profile or live brain.
+2. TDD: unit-test the invariant logic (dedup ledger, memo byte
+   stability across new renders, sanitizer); e2e in the isolated container on
+   a scratch profile — never the live default profile or live brain.
 3. Dual review to convergence (GLM + Opus) before merge; open questions park
    the PR.
 4. Version bump + CHANGELOG + README table per integration.
 5. The invariants ARE the test surface: any injection-touching PR must
    demonstrate exactly-once across randomized sessions with mid-session tool
    results, byte-identical injected blocks after first render, and the
-   supersession gate (no superseded fact is ever injected).
+   supersession gate (at render time, no superseded fact is ever injected —
+   post-render supersessions ride the append-and-mark path, per invariant 2).

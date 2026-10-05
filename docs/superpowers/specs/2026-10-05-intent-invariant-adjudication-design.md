@@ -1,6 +1,6 @@
 # curated-thoughts-integrations — INTENT invariant adjudication: spec-vs-code reconciliation
 
-**Date:** 2026-10-05 · **Status:** Draft (spec stage — single-PR SOP: spec, plan, and implementation travel together in this PR) · **Branch:** `docs/intent-invariant-adjudication` · **Priority:** high (Kurt directive 2026-10-05: "address the issue with a new PR in the next session"; delivery mode corrected 2026-10-05: ONE PR, full delivery flow — not docs-only)
+**Date:** 2026-10-05 · **Status:** Implemented 2026-10-05 (PR #26) — INTENT.md reconciled with issue #24 adjudication; dual review GLM 5.3 (Approved, 3 minors) + Opus (Changes requested, 4 findings) converged via delta commit.
 
 ## Problem
 
@@ -88,7 +88,9 @@ One target file: `INTENT.md` (120 lines). Edit set:
    render MAY be late-filled at a rebuild boundary; per-render stall bounded
    (~8 s worst case), stated explicitly.
 4. **Invariant 4 / m4:** note provenance fields are currently discarded by
-   `recall_wiki` (title+text only); closing RR-C needs parser changes per
+   `recall_wiki` (title+text only — corrected during implementation: verified
+   fields are `entity_id`, `doc_path`, `score`; no title; see plan
+   erratum); closing RR-C needs parser changes per
    integration.
 5. **Invariant 5 / m1:** cap values are host/spec-pinned, not "set by CT"
    (`max_chars=2500` is the Hermes host registration `__init__.py`;
