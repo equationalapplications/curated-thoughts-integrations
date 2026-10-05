@@ -36,7 +36,8 @@ work**, not settled by this file; open questions carried from the invariants
 
 1. **Analyze:** at bootstrap there is no conversation yet — recall is driven by
    the frozen seed constant plus session context, per PR #21 (`ct recall
-   "<seed>" --json`); the seed does the semantic work.
+   "<seed>" --json --k 3`, with cwd widened as needed); the seed does the
+   semantic work.
 2. **Match:** find wisdom-layer facts via CT's recall (semantic similarity).
 3. **Judge (in CT, optional — future; not implemented in v1):** if System One
    is configured, CT's recall
@@ -78,19 +79,23 @@ work**, not settled by this file; open questions carried from the invariants
    than never; the per-render stall stays bounded (~8 s worst case, failure
    classes per `ct_wisdom.py`). Mid-session learning arrives only as tool
    results; the system prompt is never rewritten.
-3. **Graceful degradation.** Recall unavailable, sidecar down, timeout, empty
+3. **Graceful degradation.** Recall backend unavailable, timeout, empty
    corpus → the integration is a silent no-op (no empty block, nothing
-   emitted), logged locally, never surfaced as a session error. A bounded
-   recall timeout prevents a hung sidecar from stalling bootstrap. An agent
-   session must never fail because its brain is unreachable.
+   emitted), logged locally, never surfaced as a session error. A session
+   with no session id is likewise a silent no-op — nothing emitted. A bounded
+   recall timeout prevents a hung recall backend from stalling bootstrap. An
+   agent session must never fail because its brain is unreachable.
 4. **Provenance labeling.** Every injected fact is labeled with its provenance
    class from a fixed vocabulary OWNED BY CT and emitted by `ct recall`
-   (whether `ct recall` exposes this today is unverified — RR-C; until then
-   this invariant is forward-looking). Integrations never present agent-tier
+   (`ct recall --json` currently returns entity_id, doc_path, and score only —
+   no provenance class — RR-C; closing it needs parser changes per
+   integration, so until then this invariant is forward-looking).
+   Integrations never present agent-tier
    wisdom as verified knowledge.
-5. **Bound the block.** The injection block has a size/item cap with values
-   set by CT (PR #21 pins `max_chars=2500`); the cap is never raised locally
-   to compensate for weak matching.
+5. **Bound the block.** The injection block has a size/item cap with
+   host/spec-pinned values (`max_chars=2500` is the Hermes host registration
+   in `__init__.py`; `RECALL_K=3` is local to `ct_wisdom.py`); the cap is
+   never raised locally to compensate for weak matching.
 
 ## Read-only retrieval
 
@@ -100,7 +105,8 @@ work**, not settled by this file; open questions carried from the invariants
   `pending ingest` honestly. Integrations never call row-level
   insert/update/approve/archive tools.
 - Injection never reads uningested vault files — no lexical grepping, no
-  query-time embedding. Freshness is CT's deposit-kicked-ingest job, not ours.
+  query-time embedding of vault files, no ad-hoc indexing. Freshness is CT's
+  deposit-kicked-ingest job, not ours.
 - Integrations only READ the brain via the sanctioned recall surface (`ct
   recall` subprocess / read-only sidecar tools). No direct brain DB access.
 - Reuse proven decisions: new ports fork the converged Hermes design and
