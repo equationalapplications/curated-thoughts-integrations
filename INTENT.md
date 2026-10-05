@@ -1,4 +1,4 @@
-# INTENT — curated-thoughts-integrations (Intuitive Memory & Harness Injection)
+# INTENT — curated-thoughts-integrations (Intuitive Wisdom & Harness Injection)
 
 **Read this file first.** It explains why this repo exists, the business rules
 every harness integration must obey, what is out of scope, and the workflow.
@@ -9,16 +9,37 @@ This file wins on *intent*; specs win on *detail*.
 Curated Thoughts (CT) is a local second brain with a curated wisdom layer.
 This repo carries the harness integrations (Hermes, DeepSeek Harness, and
 followers) that make CT's wisdom appear in an agent's context automatically.
-Each integration implements the same algorithm — "intuitive wisdom" (Kurt,
-2026-10-01; reference spec: PR #21, ported in PR #22).
+Each integration implements a shared v1 mechanism that serves Intuitive
+Wisdom (Kurt, 2026-10-05; supersedes the 2026-10-01 algorithm framing;
+reference spec: PR #21, ported in PR #22).
 
-## The intuitive-wisdom algorithm (what every integration implements)
+## Intuitive Wisdom (what every integration serves)
+
+Intuitive Wisdom is the agent **knowing the curated wisdom fact at the time it
+is relevant** (Kurt, 2026-10-05). It is defined by this timeliness property,
+not by any particular mechanism.
+
+What ships today (v1) is the first, partial mechanism: session-start injection
+via frozen seed + session context. It guarantees presence at bootstrap only —
+relevance is approximated by seed similarity. (Only the DSH integration has
+shipped this; the Hermes port is implemented and tested on an unmerged
+branch.) The end state is
+**relevance-timed delivery**: when a fact becomes relevant mid-session, it
+reaches the agent at that moment — via cache-safe channels that never rewrite
+the frozen system-prompt block (tool results are the v1-proven channel), and
+ledger-deduped so no fact appears twice. The matching trigger, judge
+involvement, and delivery surface for mid-session relevance are **open design
+work**, not settled by this file; open questions carried from the invariants
+(ledger ownership, scope-b labeling) resolve there.
+
+### v1 mechanism — bootstrap-time relevance (what every integration implements)
 
 1. **Analyze:** at bootstrap there is no conversation yet — recall is driven by
    the frozen seed constant plus session context, per PR #21 (`ct recall
    "<seed>" --json`); the seed does the semantic work.
 2. **Match:** find wisdom-layer facts via CT's recall (semantic similarity).
-3. **Judge (in CT, optional):** if System One is configured, CT's recall
+3. **Judge (in CT, optional — future; not implemented in v1):** if System One
+   is configured, CT's recall
    applies its relevance judgment before returning results. Integrations never
    call System One directly and never wire their own judges.
 4. **Traverse — deferred:** deeper graph traversal is NOT part of
