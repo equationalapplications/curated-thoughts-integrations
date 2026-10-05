@@ -54,17 +54,30 @@ work**, not settled by this file; open questions carried from the invariants
    session's context: once in the injected block, never again via tool
    results. The ledger lives in CT's session context (keyed by session id);
    CT recall tools filter against it. Dedup keys on the deterministic fact id
-   after supersession resolution. A replacement surfaced mid-session is
-   delivered with an explicit "supersedes <id>" marker; the frozen block is
-   never edited. (Ledger ownership and the supersession marker are new work —
+   after supersession resolution. The supersession gate governs **render-time
+   construction only**: at render time, no superseded fact is injected.
+   Post-render supersession flows exclusively through the append-and-mark
+   path: a replacement surfaced mid-session is delivered with an explicit
+   "supersedes <id>" tool-result marker; the frozen block is never edited.
+   (Ledger ownership and the supersession marker are new work —
    pending decisions.)
-2. **Cache safety.** The block is computed once, frozen as ONE contiguous
-   static region at bootstrap, once per session, additive with existing plugin
-   context. The rendered block and the session ledger are persisted per
-   session and REPLAYED on resume and compaction, never recomputed (PR #22
-   memo-replay is the pattern; per-host conformance is pending RR-6).
-   Mid-session learning arrives only as tool results; the system prompt is
-   never rewritten.
+2. **Cache safety.** The block is computed at bootstrap and frozen as ONE
+   contiguous static region, additive with existing plugin context. Verbatim
+   replay exists to protect **prompt caching** — the prefix stays intact so
+   the cache is preserved — not to freeze knowledge. Resume replay is
+   guaranteed by the **host** persisting the fully rendered prompt verbatim;
+   there is no plugin-side persistence — none will be built — and the
+   in-process memo (PR #22) is a speed optimization for **new renders only**.
+   A fact superseded **after** the original render is **appended as a
+   correction** via an explicit "supersedes <id>" tool-result marker
+   (mid-session delivery: pending design work); the append is highly
+   relevant content, not unnecessary duplication, and the stale line stays
+   visible but corrected — never silently relied on. A bootstrap render that
+   fails (timeout / spawn failure / probe timeout) MAY be **late-filled at a
+   later rebuild boundary** (e.g. a compaction rebuild) — better late wisdom
+   than never; the per-render stall stays bounded (~8 s worst case, failure
+   classes per `ct_wisdom.py`). Mid-session learning arrives only as tool
+   results; the system prompt is never rewritten.
 3. **Graceful degradation.** Recall unavailable, sidecar down, timeout, empty
    corpus → the integration is a silent no-op (no empty block, nothing
    emitted), logged locally, never surfaced as a session error. A bounded
