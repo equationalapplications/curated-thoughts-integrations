@@ -6,6 +6,18 @@ format below is load-bearing: `## <version> — <date>`.
 
 ## Unreleased
 
+## 0.3.2 — 2026-10-06
+
+- Fixed: the doctor's env-reading checks (`check_brain_dir`,
+  `check_vault`, `check_embedding`, `check_import_preflight`) read ambient
+  `os.environ` even when the caller passed an `env` — a caller using the
+  merged env view got brain directories, embedding-key verdicts, and the
+  engine-manifest lookup resolved from a *different* environment than the
+  one it asked about (issue #29; follow-up to the #14 fix). Every
+  env-reading check now accepts `env` and resolves through the same merged
+  view, and `run_checks` threads its merged env into all of them.
+  Ambient-only callers (`ct_doctor check`) see no behavior change.
+
 ## 0.3.1 — 2026-10-06
 
 - Fixed: `run_checks` discovered the sidecar from the ambient `os.environ`
