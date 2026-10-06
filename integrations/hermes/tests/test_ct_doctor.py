@@ -1363,10 +1363,15 @@ class FullRunTests(DoctorTestCase):
             "[{\"name\":\"t\"},{\"name\":\"u\"}]}}'\n"
         )
         poison.chmod(poison.stat().st_mode | stat.S_IXUSR)
+        # Compute the env BEFORE poisoning the ambient PATH (Opus r1 minor 1):
+        # with_path() snapshots os.environ, so building it after the poison
+        # would put the poison on the env PATH too and weaken the isolation
+        # this test exists to prove.
+        env_path = self.with_path()
         saved = os.environ["PATH"]
         os.environ["PATH"] = str(poison_dir) + os.pathsep + saved
         try:
-            results = ct_doctor.run_checks(timeout=3, env=self.with_path())
+            results = ct_doctor.run_checks(timeout=3, env=env_path)
         finally:
             os.environ["PATH"] = saved
         # Discovery must use the env PATH (mock wins) → poison never runs.

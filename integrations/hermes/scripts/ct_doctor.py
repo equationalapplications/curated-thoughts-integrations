@@ -139,14 +139,14 @@ def _read_text_file(path, limit=256 * 1024):
 def find_sidecar(env=None):
     """Locate the sidecar. Returns (path|None, resolved|None, source).
 
-    `env` (a mapping) overlays `os.environ` for discovery — the same view the
-    spawn sees (it runs with `os.environ` updated by `env`). Issue #14:
+    `env` (a mapping) is merged over `os.environ` before discovery — the same
+    view the spawn sees. Issue #14:
     run_checks accepted an `env` (tests pass a PATH pointing at a mock
     sidecar) but discovered from the ambient os.environ — so on machines
     with a real installed sidecar, the real binary was spawned against the
     test fixture brain.
     """
-    return ct_env.find_sidecar(env=env)
+    return ct_env.find_sidecar(env=_merged_env(env))
 
 
 def _merged_env(env=None):
