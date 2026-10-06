@@ -77,12 +77,13 @@ work**, not settled by this file; open questions carried from the invariants
    fails (timeout / exit / spawn / probe timeout) MAY be **late-filled when
    a later render misses the session memo** — `discovery_miss`,
    `parse_error`, and `zero_hits` remain cached as empty blocks until LRU
-   eviction, so a later rebuild only retries the non-memoized failure
-   classes; a compaction rebuild counts as a trigger only when it invokes
-   the renderer; each identity probe uses a 3 s subprocess timeout
-   (`PROBE_TIMEOUT`) and recall uses a 5 s subprocess timeout
-   (`RECALL_TIMEOUT`); discovery may probe multiple candidates per render,
-   so the worst-case stall scales with the candidate list (failure classes per
+   eviction; while the entry is in the LRU, only the non-memoized failure
+   classes retry, but after LRU eviction any failure class may retry on the
+   next render for that session; a compaction rebuild counts as a trigger
+   only when it invokes the renderer; each identity probe uses a 3 s
+   subprocess timeout (`PROBE_TIMEOUT`) and recall uses a 5 s subprocess
+   timeout (`RECALL_TIMEOUT`); discovery may probe multiple candidates per
+   render, so the worst-case stall scales with the candidate list (failure classes per
    `ct_wisdom.py`). Mid-session learning arrives only as tool
    results; the system prompt is never rewritten.
 3. **Graceful degradation.** Recall backend unavailable, timeout, empty
