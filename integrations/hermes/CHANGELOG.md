@@ -17,8 +17,11 @@ format below is load-bearing: `## <version> — <date>`.
   combination (raw caller env has a `PATH` key; discovery reports the
   bundled source), warns on `sidecar-binary`, refuses to spawn
   (`sidecar-mcp` WARN), and withholds the path from the import-preflight
-  engine lookup. Callers that do not override `PATH` — including the real
-  user with a bundled install and no PATH entry — are unaffected.
+  engine lookup. A caller that overrides PATH deliberately and accepts the
+  ambient install being probed under its env can opt out with
+  `CT_DOCTOR_ALLOW_BUNDLED=1` in the env. Callers that do not override
+  `PATH` — including the real user with a bundled install and no PATH
+  entry — are unaffected.
   Test-suite hardening in the same change: the mock sidecar fixture now has
   an absolute shebang, the shared helpers put ONLY the mock dir on PATH, and
   a `setUp` precondition asserts discovery resolves the mock (realpath

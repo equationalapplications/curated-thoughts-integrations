@@ -59,6 +59,12 @@ CHANGES" on v1 → this v2 is the converged resolution. The implementing PR's re
    JSON field). Guard tests match the `ct_env` constant, not the literal, so a later rename
    is one line.
 
+**GLM r2 addendum (post-implementation review):** GLM's code review of the implemented
+gate added 3 MINOR + 3 NIT, all fixed in `efef59d`. One changes caller-visible behavior:
+`CT_DOCTOR_ALLOW_BUNDLED=1` in the RAW caller env opts out of the gate entirely (for
+deliberate restricted-PATH wrappers that accept the ambient install being probed). The
+gated WARN hint documents it; it is also in the 0.3.3 CHANGELOG entry.
+
 **Why WARN+skip is the right policy** (converged GLM + Opus): the pollution happens at
 spawn time, not discovery time; discovery reporting `(path, "bundled")` is honest; the
 policy layer refuses to EXECUTE an ambient binary under a caller-owned env that claimed
@@ -79,9 +85,9 @@ correctly-functioning doctor.
 
 ## Implementation checklist
 
-- [ ] `ct_env.py`: `SOURCE_PATH`/`SOURCE_BUNDLED`/`SOURCE_NONE` constants used by `find_sidecar`
-- [ ] `ct_doctor.py run_checks`: raw-env `path_overridden`; gated path → WARN binary check, skip probe, preflight `path=None`
-- [ ] `ct_doctor.py check_sidecar_binary(found=None, gated=False)` — standalone callers unchanged
-- [ ] Tests: absolute-shebang mock; bare-PATH helpers; setUp realpath precondition; 3 new guard tests; poison never runs
-- [ ] Version 0.3.3 (plugin.yaml, integration.yaml, CHANGELOG, README row)
-- [ ] Follow-up issue filed: ct_status/ct_env.merged_env hoist
+- [x] `ct_env.py`: `SOURCE_PATH`/`SOURCE_BUNDLED`/`SOURCE_NONE` constants used by `find_sidecar`
+- [x] `ct_doctor.py run_checks`: raw-env `path_overridden`; gated path → WARN binary check, skip probe, preflight `path=None`
+- [x] `ct_doctor.py check_sidecar_binary(found=None, gated=False)` — standalone callers unchanged
+- [x] Tests: absolute-shebang mock; bare-PATH helpers; setUp realpath precondition; 3 new guard tests; poison never runs
+- [x] Version 0.3.3 (plugin.yaml, integration.yaml, CHANGELOG, README row)
+- [x] Follow-up issue filed: [#32](https://github.com/equationalapplications/curated-thoughts-integrations/issues/32) (ct_status/ct_env.merged_env hoist)

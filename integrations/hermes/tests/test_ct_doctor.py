@@ -126,11 +126,11 @@ class DoctorTestCase(unittest.TestCase):
         self.bin_dir = self.fake_home / "bin"
         self.bin_dir.mkdir()
         self.mock_path = self.bin_dir / "curated-thoughts-mcp"
-        if " " in sys.executable:
-            # GLM r2 NIT 6: the mock's shebang is #!<sys.executable>; POSIX
-            # passes everything after #! as ONE argv word, so a spaced
-            # python path is ENOENT. Skip loudly instead of failing every
-            # test on the precondition assert.
+        if " " in sys.executable and not IS_WINDOWS:
+            # GLM r2 NIT 6, scoped per Opus r3 minor 2: POSIX-only — Windows
+            # never uses the shebang (mock-spawn tests are skipped there and
+            # the realpath precondition is POSIX-only), so a spaced Windows
+            # python must not lose the whole suite.
             self.skipTest(
                 f"mock sidecar shebang cannot encode a spaced interpreter "
                 f"path ({sys.executable!r}); issue #28 fixture limitation"
@@ -2047,21 +2047,35 @@ class BundledFallbackGuardTests(DoctorTestCase):
 
     def test_gated_run_withholds_path_from_import_preflight(self):
         # With the gate active, import-preflight must not read the engine
-        # manifest of the binary we refused to run (path=None).
+        # manifest of the binary we refused to run (path=None). The sentinel
+        # manifest sits in the poison's node_modules tree — exactly where
+        # _candidate_engine_manifests searches when given a sidecar path —
+        # so a regression back to path=path would surface "6.6.6-poison" in
+        # the detail and fail this test (Opus r3 minor 1: the old assertion
+        # on the raw path could never fail because preflight never echoes
+        # the sidecar path into its detail).
         poison = self._make_poison("#!" + sys.executable + "\n")
+        manifest = (
+            poison.parent
+            / "node_modules"
+            / "@equationalapplications"
+            / "core-llm-wiki"
+            / "package.json"
+        )
+        manifest.parent.mkdir(parents=True)
+        manifest.write_text(json.dumps({"name": "x", "version": "6.6.6-poison"}))
         empty_dir = self.fake_home / "empty-path-2"
         empty_dir.mkdir()
         with self._poison_candidates(poison):
             results = {
                 r.name: r
                 for r in ct_doctor.run_checks(
-                    timeout=3.0, env={"PATH": str(empty_dir)}
+                    timeout=3.0,
+                    env={"PATH": str(empty_dir), "CT_ENGINE_PACKAGE_JSON": None},
                 )
             }
         preflight = results["import-preflight"]
-        # Whatever its verdict, it must not claim to have inspected the
-        # poison binary's engine manifest.
-        self.assertNotIn(str(poison), preflight.detail)
+        self.assertNotIn("6.6.6-poison", preflight.detail)
 
     @unittest.skipIf(IS_WINDOWS, MOCK_SPAWN_SKIP)
     def test_no_path_key_falls_back_and_probes_normally(self):
