@@ -897,15 +897,18 @@ class ImportPreflightTests(DoctorTestCase):
         # Opus r1 minor 4 (second half): the documented falsy-override rule —
         # OLLAMA_HOST="" in the env view must fall back to the default host,
         # not probe an empty netloc (ambient value would also be ignored).
+        # Hermetic regardless of a real Ollama on 11434 (CodeRabbit r1 PR #30,
+        # GLM r2 PR #31): the fallback default is redirected to a dead port
+        # DISTINCT from setUp's ambient OLLAMA_HOST (127.0.0.1:1), so the
+        # detail proves the probe took the default and not the ambient value.
+        # Patching the module constant (not urllib's urlopen) keeps the test
+        # independent of how check_embedding imports urlopen.
         from unittest import mock
 
         self.make_brain()
-        self.patch_env("OLLAMA_HOST", "http://127.0.0.1:1")
-        # GLM r2 minor 1 (PR #31 review): the assertion must hold even on a
-        # machine where a real Ollama listens on 11434 — check_embedding
-        # would PASS there and the WARN assert would flake. Redirect the
-        # fallback host to a guaranteed-dead port for the duration.
-        with mock.patch.object(ct_doctor, "OLLAMA_DEFAULT_HOST", "http://127.0.0.1:1"):
+        with mock.patch.object(
+            ct_doctor, "OLLAMA_DEFAULT_HOST", "http://127.0.0.1:2"
+        ):
             results = {
                 r.name: r
                 for r in ct_doctor.run_checks(
@@ -916,10 +919,10 @@ class ImportPreflightTests(DoctorTestCase):
                     },
                 )
             }
+        detail = results["embedding-backend"].detail
         self.assertEqual(results["embedding-backend"].status, ct_doctor.WARN)
-        # The detail must name the FALLBACK host (the patched default), the
-        # proof that the empty-string override fell back to the default.
-        self.assertIn("http://127.0.0.1:1", results["embedding-backend"].detail)
+        self.assertIn("http://127.0.0.1:2", detail)
+        self.assertNotIn("127.0.0.1:1", detail)
 
     def _seed(self, rows, evidence_table=True, evidence_ids=None, unanchored=0,
               with_source_type=True, with_deleted_at=False):
