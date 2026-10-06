@@ -1337,6 +1337,7 @@ class FullRunTests(DoctorTestCase):
         after = sorted(str(p) for p in self.fake_home.rglob("*"))
         self.assertEqual(before, after)
 
+    @unittest.skipIf(IS_WINDOWS, MOCK_SPAWN_SKIP)
     def test_sidecar_discovery_honors_env_path(self):
         # Issue #14 regression: run_checks discovered the sidecar from the
         # ambient os.environ PATH even when callers passed an `env` whose
