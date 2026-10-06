@@ -2077,6 +2077,29 @@ class BundledFallbackGuardTests(DoctorTestCase):
         preflight = results["import-preflight"]
         self.assertNotIn("6.6.6-poison", preflight.detail)
 
+    def test_none_valued_env_key_defers_to_ambient_and_never_crashes(self):
+        # GLM r3 (PR #31): a None-valued key used to survive _merged_env
+        # verbatim — crashing any UNGATED spawn (subprocess TypeError), and
+        # {"PATH": None} made shutil.which silently fall back to the AMBIENT
+        # PATH. Post-fix semantics: None means "the caller did not specify
+        # this key", so the ambient value shows through (unlike the ""
+        # suppression, which hides it) and no None reaches subprocess.run.
+        ambient_manifest = self.fake_home / "ambient-manifest.json"
+        ambient_manifest.write_text(
+            json.dumps({"name": "x", "version": "5.5.5-ambient"})
+        )
+        self.patch_env("CT_ENGINE_PACKAGE_JSON", str(ambient_manifest))
+        # Mock PATH so any spawn hits the fixture; pre-fix the None value
+        # reached subprocess.run here and crashed with TypeError.
+        results = {
+            r.name: r
+            for r in ct_doctor.run_checks(
+                timeout=3.0,
+                env={**self.with_path(), "CT_ENGINE_PACKAGE_JSON": None},
+            )
+        }
+        self.assertIn("5.5.5-ambient", results["import-preflight"].detail)
+
     @unittest.skipIf(IS_WINDOWS, MOCK_SPAWN_SKIP)
     def test_no_path_key_falls_back_and_probes_normally(self):
         # The real-user case: env WITHOUT a PATH key (merged PATH is ambient)
@@ -2179,6 +2202,49 @@ class BundledFallbackGuardTests(DoctorTestCase):
             }
         self.assertEqual(results["sidecar-binary"].status, ct_doctor.PASS)
         self.assertEqual(results["sidecar-mcp"].status, ct_doctor.PASS)
+
+    def test_allow_bundled_other_spellings_do_not_opt_out(self):
+        # GLM r3 (PR #31) (a): only the exact spelling "1" opts out. A
+        # well-meaning refactor to bool(...) would silently widen this to
+        # accept "true"/"yes"/"0" — pin the narrow contract.
+        poison = self._make_poison("#!" + sys.executable + "\n")
+        empty_dir = self.fake_home / "empty-path-5"
+        empty_dir.mkdir()
+        for spelling in ("true", "yes", "0", "1 "):
+            with self._poison_candidates(poison):
+                results = {
+                    r.name: r
+                    for r in ct_doctor.run_checks(
+                        timeout=3.0,
+                        env={
+                            "PATH": str(empty_dir),
+                            "CT_DOCTOR_ALLOW_BUNDLED": spelling,
+                        },
+                    )
+                }
+            self.assertEqual(
+                results["sidecar-mcp"].status,
+                ct_doctor.WARN,
+                f"spelling {spelling!r} must NOT opt out of the gate",
+            )
+
+    def test_allow_bundled_in_ambient_env_is_not_honored(self):
+        # GLM r3 (PR #31) (b): the opt-out is read from the RAW caller env
+        # ONLY (ct_doctor gate comment, GLM r2 minor 3). A wrapper that sets
+        # CT_DOCTOR_ALLOW_BUNDLED in ambient os.environ while calling
+        # run_checks(env=...) must stay gated — pin that choice.
+        poison = self._make_poison("#!" + sys.executable + "\n")
+        empty_dir = self.fake_home / "empty-path-6"
+        empty_dir.mkdir()
+        self.patch_env("CT_DOCTOR_ALLOW_BUNDLED", "1")
+        with self._poison_candidates(poison):
+            results = {
+                r.name: r
+                for r in ct_doctor.run_checks(
+                    timeout=3.0, env={"PATH": str(empty_dir)}
+                )
+            }
+        self.assertEqual(results["sidecar-mcp"].status, ct_doctor.WARN)
 
 
 class PluginConcurrencyTests(unittest.TestCase):

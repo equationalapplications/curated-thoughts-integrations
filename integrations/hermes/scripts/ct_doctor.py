@@ -187,7 +187,13 @@ def _merged_env(env=None):
     """
     merged = dict(os.environ)
     if env:
-        merged.update(env)
+        # GLM r3 (PR #31): drop None-valued keys. A None surviving into
+        # subprocess.run(env=...) raises TypeError, and {"PATH": None} would
+        # make shutil.which fall back to the AMBIENT PATH — a literal-None
+        # override must never do that. Semantics: None means "the caller did
+        # not specify this key" (ambient shows through), distinct from the
+        # documented "" suppression which HIDES the ambient value.
+        merged.update({k: v for k, v in env.items() if v is not None})
     return merged
 
 
@@ -1032,6 +1038,10 @@ def run_checks(timeout=MCP_TIMEOUT, env=None):
             path=None if gated else path, brain_paths=brain_paths, env=merged
         )
     )
+    # GLM r3 (PR #31): the path withhold here is future-proofing — the
+    # current body reads only tool_count (path is dead, pre-existing), but
+    # if it ever grows a path-derived metadata source the gate already
+    # withholds the bundled path from it.
     results.append(check_version_compat(None if gated else path, tool_count=tool_count))
     return results
 
