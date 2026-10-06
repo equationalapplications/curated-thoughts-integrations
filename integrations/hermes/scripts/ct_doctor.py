@@ -656,7 +656,7 @@ def check_hermes_registration():
     )
 
 
-def check_import_preflight(path=None, brain_paths=None):
+def check_import_preflight(path=None, brain_paths=None, env=None):
     """(8) import pre-flight: is this brain safe for an agent to trust?
 
     Replaces the old static okf-hygiene advisory with a check that actually
@@ -669,9 +669,16 @@ def check_import_preflight(path=None, brain_paths=None):
         machine whose engine version decides what happens next.
 
     Read-only: the database is opened through a mode=ro URI.
+
+    `env` (a mapping) is merged over os.environ for the engine-manifest
+    lookup — issue #29: detect_engine_version's CT_ENGINE_PACKAGE_JSON
+    override was read ambiently while brain paths came from the caller's
+    merged view.
     """
     paths = brain_paths or ct_env.resolve_brain_paths()
-    engine_version, engine_source = ct_preflight.detect_engine_version(sidecar_path=path)
+    engine_version, engine_source = ct_preflight.detect_engine_version(
+        sidecar_path=path, env=_merged_env(env)
+    )
     engine_note = (
         f"engine core-llm-wiki {engine_version}"
         if engine_version
@@ -918,7 +925,9 @@ def run_checks(timeout=MCP_TIMEOUT, env=None):
     results.append(check_vault(brain_paths))
     results.append(check_embedding(env=merged))
     results.append(check_hermes_registration())
-    results.append(check_import_preflight(path=path, brain_paths=brain_paths))
+    results.append(check_import_preflight(
+        path=path, brain_paths=brain_paths, env=merged
+    ))
     results.append(check_version_compat(path, tool_count=tool_count))
     return results
 

@@ -752,6 +752,28 @@ class ImportPreflightTests(DoctorTestCase):
     # Whitespace-padded: the engine would rewrite it, so "at_risk".
     AT_RISK = "  " + TOKEN
 
+    def test_engine_manifest_env_view_wins_over_ambient(self):
+        # Issue #29: detect_engine_version reads CT_ENGINE_PACKAGE_JSON from
+        # ambient os.environ, so a caller passing a merged env view got an
+        # engine-version note resolved from a DIFFERENT environment than the
+        # rest of the run. The merged view must win.
+        self.make_brain()
+        ambient_manifest = self.fake_home / "ambient-package.json"
+        ambient_manifest.write_text(
+            json.dumps({"name": "core-llm-wiki", "version": "9.9.9-ambient"})
+        )
+        env_manifest = self.fake_home / "env-package.json"
+        env_manifest.write_text(
+            json.dumps({"name": "core-llm-wiki", "version": "0.0.1-env"})
+        )
+        self.patch_env("CT_ENGINE_PACKAGE_JSON", str(ambient_manifest))
+        r = ct_doctor.check_import_preflight(
+            env={"CT_ENGINE_PACKAGE_JSON": str(env_manifest)}
+        )
+        self.assertEqual(r.status, ct_doctor.PASS)
+        self.assertIn("0.0.1-env", r.detail)
+        self.assertNotIn("9.9.9-ambient", r.detail)
+
     def _seed(self, rows, evidence_table=True, evidence_ids=None, unanchored=0,
               with_source_type=True, with_deleted_at=False):
         """Seed llm_wiki_entries (+ optional librarian_evidence).
