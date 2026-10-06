@@ -774,6 +774,62 @@ class ImportPreflightTests(DoctorTestCase):
         self.assertIn("0.0.1-env", r.detail)
         self.assertNotIn("9.9.9-ambient", r.detail)
 
+    def test_engine_manifest_env_view_wins_over_ambient_brain_paths(self):
+        # GLM r1 finding 1's exact shape: a direct caller passes ONLY env (no
+        # brain_paths) whose CURATED_BRAIN_DIR diverges from ambient — the
+        # census must run against the merged-view brain (clean), not the
+        # ambient one (seeded with a damaged row that would FAIL).
+        import sqlite3
+
+        self.make_brain()
+        ambient_brain = self.fake_home / "ambient-brain"
+        ambient_brain.mkdir()
+        conn = sqlite3.connect(ambient_brain / "brain.db")
+        try:
+            conn.execute(
+                "CREATE TABLE llm_wiki_entries (id TEXT, source_ref TEXT)"
+            )
+            conn.execute(
+                "INSERT INTO llm_wiki_entries VALUES ('e1', 'some.other.junk')"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        (ambient_brain / "config.json").write_text("{}")
+        env_brain = self.fake_home / "env-brain"
+        env_brain.mkdir()
+        (env_brain / "brain.db").write_bytes(b"")
+        (env_brain / "config.json").write_text("{}")
+        self.patch_env("CURATED_BRAIN_DIR", str(ambient_brain))
+        r = ct_doctor.check_import_preflight(env={"CURATED_BRAIN_DIR": str(env_brain)})
+        self.assertEqual(r.status, ct_doctor.PASS)
+        self.assertIn("no llm_wiki_entries table", r.detail)
+
+    def test_run_check_threads_merged_env_into_env_reading_checks(self):
+        # GLM r1 finding 6: pin the runner-level wiring — overrides visible
+        # ONLY through run_checks(env=...) must reach the checks without any
+        # ambient mutation.
+        self.make_brain()
+        env_manifest = self.fake_home / "runner-package.json"
+        env_manifest.write_text(
+            json.dumps({"name": "core-llm-wiki", "version": "1.2.3-runner"})
+        )
+        self.patch_env("OLLAMA_HOST", "http://127.0.0.1:1")  # nothing listens
+        env = {
+            "CT_EMBED_API_KEY": "test-only-not-a-secret",
+            "OLLAMA_HOST": "http://127.0.0.1:1",
+            "CT_ENGINE_PACKAGE_JSON": str(env_manifest),
+        }
+        results = {
+            r.name: r
+            for r in ct_doctor.run_checks(timeout=3.0, env={**self.with_path(), **env})
+        }
+        self.assertEqual(results["embedding-backend"].status, ct_doctor.PASS)
+        self.assertIn("CT_EMBED_API_KEY", results["embedding-backend"].detail)
+        self.assertIn(
+            "1.2.3-runner", results["import-preflight"].detail
+        )
+
     def _seed(self, rows, evidence_table=True, evidence_ids=None, unanchored=0,
               with_source_type=True, with_deleted_at=False):
         """Seed llm_wiki_entries (+ optional librarian_evidence).

@@ -401,9 +401,7 @@ def check_brain_dir(brain_paths=None, env=None):
     merged = _merged_env(env)
     paths = brain_paths or ct_env.resolve_brain_paths(env=merged)
     brain = paths.brain_dir
-    env_note = (
-        merged.get(ct_env.ENV_BRAIN_DIR) or "<unset, default ~/.brain>"
-    )
+    env_note = merged.get(ct_env.ENV_BRAIN_DIR) or "<unset, default ~/.brain>"
     if not brain.exists():
         return CheckResult(
             "brain-dir",
@@ -448,14 +446,18 @@ def check_brain_dir(brain_paths=None, env=None):
     )
 
 
-def check_vault(brain_paths=None):
+def check_vault(brain_paths=None, env=None):
     """(5) the vault the brain actually points at.
 
     The vault is the documents tree, and its path lives in config.json under
     `vault_path` — it is machine-specific, so it is the first thing that
     breaks when a brain is imported from another machine.
+
+    `env` (a mapping) is merged over os.environ for the brain-path fallback —
+    issue #29 (GLM r1): the last env-reading check without a merged view.
     """
-    paths = brain_paths or ct_env.resolve_brain_paths()
+    merged = _merged_env(env)
+    paths = brain_paths or ct_env.resolve_brain_paths(env=merged)
     config, err = ct_env.read_brain_config(paths.config_path)
     if config is None:
         return CheckResult(
@@ -518,7 +520,7 @@ def check_embedding(env=None):
             PASS,
             f"embedding API key present via {present[0]}",
         )
-    host = merged.get("OLLAMA_HOST", OLLAMA_HOST)
+    host = merged.get("OLLAMA_HOST") or "http://127.0.0.1:11434"
     try:
         from urllib.parse import urlparse
         from urllib.request import urlopen
@@ -675,7 +677,7 @@ def check_import_preflight(path=None, brain_paths=None, env=None):
     override was read ambiently while brain paths came from the caller's
     merged view.
     """
-    paths = brain_paths or ct_env.resolve_brain_paths()
+    paths = brain_paths or ct_env.resolve_brain_paths(env=_merged_env(env))
     engine_version, engine_source = ct_preflight.detect_engine_version(
         sidecar_path=path, env=_merged_env(env)
     )
@@ -922,12 +924,10 @@ def run_checks(timeout=MCP_TIMEOUT, env=None):
     results.append(mcp_result)
 
     results.append(check_brain_dir(brain_paths, env=merged))
-    results.append(check_vault(brain_paths))
+    results.append(check_vault(brain_paths, env=merged))
     results.append(check_embedding(env=merged))
     results.append(check_hermes_registration())
-    results.append(check_import_preflight(
-        path=path, brain_paths=brain_paths, env=merged
-    ))
+    results.append(check_import_preflight(path=path, brain_paths=brain_paths, env=merged))
     results.append(check_version_compat(path, tool_count=tool_count))
     return results
 
