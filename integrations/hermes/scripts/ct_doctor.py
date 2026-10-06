@@ -52,7 +52,10 @@ EMBED_ENV_KEYS = (
     "VOYAGE_API_KEY",
     "GEMINI_API_KEY",
 )
-OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434")
+# Default Ollama endpoint used when the (merged) environment does not name
+# one. A constant, not an os.environ read: ambient env must only enter
+# through _merged_env (issue #29).
+OLLAMA_DEFAULT_HOST = "http://127.0.0.1:11434"
 
 # MCP handshake timeout (seconds) — the sidecar must never hang the doctor.
 MCP_TIMEOUT = 10.0
@@ -520,7 +523,7 @@ def check_embedding(env=None):
             PASS,
             f"embedding API key present via {present[0]}",
         )
-    host = merged.get("OLLAMA_HOST") or "http://127.0.0.1:11434"
+    host = merged.get("OLLAMA_HOST") or OLLAMA_DEFAULT_HOST
     try:
         from urllib.parse import urlparse
         from urllib.request import urlopen
@@ -677,9 +680,10 @@ def check_import_preflight(path=None, brain_paths=None, env=None):
     override was read ambiently while brain paths came from the caller's
     merged view.
     """
-    paths = brain_paths or ct_env.resolve_brain_paths(env=_merged_env(env))
+    merged = _merged_env(env)
+    paths = brain_paths or ct_env.resolve_brain_paths(env=merged)
     engine_version, engine_source = ct_preflight.detect_engine_version(
-        sidecar_path=path, env=_merged_env(env)
+        sidecar_path=path, env=merged
     )
     engine_note = (
         f"engine core-llm-wiki {engine_version}"
