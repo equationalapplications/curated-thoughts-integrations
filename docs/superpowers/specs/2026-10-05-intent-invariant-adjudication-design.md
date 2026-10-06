@@ -84,7 +84,7 @@ shipped mechanics, where marked as future.
 
 ## Design
 
-One target file: `INTENT.md` (was 120 lines pre-adjudication; 149 lines after the nine edit sites below land). Edit set:
+One target file: `INTENT.md` (was 120 lines pre-adjudication; 149 lines after the nine edit sites below land; 154 after review deltas). Edit set:
 
 1. **Invariant 2 / B1:** replay clause reworded — verbatim replay protects
    prompt caching; post-render supersessions append as corrections via the
@@ -102,7 +102,8 @@ One target file: `INTENT.md` (was 120 lines pre-adjudication; 149 lines after th
    discovery loop bound the worst-case stall, stated explicitly.
 4. **Invariant 4 / m4:** note provenance fields are currently discarded by
    `recall_wiki` (the Hermes parser reads only `title` and `text` from each
-   `wiki` entry, discarding `id`, `source_ref`, and `confidence`; the full
+   `wiki` entry, discarding `id`, `entity_id`, `source_ref`, and
+   `confidence`; the full
    upstream `ct recall --json` schema also exposes a `results` array —
    `doc_path`, `chunk_text`, `score`, `symbol_name`, `entity_id` — and the
    `wiki` array fields beyond `title`/`text`; see plan erratum); closing

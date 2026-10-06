@@ -1,7 +1,7 @@
 # Plan — INTENT invariant adjudication (issue #24 → PR #26)
 
 **Goal:** reconcile `INTENT.md` with the 2026-10-05 issue #24 adjudication (comment 6002134987) — every finding gets its ruling-backed rewording, no new over-claims.
-**Architecture:** one file (`INTENT.md`, 120 lines pre-adjudication / 149 lines post-implementation), nine edit sites, docs-only implementation (adjudication eliminated all code work).
+**Architecture:** one file (`INTENT.md`, 120 lines pre-adjudication / 149 lines post-implementation / 154 lines after review deltas), nine edit sites, docs-only implementation (adjudication eliminated all code work).
 **Tech stack:** markdown; verification by grep against on-disk content after each edit.
 **Spec:** `docs/superpowers/specs/2026-10-05-intent-invariant-adjudication-design.md` (this PR).
 **Global constraints:**
@@ -30,7 +30,7 @@ In `INTENT.md`:
 
 3. **Rule 5 (line 120 context — Workflow item 5's "supersession gate" wording stays; the gate itself is line 78–80 "cap" task's sibling) — in the *invariants* list**, reword the supersession gate (invariant 1's "Dedup keys on the deterministic fact id after supersession resolution" neighborhood and the rule-5 sentence "no superseded fact is ever injected" wherever it governs replay) to: rule 5 governs **render-time construction only** — at render time no superseded fact is injected; post-render supersession flows exclusively through the append-and-mark path from Task 1.1.
 
-**Interfaces:** invariant 2's new text must not contradict invariant 1's ledger sentence or the v1 mechanism section; the `supersedes` marker must be described identically in both places it appears.
+**Interfaces:** invariant 2's new text must not contradict invariant 1's ledger sentence or the v1 mechanism section; the `supersedes` marker must be described identically in both places it appears. (Review delta: the marker is now defined once, in invariant 1's append-and-mark path; invariant 2 and Workflow item 5 reference it rather than restate it.)
 
 **Commit:** `docs: INTENT invariants 1-2 — replay is cache protection + host guarantee, late fill allowed (B1, M1, M2)`
 
@@ -40,7 +40,7 @@ In `INTENT.md`:
 
 1. **Invariant 3 (lines 68–72):** replace "sidecar down" with "**recall backend unavailable**" (Hermes has no sidecar contact); document the **empty-session_id no-op class** (a session with no session id is a silent no-op — nothing emitted, invariant's graceful-degradation behavior).
 2. **Invariant 4 (lines 73–77):** keep RR-C forward-looking framing, add: recall currently returns a `results` array of chunk hits and a `wiki` array of wiki entries; `recall_wiki` reads only `title` and `text` from each wiki entry, discarding `id`, `source_ref`, and `confidence`; closing RR-C needs parser changes per integration.
-   > **ERRATUM (2026-10-05, review delta):** this sentence was written from a stale field list. Verified ground truth: `ct recall --json` returns a `results` array (`doc_path`, `chunk_text`, `score`, `symbol_name`, `entity_id`) and a `wiki` array (`id`, `entity_id`, `title`, `text`, `source_ref`, `confidence`) — neither carries a provenance class. The implemented INTENT.md invariant 4 carries the correct fields; this line is preserved as review history and superseded by the erratum in the spec (§ m4).
+   > **ERRATUM (2026-10-05, review delta):** this sentence was written from a stale field list. Verified ground truth: `ct recall --json` returns a `results` array (`doc_path`, `chunk_text`, `score`, `symbol_name`, `entity_id`) and a `wiki` array (`id`, `entity_id`, `title`, `text`, `source_ref`, `confidence`) — neither carries a provenance class. `recall_wiki` keeps only `title` and `text`, so it discards four fields: `id`, `entity_id`, `source_ref`, and `confidence`. The implemented INTENT.md invariant 4 carries the correct fields; this erratum is canonical, and the line above is preserved as review history (the spec's Design §4 points here).
 3. **Invariant 5 (lines 78–80):** replace "values set by CT" with **host/spec-pinned values** (`max_chars=2500` is the Hermes host registration in `__init__.py`; `RECALL_K=3` is local to `ct_wisdom.py`); the never-raised-locally rule stays.
 4. **Read-only retrieval (line 89–90):** replace "no query-time embedding" with "**no query-time embedding of vault files; no ad-hoc indexing**" (recall itself embeds the query).
 5. **v1 mechanism step 1 (lines 37–39):** name the actual command: `ct recall "<seed>" --json --k 3` plus cwd widening.

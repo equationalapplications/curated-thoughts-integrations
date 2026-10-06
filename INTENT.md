@@ -36,8 +36,9 @@ work**, not settled by this file; open questions carried from the invariants
 
 1. **Analyze:** at bootstrap there is no conversation yet — recall is driven by
    the frozen seed constant plus session context, per PR #21 (`ct recall
-   "<seed>" --json --k 3`, with cwd widened as needed); the seed does the
-   semantic work.
+   "<seed>" --json --k 3`, the query string widened with the cwd basename
+   when non-degenerate; the subprocess itself runs from `~`); the seed does
+   the semantic work.
 2. **Match:** find wisdom-layer facts via CT's recall (semantic similarity).
 3. **Judge (in CT, optional — future; not implemented in v1):** if System One
    is configured, CT's recall
@@ -70,8 +71,8 @@ work**, not settled by this file; open questions carried from the invariants
    there is no plugin-side persistence — none will be built — and the
    in-process memo (PR #22) is a speed optimization for **new renders only**.
    A fact superseded **after** the original render is **appended as a
-   correction** via an explicit "supersedes <id>" tool-result marker
-   (mid-session delivery: pending design work); the append is highly
+   correction** through invariant 1's append-and-mark path (mid-session
+   delivery: pending design work); the append is highly
    relevant content, not unnecessary duplication, and the stale line stays
    visible but corrected — never silently relied on. A bootstrap render that
    fails (timeout / exit / spawn / probe timeout) MAY be **late-filled when
@@ -83,8 +84,8 @@ work**, not settled by this file; open questions carried from the invariants
    only when it invokes the renderer; each identity probe uses a 3 s
    subprocess timeout (`PROBE_TIMEOUT`) and recall uses a 5 s subprocess
    timeout (`RECALL_TIMEOUT`); discovery may probe multiple candidates per
-   render, so the worst-case stall scales with the candidate list (failure classes per
-   `ct_wisdom.py`). Mid-session learning arrives only as tool
+   render, so the worst-case stall scales with the candidate list. (Failure
+   class names are those in `ct_wisdom.py`.) Mid-session learning arrives only as tool
    results; the system prompt is never rewritten.
 3. **Graceful degradation.** Recall backend unavailable, timeout, empty
    corpus → the integration is a silent no-op (no empty block, nothing
@@ -150,4 +151,4 @@ work**, not settled by this file; open questions carried from the invariants
    after timeout / exit / spawn failure are allowed and may fill the block
    the first render left dark), and the
    supersession gate (at render time, no superseded fact is ever injected —
-   post-render supersessions ride the append-and-mark path, per invariant 2).
+   post-render supersessions ride the append-and-mark path, per invariant 1).
