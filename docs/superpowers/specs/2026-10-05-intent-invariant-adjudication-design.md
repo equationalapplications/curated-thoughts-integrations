@@ -44,12 +44,16 @@ Kurt's rulings (2026-10-05, issue #24 adjudication) decide every finding:
 - **M1:** replay is a **host guarantee** (Hermes persists the rendered prompt
   verbatim); no plugin-side persistence exists or will be built. Drop the
   RR-6 target-state work for resume replay.
-- **M2:** **late fill beats never** — a failed bootstrap render MAY be filled
-  at a later rebuild boundary (compaction rebuild); each identity probe
-  uses a 3 s subprocess timeout (`PROBE_TIMEOUT`) and recall uses a 5 s
-  subprocess timeout (`RECALL_TIMEOUT`); discovery may probe multiple
-  candidates per render, so the worst-case stall scales with the candidate
-  list — stated explicitly.
+- **M2:** **late fill is conditional on a memo miss** — a later render can
+  retry only the failure classes that did not memoize (`timeout`, `exit`,
+  `spawn`, `probe_timeout`); `discovery_miss`, `parse_error`, and
+  `zero_hits` remain cached as empty blocks until LRU eviction. A
+  compaction rebuild counts as a retry trigger only when it invokes the
+  renderer. Each identity probe uses a 3 s subprocess timeout
+  (`PROBE_TIMEOUT`) and recall uses a 5 s subprocess timeout
+  (`RECALL_TIMEOUT`); discovery may probe multiple candidates per render,
+  so the worst-case stall scales with the candidate list — stated
+  explicitly.
 - **M5:** "no query-time embedding" is false as written (recall must embed the
   query). Reword: "no query-time embedding of vault files; no ad-hoc indexing."
 - **Minors m1/m2/m4/m5/m6:** accuracy wording (caps are host/spec-pinned; name
@@ -89,9 +93,11 @@ One target file: `INTENT.md` (was 120 lines pre-adjudication; 149 lines after th
    memo is a speed optimization for new renders only. RR-6 replay work is
    unnecessary.
 3. **Invariant 2 / M2:** "computed once, frozen" relaxed — a failed bootstrap
-   render MAY be late-filled at a rebuild boundary; per-call timeouts
-   (`PROBE_TIMEOUT=3`, `RECALL_TIMEOUT=5`) and the multi-candidate discovery
-   loop bound the worst-case stall, stated explicitly.
+   render MAY be late-filled when a later render misses the session memo
+   (timeout / exit / spawn / probe_timeout retry; discovery_miss /
+   parse_error / zero_hits stay cached until LRU eviction); per-call
+   timeouts (`PROBE_TIMEOUT=3`, `RECALL_TIMEOUT=5`) and the multi-candidate
+   discovery loop bound the worst-case stall, stated explicitly.
 4. **Invariant 4 / m4:** note provenance fields are currently discarded by
    `recall_wiki` (the Hermes parser reads only `title` and `text` from each
    `wiki` entry, discarding `id`, `source_ref`, and `confidence`; the full

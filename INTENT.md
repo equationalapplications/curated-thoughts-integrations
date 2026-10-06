@@ -74,9 +74,12 @@ work**, not settled by this file; open questions carried from the invariants
    (mid-session delivery: pending design work); the append is highly
    relevant content, not unnecessary duplication, and the stale line stays
    visible but corrected — never silently relied on. A bootstrap render that
-   fails (timeout / spawn failure / probe timeout) MAY be **late-filled at a
-   later rebuild boundary** (e.g. a compaction rebuild) — better late wisdom
-   than never; each identity probe uses a 3 s subprocess timeout
+   fails (timeout / exit / spawn / probe timeout) MAY be **late-filled when
+   a later render misses the session memo** — `discovery_miss`,
+   `parse_error`, and `zero_hits` remain cached as empty blocks until LRU
+   eviction, so a later rebuild only retries the non-memoized failure
+   classes; a compaction rebuild counts as a trigger only when it invokes
+   the renderer; each identity probe uses a 3 s subprocess timeout
    (`PROBE_TIMEOUT`) and recall uses a 5 s subprocess timeout
    (`RECALL_TIMEOUT`); discovery may probe multiple candidates per render,
    so the worst-case stall scales with the candidate list (failure classes per
