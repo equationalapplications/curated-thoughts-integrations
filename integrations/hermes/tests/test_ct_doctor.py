@@ -869,11 +869,15 @@ class ImportPreflightTests(DoctorTestCase):
         env_manifest.write_text(
             json.dumps({"name": "core-llm-wiki", "version": "1.2.3-runner"})
         )
-        self.patch_env("OLLAMA_HOST", "http://127.0.0.1:1")  # ambient decoy
+        self.patch_env("OLLAMA_HOST", "http://127.0.0.1:9911")  # ambient decoy
         env = {
             # GLM r1 (PR #30) flake hardening: the env-view host must be one
             # NOTHING can listen on — port 1 (privileged, connection refused
             # everywhere), not a high port a stray CI service could bind.
+            # CodeRabbit r1 (PR #31): ambient and env-view hosts must differ —
+            # if run_checks stopped threading env into check_embedding the
+            # probe would walk back to the ambient 9911 and the assertNotIn
+            # below would flip.
             "OLLAMA_HOST": "http://127.0.0.1:1",
             "CT_ENGINE_PACKAGE_JSON": str(env_manifest),
         }
