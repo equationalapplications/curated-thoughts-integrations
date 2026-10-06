@@ -539,6 +539,34 @@ class PlatformDiscoveryTests(DoctorTestCase):
         self.assertEqual(r.status, ct_doctor.WARN)
 
 
+class FindSidecarWrapperTests(DoctorTestCase):
+    """ct_doctor.find_sidecar must route its `env` through _merged_env.
+
+    Without the overlay, an ambient os.environ PATH could win discovery
+    even when the caller passes an env PATH — the bug behind issue #14.
+    FullRunTests.test_sidecar_discovery_honors_env_path proves this
+    transitively via run_checks; this test pins the wrapper itself, so a
+    future edit that drops the _merged_env call fails here rather than
+    only at the integration level.
+    """
+
+    @unittest.skipIf(IS_WINDOWS, MOCK_SPAWN_SKIP)
+    def test_find_sidecar_wrapper_applies_merged_env(self):
+        # Patch _merged_env to return a sentinel PATH that points at the
+        # mock. If the wrapper passes its `env` straight through, the
+        # sentinel is bypassed and discovery falls back to the caller's
+        # PATH (or the ambient one) — the assertion on `path` then fails.
+        from unittest import mock
+
+        sentinel = {"PATH": str(self.bin_dir), "MERGED_SENTINEL": "1"}
+        with mock.patch.object(ct_doctor, "_merged_env", return_value=sentinel):
+            path, _resolved, source = ct_doctor.find_sidecar(
+                env={"PATH": "/this/path/is/ignored/by/the/wrapper"}
+            )
+        self.assertEqual(path, str(self.mock_path))
+        self.assertEqual(source, "PATH")
+
+
 class EmbeddingTests(DoctorTestCase):
     def test_no_backend_warns_never_fails(self):
         r = ct_doctor.check_embedding()

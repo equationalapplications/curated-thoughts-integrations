@@ -154,7 +154,8 @@ def _merged_env(env=None):
 
     Tests set CURATED_BRAIN_DIR by patching ambient os.environ while passing
     an `env` that only overrides PATH; resolving through the merge keeps both
-    visible with `env` winning collisions, matching subprocess.run(env=...).
+    visible with `env` winning collisions. Note this OVERLAYS os.environ,
+    unlike `subprocess.run(env=...)` which replaces it.
     """
     merged = dict(os.environ)
     if env:
@@ -238,9 +239,7 @@ def mcp_tools_list(path, timeout=MCP_TIMEOUT, env=None):
         + json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
         + "\n"
     )
-    run_env = dict(os.environ)
-    if env:
-        run_env.update(env)
+    run_env = _merged_env(env)
     try:
         proc = subprocess.run(
             [path, "--mcp"],
