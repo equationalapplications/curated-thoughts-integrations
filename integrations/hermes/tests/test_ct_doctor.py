@@ -49,7 +49,7 @@ POSIX_PATHS_SKIP = (
 )
 
 
-MOCK_SIDECAR = r'''#!/usr/bin/env python3
+MOCK_SIDECAR = r'''#!MOCK_PYTHON
 """Mock curated-thoughts-mcp: canned JSON-RPC over stdio.
 
 Env knobs:
@@ -126,7 +126,9 @@ class DoctorTestCase(unittest.TestCase):
         self.bin_dir = self.fake_home / "bin"
         self.bin_dir.mkdir()
         self.mock_path = self.bin_dir / "curated-thoughts-mcp"
-        self.mock_path.write_text(MOCK_SIDECAR)
+        self.mock_path.write_text(
+            MOCK_SIDECAR.replace("#!MOCK_PYTHON", f"#!{sys.executable}")
+        )
         self.mock_path.chmod(
             self.mock_path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH
         )
@@ -146,6 +148,27 @@ class DoctorTestCase(unittest.TestCase):
         # Re-resolve module-level paths against the fake home.
         ct_doctor.HERMES_CONFIG = Path(os.environ["HERMES_CONFIG"])
         self.addCleanup(self._cleanup)
+        # Issue #28 precondition: the mock MUST be the binary discovery
+        # resolves for every test that passes the mock PATH. With the old
+        # /usr/bin/env shebang the helpers had to append the ambient PATH
+        # (the mock needs python3), so a broken mock let shutil.which walk
+        # on to the REAL installed sidecar — source "PATH", invisible to the
+        # bundled-fallback guard, spawning against the fixture brain. The
+        # absolute shebang lets the helpers set a BARE bin_dir PATH, so a
+        # broken mock falls through to bundled/none (where the run_checks
+        # gate fires) instead of the real binary. This precondition fails
+        # the suite at setup if the fixture is ever broken again — and it
+        # also protects the CLI-subprocess tests, whose child calls
+        # run_checks() with env=None (beyond any runtime guard's reach).
+        found, _real, source = ct_env.find_sidecar(env=self.with_path())
+        self.assertTrue(
+            found
+            and source == ct_env.SOURCE_PATH
+            and os.path.realpath(found) == os.path.realpath(self.mock_path),
+            f"mock sidecar fixture broken: discovery returned "
+            f"({found!r}, {source!r}) instead of the mock — fix the fixture "
+            f"before running the suite (issue #28)",
+        )
 
     def _cleanup(self):
         for key, value in self._env_patches.items():
@@ -210,15 +233,17 @@ class DoctorTestCase(unittest.TestCase):
         return self.fake_home / ".brain" / "brain.db"
 
     def results_by_name(self, env=None):
-        results = ct_doctor.run_checks(
-            timeout=3.0,
-            env={"PATH": str(self.bin_dir) + os.pathsep + os.environ["PATH"], **(env or {})},
-        )
+        # Bare bin_dir PATH (issue #28): the mock has an absolute shebang, so
+        # no ambient suffix is needed — and a broken mock now falls through
+        # to bundled/none (the run_checks gate) instead of the real binary.
+        base = {"PATH": str(self.bin_dir)}
+        base.update(env or {})
+        results = ct_doctor.run_checks(timeout=3.0, env=base)
         return {r.name: r for r in results}
 
     def with_path(self):
-        """Return env dict putting the mock first on PATH."""
-        return {"PATH": str(self.bin_dir) + os.pathsep + os.environ["PATH"]}
+        """Return env dict putting ONLY the mock dir on PATH."""
+        return {"PATH": str(self.bin_dir)}
 
 
 @unittest.skipIf(IS_WINDOWS, MOCK_SPAWN_SKIP)
@@ -1539,7 +1564,9 @@ class FullRunTests(DoctorTestCase):
             capture_output=True,
             text=True,
             timeout=60,
-            env={**os.environ, "PATH": str(self.bin_dir) + os.pathsep + os.environ["PATH"]},
+            # Bare mock PATH (issue #28 fixture change): child discovery
+            # resolves the mock; the ambient PATH is irrelevant here.
+            env={**os.environ, "PATH": str(self.bin_dir)},
         )
         data = json.loads(out.stdout)
         self.assertIn("exit_code", data)
@@ -1690,7 +1717,9 @@ class CheckJsonCliTests(DoctorTestCase):
             capture_output=True,
             text=True,
             timeout=60,
-            env={**os.environ, "PATH": str(self.bin_dir) + os.pathsep + os.environ["PATH"]},
+            # Bare mock PATH (issue #28 fixture change): child discovery
+            # resolves the mock; the ambient PATH is irrelevant here.
+            env={**os.environ, "PATH": str(self.bin_dir)},
         )
         data = json.loads(out.stdout)
         self.assertIn("exit_code", data)
@@ -1927,6 +1956,154 @@ class ReviewRegressionTests(DoctorTestCase):
         r = ct_doctor.check_hermes_registration()
         self.assertEqual(r.status, ct_doctor.WARN)
         self.assertIn("plugins.enabled", r.detail)
+
+
+class BundledFallbackGuardTests(DoctorTestCase):
+    """Issue #28: the bundled (ambient install location) fallback must never
+    execute a real installed sidecar under a caller env that overrode PATH.
+
+    The test-side defense is primary (see DoctorTestCase.setUp): bare-PATH
+    helpers + absolute-shebang mock mean a broken mock falls through to
+    bundled/none instead of the real binary via ambient PATH. The runtime
+    gate in run_checks is the second layer: when the CALLER's raw env has a
+    PATH key and discovery reported source "bundled", the doctor WARNs and
+    refuses to spawn. These tests patch ct_env.sidecar_candidates with a
+    POISON stand-in for the real installed binary, so they are deterministic
+    on any machine (no dependence on /usr/bin state).
+    """
+
+    def _poison_candidates(self, poison_path):
+        """Patch sidecar_candidates to return the poison path only."""
+        from unittest import mock
+
+        return mock.patch.object(
+            ct_env, "sidecar_candidates", return_value=[Path(poison_path)]
+        )
+
+    def _make_poison(self, body, name="curated-thoughts-mcp"):
+        d = self.fake_home / "poison-install"
+        d.mkdir(exist_ok=True)
+        p = d / name
+        p.write_text(body)
+        p.chmod(p.stat().st_mode | stat.S_IXUSR)
+        return p
+
+    def setUp(self):
+        super().setUp()
+        self.make_brain()
+        self.write_config()
+
+    @unittest.skipIf(IS_WINDOWS, MOCK_SPAWN_SKIP)
+    def test_gated_run_warns_skips_spawn_and_poison_never_runs(self):
+        # Env PATH points at an EMPTY dir (override present, resolves
+        # nothing); the patched candidate is a poison sidecar that leaves a
+        # marker when spawned. The gate must WARN on sidecar-binary, WARN
+        # skip sidecar-mcp, and never execute the poison.
+        marker = self.fake_home / "POISON-RAN"
+        poison = self._make_poison(
+            "#!" + sys.executable + "\n"
+            f"open({str(marker)!r}, 'w').write('ran')\n"
+        )
+        empty_dir = self.fake_home / "empty-path"
+        empty_dir.mkdir()
+        with self._poison_candidates(poison):
+            results = {
+                r.name: r
+                for r in ct_doctor.run_checks(
+                    timeout=3.0, env={"PATH": str(empty_dir)}
+                )
+            }
+        self.assertFalse(marker.exists(), "poison sidecar was spawned despite the gate")
+        binary = results["sidecar-binary"]
+        self.assertEqual(binary.status, ct_doctor.WARN)
+        self.assertIn(ct_env.SOURCE_BUNDLED, binary.detail)
+        mcp = results["sidecar-mcp"]
+        self.assertEqual(mcp.status, ct_doctor.WARN)
+        self.assertIn("refusing to spawn", mcp.detail)
+        # The check contract is unchanged: same checks, same order.
+        self.assertEqual(list(results), list(EXPECTED_CHECKS))
+
+    def test_gated_run_withholds_path_from_import_preflight(self):
+        # With the gate active, import-preflight must not read the engine
+        # manifest of the binary we refused to run (path=None).
+        poison = self._make_poison("#!" + sys.executable + "\n")
+        empty_dir = self.fake_home / "empty-path-2"
+        empty_dir.mkdir()
+        with self._poison_candidates(poison):
+            results = {
+                r.name: r
+                for r in ct_doctor.run_checks(
+                    timeout=3.0, env={"PATH": str(empty_dir)}
+                )
+            }
+        preflight = results["import-preflight"]
+        # Whatever its verdict, it must not claim to have inspected the
+        # poison binary's engine manifest.
+        self.assertNotIn(str(poison), preflight.detail)
+
+    @unittest.skipIf(IS_WINDOWS, MOCK_SPAWN_SKIP)
+    def test_no_path_key_falls_back_and_probes_normally(self):
+        # The real-user case: env WITHOUT a PATH key (merged PATH is ambient)
+        # + bundled-candidate discovery. No gate; the (benign mock)
+        # candidate is probed normally and sidecar-binary PASSes. The mock
+        # advertises a full-tier tool count so the probe PASSes rather than
+        # WARNing on a below-tier surface (a tier verdict is not this test's
+        # subject).
+        tools = ", ".join(f'{{"name":"t{i}"}}' for i in range(14))
+        benign = self._make_poison(
+            "#!" + sys.executable + "\n"
+            "print('{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":"
+            "\"2024-11-05\",\"serverInfo\":{\"name\":\"benign\",\"version\":\"9.9.9\"},"
+            "\"capabilities\":{}}}')\n"
+            "print('{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"tools\":"
+            "[" + tools + "]}}')\n",
+        )
+        self.patch_env("PATH", str(self.fake_home / "pathless-bin"))
+        (self.fake_home / "pathless-bin").mkdir()
+        with self._poison_candidates(benign):
+            results = {
+                r.name: r
+                for r in ct_doctor.run_checks(timeout=3.0, env={"CURATED_BRAIN_DIR": str(self.fake_home / ".brain")})
+            }
+        binary = results["sidecar-binary"]
+        self.assertEqual(binary.status, ct_doctor.PASS)
+        self.assertIn(ct_env.SOURCE_BUNDLED, binary.detail)
+        mcp = results["sidecar-mcp"]
+        self.assertEqual(mcp.status, ct_doctor.PASS)
+
+    def test_empty_path_string_counts_as_override(self):
+        # "PATH": "" is the documented suppression value; the gate keys on
+        # key-presence, not truthiness, so this is gated too (a truthiness
+        # check would let discovery fall through to the poison and spawn it).
+        marker = self.fake_home / "POISON-RAN-EMPTY"
+        poison = self._make_poison(
+            "#!" + sys.executable + "\n"
+            f"open({str(marker)!r}, 'w').write('ran')\n"
+        )
+        with self._poison_candidates(poison):
+            results = {
+                r.name: r
+                for r in ct_doctor.run_checks(timeout=3.0, env={"PATH": ""})
+            }
+        self.assertFalse(
+            marker.exists(),
+            "empty-string PATH override was not treated as a gate",
+        )
+        self.assertEqual(results["sidecar-mcp"].status, ct_doctor.WARN)
+
+    def test_read_only_gated_run_touches_nothing(self):
+        # The #28 read-only gap: a run whose override fails must not execute
+        # anything, so the fake home is unchanged before/after. Snapshot
+        # AFTER building the fixtures (the fixtures themselves are allowed
+        # to exist; only the gated run must touch nothing).
+        poison = self._make_poison("#!" + sys.executable + "\n")
+        empty_dir = self.fake_home / "empty-path-3"
+        empty_dir.mkdir()
+        before = sorted(str(p) for p in self.fake_home.rglob("*"))
+        with self._poison_candidates(poison):
+            ct_doctor.run_checks(timeout=3.0, env={"PATH": str(empty_dir)})
+        after = sorted(str(p) for p in self.fake_home.rglob("*"))
+        self.assertEqual(before, after)
 
 
 class PluginConcurrencyTests(unittest.TestCase):

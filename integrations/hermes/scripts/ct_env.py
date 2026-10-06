@@ -175,23 +175,38 @@ def sidecar_candidates(platform=None, env=None):
     return _linux_candidates()
 
 
+# Where discovery found the sidecar. Constants, not string literals: callers
+# (and the issue #28 guard tests) match on these, so a future rename of
+# "bundled" → "installed" is a one-line change (see the #28 resolution doc).
+SOURCE_PATH = "PATH"
+SOURCE_BUNDLED = "bundled"
+SOURCE_NONE = "none"
+
+
 def find_sidecar(platform=None, env=None):
     """Locate the sidecar. Returns (path|None, realpath|None, source).
 
     `source` is "PATH" or "bundled" so callers can explain where it came from
     without re-deriving the search order.
+
+    Issue #28: the fallback candidates are ambient install locations, NOT
+    env-derived — a caller that passes an env carrying a PATH override (the
+    documented way to control which binary runs) must be able to tell when
+    discovery ignored that override and resolved an ambient binary instead.
+    The `source` return value is that signal; `ct_doctor` uses it to refuse
+    spawning an ambient binary under a caller-owned env (see ct_doctor.run_checks).
     """
     env = os.environ if env is None else env
     found = shutil.which(SIDECAR_NAME, path=env.get("PATH"))
     if found:
-        return found, os.path.realpath(found), "PATH"
+        return found, os.path.realpath(found), SOURCE_PATH
     for cand in sidecar_candidates(platform=platform, env=env):
         try:
             if cand.is_file() and os.access(cand, os.X_OK):
-                return str(cand), os.path.realpath(cand), "bundled"
+                return str(cand), os.path.realpath(cand), SOURCE_BUNDLED
         except OSError:
             continue
-    return None, None, "none"
+    return None, None, SOURCE_NONE
 
 
 # Path segments that mark a development build rather than an installed one.

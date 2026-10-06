@@ -191,10 +191,27 @@ def _merged_env(env=None):
     return merged
 
 
-def check_sidecar_binary(found=None):
-    """(1) sidecar binary present (PATH, then platform install locations)."""
+def check_sidecar_binary(found=None, gated=False):
+    """(1) sidecar binary present (PATH, then platform install locations).
+
+    `gated` (issue #28): discovery resolved the sidecar from the ambient
+    install locations even though the caller's env overrode PATH — the
+    override failed to resolve. WARN (not PASS) so the anomaly is visible;
+    run_checks also refuses to spawn under that combination.
+    """
     path, _resolved, source = found if found else find_sidecar()
     if path:
+        if gated and source == ct_env.SOURCE_BUNDLED:
+            return CheckResult(
+                "sidecar-binary",
+                WARN,
+                f"found {SIDECAR_NAME} at {path} (via {source})",
+                "The env you passed overrides PATH but that override did not "
+                f"contain {SIDECAR_NAME}; discovery fell back to the ambient "
+                "install locations. If this is a test or wrapper that meant "
+                "to control which binary runs, fix the override instead of "
+                "relying on the fallback.",
+            )
         return CheckResult(
             "sidecar-binary",
             PASS,
@@ -939,7 +956,19 @@ def check_version_compat(path, tool_count=None):
 # --------------------------------------------------------------------------
 
 def run_checks(timeout=MCP_TIMEOUT, env=None):
-    """Run all checks; returns list of CheckResult."""
+    """Run all checks; returns list of CheckResult.
+
+    Issue #28 guard: when the CALLER's raw env overrides PATH but discovery
+    resolved the sidecar from the ambient install locations (`source` is
+    "bundled", not "PATH"), the override failed to resolve — the found binary
+    is an ambient one, and spawning it under the caller's env is the exact
+    pollution path #28 tracks (a test's fixture brain reached by the real
+    installed sidecar). In that case: WARN on sidecar-binary, skip the
+    sidecar-mcp spawn, and withhold the path from import-preflight's engine
+    lookup. The discriminator reads the RAW caller env (not the merged view,
+    which always has a PATH), and `"PATH" in env` (not truthiness) so the
+    documented empty-string suppression counts as an override too.
+    """
     results = []
     # Discovery and brain-path resolution must honor the same env view the
     # spawn will use (issue #14, GLM r1 follow-up: resolve_brain_paths had
@@ -948,21 +977,47 @@ def run_checks(timeout=MCP_TIMEOUT, env=None):
     path, resolved, source = find_sidecar(env=merged)
     brain_paths = ct_env.resolve_brain_paths(env=merged)
 
-    results.append(check_sidecar_binary((path, resolved, source)))
+    # The bundled-fallback spawn gate: caller claimed PATH control and lost.
+    gated = env is not None and "PATH" in env and source == ct_env.SOURCE_BUNDLED
+
+    results.append(check_sidecar_binary((path, resolved, source), gated=gated))
     results.append(check_sidecar_identity(path, resolved))
 
-    # One probe, and the count comes back structurally — see _probe_sidecar.
-    mcp_result, tool_count = _probe_sidecar(
-        path, timeout=timeout, env=env, brain_paths=brain_paths
-    )
-    results.append(mcp_result)
+    # No live surface is observed when the spawn is gated (issue #28): the
+    # count feeds check_version_compat, which treats None as "unobserved".
+    tool_count = None
+    if gated:
+        # Refuse to execute an ambient binary under a caller-owned env.
+        results.append(
+            CheckResult(
+                "sidecar-mcp",
+                WARN,
+                "skipped: refusing to spawn the bundled sidecar against an "
+                "env whose PATH override failed to resolve",
+                f"Discovery found {SIDECAR_NAME} in an ambient install "
+                "location, not via your PATH override — the override "
+                "probably points at a missing or non-executable binary. "
+                f"Not spawning it; fix the override (or unset PATH in the "
+                f"env) and re-run.",
+            )
+        )
+    else:
+        # One probe, and the count comes back structurally — see _probe_sidecar.
+        mcp_result, tool_count = _probe_sidecar(
+            path, timeout=timeout, env=env, brain_paths=brain_paths
+        )
+        results.append(mcp_result)
 
     results.append(check_brain_dir(brain_paths, env=merged))
     results.append(check_vault(brain_paths, env=merged))
     results.append(check_embedding(env=merged))
     results.append(check_hermes_registration())
-    results.append(check_import_preflight(path=path, brain_paths=brain_paths, env=merged))
-    results.append(check_version_compat(path, tool_count=tool_count))
+    results.append(
+        check_import_preflight(
+            path=None if gated else path, brain_paths=brain_paths, env=merged
+        )
+    )
+    results.append(check_version_compat(None if gated else path, tool_count=tool_count))
     return results
 
 
