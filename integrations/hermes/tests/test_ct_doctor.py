@@ -343,6 +343,40 @@ class BrainDirTests(DoctorTestCase):
         self.assertEqual(r.status, ct_doctor.PASS)
         self.assertIn(str(alt), r.detail)
 
+    def test_explicit_env_wins_over_ambient_in_message(self):
+        # Issue #29: with the real CURATED_BRAIN_DIR ambient and a different
+        # one passed via env, the checked directory comes from the merged
+        # view — so the detail message must name the same directory, not the
+        # ambient value.
+        ambient = self.fake_home / "ambient-brain"
+        ambient.mkdir()
+        (ambient / "brain.db").write_bytes(b"")
+        (ambient / "config.json").write_text("{}")
+        self.patch_env("CURATED_BRAIN_DIR", str(ambient))
+        env_dir = self.fake_home / "env-brain"
+        env_dir.mkdir()
+        (env_dir / "brain.db").write_bytes(b"")
+        (env_dir / "config.json").write_text("{}")
+        r = ct_doctor.check_brain_dir(env={"CURATED_BRAIN_DIR": str(env_dir)})
+        self.assertEqual(r.status, ct_doctor.PASS)
+        self.assertIn(str(env_dir), r.detail)
+        self.assertNotIn(str(ambient), r.detail)
+
+    def test_env_brain_dir_missing_fails_naming_env_dir(self):
+        # Same divergence on the FAIL path: the message names the directory
+        # the merged view resolved (which does not exist), not the ambient
+        # one (which does).
+        ambient = self.fake_home / "ambient-brain"
+        ambient.mkdir()
+        (ambient / "brain.db").write_bytes(b"")
+        (ambient / "config.json").write_text("{}")
+        self.patch_env("CURATED_BRAIN_DIR", str(ambient))
+        env_dir = self.fake_home / "env-brain-missing"
+        r = ct_doctor.check_brain_dir(env={"CURATED_BRAIN_DIR": str(env_dir)})
+        self.assertEqual(r.status, ct_doctor.FAIL)
+        self.assertIn(str(env_dir), r.detail)
+        self.assertNotIn(str(ambient), r.detail)
+
     def test_explicit_db_path_moves_config_beside_it(self):
         # CURATED_BRAIN_DB without CURATED_BRAIN_CONFIG puts config.json next
         # to the database, matching curated-thoughts' resolve_brain_paths.

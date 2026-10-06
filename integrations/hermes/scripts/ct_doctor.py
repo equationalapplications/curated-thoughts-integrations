@@ -386,16 +386,24 @@ def _probe_sidecar(path, timeout=MCP_TIMEOUT, env=None, brain_paths=None):
     )
 
 
-def check_brain_dir(brain_paths=None):
+def check_brain_dir(brain_paths=None, env=None):
     """(4) brain directory exists and is readable.
 
     This is the directory holding brain.db and config.json — resolved exactly
     as Curated Thoughts resolves it (CURATED_BRAIN_DIR, default ~/.brain).
     It is NOT the vault; see check_vault.
+
+    `env` (a mapping) is merged over os.environ for the CURATED_BRAIN_DIR note
+    in the detail message — issue #29: `brain_paths` may come from a caller's
+    merged env view while the message quoted ambient os.environ, so the
+    message could name a different directory than the one checked.
     """
-    paths = brain_paths or ct_env.resolve_brain_paths()
+    merged = _merged_env(env)
+    paths = brain_paths or ct_env.resolve_brain_paths(env=merged)
     brain = paths.brain_dir
-    env_note = os.environ.get(ct_env.ENV_BRAIN_DIR) or "<unset, default ~/.brain>"
+    env_note = (
+        merged.get(ct_env.ENV_BRAIN_DIR) or "<unset, default ~/.brain>"
+    )
     if not brain.exists():
         return CheckResult(
             "brain-dir",
@@ -900,9 +908,9 @@ def run_checks(timeout=MCP_TIMEOUT, env=None):
     )
     results.append(mcp_result)
 
-    results.append(check_brain_dir(brain_paths))
+    results.append(check_brain_dir(brain_paths, env=merged))
     results.append(check_vault(brain_paths))
-    results.append(check_embedding())
+    results.append(check_embedding(env=merged))
     results.append(check_hermes_registration())
     results.append(check_import_preflight(path=path, brain_paths=brain_paths))
     results.append(check_version_compat(path, tool_count=tool_count))
