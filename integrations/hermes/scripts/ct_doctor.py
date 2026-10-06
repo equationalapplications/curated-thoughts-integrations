@@ -139,13 +139,27 @@ def _read_text_file(path, limit=256 * 1024):
 def find_sidecar(env=None):
     """Locate the sidecar. Returns (path|None, resolved|None, source).
 
-    `env` (a mapping) overrides os.environ for PATH-based discovery, matching
-    the spawn-time environment. Issue #14: run_checks accepted an `env`
-    (tests pass a PATH pointing at a mock sidecar) but discovered from the
-    ambient os.environ — so on machines with a real installed sidecar, the
-    real binary was spawned against the test fixture brain.
+    `env` (a mapping) overlays `os.environ` for discovery — the same view the
+    spawn sees (it runs with `os.environ` updated by `env`). Issue #14:
+    run_checks accepted an `env` (tests pass a PATH pointing at a mock
+    sidecar) but discovered from the ambient os.environ — so on machines
+    with a real installed sidecar, the real binary was spawned against the
+    test fixture brain.
     """
     return ct_env.find_sidecar(env=env)
+
+
+def _merged_env(env=None):
+    """Ambient os.environ with `env` overlaid — the spawn-time view.
+
+    Tests set CURATED_BRAIN_DIR by patching ambient os.environ while passing
+    an `env` that only overrides PATH; resolving through the merge keeps both
+    visible with `env` winning collisions, matching subprocess.run(env=...).
+    """
+    merged = dict(os.environ)
+    if env:
+        merged.update(env)
+    return merged
 
 
 def check_sidecar_binary(found=None):
@@ -306,7 +320,7 @@ def _probe_sidecar(path, timeout=MCP_TIMEOUT, env=None, brain_paths=None):
         )
     tools, _server_version, error = mcp_tools_list(path, timeout=timeout, env=env)
     if tools is None:
-        config_path = (brain_paths or ct_env.resolve_brain_paths()).config_path
+        config_path = (brain_paths or ct_env.resolve_brain_paths(env=_merged_env(env))).config_path
         return (
             CheckResult(
                 "sidecar-mcp",
@@ -871,9 +885,12 @@ def check_version_compat(path, tool_count=None):
 def run_checks(timeout=MCP_TIMEOUT, env=None):
     """Run all checks; returns list of CheckResult."""
     results = []
-    # Discovery must honor the same env the spawn will use (issue #14).
-    path, resolved, source = find_sidecar(env=env)
-    brain_paths = ct_env.resolve_brain_paths()
+    # Discovery and brain-path resolution must honor the same env view the
+    # spawn will use (issue #14, GLM r1 follow-up: resolve_brain_paths had
+    # the same ambient-env divergence one line below the original fix).
+    merged = _merged_env(env)
+    path, resolved, source = find_sidecar(env=merged)
+    brain_paths = ct_env.resolve_brain_paths(env=merged)
 
     results.append(check_sidecar_binary((path, resolved, source)))
     results.append(check_sidecar_identity(path, resolved))

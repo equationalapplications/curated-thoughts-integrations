@@ -13,9 +13,13 @@ format below is load-bearing: `## <version> — <date>`.
   on machines with a real installed sidecar, the real binary was probed (and
   its startup migration ran) against whatever brain the caller's environment
   pointed at, including test fixture brains (issue #14; the read-only and
-  self-test failures on sidecar-equipped machines). Discovery now honors the
-  same env the spawn uses. Regression test: poison sidecar on the ambient
-  PATH must never run when an env PATH override is supplied.
+  self-test failures on sidecar-equipped machines). Discovery, brain-path
+  resolution, and the spawn now all use the same merged env view
+  (`os.environ` overlaid with the caller's `env`, matching
+  `subprocess.run(env=...)`). Regression test: poison sidecar on the ambient
+  PATH must never run when an env PATH override is supplied. Residual risk
+  (bundled-path fallback reaching a real sidecar when the env-PATH mock is
+  absent) is tracked in issue #28.
 
 ## 0.3.0 — 2026-09-30
 
