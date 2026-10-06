@@ -16,10 +16,11 @@ what was decided.
 
 Current-state evidence [V] (verified 2026-10-05 against live code):
 
-- **[V] `ct recall --json` exposes `entity_id`, `doc_path`, `score` — no
-  supersession-status field, no title.** The B1 append-and-mark path cannot
-  read supersession status from recall output; it must flow through the
-  tool-result `supersedes <id>` marker.
+- **[V] The recorded live `ct recall --json` sample has `results` entries
+  with `entity_id`, `doc_path`, and `score`, and `wiki` entries with `id`,
+  `title`, `text`, `source_ref`, `confidence`, and `entity_id`.** The sample
+  has no supersession-status field; the B1 design routes that status through
+  the tool-result `supersedes <id>` marker.
 - **[V] Hermes `plugins_dispatch.py::_render_prompt_section_text` strips the
   section value and skips it entirely when empty/whitespace** (returns `None`
   → not rendered). Invariant 3's "nothing emitted" already holds; no code
@@ -44,8 +45,11 @@ Kurt's rulings (2026-10-05, issue #24 adjudication) decide every finding:
   verbatim); no plugin-side persistence exists or will be built. Drop the
   RR-6 target-state work for resume replay.
 - **M2:** **late fill beats never** — a failed bootstrap render MAY be filled
-  at a later rebuild boundary (compaction rebuild); keep the per-render stall
-  bounded (~8 s worst case, stated explicitly).
+  at a later rebuild boundary (compaction rebuild); each identity probe
+  uses a 3 s subprocess timeout (`PROBE_TIMEOUT`) and recall uses a 5 s
+  subprocess timeout (`RECALL_TIMEOUT`); discovery may probe multiple
+  candidates per render, so the worst-case stall scales with the candidate
+  list — stated explicitly.
 - **M5:** "no query-time embedding" is false as written (recall must embed the
   query). Reword: "no query-time embedding of vault files; no ad-hoc indexing."
 - **Minors m1/m2/m4/m5/m6:** accuracy wording (caps are host/spec-pinned; name
@@ -75,7 +79,7 @@ shipped mechanics, where marked as future.
 
 ## Design
 
-One target file: `INTENT.md` (120 lines). Edit set:
+One target file: `INTENT.md` (was 120 lines pre-adjudication; 149 lines after the nine edit sites below land). Edit set:
 
 1. **Invariant 2 / B1:** replay clause reworded — verbatim replay protects
    prompt caching; post-render supersessions append as corrections via the
@@ -85,13 +89,16 @@ One target file: `INTENT.md` (120 lines). Edit set:
    memo is a speed optimization for new renders only. RR-6 replay work is
    unnecessary.
 3. **Invariant 2 / M2:** "computed once, frozen" relaxed — a failed bootstrap
-   render MAY be late-filled at a rebuild boundary; per-render stall bounded
-   (~8 s worst case), stated explicitly.
+   render MAY be late-filled at a rebuild boundary; per-call timeouts
+   (`PROBE_TIMEOUT=3`, `RECALL_TIMEOUT=5`) and the multi-candidate discovery
+   loop bound the worst-case stall, stated explicitly.
 4. **Invariant 4 / m4:** note provenance fields are currently discarded by
-   `recall_wiki` (title+text only — corrected during implementation: verified
-   fields are `entity_id`, `doc_path`, `score`; no title; see plan
-   erratum); closing RR-C needs parser changes per
-   integration.
+   `recall_wiki` (the Hermes parser reads only `title` and `text` from each
+   `wiki` entry, discarding `id`, `source_ref`, and `confidence`; the full
+   upstream `ct recall --json` schema also exposes a `results` array —
+   `doc_path`, `chunk_text`, `score`, `symbol_name`, `entity_id` — and the
+   `wiki` array fields beyond `title`/`text`; see plan erratum); closing
+   RR-C needs parser changes per integration.
 5. **Invariant 5 / m1:** cap values are host/spec-pinned, not "set by CT"
    (`max_chars=2500` is the Hermes host registration `__init__.py`;
    `RECALL_K=3` is local `ct_wisdom.py`).

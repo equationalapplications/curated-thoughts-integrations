@@ -1,7 +1,7 @@
 # Plan — INTENT invariant adjudication (issue #24 → PR #26)
 
 **Goal:** reconcile `INTENT.md` with the 2026-10-05 issue #24 adjudication (comment 6002134987) — every finding gets its ruling-backed rewording, no new over-claims.
-**Architecture:** one file (`INTENT.md`, 120 lines), nine edit sites, docs-only implementation (adjudication eliminated all code work).
+**Architecture:** one file (`INTENT.md`, 120 lines pre-adjudication / 149 lines post-implementation), nine edit sites, docs-only implementation (adjudication eliminated all code work).
 **Tech stack:** markdown; verification by grep against on-disk content after each edit.
 **Spec:** `docs/superpowers/specs/2026-10-05-intent-invariant-adjudication-design.md` (this PR).
 **Global constraints:**
@@ -26,7 +26,7 @@ In `INTENT.md`:
 
    > The block is computed once, frozen as ONE contiguous static region at bootstrap, once per session
 
-   with: computed at bootstrap and frozen as ONE contiguous static region; a bootstrap render that fails (timeout / spawn failure / probe timeout) MAY be **late-filled at a later rebuild boundary** (e.g. compaction rebuild) — better late wisdom than never; the per-render stall stays bounded (**~8 s worst case**, failure classes per `ct_wisdom.py`).
+   with: computed at bootstrap and frozen as ONE contiguous static region; a bootstrap render that fails (timeout / spawn failure / probe timeout) MAY be **late-filled at a later rebuild boundary** (e.g. compaction rebuild) — better late wisdom than never; each identity probe uses a 3 s subprocess timeout (`PROBE_TIMEOUT`) and recall uses a 5 s subprocess timeout (`RECALL_TIMEOUT`); discovery may probe multiple candidates per render, so the worst-case stall scales with the candidate list (failure classes per `ct_wisdom.py`).
 
 3. **Rule 5 (line 120 context — Workflow item 5's "supersession gate" wording stays; the gate itself is line 78–80 "cap" task's sibling) — in the *invariants* list**, reword the supersession gate (invariant 1's "Dedup keys on the deterministic fact id after supersession resolution" neighborhood and the rule-5 sentence "no superseded fact is ever injected" wherever it governs replay) to: rule 5 governs **render-time construction only** — at render time no superseded fact is injected; post-render supersession flows exclusively through the append-and-mark path from Task 1.1.
 
@@ -39,8 +39,8 @@ In `INTENT.md`:
 In `INTENT.md`:
 
 1. **Invariant 3 (lines 68–72):** replace "sidecar down" with "**recall backend unavailable**" (Hermes has no sidecar contact); document the **empty-session_id no-op class** (a session with no session id is a silent no-op — nothing emitted, invariant's graceful-degradation behavior).
-2. **Invariant 4 (lines 73–77):** keep RR-C forward-looking framing, add: recall currently returns **title+text only** — `recall_wiki` discards provenance fields; closing RR-C needs parser changes per integration.
-   > **ERRATUM (2026-10-05, review delta):** this sentence was written from a stale field list. Verified ground truth: `ct recall --json` exposes `entity_id`, `doc_path`, `score` — **no title**. The implemented INTENT.md invariant 4 carries the correct fields; this line is preserved as review history and superseded by the erratum in the spec (§ m4).
+2. **Invariant 4 (lines 73–77):** keep RR-C forward-looking framing, add: recall currently returns a `results` array of chunk hits and a `wiki` array of wiki entries; `recall_wiki` reads only `title` and `text` from each wiki entry, discarding `id`, `source_ref`, and `confidence`; closing RR-C needs parser changes per integration.
+   > **ERRATUM (2026-10-05, review delta):** this sentence was written from a stale field list. Verified ground truth: `ct recall --json` returns a `results` array (`doc_path`, `chunk_text`, `score`, `symbol_name`, `entity_id`) and a `wiki` array (`id`, `entity_id`, `title`, `text`, `source_ref`, `confidence`) — neither carries a provenance class. The implemented INTENT.md invariant 4 carries the correct fields; this line is preserved as review history and superseded by the erratum in the spec (§ m4).
 3. **Invariant 5 (lines 78–80):** replace "values set by CT" with **host/spec-pinned values** (`max_chars=2500` is the Hermes host registration in `__init__.py`; `RECALL_K=3` is local to `ct_wisdom.py`); the never-raised-locally rule stays.
 4. **Read-only retrieval (line 89–90):** replace "no query-time embedding" with "**no query-time embedding of vault files; no ad-hoc indexing**" (recall itself embeds the query).
 5. **v1 mechanism step 1 (lines 37–39):** name the actual command: `ct recall "<seed>" --json --k 3` plus cwd widening.

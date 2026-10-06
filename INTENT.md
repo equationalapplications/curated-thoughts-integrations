@@ -76,8 +76,11 @@ work**, not settled by this file; open questions carried from the invariants
    visible but corrected — never silently relied on. A bootstrap render that
    fails (timeout / spawn failure / probe timeout) MAY be **late-filled at a
    later rebuild boundary** (e.g. a compaction rebuild) — better late wisdom
-   than never; the per-render stall stays bounded (~8 s worst case, failure
-   classes per `ct_wisdom.py`). Mid-session learning arrives only as tool
+   than never; each identity probe uses a 3 s subprocess timeout
+   (`PROBE_TIMEOUT`) and recall uses a 5 s subprocess timeout
+   (`RECALL_TIMEOUT`); discovery may probe multiple candidates per render,
+   so the worst-case stall scales with the candidate list (failure classes per
+   `ct_wisdom.py`). Mid-session learning arrives only as tool
    results; the system prompt is never rewritten.
 3. **Graceful degradation.** Recall backend unavailable, timeout, empty
    corpus → the integration is a silent no-op (no empty block, nothing
@@ -87,9 +90,13 @@ work**, not settled by this file; open questions carried from the invariants
    agent session must never fail because its brain is unreachable.
 4. **Provenance labeling.** Every injected fact is labeled with its provenance
    class from a fixed vocabulary OWNED BY CT and emitted by `ct recall`
-   (`ct recall --json` currently returns entity_id, doc_path, and score only —
-   no provenance class — RR-C; closing it needs parser changes per
-   integration, so until then this invariant is forward-looking).
+   (on successful recalls with chunk hits, `ct recall --json` returns a
+   `results` array of chunks — `doc_path`, `chunk_text`, `score`,
+   `symbol_name`, `entity_id` — and a `wiki` array of entries — `id`,
+   `entity_id`, `title`, `text`, `source_ref`, `confidence`; neither array
+   carries a provenance class — RR-C; closing it needs parser changes per
+   integration, so until then this invariant is forward-looking). The Hermes
+   parser reads only `title` and `text` from `wiki`, discarding the rest.
    Integrations never present agent-tier
    wisdom as verified knowledge.
 5. **Bound the block.** The injection block has a size/item cap with
@@ -135,6 +142,8 @@ work**, not settled by this file; open questions carried from the invariants
 4. Version bump + CHANGELOG + README table per integration.
 5. The invariants ARE the test surface: any injection-touching PR must
    demonstrate exactly-once across randomized sessions with mid-session tool
-   results, byte-identical injected blocks after first render, and the
+   results, byte-identical injected blocks across memoized renders (retries
+   after timeout / exit / spawn failure are allowed and may fill the block
+   the first render left dark), and the
    supersession gate (at render time, no superseded fact is ever injected —
    post-render supersessions ride the append-and-mark path, per invariant 2).
