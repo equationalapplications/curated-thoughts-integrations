@@ -136,9 +136,16 @@ def _read_text_file(path, limit=256 * 1024):
 # checks
 # --------------------------------------------------------------------------
 
-def find_sidecar():
-    """Locate the sidecar. Returns (path|None, resolved|None, source)."""
-    return ct_env.find_sidecar()
+def find_sidecar(env=None):
+    """Locate the sidecar. Returns (path|None, resolved|None, source).
+
+    `env` (a mapping) overrides os.environ for PATH-based discovery, matching
+    the spawn-time environment. Issue #14: run_checks accepted an `env`
+    (tests pass a PATH pointing at a mock sidecar) but discovered from the
+    ambient os.environ — so on machines with a real installed sidecar, the
+    real binary was spawned against the test fixture brain.
+    """
+    return ct_env.find_sidecar(env=env)
 
 
 def check_sidecar_binary(found=None):
@@ -864,7 +871,8 @@ def check_version_compat(path, tool_count=None):
 def run_checks(timeout=MCP_TIMEOUT, env=None):
     """Run all checks; returns list of CheckResult."""
     results = []
-    path, resolved, source = find_sidecar()
+    # Discovery must honor the same env the spawn will use (issue #14).
+    path, resolved, source = find_sidecar(env=env)
     brain_paths = ct_env.resolve_brain_paths()
 
     results.append(check_sidecar_binary((path, resolved, source)))

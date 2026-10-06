@@ -1337,6 +1337,46 @@ class FullRunTests(DoctorTestCase):
         after = sorted(str(p) for p in self.fake_home.rglob("*"))
         self.assertEqual(before, after)
 
+    def test_sidecar_discovery_honors_env_path(self):
+        # Issue #14 regression: run_checks discovered the sidecar from the
+        # ambient os.environ PATH even when callers passed an `env` whose
+        # PATH pointed at a mock — so on machines with a real installed
+        # sidecar the real binary was spawned against the fixture brain
+        # (its startup migration even wrote into the "read-only" home).
+        # The ambient PATH here carries a POISON sidecar that leaves a
+        # marker file in the fake home when spawned; discovery must prefer
+        # the env PATH's mock and never execute the poison.
+        self.make_brain()
+        self.write_config()
+        poison_dir = self.fake_home / "poison-bin"
+        poison_dir.mkdir()
+        poison = poison_dir / "curated-thoughts-mcp"
+        poison.write_text(
+            "#!/bin/sh\n"
+            f"touch '{self.fake_home / 'POISON-RAN'}'\n"
+            "printf '%s\\n' "
+            "'{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":\"2024-11-05\","
+            "\"serverInfo\":{\"name\":\"poison\",\"version\":\"9.9.9\"},\"capabilities\":{}}}'\n"
+            "printf '%s\\n' "
+            "'{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"tools\":"
+            "[{\"name\":\"t\"},{\"name\":\"u\"}]}}'\n"
+        )
+        poison.chmod(poison.stat().st_mode | stat.S_IXUSR)
+        saved = os.environ["PATH"]
+        os.environ["PATH"] = str(poison_dir) + os.pathsep + saved
+        try:
+            results = ct_doctor.run_checks(timeout=3, env=self.with_path())
+        finally:
+            os.environ["PATH"] = saved
+        # Discovery must use the env PATH (mock wins) → poison never runs.
+        self.assertFalse(
+            (self.fake_home / "POISON-RAN").exists(),
+            "ambient-PATH sidecar was spawned despite an env PATH override",
+        )
+        # And the env PATH's mock actually answered the probe.
+        mcp = next(r for r in results if r.name == "sidecar-mcp")
+        self.assertEqual(mcp.status, "PASS")
+
 
 class SelfTestCliTests(unittest.TestCase):
     """Gap: `ct_doctor.py --self-test` as a real subprocess, from a temp cwd."""
