@@ -855,20 +855,18 @@ class ImportPreflightTests(DoctorTestCase):
         # Opus r1 minor 4 (second half): the documented falsy-override rule —
         # OLLAMA_HOST="" in the env view must fall back to the default host,
         # not probe an empty netloc (ambient value would also be ignored).
-        # CodeRabbit r1 (PR #30): mock urlopen so this test is independent of
-        # any Ollama instance reachable at 127.0.0.1:11434 on the runner —
-        # before this the assertion flipped to PASS on a dev machine that had
-        # Ollama running. Inspecting call_args on the mock also proves the
-        # probe targeted the DEFAULT host, not the env-view or ambient one.
+        # Hermetic regardless of a real Ollama on 11434 (CodeRabbit r1 PR #30,
+        # GLM r2 PR #31): the fallback default is redirected to a dead port
+        # DISTINCT from setUp's ambient OLLAMA_HOST (127.0.0.1:1), so the
+        # detail proves the probe took the default and not the ambient value.
+        # Patching the module constant (not urllib's urlopen) keeps the test
+        # independent of how check_embedding imports urlopen.
         from unittest import mock
-        import urllib.request
 
         self.make_brain()
-        self.patch_env("OLLAMA_HOST", "http://127.0.0.1:1")
         with mock.patch.object(
-            urllib.request, "urlopen",
-            side_effect=Exception("simulated probe failure"),
-        ) as probed_mock:
+            ct_doctor, "OLLAMA_DEFAULT_HOST", "http://127.0.0.1:2"
+        ):
             results = {
                 r.name: r
                 for r in ct_doctor.run_checks(
@@ -879,13 +877,10 @@ class ImportPreflightTests(DoctorTestCase):
                     },
                 )
             }
+        detail = results["embedding-backend"].detail
         self.assertEqual(results["embedding-backend"].status, ct_doctor.WARN)
-        self.assertIn("127.0.0.1:11434", results["embedding-backend"].detail)
-        # The probe URL must be the DEFAULT host — proves the empty-string
-        # override fell through to OLLAMA_DEFAULT_HOST, not the ambient or
-        # env-view netloc.
-        probed_url = probed_mock.call_args[0][0]
-        self.assertIn("127.0.0.1:11434", probed_url)
+        self.assertIn("http://127.0.0.1:2", detail)
+        self.assertNotIn("127.0.0.1:1", detail)
 
     def _seed(self, rows, evidence_table=True, evidence_ids=None, unanchored=0,
               with_source_type=True, with_deleted_at=False):
