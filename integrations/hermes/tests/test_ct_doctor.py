@@ -855,20 +855,37 @@ class ImportPreflightTests(DoctorTestCase):
         # Opus r1 minor 4 (second half): the documented falsy-override rule —
         # OLLAMA_HOST="" in the env view must fall back to the default host,
         # not probe an empty netloc (ambient value would also be ignored).
+        # CodeRabbit r1 (PR #30): mock urlopen so this test is independent of
+        # any Ollama instance reachable at 127.0.0.1:11434 on the runner —
+        # before this the assertion flipped to PASS on a dev machine that had
+        # Ollama running. Inspecting call_args on the mock also proves the
+        # probe targeted the DEFAULT host, not the env-view or ambient one.
+        from unittest import mock
+        import urllib.request
+
         self.make_brain()
         self.patch_env("OLLAMA_HOST", "http://127.0.0.1:1")
-        results = {
-            r.name: r
-            for r in ct_doctor.run_checks(
-                timeout=3.0,
-                env={
-                    **self.with_path(),
-                    "OLLAMA_HOST": "",
-                },
-            )
-        }
+        with mock.patch.object(
+            urllib.request, "urlopen",
+            side_effect=Exception("simulated probe failure"),
+        ) as probed_mock:
+            results = {
+                r.name: r
+                for r in ct_doctor.run_checks(
+                    timeout=3.0,
+                    env={
+                        **self.with_path(),
+                        "OLLAMA_HOST": "",
+                    },
+                )
+            }
         self.assertEqual(results["embedding-backend"].status, ct_doctor.WARN)
         self.assertIn("127.0.0.1:11434", results["embedding-backend"].detail)
+        # The probe URL must be the DEFAULT host — proves the empty-string
+        # override fell through to OLLAMA_DEFAULT_HOST, not the ambient or
+        # env-view netloc.
+        probed_url = probed_mock.call_args[0][0]
+        self.assertIn("127.0.0.1:11434", probed_url)
 
     def _seed(self, rows, evidence_table=True, evidence_ids=None, unanchored=0,
               with_source_type=True, with_deleted_at=False):
