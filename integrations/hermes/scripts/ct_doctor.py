@@ -230,7 +230,11 @@ def check_sidecar_binary(found=None, gated=False):
 
 def check_sidecar_identity(path, resolved):
     """(2) sidecar identity — warn if a source-checkout build shadows the
-    installed one. Two servers on one brain is a bug; disambiguate by path."""
+    installed one. Two servers on one brain is a bug; disambiguate by path.
+
+    Must never spawn the sidecar (path inspection only): the issue #28 gate
+    in run_checks relies on a gated run executing NO binary at all.
+    """
     if not path:
         return CheckResult(
             "sidecar-identity",
@@ -978,7 +982,16 @@ def run_checks(timeout=MCP_TIMEOUT, env=None):
     brain_paths = ct_env.resolve_brain_paths(env=merged)
 
     # The bundled-fallback spawn gate: caller claimed PATH control and lost.
-    gated = env is not None and "PATH" in env and source == ct_env.SOURCE_BUNDLED
+    # CT_DOCTOR_ALLOW_BUNDLED=1 (read from the RAW caller env) is the explicit
+    # opt-out for callers that run a restricted PATH deliberately and accept
+    # the ambient install being probed under their env (GLM r2 minor 3).
+    allow_bundled = bool(env) and env.get("CT_DOCTOR_ALLOW_BUNDLED") == "1"
+    gated = (
+        env is not None
+        and "PATH" in env
+        and source == ct_env.SOURCE_BUNDLED
+        and not allow_bundled
+    )
 
     results.append(check_sidecar_binary((path, resolved, source), gated=gated))
     results.append(check_sidecar_identity(path, resolved))
@@ -997,8 +1010,10 @@ def run_checks(timeout=MCP_TIMEOUT, env=None):
                 f"Discovery found {SIDECAR_NAME} in an ambient install "
                 "location, not via your PATH override — the override "
                 "probably points at a missing or non-executable binary. "
-                f"Not spawning it; fix the override (or unset PATH in the "
-                f"env) and re-run.",
+                "Not spawning it: fix the override so it resolves the "
+                "intended binary. If you deliberately run a restricted PATH "
+                "and accept the ambient install being probed under this "
+                "env, set CT_DOCTOR_ALLOW_BUNDLED=1 in the env.",
             )
         )
     else:

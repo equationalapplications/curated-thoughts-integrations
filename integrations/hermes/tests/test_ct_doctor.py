@@ -126,6 +126,15 @@ class DoctorTestCase(unittest.TestCase):
         self.bin_dir = self.fake_home / "bin"
         self.bin_dir.mkdir()
         self.mock_path = self.bin_dir / "curated-thoughts-mcp"
+        if " " in sys.executable:
+            # GLM r2 NIT 6: the mock's shebang is #!<sys.executable>; POSIX
+            # passes everything after #! as ONE argv word, so a spaced
+            # python path is ENOENT. Skip loudly instead of failing every
+            # test on the precondition assert.
+            self.skipTest(
+                f"mock sidecar shebang cannot encode a spaced interpreter "
+                f"path ({sys.executable!r}); issue #28 fixture limitation"
+            )
         self.mock_path.write_text(
             MOCK_SIDECAR.replace("#!MOCK_PYTHON", f"#!{sys.executable}")
         )
@@ -884,20 +893,29 @@ class ImportPreflightTests(DoctorTestCase):
         # Opus r1 minor 4 (second half): the documented falsy-override rule —
         # OLLAMA_HOST="" in the env view must fall back to the default host,
         # not probe an empty netloc (ambient value would also be ignored).
+        from unittest import mock
+
         self.make_brain()
         self.patch_env("OLLAMA_HOST", "http://127.0.0.1:1")
-        results = {
-            r.name: r
-            for r in ct_doctor.run_checks(
-                timeout=3.0,
-                env={
-                    **self.with_path(),
-                    "OLLAMA_HOST": "",
-                },
-            )
-        }
+        # GLM r2 minor 1 (PR #31 review): the assertion must hold even on a
+        # machine where a real Ollama listens on 11434 — check_embedding
+        # would PASS there and the WARN assert would flake. Redirect the
+        # fallback host to a guaranteed-dead port for the duration.
+        with mock.patch.object(ct_doctor, "OLLAMA_DEFAULT_HOST", "http://127.0.0.1:1"):
+            results = {
+                r.name: r
+                for r in ct_doctor.run_checks(
+                    timeout=3.0,
+                    env={
+                        **self.with_path(),
+                        "OLLAMA_HOST": "",
+                    },
+                )
+            }
         self.assertEqual(results["embedding-backend"].status, ct_doctor.WARN)
-        self.assertIn("127.0.0.1:11434", results["embedding-backend"].detail)
+        # The detail must name the FALLBACK host (the patched default), the
+        # proof that the empty-string override fell back to the default.
+        self.assertIn("http://127.0.0.1:1", results["embedding-backend"].detail)
 
     def _seed(self, rows, evidence_table=True, evidence_ids=None, unanchored=0,
               with_source_type=True, with_deleted_at=False):
@@ -2099,15 +2117,54 @@ class BundledFallbackGuardTests(DoctorTestCase):
         # The #28 read-only gap: a run whose override fails must not execute
         # anything, so the fake home is unchanged before/after. Snapshot
         # AFTER building the fixtures (the fixtures themselves are allowed
-        # to exist; only the gated run must touch nothing).
+        # to exist; only the gated run must touch nothing). GLM r2 NIT 4:
+        # also fail if the SIDECAR spawn path is reached — mcp_tools_list is
+        # the doctor's only sidecar-exec call; dpkg-query stays legal (it is
+        # version metadata, not the sidecar).
+        from unittest import mock
+
         poison = self._make_poison("#!" + sys.executable + "\n")
         empty_dir = self.fake_home / "empty-path-3"
         empty_dir.mkdir()
         before = sorted(str(p) for p in self.fake_home.rglob("*"))
-        with self._poison_candidates(poison):
+        with self._poison_candidates(poison), mock.patch.object(
+            ct_doctor,
+            "mcp_tools_list",
+            side_effect=AssertionError("gated run spawned the sidecar"),
+        ):
             ct_doctor.run_checks(timeout=3.0, env={"PATH": str(empty_dir)})
         after = sorted(str(p) for p in self.fake_home.rglob("*"))
         self.assertEqual(before, after)
+
+    @unittest.skipIf(IS_WINDOWS, MOCK_SPAWN_SKIP)
+    def test_allow_bundled_opt_out_probes_normally(self):
+        # GLM r2 minor 3: CT_DOCTOR_ALLOW_BUNDLED=1 in the RAW caller env
+        # opts out of the gate — a deliberate restricted-PATH wrapper gets
+        # the normal bundled discovery + probe (no WARN on binary/mcp).
+        tools = ", ".join(f'{{"name":"t{i}"}}' for i in range(14))
+        benign = self._make_poison(
+            "#!" + sys.executable + "\n"
+            "print('{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":"
+            "\"2024-11-05\",\"serverInfo\":{\"name\":\"benign\",\"version\":\"9.9.9\"},"
+            "\"capabilities\":{}}}')\n"
+            "print('{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"tools\":"
+            "[" + tools + "]}}')\n",
+        )
+        empty_dir = self.fake_home / "empty-path-4"
+        empty_dir.mkdir()
+        with self._poison_candidates(benign):
+            results = {
+                r.name: r
+                for r in ct_doctor.run_checks(
+                    timeout=3.0,
+                    env={
+                        "PATH": str(empty_dir),
+                        "CT_DOCTOR_ALLOW_BUNDLED": "1",
+                    },
+                )
+            }
+        self.assertEqual(results["sidecar-binary"].status, ct_doctor.PASS)
+        self.assertEqual(results["sidecar-mcp"].status, ct_doctor.PASS)
 
 
 class PluginConcurrencyTests(unittest.TestCase):
