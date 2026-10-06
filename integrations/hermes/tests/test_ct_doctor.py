@@ -539,6 +539,34 @@ class PlatformDiscoveryTests(DoctorTestCase):
         self.assertEqual(r.status, ct_doctor.WARN)
 
 
+class FindSidecarWrapperTests(DoctorTestCase):
+    """ct_doctor.find_sidecar must route its `env` through _merged_env.
+
+    Without the overlay, an ambient os.environ PATH could win discovery
+    even when the caller passes an env PATH — the bug behind issue #14.
+    FullRunTests.test_sidecar_discovery_honors_env_path proves this
+    transitively via run_checks; this test pins the wrapper itself, so a
+    future edit that drops the _merged_env call fails here rather than
+    only at the integration level.
+    """
+
+    @unittest.skipIf(IS_WINDOWS, MOCK_SPAWN_SKIP)
+    def test_find_sidecar_wrapper_applies_merged_env(self):
+        # Patch _merged_env to return a sentinel PATH that points at the
+        # mock. If the wrapper passes its `env` straight through, the
+        # sentinel is bypassed and discovery falls back to the caller's
+        # PATH (or the ambient one) — the assertion on `path` then fails.
+        from unittest import mock
+
+        sentinel = {"PATH": str(self.bin_dir), "MERGED_SENTINEL": "1"}
+        with mock.patch.object(ct_doctor, "_merged_env", return_value=sentinel):
+            path, _resolved, source = ct_doctor.find_sidecar(
+                env={"PATH": "/this/path/is/ignored/by/the/wrapper"}
+            )
+        self.assertEqual(path, str(self.mock_path))
+        self.assertEqual(source, "PATH")
+
+
 class EmbeddingTests(DoctorTestCase):
     def test_no_backend_warns_never_fails(self):
         r = ct_doctor.check_embedding()
@@ -1336,6 +1364,52 @@ class FullRunTests(DoctorTestCase):
         ct_doctor.run_checks(timeout=3, env=self.with_path())
         after = sorted(str(p) for p in self.fake_home.rglob("*"))
         self.assertEqual(before, after)
+
+    @unittest.skipIf(IS_WINDOWS, MOCK_SPAWN_SKIP)
+    def test_sidecar_discovery_honors_env_path(self):
+        # Issue #14 regression: run_checks discovered the sidecar from the
+        # ambient os.environ PATH even when callers passed an `env` whose
+        # PATH pointed at a mock — so on machines with a real installed
+        # sidecar the real binary was spawned against the fixture brain
+        # (its startup migration even wrote into the "read-only" home).
+        # The ambient PATH here carries a POISON sidecar that leaves a
+        # marker file in the fake home when spawned; discovery must prefer
+        # the env PATH's mock and never execute the poison.
+        self.make_brain()
+        self.write_config()
+        poison_dir = self.fake_home / "poison-bin"
+        poison_dir.mkdir()
+        poison = poison_dir / "curated-thoughts-mcp"
+        poison.write_text(
+            "#!/bin/sh\n"
+            f"touch '{self.fake_home / 'POISON-RAN'}'\n"
+            "printf '%s\\n' "
+            "'{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":\"2024-11-05\","
+            "\"serverInfo\":{\"name\":\"poison\",\"version\":\"9.9.9\"},\"capabilities\":{}}}'\n"
+            "printf '%s\\n' "
+            "'{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"tools\":"
+            "[{\"name\":\"t\"},{\"name\":\"u\"}]}}'\n"
+        )
+        poison.chmod(poison.stat().st_mode | stat.S_IXUSR)
+        # Compute the env BEFORE poisoning the ambient PATH (Opus r1 minor 1):
+        # with_path() snapshots os.environ, so building it after the poison
+        # would put the poison on the env PATH too and weaken the isolation
+        # this test exists to prove.
+        env_path = self.with_path()
+        saved = os.environ["PATH"]
+        os.environ["PATH"] = str(poison_dir) + os.pathsep + saved
+        try:
+            results = ct_doctor.run_checks(timeout=3, env=env_path)
+        finally:
+            os.environ["PATH"] = saved
+        # Discovery must use the env PATH (mock wins) → poison never runs.
+        self.assertFalse(
+            (self.fake_home / "POISON-RAN").exists(),
+            "ambient-PATH sidecar was spawned despite an env PATH override",
+        )
+        # And the env PATH's mock actually answered the probe.
+        mcp = next(r for r in results if r.name == "sidecar-mcp")
+        self.assertEqual(mcp.status, "PASS")
 
 
 class SelfTestCliTests(unittest.TestCase):

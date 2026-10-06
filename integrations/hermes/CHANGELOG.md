@@ -6,6 +6,21 @@ format below is load-bearing: `## <version> — <date>`.
 
 ## Unreleased
 
+## 0.3.1 — 2026-10-06
+
+- Fixed: `run_checks` discovered the sidecar from the ambient `os.environ`
+  PATH even when callers passed an `env` whose PATH pointed elsewhere — so
+  on machines with a real installed sidecar, the real binary was probed (and
+  its startup migration ran) against whatever brain the caller's environment
+  pointed at, including test fixture brains (issue #14; the read-only and
+  self-test failures on sidecar-equipped machines). Discovery, brain-path
+  resolution, and the spawn now all use the same merged env view
+  (`os.environ` overlaid with the caller's `env`, matching
+  `subprocess.run(env=...)`). Regression test: poison sidecar on the ambient
+  PATH must never run when an env PATH override is supplied. Residual risk
+  (bundled-path fallback reaching a real sidecar when the env-PATH mock is
+  absent) is tracked in issue #28.
+
 ## 0.3.0 — 2026-09-30
 
 - New system-prompt section `curated-thoughts-wisdom` that recalls the wisdom
