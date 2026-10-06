@@ -38,11 +38,36 @@ import ct_preflight  # noqa: E402
 SIDECAR_NAME = ct_env.SIDECAR_NAME
 
 # Where the Hermes plugin registers the MCP server.
+# Ambient env enters here ONCE, at import, and that is deliberate (issue #29
+# review, GLM 2026-10-06): the Hermes config is a property of the HOST Hermes
+# installation, not of the brain/sidecar environment being probed — a caller
+# passing env= to run_checks is asking about a different brain/env view, not
+# about a different Hermes install. check_hermes_registration therefore reads
+# ambient by design; every other check resolves through _merged_env.
 HERMES_CONFIG = Path(
     os.environ.get("HERMES_CONFIG", str(Path.home() / ".hermes" / "config.yaml"))
 )
 MCP_SERVER_KEY = "curated-thoughts"
 PLUGIN_NAME = "curated-thoughts"
+
+
+def _plugin_version(manifest=None):
+    """Plugin release version, read from ../plugin.yaml at call time.
+
+    Keeps the MCP clientInfo from drifting from the shipped version (it
+    historically lagged as a literal): the manifest is the source of truth.
+    """
+    manifest = manifest or (Path(__file__).resolve().parent.parent / "plugin.yaml")
+    try:
+        for line in manifest.read_text(encoding="utf-8").splitlines():
+            if line.startswith("version:"):
+                value = line.split(":", 1)[1].strip()
+                if value:
+                    return value
+                break
+    except OSError:
+        pass
+    return "0.0.0-unknown"
 
 # Embedding backends: cloud keys OR a local Ollama. WARN-only check.
 EMBED_ENV_KEYS = (
@@ -232,7 +257,9 @@ def mcp_tools_list(path, timeout=MCP_TIMEOUT, env=None):
                 "params": {
                     "protocolVersion": "2024-11-05",
                     "capabilities": {},
-                    "clientInfo": {"name": "ct_doctor", "version": "0.2.0"},
+                    # Derived from plugin.yaml so it cannot drift (GLM r1
+                    # review of PR #30).
+                    "clientInfo": {"name": "ct_doctor", "version": _plugin_version()},
                 },
             }
         )
@@ -523,6 +550,9 @@ def check_embedding(env=None):
             PASS,
             f"embedding API key present via {present[0]}",
         )
+    # GLM r1 (PR #30): a whitespace-only OLLAMA_HOST (e.g. " ") is truthy, so
+    # it counts as "set" and the probe WARNs naming that garbage netloc —
+    # accepted degradation; only empty string is the documented suppression.
     host = merged.get("OLLAMA_HOST") or OLLAMA_DEFAULT_HOST
     try:
         from urllib.parse import urlparse

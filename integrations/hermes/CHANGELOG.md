@@ -17,6 +17,13 @@ format below is load-bearing: `## <version> — <date>`.
   env-reading check now accepts `env` and resolves through the same merged
   view, and `run_checks` threads its merged env into all of them.
   Ambient-only callers (`ct_doctor check`) see no behavior change.
+- Changed: the MCP probe's clientInfo version is now derived from
+  `plugin.yaml` at call time instead of a hard-coded literal that had
+  drifted to 0.2.0; a missing manifest degrades to `0.0.0-unknown` rather
+  than crashing. Ambient-only reading of `HERMES_CONFIG` in check 7 is now
+  documented as deliberate (the Hermes config is a property of the host
+  install, not of the probed environment). (GLM 5.3 independent review of
+  this PR, 2026-10-06 — all findings adjudicated, none Critical/Important.)
 
 ## 0.3.1 — 2026-10-06
 

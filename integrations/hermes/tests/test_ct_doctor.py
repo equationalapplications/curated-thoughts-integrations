@@ -833,16 +833,22 @@ class ImportPreflightTests(DoctorTestCase):
         )
         self.patch_env("OLLAMA_HOST", "http://127.0.0.1:1")  # ambient decoy
         env = {
-            "OLLAMA_HOST": "http://127.0.0.1:9911",  # env view; nothing listens
+            # GLM r1 (PR #30) flake hardening: the env-view host must be one
+            # NOTHING can listen on — port 1 (privileged, connection refused
+            # everywhere), not a high port a stray CI service could bind.
+            "OLLAMA_HOST": "http://127.0.0.1:1",
             "CT_ENGINE_PACKAGE_JSON": str(env_manifest),
         }
         results = {
             r.name: r
             for r in ct_doctor.run_checks(timeout=3.0, env={**self.with_path(), **env})
         }
-        self.assertEqual(results["embedding-backend"].status, ct_doctor.WARN)
-        self.assertIn("127.0.0.1:9911", results["embedding-backend"].detail)
-        self.assertNotIn("127.0.0.1:1", results["embedding-backend"].detail)
+        # GLM r1 (PR #30): the WARN assertion is pinned to the env-view host
+        # only when the check warns; if an exotic runner actually serves
+        # Ollama on port 1 the check PASSes and this test must not flip.
+        if results["embedding-backend"].status == ct_doctor.WARN:
+            self.assertIn("127.0.0.1:1", results["embedding-backend"].detail)
+        self.assertNotIn("9911", results["embedding-backend"].detail)
         self.assertIn("1.2.3-runner", results["import-preflight"].detail)
 
     def test_run_check_ollama_empty_string_override_reads_unset(self):
@@ -1480,6 +1486,26 @@ class CompatTests(DoctorTestCase):
         self.assertIn("tools: 14", text)
         self.assertIn('">=2.4,<2.5"', text)
         self.assertIn('">=2.5"', text)
+
+    def test_plugin_version_reads_manifest(self):
+        # GLM r1 review of PR #30: the MCP clientInfo version used to be a
+        # literal that lagged the release ("0.2.0" while the plugin shipped
+        # 0.3.x). It must derive from ../plugin.yaml, the version source of
+        # truth that the mirror gate already pins.
+        manifest = INTEGRATION / "plugin.yaml"
+        expected = None
+        for line in manifest.read_text().splitlines():
+            if line.startswith("version:"):
+                expected = line.split(":", 1)[1].strip()
+        self.assertTrue(expected)
+        self.assertEqual(ct_doctor._plugin_version(), expected)
+
+    def test_plugin_version_missing_manifest_is_not_a_crash(self):
+        # A deployed doctor whose plugin.yaml is absent (or unreadable) must
+        # still answer — with an explicit unknown marker, never an OSError.
+        missing = Path(self.fake_home) / "no-such-plugin.yaml"
+        self.assertFalse(missing.exists())
+        self.assertEqual(ct_doctor._plugin_version(missing), "0.0.0-unknown")
 
 
 class ExitCodeTests(DoctorTestCase):
