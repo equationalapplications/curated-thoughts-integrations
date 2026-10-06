@@ -36,7 +36,9 @@ work**, not settled by this file; open questions carried from the invariants
 
 1. **Analyze:** at bootstrap there is no conversation yet — recall is driven by
    the frozen seed constant plus session context, per PR #21 (`ct recall
-   "<seed>" --json`); the seed does the semantic work.
+   "<seed>" --json --k 3`, the query string widened with the cwd basename
+   when non-degenerate; the subprocess itself runs from `~`); the seed does
+   the semantic work.
 2. **Match:** find wisdom-layer facts via CT's recall (semantic similarity).
 3. **Judge (in CT, optional — future; not implemented in v1):** if System One
    is configured, CT's recall
@@ -54,30 +56,58 @@ work**, not settled by this file; open questions carried from the invariants
    session's context: once in the injected block, never again via tool
    results. The ledger lives in CT's session context (keyed by session id);
    CT recall tools filter against it. Dedup keys on the deterministic fact id
-   after supersession resolution. A replacement surfaced mid-session is
-   delivered with an explicit "supersedes <id>" marker; the frozen block is
-   never edited. (Ledger ownership and the supersession marker are new work —
+   after supersession resolution. The supersession gate governs **render-time
+   construction only**: at render time, no superseded fact is injected.
+   Post-render supersession flows exclusively through the append-and-mark
+   path: a replacement surfaced mid-session is delivered with an explicit
+   "supersedes <id>" tool-result marker; the frozen block is never edited.
+   (Ledger ownership and the supersession marker are new work —
    pending decisions.)
-2. **Cache safety.** The block is computed once, frozen as ONE contiguous
-   static region at bootstrap, once per session, additive with existing plugin
-   context. The rendered block and the session ledger are persisted per
-   session and REPLAYED on resume and compaction, never recomputed (PR #22
-   memo-replay is the pattern; per-host conformance is pending RR-6).
-   Mid-session learning arrives only as tool results; the system prompt is
-   never rewritten.
-3. **Graceful degradation.** Recall unavailable, sidecar down, timeout, empty
+2. **Cache safety.** The block is computed at bootstrap and frozen as ONE
+   contiguous static region, additive with existing plugin context. Verbatim
+   replay exists to protect **prompt caching** — the prefix stays intact so
+   the cache is preserved — not to freeze knowledge. Resume replay is
+   guaranteed by the **host** persisting the fully rendered prompt verbatim;
+   there is no plugin-side persistence — none will be built — and the
+   in-process memo (PR #22) is a speed optimization for **new renders only**.
+   A fact superseded **after** the original render is **appended as a
+   correction** through invariant 1's append-and-mark path (mid-session
+   delivery: pending design work); the append is highly
+   relevant content, not unnecessary duplication, and the stale line stays
+   visible but corrected — never silently relied on. A bootstrap render that
+   fails (timeout / exit / spawn / probe timeout) MAY be **late-filled when
+   a later render misses the session memo** — `discovery_miss`,
+   `parse_error`, and `zero_hits` remain cached as empty blocks until LRU
+   eviction; while the entry is in the LRU, only the non-memoized failure
+   classes retry, but after LRU eviction any failure class may retry on the
+   next render for that session; a compaction rebuild counts as a trigger
+   only when it invokes the renderer; each identity probe uses a 3 s
+   subprocess timeout (`PROBE_TIMEOUT`) and recall uses a 5 s subprocess
+   timeout (`RECALL_TIMEOUT`); discovery may probe multiple candidates per
+   render, so the worst-case stall scales with the candidate list. (Failure
+   class names are those in `ct_wisdom.py`.) Mid-session learning arrives only as tool
+   results; the system prompt is never rewritten.
+3. **Graceful degradation.** Recall backend unavailable, timeout, empty
    corpus → the integration is a silent no-op (no empty block, nothing
-   emitted), logged locally, never surfaced as a session error. A bounded
-   recall timeout prevents a hung sidecar from stalling bootstrap. An agent
-   session must never fail because its brain is unreachable.
+   emitted), logged locally, never surfaced as a session error. A session
+   with no session id is likewise a silent no-op — nothing emitted. A bounded
+   recall timeout prevents a hung recall backend from stalling bootstrap. An
+   agent session must never fail because its brain is unreachable.
 4. **Provenance labeling.** Every injected fact is labeled with its provenance
    class from a fixed vocabulary OWNED BY CT and emitted by `ct recall`
-   (whether `ct recall` exposes this today is unverified — RR-C; until then
-   this invariant is forward-looking). Integrations never present agent-tier
+   (on successful recalls with chunk hits, `ct recall --json` returns a
+   `results` array of chunks — `doc_path`, `chunk_text`, `score`,
+   `symbol_name`, `entity_id` — and a `wiki` array of entries — `id`,
+   `entity_id`, `title`, `text`, `source_ref`, `confidence`; neither array
+   carries a provenance class — RR-C; closing it needs parser changes per
+   integration, so until then this invariant is forward-looking). The Hermes
+   parser reads only `title` and `text` from `wiki`, discarding the rest.
+   Integrations never present agent-tier
    wisdom as verified knowledge.
-5. **Bound the block.** The injection block has a size/item cap with values
-   set by CT (PR #21 pins `max_chars=2500`); the cap is never raised locally
-   to compensate for weak matching.
+5. **Bound the block.** The injection block has a size/item cap with
+   host/spec-pinned values (`max_chars=2500` is the Hermes host registration
+   in `__init__.py`; `RECALL_K=3` is local to `ct_wisdom.py`); the cap is
+   never raised locally to compensate for weak matching.
 
 ## Read-only retrieval
 
@@ -87,7 +117,8 @@ work**, not settled by this file; open questions carried from the invariants
   `pending ingest` honestly. Integrations never call row-level
   insert/update/approve/archive tools.
 - Injection never reads uningested vault files — no lexical grepping, no
-  query-time embedding. Freshness is CT's deposit-kicked-ingest job, not ours.
+  query-time embedding of vault files, no ad-hoc indexing. Freshness is CT's
+  deposit-kicked-ingest job, not ours.
 - Integrations only READ the brain via the sanctioned recall surface (`ct
   recall` subprocess / read-only sidecar tools). No direct brain DB access.
 - Reuse proven decisions: new ports fork the converged Hermes design and
@@ -108,13 +139,16 @@ work**, not settled by this file; open questions carried from the invariants
 1. Spec first under `docs/superpowers/specs/`, from a Step-0 investigation
    with `[V]`-evidenced answers from pinned host sources (PR #22 is the
    standard).
-2. TDD: unit-test the invariant logic (dedup ledger, memo-replay byte
-   stability, sanitizer); e2e in the isolated container on a scratch profile —
-   never the live default profile or live brain.
+2. TDD: unit-test the invariant logic (dedup ledger, memo byte
+   stability across new renders, sanitizer); e2e in the isolated container on
+   a scratch profile — never the live default profile or live brain.
 3. Dual review to convergence (GLM + Opus) before merge; open questions park
    the PR.
 4. Version bump + CHANGELOG + README table per integration.
 5. The invariants ARE the test surface: any injection-touching PR must
    demonstrate exactly-once across randomized sessions with mid-session tool
-   results, byte-identical injected blocks after first render, and the
-   supersession gate (no superseded fact is ever injected).
+   results, byte-identical injected blocks across memoized renders (retries
+   after timeout / exit / spawn failure are allowed and may fill the block
+   the first render left dark), and the
+   supersession gate (at render time, no superseded fact is ever injected —
+   post-render supersessions ride the append-and-mark path, per invariant 1).
