@@ -160,15 +160,19 @@ class DoctorTestCase(unittest.TestCase):
         # the suite at setup if the fixture is ever broken again — and it
         # also protects the CLI-subprocess tests, whose child calls
         # run_checks() with env=None (beyond any runtime guard's reach).
-        found, _real, source = ct_env.find_sidecar(env=self.with_path())
-        self.assertTrue(
-            found
-            and source == ct_env.SOURCE_PATH
-            and os.path.realpath(found) == os.path.realpath(self.mock_path),
-            f"mock sidecar fixture broken: discovery returned "
-            f"({found!r}, {source!r}) instead of the mock — fix the fixture "
-            f"before running the suite (issue #28)",
-        )
+        # POSIX-only: Windows shutil.which appends PATHEXT and never tries
+        # the extensionless mock (the same reason the mock-spawn tests are
+        # skipped there); bare-PATH discovery legitimately returns none.
+        if not IS_WINDOWS:
+            found, _real, source = ct_env.find_sidecar(env=self.with_path())
+            self.assertTrue(
+                found
+                and source == ct_env.SOURCE_PATH
+                and os.path.realpath(found) == os.path.realpath(self.mock_path),
+                f"mock sidecar fixture broken: discovery returned "
+                f"({found!r}, {source!r}) instead of the mock — fix the fixture "
+                f"before running the suite (issue #28)",
+            )
 
     def _cleanup(self):
         for key, value in self._env_patches.items():
