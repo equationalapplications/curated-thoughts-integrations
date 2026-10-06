@@ -615,6 +615,26 @@ class EmbeddingTests(DoctorTestCase):
         finally:
             del os.environ["CT_EMBED_API_KEY"]
 
+    def test_explicit_env_key_wins_over_ambient(self):
+        # Issue #29: the ambient environment carries no embedding key (base
+        # setUp clears them); a caller passing one via env gets the PASS that
+        # view implies, without mutating os.environ.
+        r = ct_doctor.check_embedding(env={"CT_EMBED_API_KEY": "test-only-not-a-secret"})
+        self.assertEqual(r.status, ct_doctor.PASS)
+        self.assertIn("CT_EMBED_API_KEY", r.detail)
+
+    def test_ambient_key_suppressed_by_empty_string_override(self):
+        # _merged_env OVERLAYS os.environ (merge semantics, not replacement —
+        # PR #27), so env={} cannot remove an ambient key. The documented
+        # suppression mechanism is an explicit empty-string override, which
+        # reads as unset through the falsy .get().
+        os.environ["CT_EMBED_API_KEY"] = "test-only-not-a-secret"
+        try:
+            r = ct_doctor.check_embedding(env={"CT_EMBED_API_KEY": ""})
+            self.assertEqual(r.status, ct_doctor.WARN)
+        finally:
+            del os.environ["CT_EMBED_API_KEY"]
+
 
 class NormalizerPortTests(unittest.TestCase):
     """The classifier reimplements core-llm-wiki's normalizeSourceRef:

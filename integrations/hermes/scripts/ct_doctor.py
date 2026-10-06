@@ -502,17 +502,23 @@ def check_vault(brain_paths=None):
     return CheckResult("vault", PASS, f"vault at {vault} exists and is readable")
 
 
-def check_embedding():
+def check_embedding(env=None):
     """(6) embedding backend hint — env keys present or Ollama reachable.
-    WARN-only: never fails, since local fastembed works without either."""
-    present = [k for k in EMBED_ENV_KEYS if os.environ.get(k)]
+    WARN-only: never fails, since local fastembed works without either.
+
+    `env` (a mapping) is merged over os.environ — issue #29: a caller passing
+    a full env dict (e.g. the spawn-time view) gets the embedding verdict for
+    THAT view, not for ambient os.environ.
+    """
+    merged = _merged_env(env)
+    present = [k for k in EMBED_ENV_KEYS if merged.get(k)]
     if present:
         return CheckResult(
             "embedding-backend",
             PASS,
             f"embedding API key present via {present[0]}",
         )
-    host = os.environ.get("OLLAMA_HOST", OLLAMA_HOST)
+    host = merged.get("OLLAMA_HOST", OLLAMA_HOST)
     try:
         from urllib.parse import urlparse
         from urllib.request import urlopen
