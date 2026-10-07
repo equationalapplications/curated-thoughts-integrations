@@ -2253,6 +2253,7 @@ class BundledFallbackGuardTests(DoctorTestCase):
             }
         self.assertEqual(results["sidecar-mcp"].status, ct_doctor.WARN)
 
+    @unittest.skipIf(IS_WINDOWS, MOCK_SPAWN_SKIP)
     def test_path_none_does_not_fire_gate(self):
         # /code-review r4 (PR #31): the gate discriminator is `env.get("PATH") is not
         # None`, NOT `"PATH" in env`. Per _merged_env's documented semantics
