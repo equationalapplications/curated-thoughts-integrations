@@ -21,9 +21,7 @@ not by any particular mechanism.
 
 What ships today (v1) is the first, partial mechanism: session-start injection
 via frozen seed + session context. It guarantees presence at bootstrap only —
-relevance is approximated by seed similarity. (Only the DSH integration has
-shipped this; the Hermes port is implemented and tested on an unmerged
-branch.) The end state is
+relevance is approximated by seed similarity. The end state is
 **relevance-timed delivery**: when a fact becomes relevant mid-session, it
 reaches the agent at that moment — via cache-safe channels that never rewrite
 the frozen system-prompt block (tool results are the v1-proven channel), and
