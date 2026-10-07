@@ -29,6 +29,18 @@ format below is load-bearing: `## <version> — <date>`.
   the real binary. `ct_env` gained `SOURCE_PATH`/`SOURCE_BUNDLED`/
   `SOURCE_NONE` constants; the issue #28 resolution rationale is at
   `docs/superpowers/open-questions/2026-10-06-issue28-bundled-fallback-resolution.md`.
+- Hardened the gate against the GLM r4 review (4 minors applied):
+  the discriminator is now `env.get("PATH") is not None` (not `"PATH" in env`),
+  aligning with `_merged_env`'s documented None=ambient semantics — a caller
+  that passes `env={"PATH": None}` (per `_merged_env`, "caller did not
+  specify") no longer falsely trips the gate; `bool(env)` collapsed to
+  `env is not None` to match the gate's own view; `find_sidecar` is now
+  called with the raw caller env (its wrapper re-merges), removing one
+  redundant dict copy + filter pass per check; and `check_version_compat`
+  short-circuits to a single PASS line when gated so a third WARN cannot
+  dilute the actionable hint on a PATH-override defect. Pinned by three
+  new tests (PATH=None no-gate; gated version-compat stays PASS; caller-env
+  `HERMES_CONFIG` cannot override the import-time module constant).
 
 ## 0.3.2 — 2026-10-06
 

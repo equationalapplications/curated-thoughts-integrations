@@ -2253,6 +2253,123 @@ class BundledFallbackGuardTests(DoctorTestCase):
             }
         self.assertEqual(results["sidecar-mcp"].status, ct_doctor.WARN)
 
+    def test_path_none_does_not_fire_gate(self):
+        # GLM r4 (PR #31): the gate discriminator is `env.get("PATH") is not
+        # None`, NOT `"PATH" in env`. Per _merged_env's documented semantics
+        # (lines 190-195), a None-valued key means "the caller did not
+        # specify this key, ambient shows through" — same as a missing key,
+        # distinct from "" which is the documented suppression of the ambient
+        # value. Pre-fix, `"PATH" in env` returned True for None-valued
+        # keys and the gate fired on a caller that did NOT in fact override
+        # PATH — wrong verdict + a noisy "fix the override" hint pointing at
+        # an override the caller never attempted. With a benign mock on
+        # bundled discovery, the probe must proceed (no gate), matching the
+        # no-PATH-key case in test_no_path_key_falls_back_and_probes_normally.
+        # The ambient PATH is patched to a pathless dir so source resolves
+        # to "bundled" deterministically; without that, the test would pass
+        # trivially if the ambient PATH happened to contain a real binary.
+        tools = ", ".join(f'{{"name":"t{i}"}}' for i in range(14))
+        benign = self._make_poison(
+            "#!" + sys.executable + "\n"
+            "print('{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":"
+            "\"2024-11-05\",\"serverInfo\":{\"name\":\"benign\",\"version\":\"9.9.9\"},"
+            "\"capabilities\":{}}}')\n"
+            "print('{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"tools\":"
+            "[" + tools + "]}}')\n",
+        )
+        self.patch_env("PATH", str(self.fake_home / "pathless-bin-none"))
+        (self.fake_home / "pathless-bin-none").mkdir()
+        with self._poison_candidates(benign):
+            results = {
+                r.name: r
+                for r in ct_doctor.run_checks(
+                    timeout=3.0,
+                    env={"PATH": None},
+                )
+            }
+        # No gate — sidecar-binary PASSes and sidecar-mcp gets a live probe.
+        self.assertEqual(results["sidecar-binary"].status, ct_doctor.PASS)
+        self.assertEqual(results["sidecar-mcp"].status, ct_doctor.PASS)
+
+    def test_gated_run_version_compat_does_not_emit_extra_warn(self):
+        # GLM r4 (PR #31): when the gate fires, sidecar-binary and sidecar-mcp
+        # already WARN on the same underlying PATH-override defect; a third
+        # WARN from version-compat (e.g. an installed-but-out-of-tier dpkg
+        # package) dilutes the actionable hint. version-compat must PASS with
+        # a single pointer line — no dpkg-query probe (this test does NOT
+        # patch dpkg-query; a successful probe would only PASS, never WARN,
+        # so a regression to "still runs dpkg-query" would be silent in the
+        # pass-status signal either way). The structural check below fails
+        # the regression: gated + PASS detail must mention the gate.
+        poison = self._make_poison("#!" + sys.executable + "\n")
+        empty_dir = self.fake_home / "empty-path-7"
+        empty_dir.mkdir()
+        with self._poison_candidates(poison):
+            results = {
+                r.name: r
+                for r in ct_doctor.run_checks(
+                    timeout=3.0, env={"PATH": str(empty_dir)}
+                )
+            }
+        version = results["version-compat"]
+        self.assertEqual(
+            version.status, ct_doctor.PASS,
+            "version-compat must PASS when gated (no live surface to verify)",
+        )
+        self.assertIn("bundled-fallback gate", version.detail)
+
+
+class HermesConfigImportTimeTests(DoctorTestCase):
+    """HERMES_CONFIG is read from ambient os.environ at module-import time
+    (issue #29 GLM 2026-10-06; ct_doctor lines 41-46). The Hermes config is
+    a property of the HOST Hermes installation, not of the per-call env —
+    callers cannot override it via the merged view. Pin that contract here
+    (GLM r4 minor): a future regression that makes check_hermes_registration
+    honor the caller env would silently mask a real config problem when a
+    wrapper sets HERMES_CONFIG at import time and queries the doctor with a
+    different env.
+    """
+
+    def test_hermes_config_is_module_level_not_per_call_env(self):
+        # Re-point the module constant at a path that does not exist.
+        # check_hermes_registration must FAIL with "Hermes config not found"
+        # — that is the ONLY way the module-level constant entered the
+        # function. If a regression makes it read caller env, the caller's
+        # HERMES_CONFIG would override and the check would PASS against the
+        # real fixture config — wrong.
+        orig = ct_doctor.HERMES_CONFIG
+        ct_doctor.HERMES_CONFIG = Path("/nonexistent/hermes/config.yaml")
+        try:
+            r_default = ct_doctor.check_hermes_registration()
+            r_with_env = ct_doctor.check_hermes_registration()
+            results_no_env = {
+                r.name: r
+                for r in ct_doctor.run_checks(
+                    timeout=3.0, env={"PATH": str(self.bin_dir)}
+                )
+            }
+            results_with_env = {
+                r.name: r
+                for r in ct_doctor.run_checks(
+                    timeout=3.0,
+                    env={"HERMES_CONFIG": str(self.fake_home / ".hermes" / "config.yaml")},
+                )
+            }
+        finally:
+            ct_doctor.HERMES_CONFIG = orig
+        # Direct calls: identical regardless of caller env (there isn't one
+        # for this function — the signature is the pin).
+        self.assertEqual(r_default.status, r_with_env.status)
+        self.assertEqual(r_default.status, ct_doctor.FAIL)
+        self.assertIn("not found", r_default.detail)
+        # Via run_checks: a caller env HERMES_CONFIG must not override.
+        self.assertEqual(
+            results_no_env["hermes-registration"].status,
+            results_with_env["hermes-registration"].status,
+            "caller env HERMES_CONFIG must not override the import-time "
+            "module constant (issue #29 design pin)",
+        )
+
 
 class PluginConcurrencyTests(unittest.TestCase):
     """The cached system-prompt section is reachable from concurrent
