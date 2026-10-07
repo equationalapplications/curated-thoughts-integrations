@@ -153,4 +153,30 @@ exposed to recall. CT must resolve that before integrations can emit
 | O4 | CT: embedding wiki entries at ingest, threshold calibration | CT spec |
 | O5 | CT: deposit-path supersession → wiki-id supersession | CT spec |
 | O6 | A sanctioned host API for a restored session's prompt (would lift the fail-closed rule) | upstream ask, not blocking |
-| O7 | Exact string envelope of an MCP tool result as `transform_tool_result` receives it (raw JSON vs wrapped content) | plan Step 0 |
+| O7 | ~~Exact string envelope of an MCP tool result~~ — **resolved [V]**, see Target 5 | — |
+
+## Target 5 — MCP result envelope seen by `transform_tool_result` (O7)
+
+**[V]** Hermes does NOT hand the hook the raw MCP `content` array.
+`_render_call_tool_result` (`tools/mcp_tool_handlers.py:517-552`) flattens first:
+
+- text blocks are joined with `"\n"` after `strip_unicode_tags`
+  (`_render_content_blocks`, `:440-473`) and hard-capped by head+tail truncation
+  (`_truncate_mcp_text_result`, `mcp_tool_content.py:31-33`);
+- the handler string is `json.dumps({"result": <joined text>})`, plus
+  `structuredContent` and/or `_meta` keys only when the server sent them and they
+  are not a verbatim dual-emit of a text block (`:535-550`);
+- an `isError` result becomes `tool_error(...)` instead (`:527-528`).
+
+**[V] CT side:** `curated_recall_context` returns `serde_json::to_string(&response)`
+— one JSON string, keys `wiki_entries`, `code_chunks`, `query`
+(`curated_thoughts_mcp.rs:242-251`; note `wiki_entries`, not `wiki`). **[A]** rmcp
+wraps a `String` return as a single text content block with no
+`structuredContent`; the plan's unit fixture pins this shape and the e2e confirms it.
+
+So the hook receives a two-layer string: outer Hermes JSON `{"result": "<CT JSON>"}`
+→ `json.loads(outer["result"])` → CT object. Stubbing rewrites the inner object,
+re-serializes it into `outer["result"]`, then re-serializes the outer object
+(preserving any other outer keys). If the inner string fails to parse (e.g. the
+head+tail truncation marker made it invalid JSON) or the outer has no `result`
+string, or the result is a `tool_error` → pass through unmodified.

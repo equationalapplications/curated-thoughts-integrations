@@ -234,8 +234,14 @@ nothing.
 - Matches only tool names ending in `__curated_recall_context` or
   `__curated_get_wiki_entry` (`mcp__<server>__<tool>` [V]; suffix match tolerates the
   installed server name). Any other tool → `None` (pass-through).
-- Parses the result JSON. The exact Hermes MCP result envelope is investigation item
-  O7, verified in plan Step 0. For each wiki entry:
+- Unwraps the two-layer envelope (investigation Target 5, O7 resolved [V]): the outer
+  string is Hermes's `{"result": "<CT JSON>"}` (plus optional `structuredContent` /
+  `_meta`); `json.loads(outer["result"])` gives CT's object, whose wiki list is
+  `wiki_entries` for `curated_recall_context` and the single entry for
+  `curated_get_wiki_entry`. After stubbing, the inner object is re-serialized into
+  `outer["result"]` and the outer object re-serialized with its other keys intact.
+  A `tool_error`, missing `result`, or unparseable inner string (e.g. head+tail
+  truncated) → pass through. For each wiki entry:
   - `id` ∈ ledger cache → replace the entry with `{"id": id, "in_context": true,
     "note": "already in context: ct-fact:<id>"}`, dropping title and text (option A);
   - otherwise leave it as is and add the id to the ledger cache.
