@@ -6,6 +6,42 @@ format below is load-bearing: `## <version> — <date>`.
 
 ## Unreleased
 
+## 0.3.3 — 2026-10-06
+
+- Fixed: the doctor's bundled-fallback spawn gate (issue #28). When a
+  caller's env overrides `PATH` but that override fails to resolve the
+  sidecar, discovery used to fall back to the ambient install locations and
+  the probe then EXECUTED that ambient binary under the caller's env — on a
+  test machine, the real installed sidecar ran against the fixture brain
+  (the residual risk named in 0.3.1). `run_checks` now detects that
+  combination (raw caller env has a `PATH` key; discovery reports the
+  bundled source), warns on `sidecar-binary`, refuses to spawn
+  (`sidecar-mcp` WARN), and withholds the path from the import-preflight
+  engine lookup. A caller that overrides PATH deliberately and accepts the
+  ambient install being probed under its env can opt out with
+  `CT_DOCTOR_ALLOW_BUNDLED=1` in the env. Callers that do not override
+  `PATH` — including the real user with a bundled install and no PATH
+  entry — are unaffected.
+  Test-suite hardening in the same change: the mock sidecar fixture now has
+  an absolute shebang, the shared helpers put ONLY the mock dir on PATH, and
+  a `setUp` precondition asserts discovery resolves the mock (realpath
+  check), so a broken fixture fails the suite instead of silently probing
+  the real binary. `ct_env` gained `SOURCE_PATH`/`SOURCE_BUNDLED`/
+  `SOURCE_NONE` constants; the issue #28 resolution rationale is at
+  `docs/superpowers/open-questions/2026-10-06-issue28-bundled-fallback-resolution.md`.
+- Hardened the gate against the /code-review r4 findings (4 applied):
+  the discriminator is now `env.get("PATH") is not None` (not `"PATH" in env`),
+  aligning with `_merged_env`'s documented None=ambient semantics — a caller
+  that passes `env={"PATH": None}` (per `_merged_env`, "caller did not
+  specify") no longer falsely trips the gate; `bool(env)` collapsed to
+  `env is not None` to match the gate's own view; `find_sidecar` is now
+  called with the raw caller env (its wrapper re-merges), removing one
+  redundant dict copy + filter pass per check; and `check_version_compat`
+  short-circuits to a single PASS line when gated so a third WARN cannot
+  dilute the actionable hint on a PATH-override defect. Pinned by three
+  new tests (PATH=None no-gate; gated version-compat stays PASS; caller-env
+  `HERMES_CONFIG` cannot override the import-time module constant).
+
 ## 0.3.2 — 2026-10-06
 
 - Fixed: the doctor's env-reading checks (`check_brain_dir`,

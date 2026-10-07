@@ -187,14 +187,37 @@ def _merged_env(env=None):
     """
     merged = dict(os.environ)
     if env:
-        merged.update(env)
+        # GLM r3 (PR #31): drop None-valued keys. A None surviving into
+        # subprocess.run(env=...) raises TypeError, and {"PATH": None} would
+        # make shutil.which fall back to the AMBIENT PATH — a literal-None
+        # override must never do that. Semantics: None means "the caller did
+        # not specify this key" (ambient shows through), distinct from the
+        # documented "" suppression which HIDES the ambient value.
+        merged.update({k: v for k, v in env.items() if v is not None})
     return merged
 
 
-def check_sidecar_binary(found=None):
-    """(1) sidecar binary present (PATH, then platform install locations)."""
+def check_sidecar_binary(found=None, gated=False):
+    """(1) sidecar binary present (PATH, then platform install locations).
+
+    `gated` (issue #28): discovery resolved the sidecar from the ambient
+    install locations even though the caller's env overrode PATH — the
+    override failed to resolve. WARN (not PASS) so the anomaly is visible;
+    run_checks also refuses to spawn under that combination.
+    """
     path, _resolved, source = found if found else find_sidecar()
     if path:
+        if gated and source == ct_env.SOURCE_BUNDLED:
+            return CheckResult(
+                "sidecar-binary",
+                WARN,
+                f"found {SIDECAR_NAME} at {path} (via {source})",
+                "The env you passed overrides PATH but that override did not "
+                f"contain {SIDECAR_NAME}; discovery fell back to the ambient "
+                "install locations. If this is a test or wrapper that meant "
+                "to control which binary runs, fix the override instead of "
+                "relying on the fallback.",
+            )
         return CheckResult(
             "sidecar-binary",
             PASS,
@@ -213,7 +236,11 @@ def check_sidecar_binary(found=None):
 
 def check_sidecar_identity(path, resolved):
     """(2) sidecar identity — warn if a source-checkout build shadows the
-    installed one. Two servers on one brain is a bug; disambiguate by path."""
+    installed one. Two servers on one brain is a bug; disambiguate by path.
+
+    Must never spawn the sidecar (path inspection only): the issue #28 gate
+    in run_checks relies on a gated run executing NO binary at all.
+    """
     if not path:
         return CheckResult(
             "sidecar-identity",
@@ -835,7 +862,7 @@ def check_import_preflight(path=None, brain_paths=None, env=None):
     return CheckResult("import-preflight", PASS, detail)
 
 
-def check_version_compat(path, tool_count=None):
+def check_version_compat(path, tool_count=None, gated=False):
     """(9) sidecar version — corroborating metadata, not the tier authority.
 
     The sidecar exposes no --version flag and MCP serverInfo reports the rmcp
@@ -843,7 +870,23 @@ def check_version_compat(path, tool_count=None):
     discoverable. That is informational, never a warning: the tool count in
     check 3 is what determines the capability tier. This check exists to catch
     the case where a discoverable version *disagrees* with the observed tools.
+
+    `gated` (issue #28, /code-review r4 minor): when run_checks refused to spawn the
+    sidecar (caller overrode PATH, discovery fell back to ambient), the
+    version-compat check would otherwise still query dpkg-query and add a
+    third WARN on top of sidecar-binary + sidecar-mcp for the same
+    underlying PATH-override defect — diluting the actionable hint. PASS
+    with a one-line pointer to sidecar-mcp instead; dpkg-query is not the
+    sidecar spawn (so it stays legal), but emitting a third verdict for a
+    problem already reported is not.
     """
+    if gated:
+        return CheckResult(
+            "version-compat",
+            PASS,
+            "sidecar spawn was withheld by the bundled-fallback gate; "
+            "see the sidecar-mcp check for the verdict",
+        )
     # None = no live surface observed; an int = observed, and authoritative.
     # A count that maps to no tier (0, or anything below the read tier) is a
     # *known* surface, not an unknown one — it must still contradict a
@@ -939,30 +982,97 @@ def check_version_compat(path, tool_count=None):
 # --------------------------------------------------------------------------
 
 def run_checks(timeout=MCP_TIMEOUT, env=None):
-    """Run all checks; returns list of CheckResult."""
+    """Run all checks; returns list of CheckResult.
+
+    Issue #28 guard: when the CALLER's raw env overrides PATH but discovery
+    resolved the sidecar from the ambient install locations (`source` is
+    "bundled", not "PATH"), the override failed to resolve — the found binary
+    is an ambient one, and spawning it under the caller's env is the exact
+    pollution path #28 tracks (a test's fixture brain reached by the real
+    installed sidecar). In that case: WARN on sidecar-binary, skip the
+    sidecar-mcp spawn, and withhold the path from import-preflight's engine
+    lookup. The discriminator reads the RAW caller env (not the merged view,
+    which always has a PATH) and checks for a NON-None value, so the
+    documented empty-string suppression counts as an override but a None
+    (caller did not specify) does not — that aligns with `_merged_env`'s
+    documented None=ambient semantics.
+    """
     results = []
     # Discovery and brain-path resolution must honor the same env view the
     # spawn will use (issue #14, GLM r1 follow-up: resolve_brain_paths had
     # the same ambient-env divergence one line below the original fix).
     merged = _merged_env(env)
-    path, resolved, source = find_sidecar(env=merged)
+    # find_sidecar's wrapper re-merges from raw env (its contract); passing
+    # raw here avoids a redundant dict copy + filter pass per check (/code-review
+    # r4 minor — double-merge produced two semantically identical views).
+    path, resolved, source = find_sidecar(env=env)
     brain_paths = ct_env.resolve_brain_paths(env=merged)
 
-    results.append(check_sidecar_binary((path, resolved, source)))
+    # The bundled-fallback spawn gate: caller claimed PATH control and lost.
+    # CT_DOCTOR_ALLOW_BUNDLED=1 (read from the RAW caller env) is the explicit
+    # opt-out for callers that run a restricted PATH deliberately and accept
+    # the ambient install being probed under their env (GLM r2 minor 3).
+    # The discriminator checks for a NON-None PATH on the raw caller env —
+    # not key presence — so it aligns with _merged_env's documented None
+    # semantics: a None means "the caller did not specify this key, ambient
+    # shows through" (same as a missing key), distinct from "" which is the
+    # documented suppression of the ambient value. Per /code-review r4 minor.
+    allow_bundled = env is not None and env.get("CT_DOCTOR_ALLOW_BUNDLED") == "1"
+    gated = (
+        env is not None
+        and env.get("PATH") is not None
+        and source == ct_env.SOURCE_BUNDLED
+        and not allow_bundled
+    )
+
+    results.append(check_sidecar_binary((path, resolved, source), gated=gated))
     results.append(check_sidecar_identity(path, resolved))
 
-    # One probe, and the count comes back structurally — see _probe_sidecar.
-    mcp_result, tool_count = _probe_sidecar(
-        path, timeout=timeout, env=env, brain_paths=brain_paths
-    )
-    results.append(mcp_result)
+    # No live surface is observed when the spawn is gated (issue #28): the
+    # count feeds check_version_compat, which treats None as "unobserved".
+    tool_count = None
+    if gated:
+        # Refuse to execute an ambient binary under a caller-owned env.
+        results.append(
+            CheckResult(
+                "sidecar-mcp",
+                WARN,
+                "skipped: refusing to spawn the bundled sidecar against an "
+                "env whose PATH override failed to resolve",
+                f"Discovery found {SIDECAR_NAME} in an ambient install "
+                "location, not via your PATH override — the override "
+                "probably points at a missing or non-executable binary. "
+                "Not spawning it: fix the override so it resolves the "
+                "intended binary. If you deliberately run a restricted PATH "
+                "and accept the ambient install being probed under this "
+                "env, set CT_DOCTOR_ALLOW_BUNDLED=1 in the env.",
+            )
+        )
+    else:
+        # One probe, and the count comes back structurally — see _probe_sidecar.
+        mcp_result, tool_count = _probe_sidecar(
+            path, timeout=timeout, env=env, brain_paths=brain_paths
+        )
+        results.append(mcp_result)
 
     results.append(check_brain_dir(brain_paths, env=merged))
     results.append(check_vault(brain_paths, env=merged))
     results.append(check_embedding(env=merged))
     results.append(check_hermes_registration())
-    results.append(check_import_preflight(path=path, brain_paths=brain_paths, env=merged))
-    results.append(check_version_compat(path, tool_count=tool_count))
+    results.append(
+        check_import_preflight(
+            path=None if gated else path, brain_paths=brain_paths, env=merged
+        )
+    )
+    # GLM r3 (PR #31): the path withhold here is future-proofing — the
+    # current body reads only tool_count (path is dead, pre-existing), but
+    # if it ever grows a path-derived metadata source the gate already
+    # withholds the bundled path from it.
+    # /code-review r4 minor: when gated, pass gated=True so version-compat short-
+    # circuits to a single PASS line — it has no live surface to verify
+    # against, and probing dpkg-query here would emit a third WARN on top
+    # of sidecar-binary + sidecar-mcp for the same defect.
+    results.append(check_version_compat(None if gated else path, tool_count=tool_count, gated=gated))
     return results
 
 
