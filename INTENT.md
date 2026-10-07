@@ -24,11 +24,15 @@ via frozen seed + session context. It guarantees presence at bootstrap only —
 relevance is approximated by seed similarity. The end state is
 **relevance-timed delivery**: when a fact becomes relevant mid-session, it
 reaches the agent at that moment — via cache-safe channels that never rewrite
-the frozen system-prompt block (tool results are the v1-proven channel), and
-ledger-deduped so no fact appears twice. The matching trigger, judge
-involvement, and delivery surface for mid-session relevance are **open design
-work**, not settled by this file; open questions carried from the invariants
-(ledger ownership, scope-b labeling) resolve there.
+the frozen system-prompt block (host-persisted append channels: the user-message
+context and tool results), and
+ledger-deduped so no fact appears twice.
+The mid-session design is settled for Hermes in
+`docs/superpowers/specs/2026-10-06-intuitive-wisdom-live-delivery-design.md`:
+trigger = each user turn; judge = inside CT only (`ct wisdom match`, CT-owned
+semantic gate); delivery = host-persisted append channels (the user-message
+context and tool results); ledger = the transcript (below). Other ports fork
+that design.
 
 ### v1 mechanism — bootstrap-time relevance (what every integration implements)
 
@@ -37,7 +41,8 @@ work**, not settled by this file; open questions carried from the invariants
    "<seed>" --json --k 3`, the query string widened with the cwd basename
    when non-degenerate; the subprocess itself runs from `~`); the seed does
    the semantic work.
-2. **Match:** find wisdom-layer facts via CT's recall (semantic similarity).
+2. **Match:** find wisdom-layer facts via CT's recall (the v1 wiki
+   leg is lexical term overlap; the semantic, gated path is `ct wisdom match`).
 3. **Judge (in CT, optional — future; not implemented in v1):** if System One
    is configured, CT's recall
    applies its relevance judgment before returning results. Integrations never
@@ -52,15 +57,20 @@ work**, not settled by this file; open questions carried from the invariants
 
 1. **Exactly once (scope b).** A fact never appears twice anywhere in a
    session's context: once in the injected block, never again via tool
-   results. The ledger lives in CT's session context (keyed by session id);
-   CT recall tools filter against it. Dedup keys on the deterministic fact id
+   results.
+   The ledger is the transcript: every delivered fact carries a
+   `<!-- ct-fact:<id> -->` marker and the ledger is rebuilt each turn from
+   host-persisted context — no plugin persistence, no CT write. CT accepts the
+   ids as `--exclude` and returns `corrections` for superseded ones. "Anywhere
+   in a session's context" (scope b) means the CURRENT context: the frozen
+   block, user-message injections and tool results; a fact compacted out of
+   context may be delivered again.
+   Dedup keys on the deterministic fact id
    after supersession resolution. The supersession gate governs **render-time
    construction only**: at render time, no superseded fact is injected.
    Post-render supersession flows exclusively through the append-and-mark
    path: a replacement surfaced mid-session is delivered with an explicit
    "supersedes <id>" tool-result marker; the frozen block is never edited.
-   (Ledger ownership and the supersession marker are new work —
-   pending decisions.)
 2. **Cache safety.** The block is computed at bootstrap and frozen as ONE
    contiguous static region, additive with existing plugin context. Verbatim
    replay exists to protect **prompt caching** — the prefix stays intact so
@@ -70,7 +80,7 @@ work**, not settled by this file; open questions carried from the invariants
    in-process memo (PR #22) is a speed optimization for **new renders only**.
    A fact superseded **after** the original render is **appended as a
    correction** through invariant 1's append-and-mark path (mid-session
-   delivery: pending design work); the append is highly
+   delivery: see the live-delivery spec); the append is highly
    relevant content, not unnecessary duplication, and the stale line stays
    visible but corrected — never silently relied on. A bootstrap render that
    fails (timeout / exit / spawn / probe timeout) MAY be **late-filled when
@@ -118,7 +128,7 @@ work**, not settled by this file; open questions carried from the invariants
   query-time embedding of vault files, no ad-hoc indexing. Freshness is CT's
   deposit-kicked-ingest job, not ours.
 - Integrations only READ the brain via the sanctioned recall surface (`ct
-  recall` subprocess / read-only sidecar tools). No direct brain DB access.
+  recall` / `ct wisdom match` subprocesses / read-only sidecar tools). No direct brain DB access.
 - Reuse proven decisions: new ports fork the converged Hermes design and
   record deliberate divergences (PR #22 is the model).
 
