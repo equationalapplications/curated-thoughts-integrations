@@ -29,7 +29,7 @@ format below is load-bearing: `## <version> — <date>`.
   the real binary. `ct_env` gained `SOURCE_PATH`/`SOURCE_BUNDLED`/
   `SOURCE_NONE` constants; the issue #28 resolution rationale is at
   `docs/superpowers/open-questions/2026-10-06-issue28-bundled-fallback-resolution.md`.
-- Hardened the gate against the GLM r4 review (4 minors applied):
+- Hardened the gate against the /code-review r4 findings (4 applied):
   the discriminator is now `env.get("PATH") is not None` (not `"PATH" in env`),
   aligning with `_merged_env`'s documented None=ambient semantics — a caller
   that passes `env={"PATH": None}` (per `_merged_env`, "caller did not

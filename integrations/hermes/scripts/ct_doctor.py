@@ -871,7 +871,7 @@ def check_version_compat(path, tool_count=None, gated=False):
     check 3 is what determines the capability tier. This check exists to catch
     the case where a discoverable version *disagrees* with the observed tools.
 
-    `gated` (issue #28, GLM r4 minor): when run_checks refused to spawn the
+    `gated` (issue #28, /code-review r4 minor): when run_checks refused to spawn the
     sidecar (caller overrode PATH, discovery fell back to ambient), the
     version-compat check would otherwise still query dpkg-query and add a
     third WARN on top of sidecar-binary + sidecar-mcp for the same
@@ -1003,7 +1003,7 @@ def run_checks(timeout=MCP_TIMEOUT, env=None):
     # the same ambient-env divergence one line below the original fix).
     merged = _merged_env(env)
     # find_sidecar's wrapper re-merges from raw env (its contract); passing
-    # raw here avoids a redundant dict copy + filter pass per check (GLM
+    # raw here avoids a redundant dict copy + filter pass per check (/code-review
     # r4 minor — double-merge produced two semantically identical views).
     path, resolved, source = find_sidecar(env=env)
     brain_paths = ct_env.resolve_brain_paths(env=merged)
@@ -1016,7 +1016,7 @@ def run_checks(timeout=MCP_TIMEOUT, env=None):
     # not key presence — so it aligns with _merged_env's documented None
     # semantics: a None means "the caller did not specify this key, ambient
     # shows through" (same as a missing key), distinct from "" which is the
-    # documented suppression of the ambient value. Per GLM r4 minor.
+    # documented suppression of the ambient value. Per /code-review r4 minor.
     allow_bundled = env is not None and env.get("CT_DOCTOR_ALLOW_BUNDLED") == "1"
     gated = (
         env is not None
@@ -1068,7 +1068,7 @@ def run_checks(timeout=MCP_TIMEOUT, env=None):
     # current body reads only tool_count (path is dead, pre-existing), but
     # if it ever grows a path-derived metadata source the gate already
     # withholds the bundled path from it.
-    # GLM r4 minor: when gated, pass gated=True so version-compat short-
+    # /code-review r4 minor: when gated, pass gated=True so version-compat short-
     # circuits to a single PASS line — it has no live surface to verify
     # against, and probing dpkg-query here would emit a third WARN on top
     # of sidecar-binary + sidecar-mcp for the same defect.

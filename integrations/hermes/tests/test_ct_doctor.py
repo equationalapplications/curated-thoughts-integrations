@@ -2254,7 +2254,7 @@ class BundledFallbackGuardTests(DoctorTestCase):
         self.assertEqual(results["sidecar-mcp"].status, ct_doctor.WARN)
 
     def test_path_none_does_not_fire_gate(self):
-        # GLM r4 (PR #31): the gate discriminator is `env.get("PATH") is not
+        # /code-review r4 (PR #31): the gate discriminator is `env.get("PATH") is not
         # None`, NOT `"PATH" in env`. Per _merged_env's documented semantics
         # (lines 190-195), a None-valued key means "the caller did not
         # specify this key, ambient shows through" — same as a missing key,
@@ -2292,15 +2292,20 @@ class BundledFallbackGuardTests(DoctorTestCase):
         self.assertEqual(results["sidecar-mcp"].status, ct_doctor.PASS)
 
     def test_gated_run_version_compat_does_not_emit_extra_warn(self):
-        # GLM r4 (PR #31): when the gate fires, sidecar-binary and sidecar-mcp
-        # already WARN on the same underlying PATH-override defect; a third
-        # WARN from version-compat (e.g. an installed-but-out-of-tier dpkg
-        # package) dilutes the actionable hint. version-compat must PASS with
-        # a single pointer line — no dpkg-query probe (this test does NOT
-        # patch dpkg-query; a successful probe would only PASS, never WARN,
-        # so a regression to "still runs dpkg-query" would be silent in the
-        # pass-status signal either way). The structural check below fails
-        # the regression: gated + PASS detail must mention the gate.
+        # /code-review r4 (PR #31): when the gate fires, sidecar-binary and
+        # sidecar-mcp already WARN on the PATH-override defect. Pre-fix,
+        # version-compat still ran dpkg-query, and an installed-but-out-of-
+        # tier package added a THIRD, unrelated-looking WARN. Fake dpkg to
+        # report 2.3.0 (outside every tier) so a regression fails here.
+        orig = ct_doctor.subprocess.run
+
+        def fake(cmd, *a, **k):
+            if cmd[:2] == ["dpkg-query", "-W"]:
+                return subprocess.CompletedProcess(cmd, 0, "2.3.0", "")
+            return orig(cmd, *a, **k)
+
+        ct_doctor.subprocess.run = fake
+        self.addCleanup(setattr, ct_doctor.subprocess, "run", orig)
         poison = self._make_poison("#!" + sys.executable + "\n")
         empty_dir = self.fake_home / "empty-path-7"
         empty_dir.mkdir()
@@ -2312,63 +2317,35 @@ class BundledFallbackGuardTests(DoctorTestCase):
                 )
             }
         version = results["version-compat"]
-        self.assertEqual(
-            version.status, ct_doctor.PASS,
-            "version-compat must PASS when gated (no live surface to verify)",
-        )
+        self.assertEqual(version.status, ct_doctor.PASS)
         self.assertIn("bundled-fallback gate", version.detail)
 
 
 class HermesConfigImportTimeTests(DoctorTestCase):
-    """HERMES_CONFIG is read from ambient os.environ at module-import time
-    (issue #29 GLM 2026-10-06; ct_doctor lines 41-46). The Hermes config is
-    a property of the HOST Hermes installation, not of the per-call env —
-    callers cannot override it via the merged view. Pin that contract here
-    (GLM r4 minor): a future regression that makes check_hermes_registration
-    honor the caller env would silently mask a real config problem when a
-    wrapper sets HERMES_CONFIG at import time and queries the doctor with a
-    different env.
+    """HERMES_CONFIG is read from ambient os.environ at import time, by
+    design (ct_doctor module comment, issue #29): the Hermes config belongs
+    to the HOST install, not to the per-call env view. Pin it so a future
+    "make it env-aware like the others" refactor is a deliberate change
+    (/code-review r4 of PR #31).
     """
 
-    def test_hermes_config_is_module_level_not_per_call_env(self):
-        # Re-point the module constant at a path that does not exist.
-        # check_hermes_registration must FAIL with "Hermes config not found"
-        # — that is the ONLY way the module-level constant entered the
-        # function. If a regression makes it read caller env, the caller's
-        # HERMES_CONFIG would override and the check would PASS against the
-        # real fixture config — wrong.
-        orig = ct_doctor.HERMES_CONFIG
-        ct_doctor.HERMES_CONFIG = Path("/nonexistent/hermes/config.yaml")
-        try:
-            r_default = ct_doctor.check_hermes_registration()
-            r_with_env = ct_doctor.check_hermes_registration()
-            results_no_env = {
-                r.name: r
-                for r in ct_doctor.run_checks(
-                    timeout=3.0, env={"PATH": str(self.bin_dir)}
-                )
-            }
-            results_with_env = {
-                r.name: r
-                for r in ct_doctor.run_checks(
-                    timeout=3.0,
-                    env={"HERMES_CONFIG": str(self.fake_home / ".hermes" / "config.yaml")},
-                )
-            }
-        finally:
-            ct_doctor.HERMES_CONFIG = orig
-        # Direct calls: identical regardless of caller env (there isn't one
-        # for this function — the signature is the pin).
-        self.assertEqual(r_default.status, r_with_env.status)
-        self.assertEqual(r_default.status, ct_doctor.FAIL)
-        self.assertIn("not found", r_default.detail)
-        # Via run_checks: a caller env HERMES_CONFIG must not override.
-        self.assertEqual(
-            results_no_env["hermes-registration"].status,
-            results_with_env["hermes-registration"].status,
-            "caller env HERMES_CONFIG must not override the import-time "
-            "module constant (issue #29 design pin)",
-        )
+    def test_caller_env_hermes_config_does_not_override_module_constant(self):
+        # The real fixture config exists; the module constant points nowhere.
+        # If run_checks honored the caller env, registration would find the
+        # fixture config and stop FAILing. Both env views carry the mock
+        # PATH so discovery never reaches an ambient sidecar (issue #28).
+        self.write_config()
+        real_cfg = str(self.fake_home / ".hermes" / "config.yaml")
+        ct_doctor.HERMES_CONFIG = Path(self.fake_home / "nonexistent" / "config.yaml")
+        results = {
+            r.name: r
+            for r in ct_doctor.run_checks(
+                timeout=3.0, env={**self.with_path(), "HERMES_CONFIG": real_cfg}
+            )
+        }
+        reg = results["hermes-registration"]
+        self.assertEqual(reg.status, ct_doctor.FAIL)
+        self.assertIn("not found", reg.detail)
 
 
 class PluginConcurrencyTests(unittest.TestCase):
