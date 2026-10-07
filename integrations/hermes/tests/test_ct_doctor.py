@@ -343,6 +343,40 @@ class BrainDirTests(DoctorTestCase):
         self.assertEqual(r.status, ct_doctor.PASS)
         self.assertIn(str(alt), r.detail)
 
+    def test_explicit_env_wins_over_ambient_in_message(self):
+        # Issue #29: with the real CURATED_BRAIN_DIR ambient and a different
+        # one passed via env, the checked directory comes from the merged
+        # view — so the detail message must name the same directory, not the
+        # ambient value.
+        ambient = self.fake_home / "ambient-brain"
+        ambient.mkdir()
+        (ambient / "brain.db").write_bytes(b"")
+        (ambient / "config.json").write_text("{}")
+        self.patch_env("CURATED_BRAIN_DIR", str(ambient))
+        env_dir = self.fake_home / "env-brain"
+        env_dir.mkdir()
+        (env_dir / "brain.db").write_bytes(b"")
+        (env_dir / "config.json").write_text("{}")
+        r = ct_doctor.check_brain_dir(env={"CURATED_BRAIN_DIR": str(env_dir)})
+        self.assertEqual(r.status, ct_doctor.PASS)
+        self.assertIn(str(env_dir), r.detail)
+        self.assertNotIn(str(ambient), r.detail)
+
+    def test_env_brain_dir_missing_fails_naming_env_dir(self):
+        # Same divergence on the FAIL path: the message names the directory
+        # the merged view resolved (which does not exist), not the ambient
+        # one (which does).
+        ambient = self.fake_home / "ambient-brain"
+        ambient.mkdir()
+        (ambient / "brain.db").write_bytes(b"")
+        (ambient / "config.json").write_text("{}")
+        self.patch_env("CURATED_BRAIN_DIR", str(ambient))
+        env_dir = self.fake_home / "env-brain-missing"
+        r = ct_doctor.check_brain_dir(env={"CURATED_BRAIN_DIR": str(env_dir)})
+        self.assertEqual(r.status, ct_doctor.FAIL)
+        self.assertIn(str(env_dir), r.detail)
+        self.assertNotIn(str(ambient), r.detail)
+
     def test_explicit_db_path_moves_config_beside_it(self):
         # CURATED_BRAIN_DB without CURATED_BRAIN_CONFIG puts config.json next
         # to the database, matching curated-thoughts' resolve_brain_paths.
@@ -395,6 +429,20 @@ class VaultTests(DoctorTestCase):
         r = ct_doctor.check_vault()
         self.assertEqual(r.status, ct_doctor.PASS)
         self.assertIn("documents", r.detail)
+
+    def test_env_brain_view_wins_over_ambient(self):
+        # Opus r1 minor 3: check_vault gained env in the #29 fix; pin that a
+        # caller's env view (brain with no config.json) wins over the ambient
+        # one (setUp's CURATED_BRAIN_DIR brain, valid after make_brain()).
+        # Ambient would PASS; the env view must FAIL — reverting the
+        # merged-view resolution flips this assertion.
+        self.make_brain()
+        env_brain = self.fake_home / "env-brain"
+        env_brain.mkdir()
+        (env_brain / "brain.db").write_bytes(b"")
+        r = ct_doctor.check_vault(env={"CURATED_BRAIN_DIR": str(env_brain)})
+        self.assertEqual(r.status, ct_doctor.FAIL)
+        self.assertIn("vault_path", r.detail)
 
     def test_imported_brain_with_foreign_vault_path_fails(self):
         # The signature import symptom: config.json names an absolute path
@@ -581,6 +629,26 @@ class EmbeddingTests(DoctorTestCase):
         finally:
             del os.environ["CT_EMBED_API_KEY"]
 
+    def test_explicit_env_key_wins_over_ambient(self):
+        # Issue #29: the ambient environment carries no embedding key (base
+        # setUp clears them); a caller passing one via env gets the PASS that
+        # view implies, without mutating os.environ.
+        r = ct_doctor.check_embedding(env={"CT_EMBED_API_KEY": "test-only-not-a-secret"})
+        self.assertEqual(r.status, ct_doctor.PASS)
+        self.assertIn("CT_EMBED_API_KEY", r.detail)
+
+    def test_ambient_key_suppressed_by_empty_string_override(self):
+        # _merged_env OVERLAYS os.environ (merge semantics, not replacement —
+        # PR #27), so env={} cannot remove an ambient key. The documented
+        # suppression mechanism is an explicit empty-string override, which
+        # reads as unset through the falsy .get().
+        os.environ["CT_EMBED_API_KEY"] = "test-only-not-a-secret"
+        try:
+            r = ct_doctor.check_embedding(env={"CT_EMBED_API_KEY": ""})
+            self.assertEqual(r.status, ct_doctor.WARN)
+        finally:
+            del os.environ["CT_EMBED_API_KEY"]
+
 
 class NormalizerPortTests(unittest.TestCase):
     """The classifier reimplements core-llm-wiki's normalizeSourceRef:
@@ -697,6 +765,122 @@ class ImportPreflightTests(DoctorTestCase):
     MANGLED = "librarian-ab12"
     # Whitespace-padded: the engine would rewrite it, so "at_risk".
     AT_RISK = "  " + TOKEN
+
+    def test_engine_manifest_env_view_wins_over_ambient(self):
+        # Issue #29: detect_engine_version reads CT_ENGINE_PACKAGE_JSON from
+        # ambient os.environ, so a caller passing a merged env view got an
+        # engine-version note resolved from a DIFFERENT environment than the
+        # rest of the run. The merged view must win.
+        self.make_brain()
+        ambient_manifest = self.fake_home / "ambient-package.json"
+        ambient_manifest.write_text(
+            json.dumps({"name": "core-llm-wiki", "version": "9.9.9-ambient"})
+        )
+        env_manifest = self.fake_home / "env-package.json"
+        env_manifest.write_text(
+            json.dumps({"name": "core-llm-wiki", "version": "0.0.1-env"})
+        )
+        self.patch_env("CT_ENGINE_PACKAGE_JSON", str(ambient_manifest))
+        r = ct_doctor.check_import_preflight(
+            env={"CT_ENGINE_PACKAGE_JSON": str(env_manifest)}
+        )
+        self.assertEqual(r.status, ct_doctor.PASS)
+        self.assertIn("0.0.1-env", r.detail)
+        self.assertNotIn("9.9.9-ambient", r.detail)
+
+    def test_brain_paths_from_env_view_win_over_ambient(self):
+        # GLM r1 finding 1's shape, Opus r1 minor 5 rename: a direct caller
+        # passes ONLY env (no brain_paths) whose CURATED_BRAIN_DIR diverges
+        # from ambient. The census reads the merged-view brain's database —
+        # asserted via the table-absent detail, which only the env-view brain
+        # (never seeded with an entries table) can produce.
+        import sqlite3
+
+        self.make_brain()
+        ambient_brain = self.fake_home / "ambient-brain"
+        ambient_brain.mkdir()
+        conn = sqlite3.connect(ambient_brain / "brain.db")
+        try:
+            conn.execute(
+                "CREATE TABLE llm_wiki_entries (id TEXT, source_ref TEXT)"
+            )
+            conn.execute(
+                "INSERT INTO llm_wiki_entries VALUES ('e1', 'some.other.junk')"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        (ambient_brain / "config.json").write_text("{}")
+        env_brain = self.fake_home / "env-brain"
+        env_brain.mkdir()
+        (env_brain / "brain.db").write_bytes(b"")
+        (env_brain / "config.json").write_text("{}")
+        self.patch_env("CURATED_BRAIN_DIR", str(ambient_brain))
+        r = ct_doctor.check_import_preflight(env={"CURATED_BRAIN_DIR": str(env_brain)})
+        self.assertEqual(r.status, ct_doctor.PASS)
+        self.assertIn("no llm_wiki_entries table", r.detail)
+
+    def test_run_check_threads_merged_env_into_env_reading_checks(self):
+        # GLM r1 finding 6 / Opus r1 minor 4: pin the runner-level wiring —
+        # overrides visible ONLY through run_checks(env=...) must reach the
+        # checks without any ambient mutation. No embedding API key is set, so
+        # check_embedding falls through to the OLLAMA_HOST probe and its WARN
+        # detail names the env-view host, proving OLLAMA_HOST threading too.
+        self.make_brain()
+        env_manifest = self.fake_home / "runner-package.json"
+        env_manifest.write_text(
+            json.dumps({"name": "core-llm-wiki", "version": "1.2.3-runner"})
+        )
+        self.patch_env("OLLAMA_HOST", "http://127.0.0.1:1")  # ambient decoy
+        env = {
+            # GLM r1 (PR #30) flake hardening: the env-view host must be one
+            # NOTHING can listen on — port 1 (privileged, connection refused
+            # everywhere), not a high port a stray CI service could bind.
+            "OLLAMA_HOST": "http://127.0.0.1:1",
+            "CT_ENGINE_PACKAGE_JSON": str(env_manifest),
+        }
+        results = {
+            r.name: r
+            for r in ct_doctor.run_checks(timeout=3.0, env={**self.with_path(), **env})
+        }
+        # GLM r1 (PR #30): the WARN assertion is pinned to the env-view host
+        # only when the check warns; if an exotic runner actually serves
+        # Ollama on port 1 the check PASSes and this test must not flip.
+        if results["embedding-backend"].status == ct_doctor.WARN:
+            self.assertIn("127.0.0.1:1", results["embedding-backend"].detail)
+        self.assertNotIn("9911", results["embedding-backend"].detail)
+        self.assertIn("1.2.3-runner", results["import-preflight"].detail)
+
+    def test_run_check_ollama_empty_string_override_reads_unset(self):
+        # Opus r1 minor 4 (second half): the documented falsy-override rule —
+        # OLLAMA_HOST="" in the env view must fall back to the default host,
+        # not probe an empty netloc (ambient value would also be ignored).
+        # Hermetic regardless of a real Ollama on 11434 (CodeRabbit r1 PR #30,
+        # GLM r2 PR #31): the fallback default is redirected to a dead port
+        # DISTINCT from setUp's ambient OLLAMA_HOST (127.0.0.1:1), so the
+        # detail proves the probe took the default and not the ambient value.
+        # Patching the module constant (not urllib's urlopen) keeps the test
+        # independent of how check_embedding imports urlopen.
+        from unittest import mock
+
+        self.make_brain()
+        with mock.patch.object(
+            ct_doctor, "OLLAMA_DEFAULT_HOST", "http://127.0.0.1:2"
+        ):
+            results = {
+                r.name: r
+                for r in ct_doctor.run_checks(
+                    timeout=3.0,
+                    env={
+                        **self.with_path(),
+                        "OLLAMA_HOST": "",
+                    },
+                )
+            }
+        detail = results["embedding-backend"].detail
+        self.assertEqual(results["embedding-backend"].status, ct_doctor.WARN)
+        self.assertIn("http://127.0.0.1:2", detail)
+        self.assertNotIn("127.0.0.1:1", detail)
 
     def _seed(self, rows, evidence_table=True, evidence_ids=None, unanchored=0,
               with_source_type=True, with_deleted_at=False):
@@ -1314,6 +1498,26 @@ class CompatTests(DoctorTestCase):
         self.assertIn("tools: 14", text)
         self.assertIn('">=2.4,<2.5"', text)
         self.assertIn('">=2.5"', text)
+
+    def test_plugin_version_reads_manifest(self):
+        # GLM r1 review of PR #30: the MCP clientInfo version used to be a
+        # literal that lagged the release ("0.2.0" while the plugin shipped
+        # 0.3.x). It must derive from ../plugin.yaml, the version source of
+        # truth that the mirror gate already pins.
+        manifest = INTEGRATION / "plugin.yaml"
+        expected = None
+        for line in manifest.read_text().splitlines():
+            if line.startswith("version:"):
+                expected = line.split(":", 1)[1].strip()
+        self.assertTrue(expected)
+        self.assertEqual(ct_doctor._plugin_version(), expected)
+
+    def test_plugin_version_missing_manifest_is_not_a_crash(self):
+        # A deployed doctor whose plugin.yaml is absent (or unreadable) must
+        # still answer — with an explicit unknown marker, never an OSError.
+        missing = Path(self.fake_home) / "no-such-plugin.yaml"
+        self.assertFalse(missing.exists())
+        self.assertEqual(ct_doctor._plugin_version(missing), "0.0.0-unknown")
 
 
 class ExitCodeTests(DoctorTestCase):

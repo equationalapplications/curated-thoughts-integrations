@@ -38,11 +38,36 @@ import ct_preflight  # noqa: E402
 SIDECAR_NAME = ct_env.SIDECAR_NAME
 
 # Where the Hermes plugin registers the MCP server.
+# Ambient env enters here ONCE, at import, and that is deliberate (issue #29
+# review, GLM 2026-10-06): the Hermes config is a property of the HOST Hermes
+# installation, not of the brain/sidecar environment being probed — a caller
+# passing env= to run_checks is asking about a different brain/env view, not
+# about a different Hermes install. check_hermes_registration therefore reads
+# ambient by design; every other check resolves through _merged_env.
 HERMES_CONFIG = Path(
     os.environ.get("HERMES_CONFIG", str(Path.home() / ".hermes" / "config.yaml"))
 )
 MCP_SERVER_KEY = "curated-thoughts"
 PLUGIN_NAME = "curated-thoughts"
+
+
+def _plugin_version(manifest=None):
+    """Plugin release version, read from ../plugin.yaml at call time.
+
+    Keeps the MCP clientInfo from drifting from the shipped version (it
+    historically lagged as a literal): the manifest is the source of truth.
+    """
+    manifest = manifest or (Path(__file__).resolve().parent.parent / "plugin.yaml")
+    try:
+        for line in manifest.read_text(encoding="utf-8").splitlines():
+            if line.startswith("version:"):
+                value = line.split(":", 1)[1].strip()
+                if value:
+                    return value
+                break
+    except OSError:
+        pass
+    return "0.0.0-unknown"
 
 # Embedding backends: cloud keys OR a local Ollama. WARN-only check.
 EMBED_ENV_KEYS = (
@@ -52,7 +77,10 @@ EMBED_ENV_KEYS = (
     "VOYAGE_API_KEY",
     "GEMINI_API_KEY",
 )
-OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434")
+# Default Ollama endpoint used when the (merged) environment does not name
+# one. A constant, not an os.environ read: ambient env must only enter
+# through _merged_env (issue #29).
+OLLAMA_DEFAULT_HOST = "http://127.0.0.1:11434"
 
 # MCP handshake timeout (seconds) — the sidecar must never hang the doctor.
 MCP_TIMEOUT = 10.0
@@ -229,7 +257,9 @@ def mcp_tools_list(path, timeout=MCP_TIMEOUT, env=None):
                 "params": {
                     "protocolVersion": "2024-11-05",
                     "capabilities": {},
-                    "clientInfo": {"name": "ct_doctor", "version": "0.2.0"},
+                    # Derived from plugin.yaml so it cannot drift (GLM r1
+                    # review of PR #30).
+                    "clientInfo": {"name": "ct_doctor", "version": _plugin_version()},
                 },
             }
         )
@@ -386,16 +416,22 @@ def _probe_sidecar(path, timeout=MCP_TIMEOUT, env=None, brain_paths=None):
     )
 
 
-def check_brain_dir(brain_paths=None):
+def check_brain_dir(brain_paths=None, env=None):
     """(4) brain directory exists and is readable.
 
     This is the directory holding brain.db and config.json — resolved exactly
     as Curated Thoughts resolves it (CURATED_BRAIN_DIR, default ~/.brain).
     It is NOT the vault; see check_vault.
+
+    `env` (a mapping) is merged over os.environ for the CURATED_BRAIN_DIR note
+    in the detail message — issue #29: `brain_paths` may come from a caller's
+    merged env view while the message quoted ambient os.environ, so the
+    message could name a different directory than the one checked.
     """
-    paths = brain_paths or ct_env.resolve_brain_paths()
+    merged = _merged_env(env)
+    paths = brain_paths or ct_env.resolve_brain_paths(env=merged)
     brain = paths.brain_dir
-    env_note = os.environ.get(ct_env.ENV_BRAIN_DIR) or "<unset, default ~/.brain>"
+    env_note = merged.get(ct_env.ENV_BRAIN_DIR) or "<unset, default ~/.brain>"
     if not brain.exists():
         return CheckResult(
             "brain-dir",
@@ -440,14 +476,18 @@ def check_brain_dir(brain_paths=None):
     )
 
 
-def check_vault(brain_paths=None):
+def check_vault(brain_paths=None, env=None):
     """(5) the vault the brain actually points at.
 
     The vault is the documents tree, and its path lives in config.json under
     `vault_path` — it is machine-specific, so it is the first thing that
     breaks when a brain is imported from another machine.
+
+    `env` (a mapping) is merged over os.environ for the brain-path fallback —
+    issue #29 (GLM r1): the last env-reading check without a merged view.
     """
-    paths = brain_paths or ct_env.resolve_brain_paths()
+    merged = _merged_env(env)
+    paths = brain_paths or ct_env.resolve_brain_paths(env=merged)
     config, err = ct_env.read_brain_config(paths.config_path)
     if config is None:
         return CheckResult(
@@ -494,17 +534,26 @@ def check_vault(brain_paths=None):
     return CheckResult("vault", PASS, f"vault at {vault} exists and is readable")
 
 
-def check_embedding():
+def check_embedding(env=None):
     """(6) embedding backend hint — env keys present or Ollama reachable.
-    WARN-only: never fails, since local fastembed works without either."""
-    present = [k for k in EMBED_ENV_KEYS if os.environ.get(k)]
+    WARN-only: never fails, since local fastembed works without either.
+
+    `env` (a mapping) is merged over os.environ — issue #29: a caller passing
+    a full env dict (e.g. the spawn-time view) gets the embedding verdict for
+    THAT view, not for ambient os.environ.
+    """
+    merged = _merged_env(env)
+    present = [k for k in EMBED_ENV_KEYS if merged.get(k)]
     if present:
         return CheckResult(
             "embedding-backend",
             PASS,
             f"embedding API key present via {present[0]}",
         )
-    host = os.environ.get("OLLAMA_HOST", OLLAMA_HOST)
+    # GLM r1 (PR #30): a whitespace-only OLLAMA_HOST (e.g. " ") is truthy, so
+    # it counts as "set" and the probe WARNs naming that garbage netloc —
+    # accepted degradation; only empty string is the documented suppression.
+    host = merged.get("OLLAMA_HOST") or OLLAMA_DEFAULT_HOST
     try:
         from urllib.parse import urlparse
         from urllib.request import urlopen
@@ -642,7 +691,7 @@ def check_hermes_registration():
     )
 
 
-def check_import_preflight(path=None, brain_paths=None):
+def check_import_preflight(path=None, brain_paths=None, env=None):
     """(8) import pre-flight: is this brain safe for an agent to trust?
 
     Replaces the old static okf-hygiene advisory with a check that actually
@@ -655,9 +704,17 @@ def check_import_preflight(path=None, brain_paths=None):
         machine whose engine version decides what happens next.
 
     Read-only: the database is opened through a mode=ro URI.
+
+    `env` (a mapping) is merged over os.environ for the engine-manifest
+    lookup — issue #29: detect_engine_version's CT_ENGINE_PACKAGE_JSON
+    override was read ambiently while brain paths came from the caller's
+    merged view.
     """
-    paths = brain_paths or ct_env.resolve_brain_paths()
-    engine_version, engine_source = ct_preflight.detect_engine_version(sidecar_path=path)
+    merged = _merged_env(env)
+    paths = brain_paths or ct_env.resolve_brain_paths(env=merged)
+    engine_version, engine_source = ct_preflight.detect_engine_version(
+        sidecar_path=path, env=merged
+    )
     engine_note = (
         f"engine core-llm-wiki {engine_version}"
         if engine_version
@@ -900,11 +957,11 @@ def run_checks(timeout=MCP_TIMEOUT, env=None):
     )
     results.append(mcp_result)
 
-    results.append(check_brain_dir(brain_paths))
-    results.append(check_vault(brain_paths))
-    results.append(check_embedding())
+    results.append(check_brain_dir(brain_paths, env=merged))
+    results.append(check_vault(brain_paths, env=merged))
+    results.append(check_embedding(env=merged))
     results.append(check_hermes_registration())
-    results.append(check_import_preflight(path=path, brain_paths=brain_paths))
+    results.append(check_import_preflight(path=path, brain_paths=brain_paths, env=merged))
     results.append(check_version_compat(path, tool_count=tool_count))
     return results
 
