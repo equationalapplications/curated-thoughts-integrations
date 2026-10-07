@@ -1250,6 +1250,51 @@ class TestPluginWiring(unittest.TestCase):
         mod.register(ctx)  # must not raise
         self.assertEqual(ctx.sections, [])
 
+    def _hooks(self):
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location(
+            "ct_plugin_under_test3", INTEGRATION / "__init__.py"
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        ctx = _StubCtx()
+        mod.register(ctx)
+        return dict(ctx.hooks)
+
+    def test_registers_live_hooks(self):
+        hooks = self._hooks()
+        self.assertIn("on_session_start", hooks)
+        self.assertIn("pre_llm_call", hooks)
+        self.assertIn("transform_tool_result", hooks)
+
+    def test_live_hooks_fail_open(self):
+        hooks = self._hooks()
+        self.assertIsNone(hooks["pre_llm_call"](session_id=""))
+        self.assertIsNone(hooks["transform_tool_result"](tool_name="terminal", result="x"))
+
+    def test_hook_registration_error_does_not_break_register(self):
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location(
+            "ct_plugin_under_test4", INTEGRATION / "__init__.py"
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        ctx = _StubCtx()
+
+        def bad_register(name, fn):
+            if name != "on_session_start":
+                raise ValueError("unknown hook")
+            ctx.hooks.append((name, fn))
+
+        ctx.register_hook = bad_register
+        mod.register(ctx)  # must not raise
+        self.assertEqual(
+            sorted(s for s, _f, _m in ctx.sections),
+            ["curated-thoughts", "curated-thoughts-wisdom"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
