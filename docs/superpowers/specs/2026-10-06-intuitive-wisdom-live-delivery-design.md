@@ -63,8 +63,9 @@ behavior is unchanged.
 
 1. **CT PR** (curated-thoughts repo): the `ct wisdom match` contract. Gets its own CT
    spec and plan, which turn the "CT prerequisite" section below into CT-side detail
-   (embedding wiki entries at ingest, threshold calibration, deposit→wiki supersession
-   resolution). Investigation items O4 and O5.
+   (threshold calibration over the wiki embeddings CT already stores —
+   `llm_wiki_entries.embedding_blob`, filled by `embed_sweep.rs` [V] — and
+   deposit→wiki supersession resolution). Investigation items O4 and O5.
 2. **Hermes PR** (this repo): built and unit-tested against a fake `ct` that speaks
    the contract; e2e runs once a CT build with the contract is installed in the
    scratch profile.
@@ -74,14 +75,16 @@ behavior is unchanged.
 Read-only. Same subprocess rules as v1: list argv, `stdin=DEVNULL`, timeout, `cwd=~`.
 
 ```
-ct wisdom match <text> --json [--max N] [--exclude <id>]...
+ct wisdom match --json [--max N] [--exclude=<id>]... -- <text>
 ```
 
-- `<text>`: one argv element of up to 2000 characters. CT may truncate further.
+- `<text>`: one argv element of up to 2000 characters, always after `--` (a user
+  message may start with `-`, which an argument parser would otherwise read as a
+  flag). CT may truncate further.
 - `--max N`: the most relevance-gated `entries` to return (default 2). `corrections`
   are not counted against it.
-- `--exclude <id>`, repeatable: ids already in the caller's context. CT must not return
-  them in `entries`.
+- `--exclude=<id>`, repeatable, always in `=` form (an id may start with `-`): ids
+  already in the caller's context. CT must not return them in `entries`.
 - **Exit 0** on success, including no matches (unlike `ct recall`'s exit 2). Any
   non-zero exit means an error.
 
@@ -154,8 +157,10 @@ Every delivered fact is rendered with an id marker on its title line:
   [V]). `render_block` emits the marker, and an entry without a valid id is dropped
   because it cannot be deduped. The memo records the block's id list next to its bytes.
   Only new renders change, so the byte stability of memoized renders still holds.
-- **Sanitizer:** `_sanitize` additionally removes every `<!-- ct-fact` substring
-  repeatedly until stable, before the existing two steps. That way a fact's text cannot
+- **Sanitizer:** `_sanitize` additionally removes every `ct-fact:` substring
+  repeatedly until stable, before the existing two steps (the ledger scan matches
+  `ct-fact:<id>` with or without the comment wrapper, so the bare token is what
+  must be stripped). That way a fact's text cannot
   forge a ledger entry.
 - A forged marker elsewhere in the transcript, for example typed by the user, can only
   **suppress** a delivery. It can never cause a duplicate. That is the safe direction,
@@ -199,7 +204,7 @@ _on_pre_llm_call(session_id, user_message, conversation_history, is_first_turn, 
      (where live blocks land; bootstrap ids live in the system prompt and tool
      trailers in tool-role messages, so neither counts) ≥ LIVE_MAX_PER_SESSION
      → still run, but with --max 0 (corrections only)
-  6. ct wisdom match <query> --json --max k --exclude <ledger…>  (LIVE_TIMEOUT)
+  6. ct wisdom match --json --max k --exclude=<id>… -- <query>  (LIVE_TIMEOUT)
   7. drop any entry or correction whose id is invalid or already ∈ ledger;
      additionally drop a correction whose `supersedes` ∩ ledger is empty
      (nothing in context for it to correct). Corrections exist only for ids
@@ -231,14 +236,15 @@ nothing.
 
 ### `transform_tool_result` hook (dedup of agent-initiated CT calls)
 
-- Matches only tool names ending in `__curated_recall_context` or
-  `__curated_get_wiki_entry` (`mcp__<server>__<tool>` [V]; suffix match tolerates the
-  installed server name). Any other tool → `None` (pass-through).
+- Matches only tool names ending in `__curated_recall_context`
+  (`mcp__<server>__<tool>` [V]; suffix match tolerates the installed server name).
+  `curated_get_wiki_entry` is NOT matched: it returns document chunks
+  (`full_text`, `chunks`) with no wiki ids [V `curated_thoughts_mcp.rs:280-333`],
+  so there is nothing to dedup by id (plan-time correction). Any other tool → `None` (pass-through).
 - Unwraps the two-layer envelope (investigation Target 5, O7 resolved [V]): the outer
   string is Hermes's `{"result": "<CT JSON>"}` (plus optional `structuredContent` /
   `_meta`); `json.loads(outer["result"])` gives CT's object, whose wiki list is
-  `wiki_entries` for `curated_recall_context` and the single entry for
-  `curated_get_wiki_entry`. After stubbing, the inner object is re-serialized into
+  `wiki_entries`. After stubbing, the inner object is re-serialized into
   `outer["result"]` and the outer object re-serialized with its other keys intact.
   A `tool_error`, missing `result`, or unparseable inner string (e.g. head+tail
   truncated) → pass through. For each wiki entry:
