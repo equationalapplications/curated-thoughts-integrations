@@ -2,7 +2,10 @@
 
 **Date:** 2026-10-06 · **Status:** Draft (brainstorm-approved 2026-10-06; spec review pending) ·
 **Branch:** `feat/intuitive-wisdom-live-delivery` · **Repos:** this repo (Hermes plugin
-0.3.3 → 0.4.0) + `curated-thoughts` (prerequisite contract, delivered first)
+0.3.3 → 0.4.0) + `curated-thoughts` (prerequisite contract, delivered first —
+[curated-thoughts#265](https://github.com/equationalapplications/curated-thoughts/issues/265),
+CT spec `docs/superpowers/specs/2026-10-06-issue265-wisdom-match-design.md` on CT branch
+`feat/issue-265-wisdom-match`)
 
 Investigation: [`../investigations/2026-10-06-intuitive-wisdom-live-delivery-step0-investigation.md`](../investigations/2026-10-06-intuitive-wisdom-live-delivery-step0-investigation.md)
 (pinned: Hermes `ee8dd6c8`, CT `f7d9f56`; every `[V]` below has its evidence there).
@@ -93,7 +96,7 @@ stdout (`--json`):
 ```json
 {
   "schema": 1,
-  "gate": "semantic-v1",
+  "gate": "semantic-v1:<embed model>",
   "entries": [
     {"id": "…", "title": "…", "text": "…", "score": 0.0,
      "supersedes": ["…"], "provenance": "…"}
@@ -107,7 +110,10 @@ stdout (`--json`):
 
 CT guarantees:
 
-1. **Gate:** every `entries` item passed CT's relevance gate for `<text>`. An empty list
+1. **Gate:** every `entries` item passed CT's relevance gate for `<text>`. `gate` is
+   `"semantic-v1:<model>"`, or `"uncalibrated"` when CT has no calibrated floor for the
+   brain's embed model — then `entries` is always empty (CT abstains) while
+   `corrections` still flow. An empty list
    means nothing is relevant enough, not that something failed. `score` is
    informational only, and the plugin never thresholds on it.
 2. **Render-time supersession:** a superseded entry is never returned in `entries` or
