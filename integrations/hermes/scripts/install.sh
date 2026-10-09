@@ -12,7 +12,10 @@
 #                         no mcp_servers section). Default: print, don't write.
 #   HERMES_CT_SIDECAR     override the sidecar command shown in the printed
 #                         MCP block (default: curated-thoughts-mcp).
-#   HERMES_CONFIG         override config path (default: ~/.hermes/config.yaml).
+#   HERMES_CONFIG         override config path (default: $HERMES_HOME/config.yaml).
+#   HERMES_HOME           override the Hermes home root (default: ~/.hermes).
+#                         Profile-scoped installs use this, e.g.
+#                         HERMES_HOME=~/.hermes/profiles/ct-test bash install.sh.
 #
 # Docs: docs/spec-hermes-plugin-v0.md §6 and install.md.
 
@@ -20,7 +23,11 @@ set -euo pipefail
 
 PLUGIN_NAME="curated-thoughts"
 SIDECAR_CMD="${HERMES_CT_SIDECAR:-curated-thoughts-mcp}"
-HERMES_HOME="${HOME}/.hermes"
+# Honor a pre-set HERMES_HOME (profile-scoped installs) and fall back to
+# the default only when it is unset or empty — an unconditional reset here
+# once made `HERMES_HOME=... bash install.sh` overwrite the LIVE default
+# profile's plugin instead (2026-10-09).
+HERMES_HOME="${HERMES_HOME:-${HOME}/.hermes}"
 CONFIG_FILE="${HERMES_CONFIG:-${HERMES_HOME}/config.yaml}"
 
 SCRIPT_SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
