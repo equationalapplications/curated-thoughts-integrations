@@ -1,6 +1,6 @@
 # Cross-harness Intuitive Wisdom parity (DSH, OpenCode, Claude Code, OpenClaw) — design
 
-**Date:** 2026-10-09 · **Status:** Draft rev 2 (post GLM-critique r1; pending GLM re-check + Kurt approval) ·
+**Date:** 2026-10-09 · **Status:** Approved — GLM loop converged (r2: all findings resolved, no MAJOR); Gemini + Kurt approved 2026-10-09 ·
 **Controller:** Tessera · **Repo:** equationalapplications/curated-thoughts-integrations
 **Base:** `origin/main` @ `272d7ea` (re-based from investigation's `6ec6fe9`; PR #36
 merged 2026-10-09 12:12 EDT — see "Delta vs investigation rev 3" below)
@@ -268,6 +268,10 @@ constants (frozen, no config surface):
 
 on user_turn(session, user_message):
   if session.id is empty: return                      # invariant 3 no-op
+  if not host.delivery_enabled(session): return       # latching OFF switch (GLM r2):
+      # CC resume marks the session OFF-for-life in the store, so this fires
+      # before any bootstrap check — known_bootstrap is True there and must
+      # not re-enable delivery. Hosts without a latch return True here.
   ledger = host.rebuild_ledger(session)               # N4 source of truth
   host.cache_ledger(session, ledger)                  # BEFORE any early return (m1):
       # the N3 transform must be able to dedup agent-initiated CT calls even on
