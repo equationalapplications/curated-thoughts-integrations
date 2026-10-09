@@ -61,3 +61,12 @@ files in the brain, no scripts that bypass the sidecar — not even to "fix"
 something. The sidecar is the only writer; it owns indexing, embeddings, and
 consistency. If a tool call fails, report the error and route around it (see
 the curated-thoughts-ops skill) instead of working around the sidecar.
+
+## Wisdom that arrives on its own
+
+With a recent Curated Thoughts build, facts relevant to the current message
+can appear in your context under "Curated Thoughts — relevant now", each with
+a provenance label. Treat `unlabeled` and agent-tier facts as unverified. A
+`curated_recall_context` hit marked `"in_context": true` is a fact you
+already have — don't re-fetch it. A line ending in "supersedes ct-fact:<id>"
+replaces that earlier fact; stop relying on the old one.

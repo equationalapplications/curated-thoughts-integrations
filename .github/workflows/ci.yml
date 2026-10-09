@@ -239,8 +239,8 @@ jobs:
       - name: Plugin entry point registers against a stub host
         # The Hermes contract is verified against a stub ctx rather than a live
         # host (Hermes is not installable in CI): three skills, the
-        # on_session_start hook, and graceful degradation when the optional
-        # system-prompt API is absent.
+        # on_session_start hook plus the live-delivery hooks, and graceful
+        # degradation when the optional system-prompt API is absent.
         run: |
           python - <<'PY'
           import importlib.util, sys
@@ -254,12 +254,15 @@ jobs:
               def __init__(self): self.skills=[]; self.hooks=[]; self.sections=[]
               def register_skill(self, n, p): self.skills.append((n, p))
               def register_hook(self, e, cb): self.hooks.append((e, cb))
-              def register_system_prompt_section(self, i, cb): self.sections.append((i, cb))
+              def register_system_prompt_section(self, i, cb, **kw): self.sections.append((i, cb, kw))
 
           ctx = Ctx(); m.register(ctx)
           assert len(ctx.skills) == 3, ctx.skills
-          assert [e for e, _ in ctx.hooks] == ["on_session_start"], ctx.hooks
-          assert len(ctx.sections) == 1, ctx.sections
+          assert [e for e, _ in ctx.hooks] == [
+              "on_session_start", "pre_llm_call", "transform_tool_result",
+          ], ctx.hooks
+          assert len(ctx.sections) == 2, ctx.sections
+          assert ctx.sections[1][2] == {"max_chars": 2500}, ctx.sections
           ctx.hooks[0][1](session_id="ci", cwd=".")
           assert ctx.sections[0][1](), "system prompt section rendered empty"
 
@@ -267,7 +270,9 @@ jobs:
               pass
           mc = Minimal(); mc.register_system_prompt_section = None
           m.register(mc)
-          assert [e for e, _ in mc.hooks] == ["on_session_start"]
+          assert [e for e, _ in mc.hooks] == [
+              "on_session_start", "pre_llm_call", "transform_tool_result",
+          ]
           print("plugin entry point OK")
           PY
 
