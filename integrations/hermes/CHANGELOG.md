@@ -6,6 +6,13 @@ format below is load-bearing: `## <version> — <date>`.
 
 ## Unreleased
 
+## 0.4.1 — YYYY-MM-DD
+
+- Fixed: `scripts/install.sh` honors a pre-set `HERMES_HOME` instead of
+  silently resetting it to `~/.hermes`. Profile-scoped installs
+  (`HERMES_HOME=~/.hermes/profiles/ct-test bash install.sh`) previously
+  overwrote the live default profile's plugin.
+
 ## 0.4.0 — YYYY-MM-DD
 
 - Added: relevance-timed mid-session wisdom delivery (Intuitive Wisdom, spec
