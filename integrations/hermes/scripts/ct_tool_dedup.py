@@ -84,6 +84,9 @@ def _transform(tool_name, result, session_id):
         ct_ledger.LEDGER_CACHE.add(session_id, new_ids)
     trailer = "".join("\n" + ct_ledger.marker(fact_id) for fact_id in new_ids)
     outer["result"] = json.dumps(inner, ensure_ascii=False) + trailer
+    # Only outer["result"] is rewritten. structuredContent/_meta pass through
+    # verbatim per spec (investigation Target 5): a host that renders those
+    # keys instead would show un-stubbed fact text — a pinned, accepted risk.
     logger.debug("wisdom-live: tool dedup session=%s stubbed=%d new=%d",
                  session_id or "<empty>", stubbed, len(new_ids))
     return json.dumps(outer, ensure_ascii=False)

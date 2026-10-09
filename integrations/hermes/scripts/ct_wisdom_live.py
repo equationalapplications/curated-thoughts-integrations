@@ -43,7 +43,9 @@ LIVE_QUERY_CHARS = 2000
 EXCLUDE_MAX = 256
 BREAKER_FAILS = 3
 BREAKER_PAUSE = 300  # seconds
-FIRST_TURN_MAX_SESSIONS = 256
+FIRST_TURN_MAX_SESSIONS = 256  # matches LEDGER_CACHE_MAX; eviction beyond this
+# is fail-closed (a later turn degrades to restored_unknown_bootstrap), never
+# fail-open — safe on high-session gateway processes, just silently degraded.
 
 LIVE_HEADING = "## Curated Thoughts — relevant now"
 _ELLIPSIS = "…"
