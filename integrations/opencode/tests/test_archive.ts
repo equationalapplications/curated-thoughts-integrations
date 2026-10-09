@@ -98,7 +98,11 @@ beforeAll(() => {
   } catch {
     packedNpm = '';
   }
-});
+  // Archive build + tar extraction + pnpm pack can exceed vitest's 10 s
+  // beforeAll default on a cold Windows runner (main CI run 37561257987
+  // failed exactly there) — give setup its own budget instead of flaking
+  // on runner speed.
+}, 120_000);
 
 afterAll(() => {
   if (workdir) rmSync(workdir, { recursive: true, force: true });
