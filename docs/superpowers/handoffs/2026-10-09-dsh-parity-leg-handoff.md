@@ -38,28 +38,30 @@ touching `integrations/deepseek/` or the parity branch.
 **E2e evidence:** /tmp/ct-e2e-out/ (logs; ephemeral — /tmp). Pin tarballs used
 for API verification: /tmp/dshpin/ (also ephemeral).
 
-## TOP PRIORITY — CI is red (must fix first)
+## TOP PRIORITY — ~~CI is red (must fix first)~~ FIXED (2026-10-09, this session)
 
-The new `deepseek (...)` matrix jobs FAIL on the push. Root cause (reproduced
-in a fresh clone at /tmp/ci-repro): the plugin imports
-`@equational-applications/ct-wisdom-core` (a `file:../../packages/...` dep),
-but nothing builds the CORE before the deepseek job runs — `lib/` doesn't
-exist → `error TS2307: Cannot find module '@equational-applications/ct-wisdom-core'`.
-Verify locally: `cd /tmp/ci-repro/integrations/deepseek && pnpm exec tsc --noEmit`.
+The `deepseek (...)` matrix jobs failed on the push with `TS2307: Cannot find
+module '@equational-applications/ct-wisdom-core'` — reproduced in a fresh
+clone: the core's `lib/` is gitignored, nothing built it in CI, and pnpm
+resolves/copies `file:` deps at install time, so the integration's `tsc` ran
+against an empty package.
 
-Fix (spec-sanctioned — the parity spec says "New CI workspace node
-packages/ct-wisdom-core"): teach `.github/workflows/ci.yml` to build the core
-before integration jobs that need it. Either:
-- a new `core` job (pnpm install + build + vitest in packages/ct-wisdom-core),
-  and make the deepseek matrix job depend on it / run the core build as a
-  step; the cleanest minimal edit is a conditional step in the `integration`
-  job: when `matrix.entry.dir == 'integrations/deepseek'`, run
-  `pnpm install --frozen-lockfile && pnpm build` in
-  `packages/ct-wisdom-core` before the deepseek build; or
-- extend `tools/ct_ci.py discover` so the deepseek manifest can declare the
-  dependency (bigger change; only if the controller prefers manifest-driven).
-Check `gh pr checks 37` after pushing the fix — the run that failed is
-37994397452.
+**Fixed in commits `0107eee` + `5e366a1` (on this branch):**
+- New `core` job in `ci.yml`: frozen install + build + unit suite (45 tests)
+  in `packages/ct-wisdom-core` — the spec's CI workspace node; the suite had
+  previously run nowhere in CI.
+- Conditional "Build shared core" step in the `integration` job, BEFORE its
+  install (ordering is load-bearing), gated on the integration's
+  `package.json` declaring the core as a dependency — detected, not hardcoded,
+  so the OpenCode/OpenClaw legs inherit it. Runs `shell: bash` (Windows
+  default shell is pwsh; the first red run after this step landed proved the
+  ParserError on all four Windows entries).
+- `ci-ok` hard-requires `core` (it has no skip condition).
+
+**Verified:** full-matrix run 38003095545 on `5e366a1` — 29/29 jobs green
+(includes opencode/claude-code/hermes matrices, which this run exercised for
+the first time on this branch because touching `.github/` trips
+`affects_all`). `gh pr checks 37` all pass.
 
 ## Remaining legs (spec ordering)
 
@@ -83,3 +85,7 @@ core-build fix applies to opencode/openclaw when they land).
   it; manual runs: `mkdir -p out && chmod 777 out` — a root-owned dir fails
   every check with Permission denied).
 - The 4 local test failures (sidecar/brain env) are expected on this machine.
+- GitHub Actions' default shell on Windows runners is pwsh, NOT bash — any
+  POSIX-syntax `run:` step in `ci.yml` must set `shell: bash` explicitly
+  (the pwsh ParserError took down all four Windows matrix entries once
+  already).
