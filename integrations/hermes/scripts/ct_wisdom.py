@@ -433,6 +433,10 @@ class WisdomMemo:
         try:
             block, memoize = recall_fn(session_info)
         except Exception:
+            # Fails open with NO memo write to _store (docstring contract): a
+            # raising recall_fn is an unknown state, so the next render
+            # retries. _remember() below only refreshes the _last map, never
+            # the memo.
             logger.debug("wisdom: recall_fn failed for session %s", sid, exc_info=True)
             self._remember(sid, "")
             return ""
