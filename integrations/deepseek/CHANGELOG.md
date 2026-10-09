@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.3.1 — 2026-10-09
+
+Ships the live-wisdom usage guidance ("Wisdom that arrives on its own") in the
+`curated-thoughts-usage` skill, byte-identical to the Hermes integration, so
+agents on any harness read the same provenance, `in_context`, and supersession
+rules.
+
 ## 0.3.0 — 2026-09-30
 
 New system-prompt section: **wisdom auto-inclusion**. Once per agent, the

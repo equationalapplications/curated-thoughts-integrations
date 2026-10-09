@@ -1,152 +1,205 @@
-# INTENT — curated-thoughts-integrations (Intuitive Wisdom & Harness Injection)
+# INTENT — curated-thoughts-integrations
 
-**Read this file first.** It explains why this repo exists, the business rules
-every harness integration must obey, what is out of scope, and the workflow.
-This file wins on *intent*; specs win on *detail*.
+**Read this file first.** It explains why this repo exists, the rules every
+integration must follow, what it deliberately does not do, and how changes are
+made. If this file and another document disagree, this file wins on *intent*
+(what we are trying to do) and the specs win on *detail* (exactly how).
 
-## Why CTI exists
+Each rule has a **Status** line saying how much of it the code does today:
 
-Curated Thoughts (CT) is a local second brain with a curated wisdom layer.
-This repo carries the harness integrations (Hermes, DeepSeek Harness, and
-followers) that make CT's wisdom appear in an agent's context automatically.
-Each integration implements a shared v1 mechanism that serves Intuitive
-Wisdom (Kurt, 2026-10-05; supersedes the 2026-10-01 algorithm framing;
-reference spec: PR #21, ported in PR #22).
+- **Built** — the code does this.
+- **Partly built** — some of it exists; the line says what is missing.
+- **Planned** — decided, but not in the code yet.
+- **Open decision** — not decided yet.
 
-## Intuitive Wisdom (what every integration serves)
+Statuses were checked against the code on 2026-10-08. Update a status line in
+the same pull request that changes the behavior.
 
-Intuitive Wisdom is the agent **knowing the curated wisdom fact at the time it
-is relevant** (Kurt, 2026-10-05). It is defined by this timeliness property,
-not by any particular mechanism.
+## Why this repo exists
 
-What ships today (v1) is the first, partial mechanism: session-start injection
-via frozen seed + session context. It guarantees presence at bootstrap only —
-relevance is approximated by seed similarity. The end state is
-**relevance-timed delivery**: when a fact becomes relevant mid-session, it
-reaches the agent at that moment — via cache-safe channels that never rewrite
-the frozen system-prompt block (tool results are the v1-proven channel), and
-ledger-deduped so no fact appears twice. The matching trigger, judge
-involvement, and delivery surface for mid-session relevance are **open design
-work**, not settled by this file; open questions carried from the invariants
-(ledger ownership, scope-b labeling) resolve there.
+Curated Thoughts (CT) is a private, local-first "second brain" with a curated
+**wisdom layer**: short, trustworthy facts its Librarian distills from your
+files. This repo holds the **integrations**: thin plugins for agent harnesses
+(Hermes, DeepSeek Harness, and more to come) that put those facts in front of
+the agent automatically, so it doesn't have to remember to ask.
 
-### v1 mechanism — bootstrap-time relevance (what every integration implements)
+The goal is **Intuitive Wisdom**: the agent *knows the right fact at the moment
+it is relevant*. That is a property, not a mechanism. We reach it in two steps:
 
-1. **Analyze:** at bootstrap there is no conversation yet — recall is driven by
-   the frozen seed constant plus session context, per PR #21 (`ct recall
-   "<seed>" --json --k 3`, the query string widened with the cwd basename
-   when non-degenerate; the subprocess itself runs from `~`); the seed does
-   the semantic work.
-2. **Match:** find wisdom-layer facts via CT's recall (semantic similarity).
-3. **Judge (in CT, optional — future; not implemented in v1):** if System One
-   is configured, CT's recall
-   applies its relevance judgment before returning results. Integrations never
-   call System One directly and never wire their own judges.
-4. **Traverse — deferred:** deeper graph traversal is NOT part of
-   session-start injection in v1 (edges are sparse; it stays in `wiki_context`
-   on demand). Any injection-time traversal needs a new CT decision first.
-5. **Inject:** append the surviving facts to the prompt under the invariants
-   below.
+- **At session start (v1).** Before the conversation begins, recall a few facts
+  and add them to the system prompt once. There is no conversation yet, so
+  relevance is a guess.
+- **Mid-session (live delivery).** On each user message, ask CT which facts are
+  relevant *now* and append the new ones to that turn. This is the end state.
+  The Hermes design is in
+  `docs/superpowers/specs/2026-10-06-intuitive-wisdom-live-delivery-design.md`;
+  other ports copy it.
 
-## Injection invariants (non-negotiable)
+| Integration | Session-start injection | Live delivery |
+|---|---|---|
+| Hermes | Built (0.3.0) | Built (0.4.0, draft PR #35) |
+| DeepSeek Harness | Built (0.3.0) | Planned |
+| OpenCode | Not yet (0.1.0 registers the sidecar only) | Planned |
+| Claude Code | Not yet (PR #23 open) | Planned |
+| OpenClaw | Planned | Planned |
 
-1. **Exactly once (scope b).** A fact never appears twice anywhere in a
-   session's context: once in the injected block, never again via tool
-   results. The ledger lives in CT's session context (keyed by session id);
-   CT recall tools filter against it. Dedup keys on the deterministic fact id
-   after supersession resolution. The supersession gate governs **render-time
-   construction only**: at render time, no superseded fact is injected.
-   Post-render supersession flows exclusively through the append-and-mark
-   path: a replacement surfaced mid-session is delivered with an explicit
-   "supersedes <id>" tool-result marker; the frozen block is never edited.
-   (Ledger ownership and the supersession marker are new work —
-   pending decisions.)
-2. **Cache safety.** The block is computed at bootstrap and frozen as ONE
-   contiguous static region, additive with existing plugin context. Verbatim
-   replay exists to protect **prompt caching** — the prefix stays intact so
-   the cache is preserved — not to freeze knowledge. Resume replay is
-   guaranteed by the **host** persisting the fully rendered prompt verbatim;
-   there is no plugin-side persistence — none will be built — and the
-   in-process memo (PR #22) is a speed optimization for **new renders only**.
-   A fact superseded **after** the original render is **appended as a
-   correction** through invariant 1's append-and-mark path (mid-session
-   delivery: pending design work); the append is highly
-   relevant content, not unnecessary duplication, and the stale line stays
-   visible but corrected — never silently relied on. A bootstrap render that
-   fails (timeout / exit / spawn / probe timeout) MAY be **late-filled when
-   a later render misses the session memo** — `discovery_miss`,
-   `parse_error`, and `zero_hits` remain cached as empty blocks until LRU
-   eviction; while the entry is in the LRU, only the non-memoized failure
-   classes retry, but after LRU eviction any failure class may retry on the
-   next render for that session; a compaction rebuild counts as a trigger
-   only when it invokes the renderer; each identity probe uses a 3 s
-   subprocess timeout (`PROBE_TIMEOUT`) and recall uses a 5 s subprocess
-   timeout (`RECALL_TIMEOUT`); discovery may probe multiple candidates per
-   render, so the worst-case stall scales with the candidate list. (Failure
-   class names are those in `ct_wisdom.py`.) Mid-session learning arrives only as tool
-   results; the system prompt is never rewritten.
-3. **Graceful degradation.** Recall backend unavailable, timeout, empty
-   corpus → the integration is a silent no-op (no empty block, nothing
-   emitted), logged locally, never surfaced as a session error. A session
-   with no session id is likewise a silent no-op — nothing emitted. A bounded
-   recall timeout prevents a hung recall backend from stalling bootstrap. An
-   agent session must never fail because its brain is unreachable.
-4. **Provenance labeling.** Every injected fact is labeled with its provenance
-   class from a fixed vocabulary OWNED BY CT and emitted by `ct recall`
-   (on successful recalls with chunk hits, `ct recall --json` returns a
-   `results` array of chunks — `doc_path`, `chunk_text`, `score`,
-   `symbol_name`, `entity_id` — and a `wiki` array of entries — `id`,
-   `entity_id`, `title`, `text`, `source_ref`, `confidence`; neither array
-   carries a provenance class — RR-C; closing it needs parser changes per
-   integration, so until then this invariant is forward-looking). The Hermes
-   parser reads only `title` and `text` from `wiki`, discarding the rest.
-   Integrations never present agent-tier
-   wisdom as verified knowledge.
-5. **Bound the block.** The injection block has a size/item cap with
-   host/spec-pinned values (`max_chars=2500` is the Hermes host registration
-   in `__init__.py`; `RECALL_K=3` is local to `ct_wisdom.py`); the cap is
-   never raised locally to compensate for weak matching.
+## Glossary
 
-## Read-only retrieval
+- **CT** — Curated Thoughts, the separate repo and app that owns the brain.
+- **Brain** — CT's database of facts.
+- **Wisdom layer** — the curated facts that integrations deliver.
+- **Harness** / **host** — the agent program an integration plugs into.
+- **Injection** — adding facts to the agent's context without the agent asking.
+- **Block** — the section of injected facts added to the system prompt at
+  session start.
+- **Live delivery** — facts appended to a user turn mid-session.
+- **Ledger** — the list of fact ids already in the session's context. It is
+  rebuilt every turn from `<!-- ct-fact:<id> -->` markers in the transcript, so
+  the plugin stores nothing.
+- **Supersession** — CT marking an old fact as replaced by a newer one.
+- **Correction** — a replacement fact delivered mid-session for one that was
+  superseded after it was shown.
+- **Provenance** — where a fact came from (for example, stated by a person or
+  inferred by the Librarian), from a fixed list CT owns.
+- **System One** — CT's small, fast judging models. They live in CT only.
+- **`ct recall`** / **`ct wisdom match`** — CT's read-only commands. Session-start
+  injection uses `recall`. Live delivery uses `wisdom match`, which applies CT's
+  relevance cutoff.
 
-- Integration CODE never writes to CT. Agents running inside the harness may
-  use CT's deposit tools (`wisdom_deposit`, `wisdom_propose_supersession`)
-  — which write files under `immutable-source-files/agents/` and report
-  `pending ingest` honestly. Integrations never call row-level
-  insert/update/approve/archive tools.
-- Injection never reads uningested vault files — no lexical grepping, no
-  query-time embedding of vault files, no ad-hoc indexing. Freshness is CT's
-  deposit-kicked-ingest job, not ours.
-- Integrations only READ the brain via the sanctioned recall surface (`ct
-  recall` subprocess / read-only sidecar tools). No direct brain DB access.
-- Reuse proven decisions: new ports fork the converged Hermes design and
-  record deliberate divergences (PR #22 is the model).
+## The rules
 
-## Non-goals
+### 1. A fact appears at most once in the agent's context
 
-- No general-purpose CT client library; bind thinly to each host's extension
+Every delivered fact carries a `ct-fact:<id>` marker. Before delivering
+anything, the integration rebuilds the ledger from the current context and
+skips ids already there. If the agent runs a CT search itself, facts it
+already has come back as short "already in context" stubs. "Context" means
+what the agent can see right now. A fact that was compacted away may be
+delivered again.
+
+*Why:* repeating a fact wastes the agent's attention and the user's tokens.
+
+**Status: Partly built.** Hermes 0.4.0 does all of this, with a randomized
+exactly-once test. Hermes sessions restored after a restart can't see their
+session-start ids, so live delivery stays off there (it fails closed). DeepSeek
+Harness injects only at session start, and its agent-run CT searches can repeat
+a fact.
+
+### 2. Never edit the system prompt after it is built
+
+The session-start block is computed once and frozen as one unbroken region of
+the system prompt, so the host's prompt cache keeps working. Re-renders must be
+byte-identical. Anything learned later goes in the append-only channels (the
+user turn or tool results), never back into the prompt. When a session is
+resumed, the host replays the saved prompt; the plugin doesn't persist
+anything to make that work.
+
+*Why:* rewriting the prompt breaks prompt caching on every turn, which costs
+money and time.
+
+**Status: Built** (Hermes, DeepSeek Harness). When the first render fails, a
+later render may fill it in. Which failures retry is defined in the v1 spec and
+`ct_wisdom.py`.
+
+### 3. No superseded fact is ever shown as current
+
+When a block or a live delivery is built, superseded facts are left out. If a
+fact is superseded *after* the agent has seen it, the replacement is appended
+as a correction that says which id it replaces. The old line stays visible but
+is marked as replaced.
+
+*Why:* the agent must never rely on a fact CT knows is wrong.
+
+**Status: Partly built.** Hermes renders corrections, and `ct wisdom match`
+filters superseded facts. In practice no corrections arrive yet, because CT's
+Librarian doesn't apply supersessions yet (a CT-side gap). Session-start
+injection relies on `ct recall`, which doesn't filter superseded facts.
+
+### 4. Failing quietly beats failing the session
+
+If CT isn't installed, the brain is unreachable, a call times out, or nothing
+matches, the integration does nothing: no empty block and no error in the
+session. It logs locally. Every CT call has a short timeout, so a hung backend
+can't stall the session.
+
+*Why:* an agent session must never break because the brain is down.
+
+**Status: Built** (Hermes, DeepSeek Harness). Hermes live delivery also pauses
+for 5 minutes after 3 failures in a row.
+
+### 5. Label where each fact came from
+
+Each delivered fact shows its provenance, using CT's vocabulary. Agent-written
+facts are never presented as verified.
+
+*Why:* the agent should weigh a person's stated rule above a guess.
+
+**Status: Partly built.** Live delivery labels provenance. Session-start
+injection can't yet, because `ct recall` doesn't return provenance. Closing that
+gap needs a CT change and a parser change in each integration.
+
+### 6. Keep it small
+
+The session-start block and each live delivery have fixed limits on size and
+count (for Hermes: 2500 chars at start; per turn, at most 2 facts and 1200
+chars, with at most 12 per session). Never raise a limit to make up for weak
+matching.
+
+*Why:* a flood of loosely related facts is noise, not wisdom.
+
+**Status: Built** (Hermes, DeepSeek Harness).
+
+### 7. Integrations only read, and only through CT's commands
+
+Integration code never writes to the brain and never opens its database
+directly. It reads only through `ct recall`, `ct wisdom match`, and CT's
+read-only sidecar tools. It never reads vault files that CT hasn't ingested
+yet. Agents running *inside* the harness may still deposit knowledge through
+CT's own deposit tools; that's CT's write path, not ours.
+
+*Why:* CT's Librarian is the single gatekeeper for what becomes a fact.
+
+**Status: Built.**
+
+### 8. Relevance is CT's job
+
+Integrations don't score, rank, threshold, or judge facts, and they never call
+System One. CT decides what is relevant. The integration only delivers what CT
+returns.
+
+*Why:* every harness then gets the same quality, and it improves in one place.
+
+**Status: Built.** CT's live cutoff currently rarely opens on real messages
+(curated-thoughts#271). That is CT's to fix, not something to work around here.
+
+## Out of scope (don't build these here)
+
+- A general-purpose CT client library. Bind thinly to each host's extension
   points.
-- No recall-quality logic (scoring models, judges, expansion, ranking) — that
-  lives in CT; integrations consume results and never call System One.
-- No human review/attestation UX — that lives in the CT app.
-- No support for harnesses lacking the needed extension points (a stable
-  system-prompt region + a read-only recall path).
+- Recall quality: scoring, ranking, query expansion, judges. That belongs in CT.
+- Human review or attestation screens. Those belong in the CT app.
+- Following graph links during session-start injection. Graph traversal stays
+  in on-demand tools like `wiki_context`, and adding it would need a CT
+  decision first.
+- Harnesses without the extension points we need: a stable system-prompt
+  region and a way to run a read-only CT command.
 
-## Workflow
+## How changes are made
 
-1. Spec first under `docs/superpowers/specs/`, from a Step-0 investigation
-   with `[V]`-evidenced answers from pinned host sources (PR #22 is the
-   standard).
-2. TDD: unit-test the invariant logic (dedup ledger, memo byte
-   stability across new renders, sanitizer); e2e in the isolated container on
-   a scratch profile — never the live default profile or live brain.
-3. Dual review to convergence (GLM + Opus) before merge; open questions park
-   the PR.
-4. Version bump + CHANGELOG + README table per integration.
-5. The invariants ARE the test surface: any injection-touching PR must
-   demonstrate exactly-once across randomized sessions with mid-session tool
-   results, byte-identical injected blocks across memoized renders (retries
-   after timeout / exit / spawn failure are allowed and may fill the block
-   the first render left dark), and the
-   supersession gate (at render time, no superseded fact is ever injected —
-   post-render supersessions ride the append-and-mark path, per invariant 1).
+1. **Spec first.** Write a spec under `docs/superpowers/specs/`, based on a
+   Step-0 investigation that reads the pinned host source. Mark each claim with
+   `[V]` evidence. PR #22 is the model.
+2. **New ports copy the Hermes design** and record where they differ on
+   purpose.
+3. **Test the rules, not just the code.** Any pull request that touches
+   injection must show:
+   - exactly-once delivery across randomized sessions with tool results;
+   - byte-identical blocks across re-renders;
+   - no superseded fact at render time.
+4. **Run e2e on a scratch profile** in an isolated environment. Never use the
+   live default profile or the live brain.
+5. **Review, then merge.** Two independent AI reviews (GLM and Opus) until
+   neither finds a blocker or major issue, then merge. Unresolved questions
+   hold the pull request.
+6. **Release hygiene.** Each integration gets a version bump, a CHANGELOG
+   entry, and its README row updated.

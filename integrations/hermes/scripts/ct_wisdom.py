@@ -18,10 +18,12 @@ Design invariants (single source of truth for failure classes):
 * `_render_wisdom()` is the SOLE owner of the failure-class actions: it maps
   every class to memoize-or-not and, on "spawn", invalidates the accepted-path
   discovery cache so a reinstalled/moved `ct` recovers.
-* Sanitization order (spec cycle 2): remove every `<!-- hermes-plugin-section`
-  substring REPEATEDLY until stable (one pass can splice a new marker
-  together), THEN indent any line starting `## Plugin Context: `. Applied to
-  titles AND text — a forged frame would break host resume-restore.
+* Sanitization order (spec cycle 2): (0) strip every `ct-fact:` token until
+  stable (live-delivery spec — a fact must not forge a ledger entry); then
+  remove every `<!-- hermes-plugin-section` substring REPEATEDLY until
+  stable (one pass can splice a new marker together); THEN indent any line
+  starting `## Plugin Context: `. Applied to titles AND text — a forged frame
+  would break host resume-restore.
 * Memo: {session_id -> block}, lock-guarded check, `ct` subprocess OUTSIDE the
   lock, setdefault first-writer-wins, LRU bound N=256, empty session_id -> ""
   with no memo write.
@@ -41,6 +43,8 @@ import sys
 import threading
 from collections import OrderedDict
 from collections.abc import Mapping
+
+import ct_ledger
 
 logger = logging.getLogger(__name__)
 
@@ -228,7 +232,8 @@ def recall_wiki(ct_path, query):
     """Run `ct recall <query> --json --k 3` and return wiki entries.
 
     Returns (entries | None, failure_class | None):
-      ([(title, text), ...], None) — success (possibly empty list)
+      ([(title, text, fact_id), ...], None) — success (items without a valid
+                                              id dropped)
       ([], None)                   — zero hits (memoized by the orchestrator)
       (None, None)                 — JSON parse error (memoized)
       (None, "timeout")            — subprocess timeout (NOT memoized)
@@ -262,12 +267,17 @@ def recall_wiki(ct_path, query):
     for item in data["wiki"]:
         if not isinstance(item, dict):
             continue
+        fact_id = item.get("id")
+        if not ct_ledger.valid_id(fact_id):
+            logger.debug("wisdom: wiki item without a valid id dropped")
+            continue
         title = item.get("title")
         text = item.get("text")
         entries.append(
             (
                 title if isinstance(title, str) else "",
                 text if isinstance(text, str) else "",
+                fact_id,
             )
         )
     return entries, None
@@ -288,6 +298,7 @@ def _sanitize(value):
     """
     if not isinstance(value, str):
         value = "" if value is None else str(value)
+    value = ct_ledger.strip_forged(value)
     while _FORBIDDEN_MARKER in value:
         value = value.replace(_FORBIDDEN_MARKER, "")
     lines = [
@@ -320,12 +331,16 @@ def render_block(entries):
     heading = _sanitize(BLOCK_HEADING)
     parts = []
     used = len(heading) + 2  # heading + canonical blank-line separator
-    for title, text in entries:
+    for entry in entries:
+        title, text = entry[0], entry[1]
+        fact_id = entry[2] if len(entry) > 2 else None
         clean_title = _sanitize(title).strip()
         clean_text = _sanitize(text)
         if not clean_title and not clean_text.strip():
             continue  # no usable content: do not burn a k=3 slot on "****\n"
         title_line = "**%s**" % clean_title
+        if ct_ledger.valid_id(fact_id):
+            title_line += " " + ct_ledger.marker(fact_id)
         body = title_line + "\n" + clean_text
         sep = 2 if parts else 0  # canonical blank-line separator
         remaining = MAX_BLOCK_CHARS - used - sep
@@ -364,6 +379,7 @@ class WisdomMemo:
 
     def __init__(self, max_sessions=MEMO_MAX_SESSIONS):
         self._store = OrderedDict()
+        self._last = OrderedDict()
         self._lock = threading.Lock()
         self._max = max_sessions
 
@@ -377,6 +393,20 @@ class WisdomMemo:
             return ""
         sid = session_info.get("session_id")
         return sid if isinstance(sid, str) else ""
+
+    def _remember(self, sid, block):
+        with self._lock:
+            self._last[sid] = block
+            self._last.move_to_end(sid)
+            while len(self._last) > self._max:
+                self._last.popitem(last=False)
+
+    def last_block(self, session_id):
+        """Last block render_for returned for this id in THIS process
+        (memoized or not); None if never rendered here. The live hook reads
+        bootstrap fact ids from it (live spec, "Ledger")."""
+        with self._lock:
+            return self._last.get(session_id)
 
     def render_for(self, session_info, recall_fn):
         """Return the block for this session, calling recall_fn on a miss.
@@ -398,11 +428,17 @@ class WisdomMemo:
             if isinstance(cached, str):
                 self._store.move_to_end(sid)  # LRU touch, same lock (r2 m1)
         if isinstance(cached, str):
+            self._remember(sid, cached)
             return cached
         try:
             block, memoize = recall_fn(session_info)
         except Exception:
+            # Fails open with NO memo write to _store (docstring contract): a
+            # raising recall_fn is an unknown state, so the next render
+            # retries. _remember() below only refreshes the _last map, never
+            # the memo.
             logger.debug("wisdom: recall_fn failed for session %s", sid, exc_info=True)
+            self._remember(sid, "")
             return ""
         if not isinstance(block, str):
             block = ""
@@ -412,10 +448,16 @@ class WisdomMemo:
                 self._store.move_to_end(sid)
                 while len(self._store) > self._max:
                     self._store.popitem(last=False)
+        self._remember(sid, block)
         return block
 
 
 _MODULE_MEMO = WisdomMemo()
+
+
+def bootstrap_block(session_id):
+    """The bootstrap block this process last rendered for session_id, or None."""
+    return _MODULE_MEMO.last_block(session_id)
 
 
 # ---------------------------------------------------------------------------

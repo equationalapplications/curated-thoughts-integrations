@@ -2126,9 +2126,14 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 ---
 
-### Task 9: e2e on the scratch profile + close O1–O3 (requires CT build with the contract)
+### Task 9: e2e on the scratch profile + close O1–O3 (requires CT ≥ 3.3.0)
 
-Blocked on Task 0's CT work. Runs on the Linux machine with Hermes installed
+Task 0's CT work shipped in curated-thoughts#266 (CT 3.3.0); the shipped contract matches
+the spec (see spec "As shipped"). **Scope note (2026-10-08):** this e2e proves the delivery
+*mechanics* — marker, ledger, exactly-once, byte-stable replay, fail-closed. It does not
+measure match quality on real messages: CT's live gate opens rarely today
+(curated-thoughts#271), which is why Step 2 seeds a fact with distinctive wording. A zero-hit
+on an ordinary message is expected and is not a plugin failure. Runs on the Linux machine with Hermes installed
 (`~/.hermes/hermes-agent/`) and the `ct-test` scratch profile — **never** the live
 default profile or the live brain (INTENT workflow 2; memory: no Ollama on the Mac).
 
@@ -2138,7 +2143,7 @@ default profile or the live brain (INTENT workflow 2; memory: no Ollama on the M
 - [ ] **Step 4: Delivery + exactly-once.** Turn 1: unrelated message. Turn 2: ask about the zebra-release checklist → expect one `wisdom-live: deliver` debug line and the block in the stored user row (`SessionDB.get_session` / `messages` table `api_content`). Turn 3: ask about it again → expect `class=zero_hits` (filtered), no second copy. Ask the agent to call `curated_recall_context` for it → result shows the `in_context` stub.
 - [ ] **Step 5: Byte-stable replay.** Read the turn-2 user row's `api_content` before and after turn 3; assert identical bytes.
 - [ ] **Step 6: O3** — induce in-place compaction (method from the v1 plan Task 7); record whether the injected bytes survive; confirm behavior matches the spec "Compaction" rule either way.
-- [ ] **Step 7: Supersession.** Deposit a superseding fact via `wisdom_propose_supersession`, run CT ingest, send another message → expect a correction line with `supersedes ct-fact:<old>`.
+- [ ] **Step 7: Supersession.** CT fills `corrections` only from `superseded_by`, which only the engine's `supersede` writes; the Active Librarian does not yet call it for supersession deposits (CT spec "Dependency"), so `wisdom_propose_supersession` + ingest alone yields **no** correction. On the **scratch brain only**, insert a replacement row and point the delivered fact's `superseded_by` at it (or call the engine's `supersede` if a CLI path exists by then), then send another message → expect a correction line with `supersedes ct-fact:<old>`. Record which method was used. If neither is possible, record "blocked on CT Librarian supersession" and keep the unit-test coverage as the evidence.
 - [ ] **Step 8: Fail-closed.** `/resume` the session in a fresh process and send a message → expect `class=restored_unknown_bootstrap`, no delivery.
 - [ ] **Step 9: O2** — if MoA or `codex_app_server` mode is available in the scratch config, run one turn and record whether the context reaches the model; otherwise record "not exercised".
 - [ ] **Step 10: Latency** — record p50/p95 hook wall time over 20 turns (debug timestamps); confirm well under `plugins.hook_callback_timeout` (default 30 s [V]).

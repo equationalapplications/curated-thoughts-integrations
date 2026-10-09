@@ -10,9 +10,9 @@ common architecture.
 
 | Harness | Directory | Status | Version |
 |---------|-----------|--------|---------|
-| [Hermes Agent](https://github.com/NousResearch/hermes-agent) | [`integrations/hermes/`](integrations/hermes/) | implemented | [0.3.3](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=hermes) |
-| DeepSeek Harness | [`integrations/deepseek/`](integrations/deepseek/) | implemented | [0.3.0](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=deepseek) |
-| OpenCode | [`integrations/opencode/`](integrations/opencode/) | implemented | [0.1.0](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=opencode) |
+| [Hermes Agent](https://github.com/NousResearch/hermes-agent) | [`integrations/hermes/`](integrations/hermes/) | implemented | [0.4.1](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=hermes) |
+| DeepSeek Harness | [`integrations/deepseek/`](integrations/deepseek/) | implemented | [0.3.1](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=deepseek) |
+| OpenCode | [`integrations/opencode/`](integrations/opencode/) | implemented | [0.1.1](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=opencode) |
 | OpenClaw | `integrations/openclaw/` | planned | — |
 | Claude Code | `integrations/claude-code/` | planned | — |
 
@@ -43,14 +43,24 @@ sidecar in the agent's MCP config, ships the shared doctor as
 Hermes skills tree. Since 0.3.0 it also injects a second system-prompt
 section that recalls the wisdom layer at session start — a short digest of
 relevant procedures and facts, memoized per session so re-renders are free.
+Since 0.4.0, with Curated Thoughts 3.3.0 or later (which ships `ct wisdom match`), it
+also delivers facts mid-session: on each user turn CT decides which wisdom
+facts are relevant to the message, and any not already in context are
+appended to that turn (never to the system prompt), each exactly once; a
+CT recall the agent runs itself shows already-delivered facts as short
+"already in context" stubs. Older CT builds keep the 0.3 behavior.
 It degrades to a silent no-op: no Curated Thoughts install or unreachable
 brain simply means the block is absent. Known gaps: a *restored* session
 (`/branch`, or `/resume` after a process restart) gets its persisted prompt
 bytes back without a recall — the new id has an empty memo, so the first
 compression afterwards re-recalls and the block may change; legacy
 non-in-place compression rotates the session id, which can also trigger one
-extra recall; and more than 256 concurrently live sessions evict each
-other's memos.
+extra recall; more than 256 concurrently live sessions evict each
+other's memos; a restored session gets no mid-session delivery
+(its bootstrap facts cannot be seen from the hook), and an agent-run CT recall there can
+repeat a bootstrap fact. CT-side, live matching still rarely fires on real messages
+([curated-thoughts#271](https://github.com/equationalapplications/curated-thoughts/issues/271))
+and supersession corrections stay empty until CT's Librarian applies them.
 
 **[DeepSeek Harness](integrations/deepseek/)** (Node/TypeScript) is a Cordis
 plugin module, `@equational-applications/dsh-curated-thoughts`. It mounts the

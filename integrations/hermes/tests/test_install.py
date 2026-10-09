@@ -50,6 +50,9 @@ def run_install(home: Path, extra_env=None, cwd="/", install_sh=INSTALL_SH):
         "HOME": str(home),
         # keep the config check deterministic even if the host sets this
         "HERMES_CONFIG": str(home / ".hermes" / "config.yaml"),
+        # install.sh honors a pre-set HERMES_HOME; a gateway session exports
+        # it, which would leak the host's real plugin dir into these tests.
+        "HERMES_HOME": str(home / ".hermes"),
     }
     env.pop("CT_INSTALL_EDIT", None)
     if extra_env:
@@ -323,6 +326,36 @@ class StaleManifestPruneTests(InstallShTestCase):
         self.assertFalse((self.dest / "hooks").is_symlink())
         self.assertTrue((self.dest / "hooks" / "session-start.py").exists())
 
+@unittest.skipIf(IS_WINDOWS, BASH_SKIP)
+class HermesHomeOverrideTests(InstallShTestCase):
+    """HERMES_HOME must be honored. The installer used to hardcode
+    ~/.hermes, so a profile-scoped install like
+    `HERMES_HOME=~/.hermes/profiles/ct-test bash install.sh` silently
+    overwrote the LIVE default profile's plugin instead (2026-10-09
+    incident during the PR #35 e2e run)."""
+
+    def test_pre_set_hermes_home_wins(self):
+        alt = self.home / "alt-hermes"
+        proc = run_install(
+            self.home,
+            extra_env={
+                "HERMES_HOME": str(alt),
+                "HERMES_CONFIG": str(alt / "config.yaml"),
+            },
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertTrue(
+            (alt / "plugins" / "curated-thoughts" / "plugin.yaml").exists(),
+            "plugin did not land under the overridden HERMES_HOME")
+        # Nothing may land in the default location when HERMES_HOME is set.
+        self.assertFalse(
+            (self.home / ".hermes" / "plugins" / "curated-thoughts").exists(),
+            "install overwrote the default profile despite HERMES_HOME")
+
+    def test_unset_or_empty_hermes_home_defaults_to_dot_hermes(self):
+        proc = run_install(self.home, extra_env={"HERMES_HOME": ""})
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertTrue((self.dest / "plugin.yaml").exists())
 
 
 class PluginShapeTests(InstallShTestCase):

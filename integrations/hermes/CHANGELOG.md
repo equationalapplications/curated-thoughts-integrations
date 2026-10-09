@@ -6,6 +6,28 @@ format below is load-bearing: `## <version> — <date>`.
 
 ## Unreleased
 
+## 0.4.1 — YYYY-MM-DD
+
+- Fixed: `scripts/install.sh` honors a pre-set `HERMES_HOME` instead of
+  silently resetting it to `~/.hermes`. Profile-scoped installs
+  (`HERMES_HOME=~/.hermes/profiles/ct-test bash install.sh`) previously
+  overwrote the live default profile's plugin.
+
+## 0.4.0 — YYYY-MM-DD
+
+- Added: relevance-timed mid-session wisdom delivery (Intuitive Wisdom, spec
+  2026-10-06-intuitive-wisdom-live-delivery-design.md). A `pre_llm_call` hook
+  asks `ct wisdom match` which facts are relevant to the user's message and
+  appends new ones to that turn (≤2/turn, ≤1200 chars, ≤12/session;
+  corrections for superseded facts always flow). A `transform_tool_result`
+  hook stubs `curated_recall_context` wiki entries already in context.
+  Exactly-once is enforced by a ledger rebuilt each turn from `ct-fact:<id>`
+  markers in the transcript — no plugin persistence. Requires CT ≥ 3.3.0
+  (`ct wisdom match`); otherwise a silent no-op. Restored sessions fail closed.
+- Changed: the bootstrap wisdom block now tags each fact with its CT id
+  (`<!-- ct-fact:<id> -->`) and drops wiki entries without a valid id; the
+  sanitizer strips forged `ct-fact:` tokens.
+
 ## 0.3.3 — 2026-10-06
 
 - Fixed: the doctor's bundled-fallback spawn gate (issue #28). When a

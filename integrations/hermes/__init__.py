@@ -10,7 +10,11 @@ What it wires up:
   * an `on_session_start` hook that refreshes a cached health snapshot;
   * a system-prompt section carrying that snapshot plus the tool-routing
     reminder, so the agent starts every session knowing whether Curated
-    Thoughts memory is usable and how to reach for it.
+    Thoughts memory is usable and how to reach for it;
+  * a `pre_llm_call` hook that delivers wisdom facts relevant to the current
+    user turn (ct_wisdom_live), and a `transform_tool_result` hook that keeps
+    agent-initiated CT recall from repeating a fact already in context
+    (ct_tool_dedup) — the Intuitive Wisdom live path;
 
 The tool surface itself is NOT registered here — it is served by the
 `curated-thoughts-mcp` sidecar over MCP, registered under `mcp_servers` in
@@ -130,6 +134,29 @@ def _wisdom_prompt_section(session_info=None):
         return ""
 
 
+def _pre_llm_call(**kwargs):
+    """Relevance-timed wisdom for this user turn (ct_wisdom_live, imported
+    lazily so an import problem can never take down registration)."""
+    try:
+        import ct_wisdom_live
+
+        return ct_wisdom_live.on_pre_llm_call(**kwargs)
+    except Exception:  # pragma: no cover - defensive
+        logger.debug("curated-thoughts: live wisdom hook failed", exc_info=True)
+        return None
+
+
+def _transform_tool_result(**kwargs):
+    """Stub CT recall entries already in context (ct_tool_dedup)."""
+    try:
+        import ct_tool_dedup
+
+        return ct_tool_dedup.on_transform_tool_result(**kwargs)
+    except Exception:  # pragma: no cover - defensive
+        logger.debug("curated-thoughts: tool dedup hook failed", exc_info=True)
+        return None
+
+
 def register(ctx):
     """Hermes plugin entry point. Called exactly once at startup."""
     for skill in SKILLS:
@@ -148,6 +175,17 @@ def register(ctx):
         ctx.register_hook("on_session_start", _on_session_start)
     except Exception:  # pragma: no cover - host API variance
         logger.warning("curated-thoughts: could not register session-start hook", exc_info=True)
+
+    for hook_name, callback in (
+        ("pre_llm_call", _pre_llm_call),
+        ("transform_tool_result", _transform_tool_result),
+    ):
+        try:
+            ctx.register_hook(hook_name, callback)
+        except Exception:  # pragma: no cover - host API variance
+            logger.warning(
+                "curated-thoughts: could not register %s hook", hook_name, exc_info=True
+            )
 
     # Optional on some Hermes versions; the plugin is still useful without it.
     register_section = getattr(ctx, "register_system_prompt_section", None)

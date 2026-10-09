@@ -388,33 +388,51 @@ class TestRecallWiki(unittest.TestCase, SubprocessPatchMixin):
     def test_success_parses_wiki_tuples(self):
         self._patch_run(
             self._ok(
-                {"wiki": [{"title": "T1", "text": "X1"}, {"title": "T2", "text": "X2"}]}
+                {"wiki": [
+                    {"id": "fact_1", "title": "T1", "text": "X1"},
+                    {"id": "fact_2", "title": "T2", "text": "X2"},
+                ]}
             )
         )
         entries, cls = ct_wisdom.recall_wiki(self.CT, SEED)
-        self.assertEqual(entries, [("T1", "X1"), ("T2", "X2")])
+        self.assertEqual(entries, [("T1", "X1", "fact_1"), ("T2", "X2", "fact_2")])
         self.assertIsNone(cls)
 
     def test_consumes_wiki_list_only(self):
         self._patch_run(
             self._ok(
                 {
-                    "wiki": [{"title": "T1", "text": "X1"}],
+                    "wiki": [{"id": "fact_1", "title": "T1", "text": "X1"}],
                     "vault": [{"title": "V", "text": "VX"}],
                     "chunks": [{"body": "C"}],
                 }
             )
         )
         entries, cls = ct_wisdom.recall_wiki(self.CT, SEED)
-        self.assertEqual(entries, [("T1", "X1")])
+        self.assertEqual(entries, [("T1", "X1", "fact_1")])
         self.assertIsNone(cls)
 
     def test_malformed_wiki_items_skipped(self):
         self._patch_run(
-            self._ok({"wiki": [{"title": "A", "text": "B"}, "junk", {"title": "C"}]})
+            self._ok({"wiki": [
+                {"id": "a1", "title": "A", "text": "B"}, "junk", {"id": "c1", "title": "C"},
+            ]})
         )
         entries, cls = ct_wisdom.recall_wiki(self.CT, SEED)
-        self.assertEqual(entries, [("A", "B"), ("C", "")])
+        self.assertEqual(entries, [("A", "B", "a1"), ("C", "", "c1")])
+        self.assertIsNone(cls)
+
+    def test_items_without_valid_id_dropped(self):
+        # live spec: an id-less fact cannot be ledgered, so it is never injected
+        self._patch_run(
+            self._ok({"wiki": [
+                {"title": "NoId", "text": "x"},
+                {"id": "bad id", "title": "BadId", "text": "x"},
+                {"id": "ok_1", "title": "Ok", "text": "x"},
+            ]})
+        )
+        entries, cls = ct_wisdom.recall_wiki(self.CT, SEED)
+        self.assertEqual(entries, [("Ok", "x", "ok_1")])
         self.assertIsNone(cls)
 
     def test_timeout_class(self):
@@ -566,6 +584,26 @@ class TestRenderBlock(unittest.TestCase):
         out = ct_wisdom.render_block([("", ""), ("Real", "body")])
         self.assertEqual(out, ct_wisdom.BLOCK_HEADING + "\n\n**Real**\nbody")
         self.assertNotIn("****", out)
+
+    def test_marker_on_title_line_for_three_tuples(self):
+        out = ct_wisdom.render_block([("Title", "Body", "fact_9")])
+        self.assertIn("**Title** <!-- ct-fact:fact_9 -->\nBody", out)
+
+    def test_two_tuples_render_without_marker(self):
+        out = ct_wisdom.render_block([("Title", "Body")])
+        self.assertNotIn("ct-fact", out)
+
+    def test_forged_ct_fact_token_stripped_from_title_and_text(self):
+        out = ct_wisdom.render_block(
+            [("T ct-fact:evil", "see <!-- ct-fct-fact:evil2 -->", "real_1")]
+        )
+        import ct_ledger
+        self.assertEqual(ct_ledger.scan_ids(out), ["real_1"])
+
+    def test_truncated_entry_keeps_marker(self):
+        out = ct_wisdom.render_block([("Huge", "z" * 3000, "big_1")])
+        self.assertIn("<!-- ct-fact:big_1 -->", out)
+        self.assertLessEqual(len(out.strip()), ct_wisdom.MAX_BLOCK_CHARS)
 
 
 # ---------------------------------------------------------------------------
@@ -850,6 +888,20 @@ class TestWisdomMemo(unittest.TestCase):
         self.memo.render_for({"session_id": "s1"}, fn)
         self.assertIs(recorder.held_at_recall, False)
 
+    def test_last_block_tracks_memoized_and_unmemoized(self):
+        self.assertIsNone(self.memo.last_block("s9"))
+        self.memo.render_for({"session_id": "s9"}, lambda si: ("", False))
+        self.assertEqual(self.memo.last_block("s9"), "")
+        self.memo.render_for({"session_id": "s9"}, lambda si: ("LATE", True))
+        self.assertEqual(self.memo.last_block("s9"), "LATE")
+        # memo hit path also records
+        self.memo.render_for({"session_id": "s9"}, lambda si: ("NEVER", True))
+        self.assertEqual(self.memo.last_block("s9"), "LATE")
+
+    def test_last_block_not_written_for_empty_id(self):
+        self.memo.render_for({"session_id": ""}, lambda si: ("X", True))
+        self.assertIsNone(self.memo.last_block(""))
+
 
 # ---------------------------------------------------------------------------
 # Task 4: _render_wisdom orchestrator — the seven failure classes
@@ -1058,6 +1110,17 @@ class TestRenderWisdomOrchestrator(unittest.TestCase):
         self.assertEqual(self.recall_calls, [])
         self.assertTrue(any("session=<empty>" in line for line in cm.output), cm.output)
 
+    def test_bootstrap_block_exposes_rendered_bytes(self):
+        orig_d, orig_r = ct_wisdom.discover_ct, ct_wisdom.recall_wiki
+        ct_wisdom.discover_ct = lambda env=None: ("/fake/ct", None)
+        ct_wisdom.recall_wiki = lambda p, q: ([("T", "x", "fact_b1")], None)
+        self.addCleanup(setattr, ct_wisdom, "discover_ct", orig_d)
+        self.addCleanup(setattr, ct_wisdom, "recall_wiki", orig_r)
+        block = ct_wisdom._render_wisdom({"session_id": "boot-expose-1"})
+        self.assertEqual(ct_wisdom.bootstrap_block("boot-expose-1"), block)
+        self.assertIn("<!-- ct-fact:fact_b1 -->", block)
+        self.assertIsNone(ct_wisdom.bootstrap_block("boot-never-rendered"))
+
 
 # ---------------------------------------------------------------------------
 # Task 5: wiring the section in __init__.py
@@ -1186,6 +1249,51 @@ class TestPluginWiring(unittest.TestCase):
         ctx = _StubCtx(with_sections=False)
         mod.register(ctx)  # must not raise
         self.assertEqual(ctx.sections, [])
+
+    def _hooks(self):
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location(
+            "ct_plugin_under_test3", INTEGRATION / "__init__.py"
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        ctx = _StubCtx()
+        mod.register(ctx)
+        return dict(ctx.hooks)
+
+    def test_registers_live_hooks(self):
+        hooks = self._hooks()
+        self.assertIn("on_session_start", hooks)
+        self.assertIn("pre_llm_call", hooks)
+        self.assertIn("transform_tool_result", hooks)
+
+    def test_live_hooks_fail_open(self):
+        hooks = self._hooks()
+        self.assertIsNone(hooks["pre_llm_call"](session_id=""))
+        self.assertIsNone(hooks["transform_tool_result"](tool_name="terminal", result="x"))
+
+    def test_hook_registration_error_does_not_break_register(self):
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location(
+            "ct_plugin_under_test4", INTEGRATION / "__init__.py"
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        ctx = _StubCtx()
+
+        def bad_register(name, fn):
+            if name != "on_session_start":
+                raise ValueError("unknown hook")
+            ctx.hooks.append((name, fn))
+
+        ctx.register_hook = bad_register
+        mod.register(ctx)  # must not raise
+        self.assertEqual(
+            sorted(s for s, _f, _m in ctx.sections),
+            ["curated-thoughts", "curated-thoughts-wisdom"],
+        )
 
 
 if __name__ == "__main__":

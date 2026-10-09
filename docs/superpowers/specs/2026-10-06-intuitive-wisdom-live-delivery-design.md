@@ -1,11 +1,12 @@
 # curated-thoughts-integrations — Intuitive Wisdom: relevance-timed mid-session delivery (Hermes) design
 
-**Date:** 2026-10-06 · **Status:** Draft (brainstorm-approved 2026-10-06; spec review pending) ·
+**Date:** 2026-10-06 · **Status:** Implemented 2026-10-09 (PR #35 — pending merge, e2e verified) ·
 **Branch:** `feat/intuitive-wisdom-live-delivery` · **Repos:** this repo (Hermes plugin
 0.3.3 → 0.4.0) + `curated-thoughts` (prerequisite contract, delivered first —
 [curated-thoughts#265](https://github.com/equationalapplications/curated-thoughts/issues/265),
-CT spec `docs/superpowers/specs/2026-10-06-issue265-wisdom-match-design.md` on CT branch
-`feat/issue-265-wisdom-match`)
+CT spec `docs/superpowers/specs/2026-10-06-issue265-wisdom-match-design.md`; shipped in
+[curated-thoughts#266](https://github.com/equationalapplications/curated-thoughts/pull/266),
+released in CT **3.3.0** — the minimum CT version for live delivery)
 
 Investigation: [`../investigations/2026-10-06-intuitive-wisdom-live-delivery-step0-investigation.md`](../investigations/2026-10-06-intuitive-wisdom-live-delivery-step0-investigation.md)
 (pinned: Hermes `ee8dd6c8`, CT `f7d9f56`; every `[V]` below has its evidence there).
@@ -130,6 +131,16 @@ CT guarantees:
 
 Capability probe: `ct wisdom match --help` exits 0. The plugin checks once per process
 per discovered `ct` path and memoizes the result.
+
+**As shipped (CT 3.3.0, re-checked 2026-10-08).** The contract above matches CT's
+merged spec, with two details pinned: `gate` is concretely
+`"semantic-v1:external:qwen/qwen3-embedding-4b"` (calibrated floor 0.70), and every error
+— including usage errors — exits 1 (`wisdom match` never returns 2). The plugin reads
+neither `gate` nor the exit code's value beyond non-zero, so no code change follows.
+[curated-thoughts#271](https://github.com/equationalapplications/curated-thoughts/issues/271)
+plans to move CT's matching to two stages (source-chunk search, then map to the curated
+facts derived from them). That is internal to CT: `entries` stay curated facts with the
+same ids and shape, so this contract and the ledger are unaffected.
 
 ## Hermes plugin design
 
@@ -278,7 +289,7 @@ host runs with `_persist_disabled` gets no `pre_llm_call` context anyway [V]. No
 host mode is confirmed to deliver `pre_llm_call` context (O2: MoA, `codex_app_server`);
 where it doesn't, the feature is a silent no-op.
 
-## Known limitations (README list grows from 3 to 5)
+## Known limitations (README list grows from 3 to 5; items 6–7 are CT-side, tracked upstream)
 
 4. **Restored sessions get no live delivery** when the bootstrap memo is gone (`/resume`,
    `/branch`, process restart), because the host offers plugins no way to read the
@@ -286,6 +297,15 @@ where it doesn't, the feature is a silent no-op.
 5. **An agent-initiated CT tool call in such a restored session** can repeat a bootstrap
    fact, because the ledger cache can't know the bootstrap ids. This was already true of
    v1 for every session; this design closes it for all non-restored sessions.
+6. **Live matching rarely fires on real traffic yet** (CT-side). CT's live calibration
+   opened the gate on 2 of 40 relevant real messages, because it scores messages
+   against short librarian-written fact cards rather than the source text
+   ([curated-thoughts#271](https://github.com/equationalapplications/curated-thoughts/issues/271)).
+   The plugin delivers correctly when CT returns entries; how often it does is CT's to fix.
+7. **`corrections` stay empty in practice** (CT-side). CT writes `superseded_by` only
+   through the engine's `supersede`, which the Active Librarian does not yet call for
+   supersession deposits (CT spec "Dependency"). The plugin renders corrections when
+   they arrive.
 
 ## INTENT.md amendments (same PR)
 
