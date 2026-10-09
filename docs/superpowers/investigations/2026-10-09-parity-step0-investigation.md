@@ -1,6 +1,6 @@
 # Step-0 investigation — cross-harness Intuitive Wisdom parity (DSH, OpenClaw, Claude Code, OpenCode)
 
-**Date:** 2026-10-09 · **Author:** Tessera (controller) · **Status:** rev 2 (post GLM-critique)
+**Date:** 2026-10-09 · **Author:** Tessera (controller) · **Status:** rev 3 (post GLM-critique r1; per spec, all resolve-before-spec items closed)
 **Directive:** Kurt, 2026-10-09 (thread): next CTI PR = parity of DSH, OpenClaw, Claude Code
 (+ OpenCode) with the Hermes integration, releases for all, README revision + dedicated
 Intuitive Wisdom section. Opened as DRAFT per SOP (draft-until-implemented, Kurt Oct 9).
