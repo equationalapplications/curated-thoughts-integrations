@@ -23,7 +23,9 @@ import { fileURLToPath } from 'node:url';
 
 const PKG_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const REPO_ROOT = resolve(PKG_ROOT, '..', '..');
-const VERSION = '0.1.0';
+// Pinned to the shipped version, not hardcoded — a version bump must not
+// silently point every archive assertion at a nonexistent tarball.
+const VERSION = (JSON.parse(readFileSync(join(PKG_ROOT, 'package.json'), 'utf8')) as { version: string }).version;
 const TAG = `opencode-v${VERSION}`;
 const TARBALL = `${TAG}.tar.gz`;
 
