@@ -1,6 +1,9 @@
 {
   "name": "@equational-applications/dsh-curated-thoughts",
-  "version": "0.3.2",
+  "version": "0.4.0",
+  "dependencies": {
+    "@equational-applications/ct-wisdom-core": "file:../../packages/ct-wisdom-core"
+  },
   "description": "Curated Thoughts memory integration for DeepSeek Harness",
   "license": "MIT",
   "type": "module",

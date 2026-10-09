@@ -74,8 +74,18 @@ describe.skipIf(isWin)('recallWiki — real executable fixtures (POSIX, no modul
 
   it('a real ct printing wiki JSON yields real entries', () => {
     dir = mkdtempSync(join(tmpdir(), 'ct-wisdom-fixture-'));
-    const ct = makeScript(dir, 'ct', `printf '{"wiki":[{"title":"T","text":"b"}]}'`);
-    expect(recallWiki(ct, 'q')).toEqual({ entries: [{ title: 'T', text: 'b' }], failure: null });
+    const ct = makeScript(dir, 'ct', `printf '{"wiki":[{"id":"f1","title":"T","text":"b"}]}'`);
+    expect(recallWiki(ct, 'q')).toEqual({ entries: [{ title: 'T', text: 'b', id: 'f1' }], failure: null });
+  });
+
+  it('v1 amendment: an entry without a valid id is DROPPED (it cannot be deduped)', () => {
+    dir = mkdtempSync(join(tmpdir(), 'ct-wisdom-fixture-'));
+    const ct = makeScript(
+      dir,
+      'ct',
+      `printf '{"wiki":[{"title":"NoId","text":"x"},{"id":"","title":"Empty","text":"y"}]}'`,
+    );
+    expect(recallWiki(ct, 'q')).toEqual({ entries: [], failure: null });
   });
 
   it('a real ct printing garbage yields the parse-error class', () => {

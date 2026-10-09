@@ -7,7 +7,7 @@
 ARG BASE_IMAGE=ct-e2e-base
 FROM ${BASE_IMAGE}
 
-ARG DSH_VERSION=0.1.5-rc.2
+ARG DSH_VERSION=0.2.0-rc.2
 ARG PNPM_VERSION=10
 
 # pnpm must be on PATH: `dsh plugin --profile <p> add` forwards to pnpm in the

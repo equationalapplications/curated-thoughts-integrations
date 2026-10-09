@@ -2,11 +2,19 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { apply, Config, inject } from '../src/index.js';
 
 // test_index stays UNIT-scoped: the real wisdom module's spawns/governor
-// belong to test_wisdom.ts — mock it entirely (Step 6.1).
-vi.mock('../src/wisdom.js', () => ({ renderWisdom: vi.fn(() => '') }));
+// belong to test_wisdom.ts — mock it entirely (Step 6.1). The real
+// WisdomMemo/scanIds/keyOf are imported by apply() for the live hooks
+// (0.4.0); pass the pure implementations through.
+vi.mock('../src/wisdom.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/wisdom.js')>();
+  return {
+    ...actual,
+    renderWisdom: vi.fn(() => ''),
+  };
+});
 import { renderWisdom } from '../src/wisdom.js';
 
-// The ctx mock encodes the real DSH 0.1.5 runtime surface: there is NO
+// The ctx mock encodes the real DSH 0.2.0 runtime surface: there is NO
 // `ctx.plugin(string, ...)` (cordis rejects a string plugin — the MCP client
 // is mounted by the shipped bundle patch instead), and systemPrompt.context
 // requires a named entry with a finite `order` (getContextOrder only knows
@@ -30,6 +38,13 @@ function mockCtx() {
     text: (assembleCtx: unknown) => string;
   }> = [];
   const sessionStartListeners: Array<() => Promise<void>> = [];
+  const createdListeners: Array<(payload: unknown) => Promise<void>> = [];
+  const preStepListeners: Array<
+    (payload: unknown, next: () => Promise<unknown>) => Promise<unknown>
+  > = [];
+  const postExecuteListeners: Array<
+    (exec: unknown, result: unknown, next: () => Promise<unknown>) => Promise<unknown>
+  > = [];
   return {
     ctx: {
       skills: {
@@ -48,14 +63,30 @@ function mockCtx() {
           return () => {};
         }),
       },
-      on: vi.fn((event: string, listener: () => Promise<void>) => {
-        if (event === 'agent/session-start') sessionStartListeners.push(listener);
+      on: vi.fn((event: string, listener: (...args: unknown[]) => unknown) => {
+        if (event === 'agent/session-start') {
+          sessionStartListeners.push(listener as () => Promise<void>);
+        } else if (event === 'agent/created') {
+          createdListeners.push(listener as (payload: unknown) => Promise<void>);
+        } else if (event === 'agent/pre-step') {
+          preStepListeners.push(
+            listener as (p: unknown, next: () => Promise<unknown>) => Promise<unknown>,
+          );
+        } else if (event === 'tools/post-execute') {
+          postExecuteListeners.push(
+            listener as (e: unknown, r: unknown, next: () => Promise<unknown>) => Promise<unknown>,
+          );
+        }
+        return () => {};
       }),
     },
     skillRegistrations,
     contextRegistrations,
     sectionRegistrations,
     sessionStartListeners,
+    createdListeners,
+    preStepListeners,
+    postExecuteListeners,
   };
 }
 
@@ -95,12 +126,15 @@ describe('apply', () => {
     expect(ctx0.text()).toBe('');
   });
 
-  it('publishes the health block once the session-start refresh has run', async () => {
+  it('publishes the health block once the agent/created refresh has run', async () => {
     apply(m.ctx as unknown as Parameters<typeof apply>[0], {} as Parameters<typeof apply>[1]);
-    expect(m.sessionStartListeners.length).toBe(1);
+    // MIGRATION (0.2.0-rc.2): the lifecycle event is agent/created — the old
+    // agent/session-start name has NO dispatcher at this pin (dead listener).
+    expect(m.createdListeners.length).toBe(1);
+    expect(m.sessionStartListeners.length).toBe(0);
     // The listener refreshes the cache fail-open; the text() reference must
     // observe the refreshed value at the next prompt assembly.
-    await m.sessionStartListeners[0]();
+    await m.createdListeners[0]({ agent: { id: 'a' }, source: 'startup' });
     for (const reg of m.contextRegistrations) {
       expect(typeof reg.text()).toBe('string');
     }
@@ -112,7 +146,7 @@ describe('apply', () => {
     try {
       apply(m.ctx as unknown as Parameters<typeof apply>[0], { brainDir: '/nonexistent/ct-brain' });
       expect(process.env.CURATED_BRAIN_DIR).toBeUndefined();
-      await m.sessionStartListeners[0]();
+      await m.createdListeners[0]({ agent: { id: 'a' }, source: 'startup' });
       // The probe looked at the configured dir, so the degraded block names it.
       expect(m.contextRegistrations[0].text()).toContain('/nonexistent/ct-brain');
     } finally {
@@ -121,10 +155,16 @@ describe('apply', () => {
     }
   });
 
-  it('subscribes agent/session-start for async refresh', () => {
+  it('subscribes agent/created for async refresh (0.2.0-rc.2 lifecycle event)', () => {
     apply(m.ctx as unknown as Parameters<typeof apply>[0], {} as Parameters<typeof apply>[1]);
-    expect(m.sessionStartListeners.length).toBe(1);
-    expect(typeof m.sessionStartListeners[0]).toBe('function');
+    expect(m.createdListeners.length).toBe(1);
+    expect(typeof m.createdListeners[0]).toBe('function');
+  });
+
+  it('registers the live-delivery listeners: one pre-step, one post-execute', () => {
+    apply(m.ctx as unknown as Parameters<typeof apply>[0], {} as Parameters<typeof apply>[1]);
+    expect(m.preStepListeners.length).toBe(1);
+    expect(m.postExecuteListeners.length).toBe(1);
   });
 
   it('registers three skills', () => {
