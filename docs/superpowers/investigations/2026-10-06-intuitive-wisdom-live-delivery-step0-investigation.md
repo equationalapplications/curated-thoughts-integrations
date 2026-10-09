@@ -180,3 +180,60 @@ re-serializes it into `outer["result"]`, then re-serializes the outer object
 (preserving any other outer keys). If the inner string fails to parse (e.g. the
 head+tail truncation marker made it invalid JSON) or the outer has no `result`
 string, or the result is a `tool_error` → pass through unmodified.
+
+---
+
+## Target 6 — e2e results on the scratch profile (plan Task 9, 2026-10-09)
+
+Host pin: Hermes Agent `da303d1` (v0.21.5+8121, dirty, 2026-10-06 -0400,
+`~/.hermes/hermes-agent`). Cited line numbers re-checked: system prompt built
+before the hook (`turn_context.py:1122-1124`), `pre_llm_call` collected at
+`:1160` via `_collect_pre_llm_call_context` (`:782`),
+`_stamp_api_content_sidecar` stamps the user turn (`:1185`, def `:921`);
+`_apply_transform_tool_result_hook` and `_render_call_tool_result`
+(`mcp_tool_handlers.py:517`) unchanged in substance. Plugin payload under test:
+0.4.1 (`992b2ce`) installed into the scratch profile `~/.hermes/profiles/ct-test`;
+CT gate `semantic-v1:external:qwen/qwen3-embedding-4b`, scheme `instr1`.
+
+Session: `20261009_035603_7e5bf3` (live `hermes chat` under
+`CURATED_BRAIN_DIR=<scratch brain>`, seeded quokka-deploy memories). Facts ingest
+into the wiki asynchronously (librarian), so the ledger-proof below uses the
+delivered `ids=` debug lines.
+
+- **Delivery + exactly-once (Steps 4):** [V] turn 1 unrelated →
+  `class=zero_hits`; turn 2 quokka question → `wisdom-live: deliver ids=fact_511e…,
+  fact_620a…` and the wisdom block persisted in the turn-2 user row `api_content`
+  (797 bytes, markers `<!-- ct-fact:… -->`); turns 3–4 → new fact ids each time
+  (`fact_69fe…, fact_1f29…`, then `fact_a3e2…, fact_e856…`). All 6 delivered ids
+  are unique across the session — no fact ever delivered twice; turn-3's
+  overlapping-topic question did not re-deliver the ledgered pair.
+- **O1 — history field the hook sees:** [V] resolved behaviorally: the turn-3
+  hook filtered exactly the facts injected into turn-2's `api_content` sidecar
+  (its plain `content` never contained them), and `ct_ledger.history_ids()`
+  rebuild over the stored rows recovers all 6 ids from the sidecar field. The
+  hook's `conversation_history` therefore sees `api_content`.
+- **Byte-stable replay (Step 5):** [V] turn-2 user row `api_content` re-read
+  after turns 3–5: sha256 `5469adea…3aa` identical before/after.
+- **O3 — in-place compaction (Step 6):** [V — host declined to compact] five
+  live `/compress here [N]` attempts on the delivered session; the host logs
+  `insufficient_messages` / "no progress — skipping boundary rewrite" every time
+  (tiny session on a 1M-context model; protected head+tail covers all messages).
+  Outcome: injected bytes trivially survive = the spec's second branch ("if
+  compaction keeps the bytes, the markers keep the fact ledgered" — ledger
+  re-read post-attempts still returns all 6 ids). The summarize-away branch
+  remains covered by the property test (`test_exactly_once.py`, random
+  prefix drops); both branches are ruled correct by the spec "Compaction" note.
+- **Supersession (Step 7):** [V] no `ct supersede` CLI exists (CT fills
+  `corrections` only from engine `supersede`), so per the plan's fallback the
+  replacement row was inserted directly in the **scratch brain** and the old
+  fact's `superseded_by` pointed at it (`fact_e2e_supersede_0001`). Next turn
+  delivered the correction line verbatim: `… — supersedes
+  ct-fact:fact_511e9e7516d23affb801ba9d`.
+- **Fail-closed (Step 8):** [V] `/quit`, then `hermes -r 20261009_035603_7e5bf3`
+  in a fresh process and a new quokka question →
+  `wisdom-live: skip class=restored_unknown_bootstrap`, no delivery, no block.
+- **O2 — MoA / `codex_app_server`:** not exercised — neither mode is configured
+  in the scratch profile, per the plan's sanctioned fallback.
+- **Latency (Step 10):** [V] live hook wall-time on 4 turns: 0.44–2.07 s
+  (median ≈ 1.0 s); 20× direct `ct wisdom match` probes: min 0.37 s, p50 0.47 s,
+  p95 1.22 s, max 1.22 s — well under `plugins.hook_callback_timeout` (30 s).

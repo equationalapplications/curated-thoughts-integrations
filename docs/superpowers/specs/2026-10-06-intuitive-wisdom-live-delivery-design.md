@@ -1,6 +1,6 @@
 # curated-thoughts-integrations — Intuitive Wisdom: relevance-timed mid-session delivery (Hermes) design
 
-**Date:** 2026-10-06 · **Status:** Implemented 2026-10-06 (PR #35 — draft) ·
+**Date:** 2026-10-06 · **Status:** Implemented 2026-10-09 (PR #35 — pending merge, e2e verified) ·
 **Branch:** `feat/intuitive-wisdom-live-delivery` · **Repos:** this repo (Hermes plugin
 0.3.3 → 0.4.0) + `curated-thoughts` (prerequisite contract, delivered first —
 [curated-thoughts#265](https://github.com/equationalapplications/curated-thoughts/issues/265),
