@@ -15,8 +15,8 @@ format below is load-bearing: `## <version> — <date>`.
   corrections for superseded facts always flow). A `transform_tool_result`
   hook stubs `curated_recall_context` wiki entries already in context.
   Exactly-once is enforced by a ledger rebuilt each turn from `ct-fact:<id>`
-  markers in the transcript — no plugin persistence. Requires a CT build with
-  `ct wisdom match`; otherwise a silent no-op. Restored sessions fail closed.
+  markers in the transcript — no plugin persistence. Requires CT ≥ 3.3.0
+  (`ct wisdom match`); otherwise a silent no-op. Restored sessions fail closed.
 - Changed: the bootstrap wisdom block now tags each fact with its CT id
   (`<!-- ct-fact:<id> -->`) and drops wiki entries without a valid id; the
   sanitizer strips forged `ct-fact:` tokens.

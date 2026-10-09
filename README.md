@@ -43,7 +43,7 @@ sidecar in the agent's MCP config, ships the shared doctor as
 Hermes skills tree. Since 0.3.0 it also injects a second system-prompt
 section that recalls the wisdom layer at session start — a short digest of
 relevant procedures and facts, memoized per session so re-renders are free.
-Since 0.4.0, with a Curated Thoughts build that ships `ct wisdom match`, it
+Since 0.4.0, with Curated Thoughts 3.3.0 or later (which ships `ct wisdom match`), it
 also delivers facts mid-session: on each user turn CT decides which wisdom
 facts are relevant to the message, and any not already in context are
 appended to that turn (never to the system prompt), each exactly once; a
@@ -58,7 +58,9 @@ non-in-place compression rotates the session id, which can also trigger one
 extra recall; more than 256 concurrently live sessions evict each
 other's memos; a restored session gets no mid-session delivery
 (its bootstrap facts cannot be seen from the hook), and an agent-run CT recall there can
-repeat a bootstrap fact.
+repeat a bootstrap fact. CT-side, live matching still rarely fires on real messages
+([curated-thoughts#271](https://github.com/equationalapplications/curated-thoughts/issues/271))
+and supersession corrections stay empty until CT's Librarian applies them.
 
 **[DeepSeek Harness](integrations/deepseek/)** (Node/TypeScript) is a Cordis
 plugin module, `@equational-applications/dsh-curated-thoughts`. It mounts the
