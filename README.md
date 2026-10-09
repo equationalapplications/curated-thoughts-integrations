@@ -14,7 +14,7 @@ common architecture.
 | DeepSeek Harness | [`integrations/deepseek/`](integrations/deepseek/) | implemented | [0.3.1](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=deepseek) |
 | OpenCode | [`integrations/opencode/`](integrations/opencode/) | implemented | [0.1.1](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=opencode) |
 | OpenClaw | `integrations/openclaw/` | planned | — |
-| Claude Code | `integrations/claude-code/` | planned | — |
+| Claude Code | [`integrations/claude-code/`](integrations/claude-code/) | implemented | [0.1.0](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=claude-code) |
 
 Rows marked *planned* are placeholders — no installable artifact exists yet
 for that harness. Implemented rows link to that integration's releases.
