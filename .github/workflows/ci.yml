@@ -383,6 +383,25 @@ jobs:
         with:
           package_json_file: integrations/opencode/package.json
 
+      - name: Build shared core
+        # opencode-specific job; the opencode leg will add the file:
+        # ct-wisdom-core dep (gitignored lib/, pnpm resolves at install
+        # time), so build it before the install below when present. No-op
+        # today — kept so the next leg cannot reintroduce the TS2307 class.
+        if: steps.changes.outputs.run == 'true'
+        shell: bash
+        env:
+          INTEGRATION_DIR: integrations/opencode
+        run: |
+          if node -e "const fs=require('fs'),p=JSON.parse(fs.readFileSync(process.env.INTEGRATION_DIR + '/package.json')); process.exit(['dependencies','devDependencies','peerDependencies'].some(k => p[k]?.['@equational-applications/ct-wisdom-core']) ? 0 : 1)"; then
+            echo "integration depends on ct-wisdom-core — building it"
+            cd "$GITHUB_WORKSPACE/packages/ct-wisdom-core"
+            pnpm install --frozen-lockfile
+            pnpm run build
+          else
+            echo "no ct-wisdom-core dependency — skipping core build"
+          fi
+
       - name: Install dependencies
         # Frozen: the host contract must run against exactly what the
         # lockfile pins, or it verifies a different tree than ships.
