@@ -156,7 +156,7 @@ jobs:
         # this step landed proved it on all four Windows matrix entries).
         shell: bash
         run: |
-          if node -e "process.exit(require('./package.json').dependencies?.['@equational-applications/ct-wisdom-core'] ? 0 : 1)"; then
+          if node -e "const p=require('./package.json'); process.exit(['dependencies','devDependencies','peerDependencies'].some(k => p[k]?.['@equational-applications/ct-wisdom-core']) ? 0 : 1)"; then
             echo "integration depends on ct-wisdom-core — building it"
             cd "$GITHUB_WORKSPACE/packages/ct-wisdom-core"
             pnpm install --frozen-lockfile

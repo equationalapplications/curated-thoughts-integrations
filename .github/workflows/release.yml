@@ -133,6 +133,29 @@ jobs:
           cache: pnpm
           cache-dependency-path: ${{ needs.identify.outputs.dir }}/pnpm-lock.yaml
 
+      - name: Build shared core
+        # Same gap ci.yml closes: a node integration may depend on
+        # packages/ct-wisdom-core via a file: dep whose lib/ is gitignored,
+        # and pnpm resolves file: deps at install time — so the core must be
+        # built BEFORE the install below or the tagged release fails with
+        # TS2307. Detected from package.json (any dependency class), not
+        # hardcoded, so the OpenCode/OpenClaw legs inherit it.
+        if: needs.identify.outputs.language == 'node'
+        # bash explicitly: Windows is in the matrix and GitHub's default
+        # shell there is pwsh.
+        shell: bash
+        env:
+          INTEGRATION_DIR: ${{ needs.identify.outputs.dir }}
+        run: |
+          if node -e "const fs=require('fs'),p=JSON.parse(fs.readFileSync(process.env.INTEGRATION_DIR + '/package.json')); process.exit(['dependencies','devDependencies','peerDependencies'].some(k => p[k]?.['@equational-applications/ct-wisdom-core']) ? 0 : 1)"; then
+            echo "integration depends on ct-wisdom-core — building it"
+            cd "$GITHUB_WORKSPACE/packages/ct-wisdom-core"
+            pnpm install --frozen-lockfile
+            pnpm run build
+          else
+            echo "no ct-wisdom-core dependency — skipping core build"
+          fi
+
       - name: Install dependencies
         # Frozen: a release must fail on a package.json that disagrees with the
         # committed lockfile, not paper over the drift.
@@ -219,6 +242,26 @@ jobs:
           node-version: ${{ fromJson(needs.identify.outputs.interpreter)[0] }}
           cache: pnpm
           cache-dependency-path: ${{ needs.identify.outputs.dir }}/pnpm-lock.yaml
+
+      - name: Build shared core
+        # Same gap ci.yml closes: without a core build here the archived
+        # working tree has an empty file: dep — the tarball would carry a
+        # package whose lib/ does not exist. Build BEFORE the install below
+        # (pnpm resolves file: deps at install time). Detected from
+        # package.json (any dependency class), not hardcoded.
+        if: needs.identify.outputs.language == 'node'
+        shell: bash
+        env:
+          INTEGRATION_DIR: ${{ needs.identify.outputs.dir }}
+        run: |
+          if node -e "const fs=require('fs'),p=JSON.parse(fs.readFileSync(process.env.INTEGRATION_DIR + '/package.json')); process.exit(['dependencies','devDependencies','peerDependencies'].some(k => p[k]?.['@equational-applications/ct-wisdom-core']) ? 0 : 1)"; then
+            echo "integration depends on ct-wisdom-core — building it"
+            cd "$GITHUB_WORKSPACE/packages/ct-wisdom-core"
+            pnpm install --frozen-lockfile
+            pnpm run build
+          else
+            echo "no ct-wisdom-core dependency — skipping core build"
+          fi
 
       - name: Build the shipped artifacts
         if: needs.identify.outputs.language == 'node'
@@ -327,6 +370,26 @@ jobs:
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
         with:
           package_json_file: ${{ needs.identify.outputs.dir }}/package.json
+
+      - name: Build shared core
+        # The host contract compiles the integration's TS contract test
+        # against the checkout; a file: ct-wisdom-core dep with gitignored
+        # lib/ must be built before the install below (latent today — no
+        # host-checked integration depends on the core yet — but the
+        # opencode leg will). Same detection as the verify/publish jobs.
+        if: needs.identify.outputs.host != ''
+        shell: bash
+        env:
+          INTEGRATION_DIR: ${{ needs.identify.outputs.dir }}
+        run: |
+          if node -e "const fs=require('fs'),p=JSON.parse(fs.readFileSync(process.env.INTEGRATION_DIR + '/package.json')); process.exit(['dependencies','devDependencies','peerDependencies'].some(k => p[k]?.['@equational-applications/ct-wisdom-core']) ? 0 : 1)"; then
+            echo "integration depends on ct-wisdom-core — building it"
+            cd "$GITHUB_WORKSPACE/packages/ct-wisdom-core"
+            pnpm install --frozen-lockfile
+            pnpm run build
+          else
+            echo "no ct-wisdom-core dependency — skipping core build"
+          fi
 
       - name: Install dependencies
         working-directory: ${{ needs.identify.outputs.dir }}
