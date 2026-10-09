@@ -6,6 +6,15 @@ heading format below is load-bearing: `## <version> — <date>`.
 
 ## Unreleased
 
+## 0.1.1 — 2026-10-09
+
+- Sync `skills/usage/SKILL.md` with Hermes: the `## Wisdom that arrives on
+  its own` section shipped to Hermes's `curated-thoughts-usage` skill in the
+  0.4.0 live-delivery work (PR #35) was missing from this port, so both
+  parity tests in `tests/test_skills_content.py` failed. The section is
+  added verbatim; the ops cross-reference keeps the `/curated-thoughts:ops`
+  spelling per the parity test's normalization rule 3.
+
 ## 0.1.0 — 2026-09-11
 
 - Scaffold the Claude Code plugin: `.claude-plugin/plugin.json` (plugin name

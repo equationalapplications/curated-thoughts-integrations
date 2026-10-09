@@ -10,7 +10,7 @@
 # generated-file checks and the release train.
 id: claude-code
 name: Curated Thoughts for Claude Code
-version: 0.1.0
+version: 0.1.1
 language: python
 status: implemented
 requires_sidecar: ">=2.5"
