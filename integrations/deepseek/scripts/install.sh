@@ -156,14 +156,69 @@ do_install() {
   # to pack itself, and an in-tree artifact would dirty a user's checkout.
   local tarball
   INSTALL_TMP="$(mktemp -d)"
-  tarball="$(npm pack --pack-destination "$INSTALL_TMP" --silent "$SCRIPT_SRC" | tail -1)"
-  if [ ! -f "$INSTALL_TMP/$tarball" ]; then
-    warn "npm pack did not produce $tarball — aborting."
+  # Stage a SELF-CONTAINED copy: the working tree declares the shared core as
+  # `file:../../packages/ct-wisdom-core` (monorepo-relative), which is
+  # meaningless inside the profile directory a packed install lands in —
+  # pnpm resolves a file: dep relative to the INSTALL location and fails with
+  # ERR_PNPM_LINKED_PKG_DIR_NOT_FOUND. And npm pack cannot bundle it either:
+  # a file: dep is not installable at pack time, so bundleDependencies never
+  # materialize. So the stage carries the BUILT core lib at
+  # node_modules/@equational-applications/ct-wisdom-core, the dependency is
+  # dropped from package.json (it is bundled, nothing to resolve), and the
+  # npm-format tarball (package/ root) is written with tar directly. The
+  # stage is disposable; the checkout is never modified.
+  local stage core_lib
+  # The stage dir is literally named "package" so the tarball gets npm's
+  # package/ root without a rename transform.
+  stage="${INSTALL_TMP}/package"
+  mkdir -p "$stage/node_modules/@equational-applications"
+  cp -R "$SCRIPT_SRC/." "$stage/"
+  for core_lib in \
+    "$SCRIPT_SRC/lib/ct-wisdom-core" \
+    "$SCRIPT_SRC/../../packages/ct-wisdom-core/lib"; do
+    if [ -d "$core_lib" ]; then
+      cp -R "$core_lib/." \
+        "$stage/node_modules/@equational-applications/ct-wisdom-core/"
+      break
+    fi
+  done
+  if [ ! -f "$stage/node_modules/@equational-applications/ct-wisdom-core/index.js" ]; then
+    warn "ct-wisdom-core build output not found — build the monorepo first:"
+    warn "  (cd packages/ct-wisdom-core && pnpm build)"
     exit 1
   fi
-  say "Packed: $tarball"
+  cat >"$stage/node_modules/@equational-applications/ct-wisdom-core/package.json" <<'VPKG'
+{
+  "name": "@equational-applications/ct-wisdom-core",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "index.js",
+  "types": "index.d.ts"
+}
+VPKG
+  node - "$stage/package.json" <<'NJS'
+const fs = require('fs');
+const p = process.argv[2];
+const m = JSON.parse(fs.readFileSync(p, 'utf8'));
+if (m.dependencies) delete m.dependencies['@equational-applications/ct-wisdom-core'];
+if (m.dependencies && Object.keys(m.dependencies).length === 0) delete m.dependencies;
+m.bundleDependencies = ['@equational-applications/ct-wisdom-core'];
+fs.writeFileSync(p, JSON.stringify(m, null, 2) + '\n');
+NJS
+  # npm-format layout: every path under package/. The plugin's own node_modules
+  # (peer deps) are excluded — they resolve from the profile at runtime.
+  tarball="$INSTALL_TMP/plugin-bundle.tgz"
+  tar -czf "$tarball" -C "$INSTALL_TMP" \
+    --exclude 'package/node_modules/.bin' \
+    --exclude 'package/node_modules/.pnpm' \
+    package
+  if [ ! -s "$tarball" ]; then
+    warn "staged tarball is empty — aborting."
+    exit 1
+  fi
+  say "Packed: plugin-bundle.tgz (bundled ct-wisdom-core)"
   say "Installing into profile '${PROFILE}' via dsh plugin add..."
-  dsh plugin --profile "$PROFILE" add "$INSTALL_TMP/$tarball"
+  dsh plugin --profile "$PROFILE" add "$tarball"
   say "Installed ${PLUGIN_SCOPE} into ${PROFILE_DIR}."
   say "Restart any running dsh session for the profile to pick it up."
 }
