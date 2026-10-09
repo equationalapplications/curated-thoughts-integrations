@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.1.2 — 2026-10-09
+
+Dependency hygiene release: bump the transitive `source-map-js` 1.2.1 → 1.2.2
+(Dependabot #11, GHSA-68fv-2mgg-jv7q, development scope only, reached via
+`postcss`). Lockfile-only change; no shipped code or behavior is affected.
+
 ## 0.1.1 — 2026-10-09
 
 Ships the live-wisdom usage guidance ("Wisdom that arrives on its own") in the
