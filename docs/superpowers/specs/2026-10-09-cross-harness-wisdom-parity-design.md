@@ -114,18 +114,21 @@ medium with named conditions.
    paths. **DSH ledger rule (m5): the ledger is rebuilt from the session log
    (`deriveMessages`/history), never from the adapter's own decision — the ledger's
    source of truth is whatever the NEXT trigger will read.**
-7. **Release/version matrix (as amended by the delta above; "From" = current
-   manifest values).**
+7. **Release/version matrix (as amended by the delta above and by the
+   dependabot patch release PR #38, merged 2026-10-09: deepseek 0.3.2 and
+   opencode 0.1.2 shipped as tagged patch releases for the source-map-js
+   lockfile fix; this PR bumps from those).**
 
    | Integration | From → To | Tag after merge |
    |---|---|---|
-   | deepseek | **0.3.1** → **0.4.0** (folds the never-tagged 0.3.1 entry into 0.4.0's release body) | `deepseek-v0.4.0` |
-   | opencode | **0.1.1** → **0.2.0** (folds never-tagged 0.1.1) | `opencode-v0.2.0` |
+   | deepseek | **0.3.2** → **0.4.0** | `deepseek-v0.4.0` |
+   | opencode | **0.1.2** → **0.2.0** | `opencode-v0.2.0` |
    | claude-code | 0.1.1 → **0.2.0** | `claude-code-v0.2.0` |
    | openclaw | 0.0.0 → **0.1.0** (`planned → implemented`) | `openclaw-v0.1.0` |
 
-   `deepseek-v0.3.1` and `opencode-v0.1.1` are never tagged. No hermes bump unless
-   the shared annex forces docs changes (then docs-only 0.4.2).
+   `deepseek-v0.3.1` and `opencode-v0.1.1` are never tagged (0.3.2 and 0.1.2 are
+   the tagged patch releases from PR #38). No hermes bump unless the shared annex
+   forces docs changes (then docs-only 0.4.2).
 8. **Verification strategy + in-PR ordering.**
 
    | Host | CI proves | Pre-merge e2e | Post-merge tracking |
