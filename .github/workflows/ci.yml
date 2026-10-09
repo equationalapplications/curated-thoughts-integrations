@@ -151,6 +151,10 @@ jobs:
         # from package.json rather than hardcoded to deepseek, so the
         # OpenCode/OpenClaw legs of the parity work get this for free.
         if: matrix.entry.language == 'node' && (matrix.entry.checks.test || matrix.entry.checks.lint)
+        # bash explicitly: GitHub's default shell on Windows is pwsh, and the
+        # POSIX if/then/fi below is a ParserError there (first red run after
+        # this step landed proved it on all four Windows matrix entries).
+        shell: bash
         run: |
           if node -e "process.exit(require('./package.json').dependencies?.['@equational-applications/ct-wisdom-core'] ? 0 : 1)"; then
             echo "integration depends on ct-wisdom-core — building it"
