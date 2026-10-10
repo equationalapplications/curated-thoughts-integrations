@@ -22,6 +22,7 @@
  */
 
 import {
+  marker,
   onToolResult as coreOnToolResult,
   onUserTurn as coreOnUserTurn,
   wisdomMatch as coreWisdomMatch,
@@ -427,11 +428,17 @@ export class DshWisdomAdapter implements HostAdapter {
   }
 
   /**
-   * Option A: replace repeated wiki entries with one-line stubs inside the
-   * envelope, then re-serialize. The returned object replaces the result's
-   * `value` and its content blocks are rebuilt by the caller (postExecute).
+   * Reference dedup (ct_tool_dedup.transform_tool_result): stub repeated
+   * wiki entries down to one-line stubs (option A), then append a
+   * `ct-fact:<id>` trailer line for every NEW id — envelope JSON first,
+   * one trailer line per new id after it, exactly as the reference writes
+   * `outer['result'] = json.dumps(inner) + trailer`. The persisted tool
+   * result then carries the markers the next ledger scan picks up. Other
+   * outer keys (`structuredContent`, ...) pass through verbatim; the
+   * returned object replaces the result's `value` and its content blocks
+   * are rebuilt by the caller (postExecute).
    */
-  rewriteEnvelopeStub(result: unknown, repeats: string[]): unknown {
+  rewriteEnvelopeStub(result: unknown, repeats: string[], newIds: string[]): unknown {
     const parsed = parseEnvelope(result);
     if (parsed === null) return result;
     const stubs = new Set(repeats);
@@ -439,7 +446,8 @@ export class DshWisdomAdapter implements HostAdapter {
       const id = (entry as { id?: unknown } | null)?.id;
       return isValidId(id) && stubs.has(id) ? stubEntry(id) : entry;
     });
-    return { ...parsed.outer, result: JSON.stringify(parsed.inner) };
+    const trailer = newIds.map((id) => `\n${marker(id)}`).join('');
+    return { ...parsed.outer, result: JSON.stringify(parsed.inner) + trailer };
   }
 
   /** n3: a spawn-class failure drops the process capability latch. */

@@ -15,8 +15,9 @@
  *   - the N2 append is OUR listener's job in production, so the harness here
  *     appends the delivered block to the turn's user message exactly like
  *     the pre-step listener does (block message with source.kind);
- *   - N3 rewrites a REAL recall envelope ({result: "<CT JSON>"}), trailing
- *     ct-fact markers on the content blocks (the post-execute rewrite).
+ *   - N3 rewrites a REAL recall envelope ({result: "<CT JSON>"}); the
+ *     production rewrite itself appends the ct-fact trailer for new ids
+ *     (ct_tool_dedup parity) — no test-side marker patching.
  */
 
 import { describe, expect, it } from 'vitest';
@@ -134,24 +135,13 @@ class DshSim {
         wiki_entries: ids.map((id) => ({ id, title: 'T' + id, text: 'full ' + id })),
       }),
     };
+    // Production path: the adapter's rewriteEnvelopeStub appends the
+    // ct-fact trailer for every NEW id itself (ct_tool_dedup parity) —
+    // the test appends nothing.
     const rewritten = onToolResult(this.adapter, { id: this.id }, envelope) as typeof envelope;
-    const kept = (
-      JSON.parse(rewritten.result) as { wiki_entries: Array<{ id?: string }> }
-    ).wiki_entries
-      .map((e) => e.id)
-      .filter((id): id is string => typeof id === 'string');
-    // The post-execute content: each kept id carries its trailing marker
-    // (mirrors the reference's transform_tool_result), so the next ledger
-    // rebuild can see it.
     this.log.push({
       role: 'tool',
-      content: [
-        textBlock(
-          JSON.stringify(rewritten) +
-            '\n' +
-            kept.map((id) => marker(id)).join('\n'),
-        ),
-      ],
+      content: [textBlock(JSON.stringify(rewritten))],
     });
     this.syncLog();
   }
@@ -209,7 +199,8 @@ function assertNoDupes(sim: DshSim, where: string): void {
 /**
  * The adapter's wisdomMatch runs the REAL spawn contract, so the fake encodes
  * the result JSON on the match call (the core's SimHost faked
- * HostAdapter.wisdomMatch directly — this is one layer lower).
+ * HostAdapter.wisdomMatch directly — this is one layer lower). Parses the
+ * shipped 3.3.0 argv: `--exclude=<id>` flags, query last after `--`.
  */
 function fakeCtFor(matchFor: (query: string, max: number, exclude: string[]) => WisdomMatchResult): SpawnFn {
   return (spec) =>
@@ -224,9 +215,9 @@ function fakeCtFor(matchFor: (query: string, max: number, exclude: string[]) => 
         : {
             stdout: JSON.stringify(
               matchFor(
-                spec.args[spec.args.indexOf('--query') + 1] ?? '',
+                spec.args[spec.args.indexOf('--') + 1] ?? '',
                 Number(spec.args[spec.args.indexOf('--max') + 1] ?? 0),
-                spec.args.slice(spec.args.indexOf('--exclude') + 1).filter((a) => a !== undefined && !a.startsWith('--')),
+                spec.args.filter((a) => a.startsWith('--exclude=')).map((a) => a.slice('--exclude='.length)),
               ),
             ),
           }),

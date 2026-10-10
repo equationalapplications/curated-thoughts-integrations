@@ -186,9 +186,10 @@ describe('capability probe + wisdomMatch', () => {
         // capability gate: `ct wisdom match --help` exits 0
         return Promise.resolve(spawnOutcome({}));
       }
-      // the core's matchArgs contract: query inline, exclude as flags
-      expect(spec.args.slice(0, 4)).toEqual(['wisdom', 'match', '--query', 'q']);
-      expect(spec.args.slice(4)).toEqual(['--max', '2', '--exclude', 'ex1']);
+      // the core's matchArgs contract (CT 3.3.0): --json, --exclude= ids,
+      // query last after --
+      expect(spec.args.slice(0, 5)).toEqual(['wisdom', 'match', '--json', '--max', '2']);
+      expect(spec.args.slice(5)).toEqual(['--exclude=ex1', '--', 'q']);
       expect(spec.timeoutMs).toBe(3000);
       return Promise.resolve(
         spawnOutcome({ stdout: '{"entries": [{"id": "e1", "title": "T", "text": "B"}], "corrections": []}' }),
@@ -255,10 +256,11 @@ describe('recall envelope (N3, m4)', () => {
     expect(a.envelopeFactIds({ result: 'not json' })).toEqual([]);
   });
 
-  it('stubs repeats in place and preserves other outer keys', () => {
+  it('stubs repeats in place, preserves other outer keys, and leaves new ids alone', () => {
     const { a } = adapter();
-    const rewritten = a.rewriteEnvelopeStub(ENVELOPE, ['f1']) as typeof ENVELOPE;
+    const rewritten = a.rewriteEnvelopeStub(ENVELOPE, ['f1'], []) as typeof ENVELOPE;
     expect(rewritten.structuredContent).toEqual({ passthrough: true });
+    // No new ids → NO trailer: result stays pure JSON.
     const inner = JSON.parse(rewritten.result) as {
       wiki_entries: Array<Record<string, unknown>>;
     };
@@ -270,10 +272,40 @@ describe('recall envelope (N3, m4)', () => {
     expect(inner.wiki_entries[1]).toEqual({ id: 'f2', title: 'B', text: 'other' });
   });
 
+  it('appends one ct-fact trailer line per NEW id, envelope JSON first', async () => {
+    const { a } = adapter();
+    const rewritten = a.rewriteEnvelopeStub(ENVELOPE, ['f1'], ['f2']) as typeof ENVELOPE;
+    expect(rewritten.structuredContent).toEqual({ passthrough: true });
+    // Mirror of ct_tool_dedup: result = json.dumps(inner) + trailer.
+    expect(rewritten.result).toBe(
+      JSON.stringify({
+        wiki_entries: [
+          {
+            id: 'f1',
+            in_context: true,
+            note: 'already in context: ct-fact:f1',
+          },
+          { id: 'f2', title: 'B', text: 'other' },
+        ],
+      }) + '\n<!-- ct-fact:f2 -->',
+    );
+    // The trailer must be scannable by the ledger (next rebuild picks it up).
+    // scanIds also picks the ct-fact token out of the stub NOTE — harmless,
+    // f1 is a repeat — so expect both, in text order.
+    const { scanIds } = await import('@equational-applications/ct-wisdom-core');
+    expect(scanIds(rewritten.result)).toEqual(['f1', 'f2']);
+  });
+
+  it('trailers every new id in order when there are no repeats', () => {
+    const { a } = adapter();
+    const rewritten = a.rewriteEnvelopeStub(ENVELOPE, [], ['f1', 'f2']) as typeof ENVELOPE;
+    expect(rewritten.result.endsWith('\n<!-- ct-fact:f1 -->\n<!-- ct-fact:f2 -->')).toBe(true);
+  });
+
   it('malformed envelope passes through untouched', () => {
     const { a } = adapter();
-    expect(a.rewriteEnvelopeStub({ result: 'not json' }, ['f1'])).toEqual({ result: 'not json' });
-    expect(a.rewriteEnvelopeStub(null, ['f1'])).toBeNull();
+    expect(a.rewriteEnvelopeStub({ result: 'not json' }, ['f1'], [])).toEqual({ result: 'not json' });
+    expect(a.rewriteEnvelopeStub(null, ['f1'], [])).toBeNull();
   });
 });
 
@@ -343,6 +375,29 @@ describe('core engine integration (injected spawn, no real ct)', () => {
       in_context: true,
       note: 'already in context: ct-fact:dup1',
     });
+  });
+
+  it('exactly-once: a recall envelope with a NEW id gets the ct-fact trailer through onToolResult', async () => {
+    // Recall of an id the ledger has never seen: the persisted tool result
+    // must carry its marker (the next ledger rebuild picks it up) — the
+    // production rewrite appends it, not the host.
+    const { a } = adapter();
+    a.sessionMessages.set('s8', []);
+    const { onToolResult, scanIds } = await import('@equational-applications/ct-wisdom-core');
+    const envelope = {
+      result: JSON.stringify({
+        wiki_entries: [{ id: 'brand_new', title: 'N', text: 'first appearance' }],
+      }),
+    };
+    const rewritten = onToolResult(a, { id: 's8' }, envelope) as typeof envelope;
+    // Envelope JSON first, one trailer line per new id after it.
+    expect(rewritten.result).toBe(
+      JSON.stringify({
+        wiki_entries: [{ id: 'brand_new', title: 'N', text: 'first appearance' }],
+      }) + '\n<!-- ct-fact:brand_new -->',
+    );
+    // And the next ledger scan sees it — the reason the trailer exists.
+    expect(scanIds(rewritten.result)).toEqual(['brand_new']);
   });
 
   it('empty session id → silent no-op (invariant 3)', async () => {
