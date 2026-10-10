@@ -1,6 +1,6 @@
 {
   "name": "@equational-applications/opencode-curated-thoughts",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "description": "Curated Thoughts memory integration for OpenCode",
   "license": "MIT",
   "type": "module",
@@ -16,6 +16,9 @@
     "scripts/install.sh",
     "scripts/loader.js.tmpl"
   ],
+  "dependencies": {
+    "@equational-applications/ct-wisdom-core": "file:../../packages/ct-wisdom-core"
+  },
   "scripts": {
     "build": "tsc && esbuild scripts/install.ts --bundle --platform=node --format=esm --target=node22 --main-fields=module,main --outfile=lib/scripts/install.js --log-level=warning",
     "prepack": "pnpm run build",
