@@ -169,12 +169,15 @@ function presentCounts(sim: DshSim): Map<string, number> {
       }
     } else if (msg.role === 'tool') {
       // Tool results: NON-STUBBED ids count as present (a stubbed id was
-      // replaced by the one-line stub, NOT delivered again).
+      // replaced by the one-line stub, NOT delivered again). The envelope
+      // JSON is the FIRST line only — the rewrite appends ct-fact trailer
+      // lines after it (production path), and JSON.stringify never emits
+      // literal newlines, so line 1 is exactly the parseable prefix.
       for (const text of texts) {
         const jsonPart = text.split('\n')[0] ?? '';
         try {
           const outer = JSON.parse(jsonPart) as { result?: string };
-          const inner = JSON.parse(outer.result ?? '{}') as {
+          const inner = JSON.parse((outer.result ?? '').split('\n')[0]) as {
             wiki_entries?: Array<Record<string, unknown>>;
           };
           for (const entry of inner.wiki_entries ?? []) {

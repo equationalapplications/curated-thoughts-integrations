@@ -211,8 +211,12 @@ function presentCounts(host: SimHost): Map<string, number> {
     } else if (msg.role === 'tool') {
       // Tool results: every NON-STUBBED id counts as present; a stubbed id
       // was replaced by a one-line stub (option A), NOT delivered again.
+      // The rewriteEnvelopeStub trailer lines come AFTER the JSON, and
+      // JSON.stringify never emits literal newlines — parse line 1 only,
+      // otherwise every trailer'd delivery is swallowed by the catch and
+      // the oracle goes blind for exactly the ids N3 marked.
       try {
-        const parsed = JSON.parse(msg.content.slice(4)) as {
+        const parsed = JSON.parse(msg.content.split('\n')[0].slice(4)) as {
           ids?: string[];
           stubbed?: string[];
         };
