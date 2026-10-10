@@ -414,10 +414,14 @@ export function apply(ctx: Context, config: Config): void {
   const liveMemoBlockFor = (agentId: string): string => {
     // _last-parity: the module memo's rendered bytes. WisdomMemo stores only
     // memoized blocks; the section's moduleMemo is private, so mirror the
-    // render here with a once-per-agent probe memo that never re-recalls.
+    // render here with a once-per-agent probe. The probe may re-run this
+    // cheap closure while the section has not rendered yet (an empty block
+    // is never memoized — a memoized '' would hide the bootstrap ids for the
+    // whole session); it still never re-recalls anything expensive.
+    const block = bootstrapBlockCache.get(agentId) ?? '';
     return liveMemo.renderFor(agentId, () => ({
-      block: bootstrapBlockCache.get(agentId) ?? '',
-      memoize: true,
+      block,
+      memoize: block !== '',
     }));
   };
   /** Written by the section's text() below on every render (memo hit or miss). */
