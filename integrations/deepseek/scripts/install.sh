@@ -171,8 +171,15 @@ do_install() {
   # The stage dir is literally named "package" so the tarball gets npm's
   # package/ root without a rename transform.
   stage="${INSTALL_TMP}/package"
-  mkdir -p "$stage/node_modules/@equational-applications"
   cp -R "$SCRIPT_SRC/." "$stage/"
+  # Symlink trap: if the source tree's node_modules came from pnpm, its
+  # package dirs are SYMLINKS into the store. cp -R copies the links as
+  # links, so a surviving node_modules/@equational-applications/ct-wisdom-core
+  # would make the core copy below write THROUGH the link into the store (or
+  # a dangling copy), and the tar's .pnpm exclusion would archive a dangling
+  # symlink. Drop the copied tree so the fresh dir below is always real.
+  rm -rf "$stage/node_modules"
+  mkdir -p "$stage/node_modules/@equational-applications"
   for core_lib in \
     "$SCRIPT_SRC/lib/ct-wisdom-core" \
     "$SCRIPT_SRC/../../packages/ct-wisdom-core/lib"; do
