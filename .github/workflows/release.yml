@@ -259,6 +259,13 @@ jobs:
             cd "$GITHUB_WORKSPACE/packages/ct-wisdom-core"
             pnpm install --frozen-lockfile
             pnpm run build
+            # Stage the built core into the integration, mirroring the e2e
+            # pattern (tests/e2e/run.sh): the release tarball is integration-
+            # scoped (packages/ is not part of it), so the monorepo-relative
+            # file: dep can only be satisfied by the vendored copy at
+            # lib/ct-wisdom-core inside the integration itself.
+            mkdir -p "$GITHUB_WORKSPACE/$INTEGRATION_DIR/lib/ct-wisdom-core"
+            cp -R "$GITHUB_WORKSPACE/packages/ct-wisdom-core/lib/." "$GITHUB_WORKSPACE/$INTEGRATION_DIR/lib/ct-wisdom-core/"
           else
             echo "no ct-wisdom-core dependency — skipping core build"
           fi
@@ -276,7 +283,11 @@ jobs:
       - name: The archive must carry the declared entry point
         # Cheap standing guard against the silent-omission failure above:
         # assert the tarball really contains what package.json points `main`
-        # at, rather than trusting that a build ran.
+        # at, rather than trusting that a build ran. When the integration
+        # also declares the shared core in ANY dependency class, the archive
+        # must equally carry its vendored entry point — the same
+        # silent-omission failure (gitignored lib/) otherwise ships a
+        # bundleDependencies entry that resolves to nothing at install time.
         if: needs.identify.outputs.language == 'node'
         env:
           # Passed through the environment, not interpolated into the script.
@@ -285,13 +296,30 @@ jobs:
           python - <<'PY'
           import json, os, pathlib, sys, tarfile
           directory = pathlib.Path(os.environ["INTEGRATION_DIR"])
-          main = json.loads((directory / "package.json").read_text())["main"]
+          manifest = json.loads((directory / "package.json").read_text())
+          main = manifest["main"]
           archive = next(pathlib.Path("dist").glob("*.tar.gz"))
           with tarfile.open(archive) as tar:
               names = tar.getnames()
           if not any(name == main or name.endswith("/" + main) for name in names):
               sys.exit(f"{archive.name} is missing the declared entry point {main}")
           print(f"{archive.name} carries {main}")
+          declares_core = any(
+              manifest.get(key, {}).get("@equational-applications/ct-wisdom-core")
+              is not None
+              for key in ("dependencies", "devDependencies", "peerDependencies")
+          )
+          if declares_core:
+              core_main = "lib/ct-wisdom-core/index.js"
+              if not any(
+                  name == core_main or name.endswith("/" + core_main)
+                  for name in names
+              ):
+                  sys.exit(
+                      f"{archive.name} declares @equational-applications/ct-wisdom-core"
+                      f" but is missing the vendored entry point {core_main}"
+                  )
+              print(f"{archive.name} carries the vendored core ({core_main})")
           PY
 
       - name: Create the GitHub Release
