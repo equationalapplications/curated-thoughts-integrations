@@ -43,26 +43,33 @@ describe('Breaker', () => {
 });
 
 describe('match contract', () => {
-  it('builds argv with exclude only when non-empty', () => {
+  it('builds the shipped 3.3.0 argv: --json, --exclude= ids, query last after --', () => {
     expect(matchArgs('q', 2, [])).toEqual([
       'wisdom',
       'match',
-      '--query',
-      'q',
+      '--json',
       '--max',
       '2',
+      '--',
+      'q',
     ]);
     expect(matchArgs('q', 0, ['a', 'b'])).toEqual([
       'wisdom',
       'match',
-      '--query',
-      'q',
+      '--json',
       '--max',
       '0',
-      '--exclude',
-      'a',
-      'b',
+      '--exclude=a',
+      '--exclude=b',
+      '--',
+      'q',
     ]);
+  });
+
+  it('never lets query text parse as a flag (it rides after --)', () => {
+    const args = matchArgs('--max 999 --json', 3, []);
+    expect(args[args.length - 2]).toBe('--');
+    expect(args[args.length - 1]).toBe('--max 999 --json');
   });
 
   it('classifies spawn / timeout_or_exit / ok', () => {

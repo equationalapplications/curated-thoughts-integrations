@@ -31,16 +31,23 @@ export interface SpawnOutcome {
 
 export type SpawnFn = (spec: SpawnLike) => Promise<SpawnOutcome>;
 
-/** Build the argv for one `ct wisdom match` call. */
+/**
+ * Build the argv for one `ct wisdom match` call — the shipped CT 3.3.0
+ * contract (Hermes parity, ct_wisdom_live.match_wisdom): `--json` makes
+ * stdout parseable, ids ride `--exclude=<id>` so they can never be read as
+ * positional values, and the query goes LAST after `--` so arbitrary user
+ * text can never parse as a flag.
+ */
 export function matchArgs(
   query: string,
   max: number,
   exclude: string[],
 ): string[] {
-  const args = ['wisdom', 'match', '--query', query, '--max', String(max)];
-  if (exclude.length > 0) {
-    args.push('--exclude', ...exclude);
+  const args = ['wisdom', 'match', '--json', '--max', String(max)];
+  for (const id of exclude) {
+    args.push(`--exclude=${id}`);
   }
+  args.push('--', query);
   return args;
 }
 
