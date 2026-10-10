@@ -147,7 +147,12 @@ jobs:
         env:
           INTEGRATION_DIR: ${{ needs.identify.outputs.dir }}
         run: |
-          if node -e "const fs=require('fs'),p=JSON.parse(fs.readFileSync(process.env.INTEGRATION_DIR + '/package.json')); process.exit(['dependencies','devDependencies','peerDependencies'].some(k => p[k]?.['@equational-applications/ct-wisdom-core']) ? 0 : 1)"; then
+          # The pkg path is anchored to $GITHUB_WORKSPACE so the probe is
+          # CWD-independent: the verify job runs with a job-level
+          # working-directory inside the integration, where the relative
+          # path ENOENTs and the probe "skips" a dependency that exists
+          # (deepseek-v0.4.0 release run 38065796391 failed on exactly this).
+          if node -e "const fs=require('fs'),p=JSON.parse(fs.readFileSync(process.env.GITHUB_WORKSPACE + '/' + process.env.INTEGRATION_DIR + '/package.json')); process.exit(['dependencies','devDependencies','peerDependencies'].some(k => p[k]?.['@equational-applications/ct-wisdom-core']) ? 0 : 1)"; then
             echo "integration depends on ct-wisdom-core — building it"
             cd "$GITHUB_WORKSPACE/packages/ct-wisdom-core"
             pnpm install --frozen-lockfile
@@ -254,7 +259,12 @@ jobs:
         env:
           INTEGRATION_DIR: ${{ needs.identify.outputs.dir }}
         run: |
-          if node -e "const fs=require('fs'),p=JSON.parse(fs.readFileSync(process.env.INTEGRATION_DIR + '/package.json')); process.exit(['dependencies','devDependencies','peerDependencies'].some(k => p[k]?.['@equational-applications/ct-wisdom-core']) ? 0 : 1)"; then
+          # The pkg path is anchored to $GITHUB_WORKSPACE so the probe is
+          # CWD-independent: the verify job runs with a job-level
+          # working-directory inside the integration, where the relative
+          # path ENOENTs and the probe "skips" a dependency that exists
+          # (deepseek-v0.4.0 release run 38065796391 failed on exactly this).
+          if node -e "const fs=require('fs'),p=JSON.parse(fs.readFileSync(process.env.GITHUB_WORKSPACE + '/' + process.env.INTEGRATION_DIR + '/package.json')); process.exit(['dependencies','devDependencies','peerDependencies'].some(k => p[k]?.['@equational-applications/ct-wisdom-core']) ? 0 : 1)"; then
             echo "integration depends on ct-wisdom-core — building it"
             cd "$GITHUB_WORKSPACE/packages/ct-wisdom-core"
             pnpm install --frozen-lockfile
@@ -410,7 +420,12 @@ jobs:
         env:
           INTEGRATION_DIR: ${{ needs.identify.outputs.dir }}
         run: |
-          if node -e "const fs=require('fs'),p=JSON.parse(fs.readFileSync(process.env.INTEGRATION_DIR + '/package.json')); process.exit(['dependencies','devDependencies','peerDependencies'].some(k => p[k]?.['@equational-applications/ct-wisdom-core']) ? 0 : 1)"; then
+          # The pkg path is anchored to $GITHUB_WORKSPACE so the probe is
+          # CWD-independent: the verify job runs with a job-level
+          # working-directory inside the integration, where the relative
+          # path ENOENTs and the probe "skips" a dependency that exists
+          # (deepseek-v0.4.0 release run 38065796391 failed on exactly this).
+          if node -e "const fs=require('fs'),p=JSON.parse(fs.readFileSync(process.env.GITHUB_WORKSPACE + '/' + process.env.INTEGRATION_DIR + '/package.json')); process.exit(['dependencies','devDependencies','peerDependencies'].some(k => p[k]?.['@equational-applications/ct-wisdom-core']) ? 0 : 1)"; then
             echo "integration depends on ct-wisdom-core — building it"
             cd "$GITHUB_WORKSPACE/packages/ct-wisdom-core"
             pnpm install --frozen-lockfile
