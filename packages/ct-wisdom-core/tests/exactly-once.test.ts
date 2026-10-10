@@ -159,7 +159,7 @@ class SimHost implements HostAdapter {
     }
   }
 
-  rewriteEnvelopeStub(result: unknown, repeats: string[]): unknown {
+  rewriteEnvelopeStub(result: unknown, repeats: string[], newIds: string[]): unknown {
     if (typeof result !== 'string') return result;
     const parsed = JSON.parse(result.slice(4)) as {
       ids?: string[];
@@ -167,13 +167,10 @@ class SimHost implements HostAdapter {
     };
     parsed.stubbed = repeats;
     parsed.ids = (parsed.ids ?? []).filter((id) => !repeats.includes(id));
-    return 'CT::' + JSON.stringify(parsed);
-  }
-
-  /** Trail a rewritten envelope with markers (reference: ct_tool_dedup L85). */
-  markEnvelope(result: string, newIds: string[]): string {
-    if (newIds.length === 0) return result;
-    return `${result}\n${newIds.map((id) => marker(id)).join('\n')}`;
+    // Reference trailer: envelope JSON first, one ct-fact line per NEW id —
+    // exactly what ct_tool_dedup appends so the next ledger scan sees them.
+    const trailer = newIds.map((id) => `\n${marker(id)}`).join('');
+    return 'CT::' + JSON.stringify(parsed) + trailer;
   }
 
   resetDiscoveryAndProbeCaches(): void {}
@@ -278,15 +275,11 @@ describe('exactly-once across randomized sessions (Hermes port)', () => {
         for (let k = 0; k < recalls; k++) {
           const ids = sample(rand, UNIVERSE, Math.floor(rand() * 5));
           let raw = 'CT::' + JSON.stringify({ ids });
-          // The N3 transform consults the turn cache (with fallback rebuild)
-          // and stubs repeats, including ids carried by an EARLIER recall in
-          // this same turn (cache union rule).
+          // The N3 transform consults the turn cache (with fallback rebuild),
+          // stubs repeats, AND trails NEW ids with ct-fact markers — the
+          // production path now appends the trailer itself (reference
+          // ct_tool_dedup), so the next rebuild can see them.
           raw = onToolResult(host, host.session, raw) as string;
-          // Trail the (possibly rewritten) envelope with ct-fact: markers for
-          // every id still present — exactly what the reference's
-          // transform_tool_result does, so the next rebuild can see them.
-          const kept = (JSON.parse(raw.slice(4)) as { ids?: string[] }).ids ?? [];
-          raw = host.markEnvelope(raw, kept);
           host.context.push({ role: 'tool', content: raw });
           assertNoDupes(host, `session ${host.id} turn ${turn} recall ${k}`);
         }

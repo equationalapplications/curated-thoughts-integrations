@@ -129,8 +129,13 @@ export function onToolResult(
 
   const ids = host.envelopeFactIds(result);
   const repeats = ids.filter((id) => validId(id) && ledger!.has(id));
-  if (repeats.length > 0) {
-    result = host.rewriteEnvelopeStub(result, repeats);
+  // New = a valid envelope id NOT already in the rebuilt/cached ledger view —
+  // it is delivered for the first time by THIS tool result, so the persisted
+  // copy must carry its ct-fact marker (mirrors the reference's new_ids /
+  // LEDGER_CACHE.add in ct_tool_dedup).
+  const newIds = ids.filter((id) => validId(id) && !ledger!.has(id));
+  if (repeats.length > 0 || newIds.length > 0) {
+    result = host.rewriteEnvelopeStub(result, repeats, newIds);
   }
   // Union the ids this result now carries into the turn cache (mirrors the
   // reference's LEDGER_CACHE.add in ct_tool_dedup): a SECOND recall within

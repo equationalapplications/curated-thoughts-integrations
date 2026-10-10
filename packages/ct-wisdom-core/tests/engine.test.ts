@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import { Breaker } from '../src/breaker.js';
 import { onToolResult, onUserTurn, buildQuery } from '../src/engine.js';
+import { marker, validId } from '../src/ledger.js';
 import { EMPTY_LEDGER } from '../src/types.js';
 import type {
   HostAdapter,
@@ -70,8 +71,10 @@ class FakeHost implements HostAdapter {
       return [];
     }
   }
-  rewriteEnvelopeStub(result: unknown, _repeats: string[]): unknown {
-    return (result as string) + '|STUBBED';
+  rewriteEnvelopeStub(result: unknown, repeats: string[], newIds: string[]): unknown {
+    void repeats;
+    const trailer = newIds.map((id) => `\n${marker(id)}`).join('');
+    return (result as string) + '|STUBBED' + trailer;
   }
   resetDiscoveryAndProbeCaches(): void {
     this.cacheResets += 1;
@@ -234,25 +237,32 @@ describe('onUserTurn — budgets and dedup', () => {
   });
 });
 
-describe('onToolResult — N3 dedup stub', () => {
+describe('onToolResult — N3 dedup stub + new-id trailers', () => {
   it('passes through non-CT results untouched', () => {
     const host = new FakeHost();
     host.contextIds = ['a'];
     expect(onToolResult(host, { id: 's' }, 'plain result')).toBe('plain result');
   });
 
-  it('rewrites repeats down to stubs, using cache when present', () => {
+  it('stubs repeats AND trailers new ids (reference ct_tool_dedup contract)', () => {
     const host = new FakeHost();
     host.contextIds = ['a', 'b'];
     const result = 'CT_RECALL_ENVELOPE:' + JSON.stringify(['a', 'fresh']);
-    expect(onToolResult(host, { id: 's' }, result)).toBe(result + '|STUBBED');
+    const out = onToolResult(host, { id: 's' }, result) as string;
+    // Stubs: the adapter got both lists (repeats stubbed by the fake's
+    // payload rewrite; asserted via the SimHost test in exactly-once).
+    expect(out.startsWith(result + '|STUBBED')).toBe(true);
+    // Trailers: one ct-fact line per NEW valid id, envelope JSON first.
+    expect(out).toBe(`${result}|STUBBED\n${marker('fresh')}`);
   });
 
-  it('no-op when no ids repeat', () => {
+  it('no-op envelope (all ids invalid) passes through unchanged', () => {
     const host = new FakeHost();
-    host.contextIds = ['a'];
-    const result = 'CT_RECALL_ENVELOPE:' + JSON.stringify(['fresh']);
-    expect(onToolResult(host, { id: 's' }, result)).toBe(result);
+    host.contextIds = [];
+    // validId requires [A-Za-z0-9._:-]; these ids are all invalid, so the
+    // engine never calls the adapter — the envelope goes through verbatim.
+    const invalid = 'CT_RECALL_ENVELOPE:' + JSON.stringify(['not valid!', '']);
+    expect(onToolResult(host, { id: 's' }, invalid)).toBe(invalid);
   });
 
   it('rebuilds the ledger when no cached view exists', () => {
@@ -261,6 +271,26 @@ describe('onToolResult — N3 dedup stub', () => {
     host.contextIds = ['a'];
     const result = 'CT_RECALL_ENVELOPE:' + JSON.stringify(['a']);
     expect(onToolResult(host, { id: 's' }, result)).toBe(result + '|STUBBED');
+  });
+
+  it('every envelope id that reaches rewriteEnvelopeStub is a valid id', () => {
+    const host = new FakeHost();
+    host.contextIds = [];
+    const seen: { repeats: string[]; newIds: string[] }[] = [];
+    host.rewriteEnvelopeStub = (
+      result: unknown,
+      repeats: string[],
+      newIds: string[],
+    ): unknown => {
+      seen.push({ repeats, newIds });
+      void result;
+      return result;
+    };
+    const result =
+      'CT_RECALL_ENVELOPE:' + JSON.stringify(['good.id', 'has space', '', 'ok:1']);
+    onToolResult(host, { id: 's' }, result);
+    expect(seen).toEqual([{ repeats: [], newIds: ['good.id', 'ok:1'] }]);
+    expect(seen[0].newIds.every((id) => validId(id))).toBe(true);
   });
 });
 

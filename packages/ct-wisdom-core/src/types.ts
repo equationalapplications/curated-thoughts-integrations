@@ -87,8 +87,21 @@ export interface HostAdapter {
   /** Fact ids carried by a CT recall envelope (parse; empty on malformed). */
   envelopeFactIds(result: unknown): string[];
 
-  /** Rewrite repeated ids in a recall envelope down to stubs (option A). */
-  rewriteEnvelopeStub(result: unknown, repeats: string[]): unknown;
+  /**
+   * Rewrite a CT recall envelope per the reference dedup
+   * (ct_tool_dedup.transform_tool_result): (a) stub every REPEATED id
+   * (already in context — option A), and (b) append a `ct-fact:<id>`
+   * trailer line for every NEW valid id, so the host's persisted tool
+   * result carries the markers the next ledger scan picks up. Order is
+   * normative: the envelope JSON first, then one trailer line per new id
+   * (`outer['result'] = json.dumps(inner) + trailer`). Called when either
+   * list is non-empty; `repeats` and `newIds` are disjoint.
+   */
+  rewriteEnvelopeStub(
+    result: unknown,
+    repeats: string[],
+    newIds: string[],
+  ): unknown;
 
   /** n3: retry next turn — drop discovery/probe caches after a spawn failure. */
   resetDiscoveryAndProbeCaches(): void;
