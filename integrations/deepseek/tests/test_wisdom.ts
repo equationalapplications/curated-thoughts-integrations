@@ -349,14 +349,17 @@ describe('recallWiki (mocked spawnSync injection — all platforms)', () => {
     expect((runSpy.mock.calls[0]![2] as { env: NodeJS.ProcessEnv }).env).toBe(wisdomEnv);
   });
 
-  it('parses valid wiki JSON with full coercion rules', () => {
+  it('parses valid wiki JSON with full coercion rules (v1 amendment: id parsed, invalid ids DROPPED)', () => {
     const stdout = Buffer.from(
       JSON.stringify({
         wiki: [
-          { title: 'T1', text: 'body' },
-          { text: 'no title' }, // missing title → ''
-          { title: 'no text' }, // missing text → ''
-          { title: 42, text: null }, // non-string → ''
+          { id: 'f1', title: 'T1', text: 'body' },
+          { id: 'f2', text: 'no title' }, // missing title → ''
+          { id: 'f3', title: 'no text' }, // missing text → ''
+          { id: 'f4', title: 42, text: null }, // non-string → ''
+          { title: 'no id' }, // v1 amendment: no valid id → DROPPED (cannot be deduped)
+          { id: 42, title: 'bad id type' }, // non-string id → dropped
+          { id: 'bad id!', title: 'bad id charset' }, // id outside [A-Za-z0-9._:-] → dropped
           'a string item', // non-dict → skipped
           ['array', 'item'], // arrays are not dicts → skipped
         ],
@@ -366,10 +369,10 @@ describe('recallWiki (mocked spawnSync injection — all platforms)', () => {
     const r = recallWiki('/bin/ct', 'q', { spawnSync: spawn as never });
     expect(r).toEqual({
       entries: [
-        { title: 'T1', text: 'body' },
-        { title: '', text: 'no title' },
-        { title: 'no text', text: '' },
-        { title: '', text: '' },
+        { id: 'f1', title: 'T1', text: 'body' },
+        { id: 'f2', title: '', text: 'no title' },
+        { id: 'f3', title: 'no text', text: '' },
+        { id: 'f4', title: '', text: '' },
       ],
       failure: null,
     });
@@ -601,7 +604,8 @@ describe('RetryGovernor (constructor-injected clock)', () => {
 
 // ── Task 5: WisdomMemo + renderWisdom orchestrator (injected deps ONLY — no real spawns) ──
 
-const WIKI_OK = '{"wiki": [{"title": "T1", "text": "body one"}]}';
+// v1 amendment: the entry carries a valid id — recallWiki drops id-less entries
+const WIKI_OK = '{"wiki": [{"id": "wf1", "title": "T1", "text": "body one"}]}';
 
 function okSpawn(): { fn: ReturnType<typeof vi.fn>; result: () => ReturnType<typeof spawnShape> } {
   const fn = vi.fn(() => spawnShape({ stdout: Buffer.from(WIKI_OK) }));

@@ -95,7 +95,12 @@ if ! ct --help 2>/dev/null | grep -q 'Curated Thoughts'; then
   bad 'ct CLI not on PATH — wisdom seed skipped, wisdom checks would be vacuous'
   WISDOM_E2E=0
 else
-  if ! ct status >/dev/null 2>&1; then
+  # Probe the EMBEDDER, not the brain: `ct status` exits 0 here because the
+  # brain was seeded above, but ingest/recall embed through Ollama and fail
+  # on connection (run 3, rc=2; 2026-10-09 run: 3 FAILs from the same gap).
+  # A trivial recall is exactly what ingest does first, so its rc is the
+  # honest gate.
+  if ! ct recall 'embedder probe' --json --k 1 >/dev/null 2>&1; then
     echo 'SKIP  no embedding backend for ct ingest/recall — wisdom e2e covered at unit level'
     WISDOM_E2E=0
   fi

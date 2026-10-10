@@ -33,6 +33,13 @@ ctx="$(mktemp -d)"
 trap 'rm -rf "$ctx"' EXIT
 mkdir -p "$ctx/dist"
 # lib/ is gitignored and the packager ships what is on disk, so build first.
+# The core build output is staged INSIDE the package (lib/ct-wisdom-core, the
+# install.sh vendoring fallback) because the release tarball is integration-
+# scoped — packages/ is not part of it, so the monorepo-relative file: dep is
+# rewritten to the vendored copy at install time.
+(cd "$PKG/../../packages/ct-wisdom-core" && pnpm -s build)
+mkdir -p "$PKG/lib/ct-wisdom-core"
+cp -R "$PKG/../../packages/ct-wisdom-core/lib/." "$PKG/lib/ct-wisdom-core/"
 (cd "$PKG" && pnpm -s build)
 VERSION="$(node -p "require('$PKG/package.json').version")"
 (cd "$REPO" && python3 tools/ct_ci.py package --tag "deepseek-v$VERSION" --out "$ctx/dist" >/dev/null)

@@ -6,6 +6,17 @@
 answered with evidence. Tags: **[V]** = controller-verified (read the cited source
 this session), **[C]** = child-reported, **[A]** = assumption flagged for the spec.
 
+> **SUPERSEDED IN PART (2026-10-09):** the Target 2 finding that DSH has "no
+> per-user-turn hook" is **wrong at host 0.2.0-rc.2** — the 0.2.0 line added the
+> `agent/pre-step` waterfall (and `tools/post-execute`), which is exactly the
+> per-user-turn trigger + transform pair the live-delivery design needed. The
+> evidence in this document was read at pin 0.1.5-rc.2 and remains accurate
+> *for that pin*; history is preserved as written. The authoritative successor
+> is the 2026-10-09 cross-harness parity spec
+> (`../specs/2026-10-09-cross-harness-wisdom-parity-design.md`), whose DSH leg
+> re-verified the 0.2.0-rc.2 contracts from the published tarballs and shipped
+> the live path (deepseek 0.4.0).
+
 **Host evidence base:** DeepSeek Harness publishes its runtime as npm packages.
 Sources read this session from the pinned host version **0.1.5-rc.2**
 (`tests/host/compatibility.json`):

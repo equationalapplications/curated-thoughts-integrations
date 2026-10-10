@@ -1,12 +1,13 @@
 {
-  "dsh": "0.1.5-rc.2",
+  "dsh": "0.2.0-rc.2",
   "pnpm": "10",
   "node": "24-bookworm",
-  "note": "Versions the deepseek e2e harness (tests/e2e/run.sh) builds and verifies against. Every published dsh release so far is a pre-release: npm 'latest' = 0.1.5-rc.2, 'alpha' = 0.1.6-alpha.2. Re-verify the harness after bumping any of these.",
+  "note": "Versions the deepseek e2e harness (tests/e2e/run.sh) builds and verifies against. Every published dsh release so far is a pre-release: npm 'latest' = 0.2.0-rc.2, 'alpha' = 0.2.1-alpha.2 (the runtime packages @deepseek-ai/dsh-* publish 0.2.0-rc.2 under the 'next' dist-tag). Re-verify the harness after bumping any of these.",
   "verifiedWith": {
     "platform": "docker: linux/amd64 (node:24-bookworm-slim base, tests/e2e/base.Dockerfile)",
     "ctSidecar": "2.12.1 (.deb)",
     "command": "integrations/deepseek/tests/e2e/run.sh",
-    "date": "2026-09-18"
+    "date": "2026-09-18",
+    "note": "Live-verified at dsh 0.1.5-rc.2. The 0.2.0-rc.2 pin (2026-10-09 cross-harness parity leg) is source-verified from the published tarballs (agent/pre-step + PreStepDecision, tools/post-execute + PostToolDecision, agent/created lifecycle); live re-verify pending controller e2e (spec m6) before the leg flips to done."
   }
 }

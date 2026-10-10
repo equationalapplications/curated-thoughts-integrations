@@ -2,6 +2,48 @@
 
 ## Unreleased
 
+## 0.4.0 — 2026-10-09
+
+New: **intuitive wisdom live delivery** (cross-harness parity, DSH leg — spec
+`docs/superpowers/specs/2026-10-09-cross-harness-wisdom-parity-design.md`).
+Once per user turn, on the first `agent/pre-step` step of a turn, the plugin
+asks CT which wisdom facts are relevant to the user's message
+(`ct wisdom match`, CT ≥ 3.3.0 owns the relevance gate), drops anything already
+in context, and appends a sanitized delivery block (max 1200 chars) as a
+user-role message to the pre-step decision — which the agent loop persists
+verbatim in the session log. Failure handling is silent and budgeted: a
+process-wide circuit breaker (three consecutive failures → five-minute open,
+one half-open probe) bounds a sick backend; the `--exclude` bound is capped at
+256 ids, most recent first.
+
+The session ledger is rebuilt every turn from the persisted session log
+(`agent.session.deriveMessages()` — never from the plugin's own decision),
+unioned with the v1 bootstrap block's fact ids, so exactly-once survives
+compaction (the agent id does not rotate) and resume within a process.
+Agent-initiated CT recalls are deduped at `tools/post-execute`: repeated wiki
+entries in a `curated_recall_context` envelope are rewritten to one-line stubs
+inside the envelope's value.
+
+**v1 amendments** (Hermes 0.4.0 parity): the auto-inclusion block now tags
+every fact with a `<!-- ct-fact:<id> -->` marker, `ct recall` entries without a
+valid id are dropped (they cannot be deduped), and the fact-id token is
+stripped from rendered text to a fixpoint so a fact can never forge a ledger
+entry. Memoized renders keep their byte stability (only new renders change).
+
+**Host-pin bump:** DSH `0.1.5-rc.2` → `0.2.0-rc.2`
+(`tests/host/compatibility.json`). At the new pin the lifecycle event is
+`agent/created` (payload `{agent, source}`) — the pre-0.2
+`agent/session-start` listener had no dispatcher there, so the health-block
+refresh was dead; it now subscribes `agent/created`. The new contracts
+(`agent/pre-step`, `tools/post-execute`) are source-verified from the
+published tarballs; the live container e2e re-verification is pending
+(spec m6) before the leg is marked done.
+
+Shared algorithm in `packages/ct-wisdom-core` (annex A): budgets (2/turn,
+12/session live), rendering, sanitizer, breaker, and the `ct wisdom match`
+subprocess contract live there now; this integration binds them to the DSH
+session log and the harness ToolRuntime.
+
 ## 0.3.2 — 2026-10-09
 
 Dependency hygiene release: bump the transitive `source-map-js` 1.2.1 → 1.2.2

@@ -12,8 +12,35 @@ const FORBIDDEN_MARKER = '<!-- hermes-plugin-section';
 const FORBIDDEN_HEADING = '## Plugin Context: ';
 const HEADING_INDENT = '    ' + FORBIDDEN_HEADING;
 const ELLIPSIS = '\u2026';
+// v1 amendment (2026-10-09 cross-harness parity, N5): the `ct-fact:` token is
+// stripped FIRST — the ledger scan matches `ct-fact:<id>` with or without the
+// comment wrapper, so the bare token is what must be removed before a fact's
+// text can splice or forge a ledger entry (one pass can join fragments into a
+// fresh token, hence the loop-to-fixpoint).
+const FACT_TOKEN = 'ct-fact:';
+const FACT_ID_RE = /^[A-Za-z0-9._:-]{1,128}$/;
 
-export type WikiEntry = { title: string; text: string };
+export type WikiEntry = { title: string; text: string; id?: string };
+
+export function validId(value: unknown): value is string {
+  return typeof value === 'string' && FACT_ID_RE.test(value);
+}
+
+export function markerOf(factId: string): string {
+  return `<!-- ct-fact:${factId} -->`;
+}
+
+/** Ids in this session's frozen bootstrap block (memo record → live ledger). */
+export function scanIds(text: unknown): string[] {
+  if (typeof text !== 'string') return [];
+  const out: string[] = [];
+  const re = /ct-fact:([A-Za-z0-9._:-]{1,128})/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) {
+    if (!out.includes(m[1])) out.push(m[1]);
+  }
+  return out;
+}
 
 export function keyOf(ctx: unknown): string {
   const c = (ctx ?? {}) as { agent?: unknown; scope?: unknown };
@@ -26,6 +53,10 @@ export function keyOf(ctx: unknown): string {
 
 export function sanitize(value: unknown): string {
   let v = typeof value === 'string' ? value : value == null ? '' : String(value);
+  // Order matters (live-delivery spec): strip the ct-fact token to a fixpoint
+  // BEFORE the plugin-frame steps — a single pass can splice 'ct-f' + 'act:'
+  // fragments into a fresh token.
+  while (v.includes(FACT_TOKEN)) v = v.split(FACT_TOKEN).join('');
   while (v.includes(FORBIDDEN_MARKER)) v = v.split(FORBIDDEN_MARKER).join('');
   v = v
     .split('\n')
@@ -39,11 +70,11 @@ export function renderBlock(entries: WikiEntry[]): string {
   const heading = sanitize(BLOCK_HEADING);
   const parts: string[] = [];
   let used = heading.length + 2;
-  for (const { title, text } of entries) {
+  for (const { title, text, id } of entries) {
     const cleanTitle = sanitize(title).trim();
     const cleanText = sanitize(text);
     if (!cleanTitle && !cleanText.trim()) continue;
-    const titleLine = `**${cleanTitle}**`;
+    const titleLine = `**${cleanTitle}**${validId(id) ? ' ' + markerOf(id) : ''}`;
     let body = titleLine + '\n' + cleanText;
     const sep = parts.length ? 2 : 0;
     const remaining = MAX_BLOCK_CHARS - used - sep;
@@ -535,8 +566,14 @@ export function recallWiki(ctPath: string, query: string, deps: { spawnSync?: Sp
   const entries: WikiEntry[] = [];
   for (const item of wiki) {
     if (typeof item !== 'object' || item === null || Array.isArray(item)) continue; // arrays are not dicts (m5 cycle 2)
-    const o = item as { title?: unknown; text?: unknown };
-    entries.push({ title: typeof o.title === 'string' ? o.title : '', text: typeof o.text === 'string' ? o.text : '' });
+    const o = item as { title?: unknown; text?: unknown; id?: unknown };
+    const factId = validId(o.id) ? o.id : undefined;
+    if (factId === undefined) continue; // v1 amendment: no valid id → cannot be deduped → dropped
+    entries.push({
+      title: typeof o.title === 'string' ? o.title : '',
+      text: typeof o.text === 'string' ? o.text : '',
+      id: factId,
+    });
   }
   return { entries, failure: null };
 }
