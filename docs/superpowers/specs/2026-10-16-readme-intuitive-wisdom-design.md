@@ -78,8 +78,10 @@ per-host adapter table; the OpenClaw leg spec's restore rule; `deepseek/src/wisd
 - Install commands per host (in each integration README).
 - Hermes v1 bootstrap edge cases (memo eviction, legacy compression id rotation). These are
   in the Hermes CHANGELOG; the top-level README keeps only the user-visible restored-session rule.
-- Fixes to integration READMEs. The DeepSeek README still says `agent/session-start` and
-  lacks a live-delivery section; that is a separate change to the deepseek integration and
-  is reported as a follow-up, not done here.
+- Other integration READMEs, with one exception added on review. The DeepSeek README said
+  `agent/session-start` and had no live-delivery section, so it gets the `agent/created`
+  fix and a short Intuitive Wisdom section, consistent with the top-level section and the
+  deepseek 0.4.0/0.4.1 CHANGELOG. That edit is conditional on the policy gate passing
+  without a version bump.
 - No version bump: this is a docs-only change outside `integrations/`, confirmed by the
   policy gate.
