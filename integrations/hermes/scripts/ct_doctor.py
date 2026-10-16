@@ -286,8 +286,8 @@ def mcp_tools_list(path, timeout=MCP_TIMEOUT, env=None):
                 "params": {
                     "protocolVersion": "2024-11-05",
                     "capabilities": {},
-                    # Derived from plugin.yaml so it cannot drift (GLM r1
-                    # review of PR #30).
+                    # Derived from the plugin manifest (_plugin_version) so
+                    # it cannot drift (GLM r1 review of PR #30).
                     "clientInfo": {"name": "ct_doctor", "version": _plugin_version()},
                 },
             }

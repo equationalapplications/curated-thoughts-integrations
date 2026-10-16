@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# >>> harness-specific: module-docstring
 """ct_doctor.py — install/health doctor for the Curated Thoughts Claude
 Code plugin.
 
@@ -15,17 +16,20 @@ Usage:
 
 Exit codes: 0 = all PASS, 1 = any FAIL, 2 = no FAIL but at least one WARN.
 
-Copied from integrations/hermes; keep logically identical. Checks 1-6, 8
-and 9 are harness-agnostic and must not drift from the Hermes copy. Check 7
-is the one harness-specific check: Hermes scans ~/.hermes/config.yaml,
-while this one reads the JSON config Claude Code writes (see
-check_claude_code_registration).
+Shared script: integrations/hermes/scripts/ct_doctor.py carries the same
+code outside the `harness-specific` marker regions (this docstring, the
+harness config block, and check 7 — registration). Check 7 is the one
+harness-specific check: Hermes scans ~/.hermes/config.yaml, while this one
+reads the JSON config Claude Code writes (see
+check_claude_code_registration). Change both copies together;
+tests/tools/test_shared_script_parity.py fails on any drift.
 
 Spec: docs/superpowers/specs/2026-09-11-claude-code-integration-design.md.
 Tier matrix: shared/compat.yaml.
 Environment contract and platform discovery: scripts/ct_env.py.
 Import pre-flight (curated-thoughts PR #188): scripts/ct_preflight.py.
 """
+# <<< harness-specific: module-docstring
 
 from __future__ import annotations
 
@@ -45,12 +49,23 @@ import ct_preflight  # noqa: E402
 
 SIDECAR_NAME = ct_env.SIDECAR_NAME
 
+# >>> harness-specific: harness-config
+HARNESS_LABEL = "Claude Code"
+
 # Claude Code honors CLAUDE_CONFIG_DIR to relocate the *entire* config
 # directory (both ~/.claude.json and ~/.claude/settings.json follow it).
 # CLAUDE_CONFIG_PATH is a test-only escape hatch that redirects just the
 # .claude.json path — useful for hermetic tests that need the two files in
 # separate places, not a real Claude Code behavior. Without CLAUDE_CONFIG_DIR
 # set, the directory is ~/.claude, the same default Claude Code uses.
+#
+# Ambient env enters here ONCE, at import, and that is deliberate — the same
+# rule Hermes documents for HERMES_CONFIG (issue #29 review, GLM 2026-10-06):
+# the Claude Code config is a property of the HOST Claude Code installation,
+# not of the brain/sidecar environment being probed. A caller passing env= to
+# run_checks is asking about a different brain/env view, not about a
+# different Claude Code install. check_claude_code_registration therefore
+# reads ambient by design; every other check resolves through _merged_env.
 def _claude_config_dir():
     return Path(
         os.environ.get("CLAUDE_CONFIG_DIR", str(Path.home() / ".claude"))
@@ -79,6 +94,28 @@ PROJECT_MCP_CONFIG = ".mcp.json"
 MCP_SERVER_KEY = "curated-thoughts"
 PLUGIN_NAME = "curated-thoughts"
 
+
+def _plugin_version(manifest=None):
+    """Plugin release version, read from ../.claude-plugin/plugin.json at
+    call time.
+
+    Keeps the MCP clientInfo from drifting from the shipped version (it
+    historically lagged as a literal): the manifest is the source of truth.
+    """
+    manifest = manifest or (
+        Path(__file__).resolve().parent.parent / ".claude-plugin" / "plugin.json"
+    )
+    try:
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return "0.0.0-unknown"
+    value = data.get("version") if isinstance(data, dict) else None
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return "0.0.0-unknown"
+# <<< harness-specific: harness-config
+
+
 # Embedding backends: cloud keys OR a local Ollama. WARN-only check.
 EMBED_ENV_KEYS = (
     "CT_EMBED_API_KEY",
@@ -87,7 +124,10 @@ EMBED_ENV_KEYS = (
     "VOYAGE_API_KEY",
     "GEMINI_API_KEY",
 )
-OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434")
+# Default Ollama endpoint used when the (merged) environment does not name
+# one. A constant, not an os.environ read: ambient env must only enter
+# through _merged_env (issue #29).
+OLLAMA_DEFAULT_HOST = "http://127.0.0.1:11434"
 
 # MCP handshake timeout (seconds) — the sidecar must never hang the doctor.
 MCP_TIMEOUT = 10.0
@@ -167,38 +207,54 @@ def _read_text_file(path, limit=256 * 1024):
         return None
 
 
-def _read_json_file(path):
-    """Read a JSON object. Returns (data|None, reason|None).
-
-    The three failure modes stay distinct — absent, unparseable, not an
-    object — because the fix differs for each, and only "absent" means the
-    harness was never configured at all.
-    """
-    text = _read_text_file(path)
-    if text is None:
-        return None, "not found"
-    try:
-        data = json.loads(text)
-    except ValueError as exc:
-        return None, f"is not valid JSON ({exc})"
-    if not isinstance(data, dict):
-        return None, "does not hold a JSON object"
-    return data, None
-
-
 # --------------------------------------------------------------------------
 # checks
 # --------------------------------------------------------------------------
 
-def find_sidecar():
-    """Locate the sidecar. Returns (path|None, resolved|None, source)."""
-    return ct_env.find_sidecar()
+def find_sidecar(env=None):
+    """Locate the sidecar. Returns (path|None, resolved|None, source).
+
+    `env` (a mapping) is merged over `os.environ` before discovery — the same
+    view the spawn sees. Issue #14:
+    run_checks accepted an `env` (tests pass a PATH pointing at a mock
+    sidecar) but discovered from the ambient os.environ — so on machines
+    with a real installed sidecar, the real binary was spawned against the
+    test fixture brain.
+    """
+    return ct_env.find_sidecar(env=_merged_env(env))
 
 
-def check_sidecar_binary(found=None):
-    """(1) sidecar binary present (PATH, then platform install locations)."""
+def _merged_env(env=None):
+    """Ambient os.environ with `env` overlaid — the spawn-time view.
+
+    Thin delegate to ct_env.merged_env, which owns the None / "" / missing
+    contract (issue #32). Kept as a doctor-local seam: tests patch it to pin
+    that each check resolves through the merged view.
+    """
+    return ct_env.merged_env(env)
+
+
+def check_sidecar_binary(found=None, gated=False):
+    """(1) sidecar binary present (PATH, then platform install locations).
+
+    `gated` (issue #28): discovery resolved the sidecar from the ambient
+    install locations even though the caller's env overrode PATH — the
+    override failed to resolve. WARN (not PASS) so the anomaly is visible;
+    run_checks also refuses to spawn under that combination.
+    """
     path, _resolved, source = found if found else find_sidecar()
     if path:
+        if gated and source == ct_env.SOURCE_BUNDLED:
+            return CheckResult(
+                "sidecar-binary",
+                WARN,
+                f"found {SIDECAR_NAME} at {path} (via {source})",
+                "The env you passed overrides PATH but that override did not "
+                f"contain {SIDECAR_NAME}; discovery fell back to the ambient "
+                "install locations. If this is a test or wrapper that meant "
+                "to control which binary runs, fix the override instead of "
+                "relying on the fallback.",
+            )
         return CheckResult(
             "sidecar-binary",
             PASS,
@@ -217,7 +273,11 @@ def check_sidecar_binary(found=None):
 
 def check_sidecar_identity(path, resolved):
     """(2) sidecar identity — warn if a source-checkout build shadows the
-    installed one. Two servers on one brain is a bug; disambiguate by path."""
+    installed one. Two servers on one brain is a bug; disambiguate by path.
+
+    Must never spawn the sidecar (path inspection only): the issue #28 gate
+    in run_checks relies on a gated run executing NO binary at all.
+    """
     if not path:
         return CheckResult(
             "sidecar-identity",
@@ -261,7 +321,9 @@ def mcp_tools_list(path, timeout=MCP_TIMEOUT, env=None):
                 "params": {
                     "protocolVersion": "2024-11-05",
                     "capabilities": {},
-                    "clientInfo": {"name": "ct_doctor", "version": "0.2.0"},
+                    # Derived from the plugin manifest (_plugin_version) so
+                    # it cannot drift (GLM r1 review of PR #30).
+                    "clientInfo": {"name": "ct_doctor", "version": _plugin_version()},
                 },
             }
         )
@@ -271,9 +333,7 @@ def mcp_tools_list(path, timeout=MCP_TIMEOUT, env=None):
         + json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
         + "\n"
     )
-    run_env = dict(os.environ)
-    if env:
-        run_env.update(env)
+    run_env = _merged_env(env)
     try:
         proc = subprocess.run(
             [path, "--mcp"],
@@ -353,7 +413,7 @@ def _probe_sidecar(path, timeout=MCP_TIMEOUT, env=None, brain_paths=None):
         )
     tools, _server_version, error = mcp_tools_list(path, timeout=timeout, env=env)
     if tools is None:
-        config_path = (brain_paths or ct_env.resolve_brain_paths()).config_path
+        config_path = (brain_paths or ct_env.resolve_brain_paths(env=_merged_env(env))).config_path
         return (
             CheckResult(
                 "sidecar-mcp",
@@ -420,16 +480,22 @@ def _probe_sidecar(path, timeout=MCP_TIMEOUT, env=None, brain_paths=None):
     )
 
 
-def check_brain_dir(brain_paths=None):
+def check_brain_dir(brain_paths=None, env=None):
     """(4) brain directory exists and is readable.
 
     This is the directory holding brain.db and config.json — resolved exactly
     as Curated Thoughts resolves it (CURATED_BRAIN_DIR, default ~/.brain).
     It is NOT the vault; see check_vault.
+
+    `env` (a mapping) is merged over os.environ for the CURATED_BRAIN_DIR note
+    in the detail message — issue #29: `brain_paths` may come from a caller's
+    merged env view while the message quoted ambient os.environ, so the
+    message could name a different directory than the one checked.
     """
-    paths = brain_paths or ct_env.resolve_brain_paths()
+    merged = _merged_env(env)
+    paths = brain_paths or ct_env.resolve_brain_paths(env=merged)
     brain = paths.brain_dir
-    env_note = os.environ.get(ct_env.ENV_BRAIN_DIR) or "<unset, default ~/.brain>"
+    env_note = merged.get(ct_env.ENV_BRAIN_DIR) or "<unset, default ~/.brain>"
     if not brain.exists():
         return CheckResult(
             "brain-dir",
@@ -474,14 +540,18 @@ def check_brain_dir(brain_paths=None):
     )
 
 
-def check_vault(brain_paths=None):
+def check_vault(brain_paths=None, env=None):
     """(5) the vault the brain actually points at.
 
     The vault is the documents tree, and its path lives in config.json under
     `vault_path` — it is machine-specific, so it is the first thing that
     breaks when a brain is imported from another machine.
+
+    `env` (a mapping) is merged over os.environ for the brain-path fallback —
+    issue #29 (GLM r1): the last env-reading check without a merged view.
     """
-    paths = brain_paths or ct_env.resolve_brain_paths()
+    merged = _merged_env(env)
+    paths = brain_paths or ct_env.resolve_brain_paths(env=merged)
     config, err = ct_env.read_brain_config(paths.config_path)
     if config is None:
         return CheckResult(
@@ -528,17 +598,26 @@ def check_vault(brain_paths=None):
     return CheckResult("vault", PASS, f"vault at {vault} exists and is readable")
 
 
-def check_embedding():
+def check_embedding(env=None):
     """(6) embedding backend hint — env keys present or Ollama reachable.
-    WARN-only: never fails, since local fastembed works without either."""
-    present = [k for k in EMBED_ENV_KEYS if os.environ.get(k)]
+    WARN-only: never fails, since local fastembed works without either.
+
+    `env` (a mapping) is merged over os.environ — issue #29: a caller passing
+    a full env dict (e.g. the spawn-time view) gets the embedding verdict for
+    THAT view, not for ambient os.environ.
+    """
+    merged = _merged_env(env)
+    present = [k for k in EMBED_ENV_KEYS if merged.get(k)]
     if present:
         return CheckResult(
             "embedding-backend",
             PASS,
             f"embedding API key present via {present[0]}",
         )
-    host = os.environ.get("OLLAMA_HOST", OLLAMA_HOST)
+    # GLM r1 (PR #30): a whitespace-only OLLAMA_HOST (e.g. " ") is truthy, so
+    # it counts as "set" and the probe WARNs naming that garbage netloc —
+    # accepted degradation; only empty string is the documented suppression.
+    host = merged.get("OLLAMA_HOST") or OLLAMA_DEFAULT_HOST
     try:
         from urllib.parse import urlparse
         from urllib.request import urlopen
@@ -562,6 +641,26 @@ def check_embedding():
             "embedding API key in the environment or start Ollama "
             "(systemctl --user start ollama, or set OLLAMA_HOST).",
         )
+
+
+# >>> harness-specific: registration-check
+def _read_json_file(path):
+    """Read a JSON object. Returns (data|None, reason|None).
+
+    The three failure modes stay distinct — absent, unparseable, not an
+    object — because the fix differs for each, and only "absent" means the
+    harness was never configured at all.
+    """
+    text = _read_text_file(path)
+    if text is None:
+        return None, "not found"
+    try:
+        data = json.loads(text)
+    except ValueError as exc:
+        return None, f"is not valid JSON ({exc})"
+    if not isinstance(data, dict):
+        return None, "does not hold a JSON object"
+    return data, None
 
 
 def _mcp_entry(data):
@@ -816,7 +915,17 @@ def check_claude_code_registration(cwd=None):
     )
 
 
-def check_import_preflight(path=None, brain_paths=None):
+def _check_registration(cwd=None):
+    """(7) adapter: the shared runner's entry into this harness's check 7.
+
+    `cwd` is the registration context run_checks forwards: the local- and
+    project-scope lookups resolve against it (default: os.getcwd()).
+    """
+    return check_claude_code_registration(cwd=cwd)
+# <<< harness-specific: registration-check
+
+
+def check_import_preflight(path=None, brain_paths=None, env=None):
     """(8) import pre-flight: is this brain safe for an agent to trust?
 
     Replaces the old static okf-hygiene advisory with a check that actually
@@ -829,9 +938,17 @@ def check_import_preflight(path=None, brain_paths=None):
         machine whose engine version decides what happens next.
 
     Read-only: the database is opened through a mode=ro URI.
+
+    `env` (a mapping) is merged over os.environ for the engine-manifest
+    lookup — issue #29: detect_engine_version's CT_ENGINE_PACKAGE_JSON
+    override was read ambiently while brain paths came from the caller's
+    merged view.
     """
-    paths = brain_paths or ct_env.resolve_brain_paths()
-    engine_version, engine_source = ct_preflight.detect_engine_version(sidecar_path=path)
+    merged = _merged_env(env)
+    paths = brain_paths or ct_env.resolve_brain_paths(env=merged)
+    engine_version, engine_source = ct_preflight.detect_engine_version(
+        sidecar_path=path, env=merged
+    )
     engine_note = (
         f"engine core-llm-wiki {engine_version}"
         if engine_version
@@ -952,7 +1069,7 @@ def check_import_preflight(path=None, brain_paths=None):
     return CheckResult("import-preflight", PASS, detail)
 
 
-def check_version_compat(path, tool_count=None):
+def check_version_compat(path, tool_count=None, gated=False):
     """(9) sidecar version — corroborating metadata, not the tier authority.
 
     The sidecar exposes no --version flag and MCP serverInfo reports the rmcp
@@ -960,7 +1077,23 @@ def check_version_compat(path, tool_count=None):
     discoverable. That is informational, never a warning: the tool count in
     check 3 is what determines the capability tier. This check exists to catch
     the case where a discoverable version *disagrees* with the observed tools.
+
+    `gated` (issue #28, /code-review r4 minor): when run_checks refused to spawn the
+    sidecar (caller overrode PATH, discovery fell back to ambient), the
+    version-compat check would otherwise still query dpkg-query and add a
+    third WARN on top of sidecar-binary + sidecar-mcp for the same
+    underlying PATH-override defect — diluting the actionable hint. PASS
+    with a one-line pointer to sidecar-mcp instead; dpkg-query is not the
+    sidecar spawn (so it stays legal), but emitting a third verdict for a
+    problem already reported is not.
     """
+    if gated:
+        return CheckResult(
+            "version-compat",
+            PASS,
+            "sidecar spawn was withheld by the bundled-fallback gate; "
+            "see the sidecar-mcp check for the verdict",
+        )
     # None = no live surface observed; an int = observed, and authoritative.
     # A count that maps to no tier (0, or anything below the read tier) is a
     # *known* surface, not an unknown one — it must still contradict a
@@ -1058,30 +1191,102 @@ def check_version_compat(path, tool_count=None):
 def run_checks(timeout=MCP_TIMEOUT, env=None, cwd=None):
     """Run all checks; returns list of CheckResult.
 
-    `cwd` is passed to check_claude_code_registration so its project-scope
-    .mcp.json lookup is hermetic: callers in a different directory (or a
-    test) can pin it, and the CLI default of os.getcwd() keeps a normal
-    run answering the question about where it was launched.
+    `env` (a mapping) is merged over os.environ (ct_env.merged_env) for
+    every check except check 7, whose harness config belongs to the host
+    install and is resolved at import time. `cwd` is the registration
+    context handed to check 7 through `_check_registration` — a harness with
+    project-scope registrations (Claude Code's .mcp.json) resolves them
+    against it, defaulting to os.getcwd(); a harness without them ignores it.
+
+    Issue #28 guard: when the CALLER's raw env overrides PATH but discovery
+    resolved the sidecar from the ambient install locations (`source` is
+    "bundled", not "PATH"), the override failed to resolve — the found binary
+    is an ambient one, and spawning it under the caller's env is the exact
+    pollution path #28 tracks (a test's fixture brain reached by the real
+    installed sidecar). In that case: WARN on sidecar-binary, skip the
+    sidecar-mcp spawn, and withhold the path from import-preflight's engine
+    lookup. The discriminator reads the RAW caller env (not the merged view,
+    which always has a PATH) and checks for a NON-None value, so the
+    documented empty-string suppression counts as an override but a None
+    (caller did not specify) does not — that aligns with `_merged_env`'s
+    documented None=ambient semantics.
     """
     results = []
-    path, resolved, source = find_sidecar()
-    brain_paths = ct_env.resolve_brain_paths()
+    # Discovery and brain-path resolution must honor the same env view the
+    # spawn will use (issue #14, GLM r1 follow-up: resolve_brain_paths had
+    # the same ambient-env divergence one line below the original fix).
+    merged = _merged_env(env)
+    # find_sidecar's wrapper re-merges from raw env (its contract); passing
+    # raw here avoids a redundant dict copy + filter pass per check (/code-review
+    # r4 minor — double-merge produced two semantically identical views).
+    path, resolved, source = find_sidecar(env=env)
+    brain_paths = ct_env.resolve_brain_paths(env=merged)
 
-    results.append(check_sidecar_binary((path, resolved, source)))
+    # The bundled-fallback spawn gate: caller claimed PATH control and lost.
+    # CT_DOCTOR_ALLOW_BUNDLED=1 (read from the RAW caller env) is the explicit
+    # opt-out for callers that run a restricted PATH deliberately and accept
+    # the ambient install being probed under their env (GLM r2 minor 3).
+    # The discriminator checks for a NON-None PATH on the raw caller env —
+    # not key presence — so it aligns with _merged_env's documented None
+    # semantics: a None means "the caller did not specify this key, ambient
+    # shows through" (same as a missing key), distinct from "" which is the
+    # documented suppression of the ambient value. Per /code-review r4 minor.
+    allow_bundled = env is not None and env.get("CT_DOCTOR_ALLOW_BUNDLED") == "1"
+    gated = (
+        env is not None
+        and env.get("PATH") is not None
+        and source == ct_env.SOURCE_BUNDLED
+        and not allow_bundled
+    )
+
+    results.append(check_sidecar_binary((path, resolved, source), gated=gated))
     results.append(check_sidecar_identity(path, resolved))
 
-    # One probe, and the count comes back structurally — see _probe_sidecar.
-    mcp_result, tool_count = _probe_sidecar(
-        path, timeout=timeout, env=env, brain_paths=brain_paths
-    )
-    results.append(mcp_result)
+    # No live surface is observed when the spawn is gated (issue #28): the
+    # count feeds check_version_compat, which treats None as "unobserved".
+    tool_count = None
+    if gated:
+        # Refuse to execute an ambient binary under a caller-owned env.
+        results.append(
+            CheckResult(
+                "sidecar-mcp",
+                WARN,
+                "skipped: refusing to spawn the bundled sidecar against an "
+                "env whose PATH override failed to resolve",
+                f"Discovery found {SIDECAR_NAME} in an ambient install "
+                "location, not via your PATH override — the override "
+                "probably points at a missing or non-executable binary. "
+                "Not spawning it: fix the override so it resolves the "
+                "intended binary. If you deliberately run a restricted PATH "
+                "and accept the ambient install being probed under this "
+                "env, set CT_DOCTOR_ALLOW_BUNDLED=1 in the env.",
+            )
+        )
+    else:
+        # One probe, and the count comes back structurally — see _probe_sidecar.
+        mcp_result, tool_count = _probe_sidecar(
+            path, timeout=timeout, env=env, brain_paths=brain_paths
+        )
+        results.append(mcp_result)
 
-    results.append(check_brain_dir(brain_paths))
-    results.append(check_vault(brain_paths))
-    results.append(check_embedding())
-    results.append(check_claude_code_registration(cwd=cwd))
-    results.append(check_import_preflight(path=path, brain_paths=brain_paths))
-    results.append(check_version_compat(path, tool_count=tool_count))
+    results.append(check_brain_dir(brain_paths, env=merged))
+    results.append(check_vault(brain_paths, env=merged))
+    results.append(check_embedding(env=merged))
+    results.append(_check_registration(cwd=cwd))
+    results.append(
+        check_import_preflight(
+            path=None if gated else path, brain_paths=brain_paths, env=merged
+        )
+    )
+    # GLM r3 (PR #31): the path withhold here is future-proofing — the
+    # current body reads only tool_count (path is dead, pre-existing), but
+    # if it ever grows a path-derived metadata source the gate already
+    # withholds the bundled path from it.
+    # /code-review r4 minor: when gated, pass gated=True so version-compat short-
+    # circuits to a single PASS line — it has no live surface to verify
+    # against, and probing dpkg-query here would emit a third WARN on top
+    # of sidecar-binary + sidecar-mcp for the same defect.
+    results.append(check_version_compat(None if gated else path, tool_count=tool_count, gated=gated))
     return results
 
 
@@ -1127,8 +1332,7 @@ def cmd_check(json_output=False):
 
 def _self_test_suite():
     # tests/ lives inside this integration:
-    # integrations/claude-code/{scripts/ct_doctor.py,
-    # tests/test_ct_doctor.py}.
+    # integrations/<id>/{scripts/ct_doctor.py, tests/test_ct_doctor.py}.
     # Resolve relative to __file__ so the self-test works from any cwd.
     import importlib.util
 
@@ -1162,7 +1366,7 @@ def cmd_self_test():
 def main(argv=None):
     parser = argparse.ArgumentParser(
         prog="ct_doctor.py",
-        description="Curated Thoughts Claude Code plugin doctor (read-only).",
+        description=f"Curated Thoughts {HARNESS_LABEL} plugin doctor (read-only).",
     )
     sub = parser.add_subparsers(dest="command")
     p_check = sub.add_parser("check", help="run all checks against the live system")

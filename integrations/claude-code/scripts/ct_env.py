@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """ct_env.py — Curated Thoughts environment resolution, shared by the doctor,
-the session-start hook, and the Hermes plugin entry point.
+the session-start hooks, and the plugin entry points.
 
 Single source of truth for three things the integration kept getting wrong:
 
@@ -22,7 +22,9 @@ Single source of truth for three things the integration kept getting wrong:
 
 Stdlib only. Every function is read-only and non-raising.
 
-Copied byte-for-byte from integrations/hermes; keep logically identical.
+Shared script: integrations/hermes/scripts and integrations/claude-code/scripts
+carry byte-identical copies. Change both together;
+tests/tools/test_shared_script_parity.py fails on any drift.
 """
 
 from __future__ import annotations
@@ -45,6 +47,47 @@ ENV_BRAIN_CONFIG = "CURATED_BRAIN_CONFIG"
 def _expand(p):
     """Expand a leading ~ the way CT's doctor does, then make it a Path."""
     return Path(os.path.expanduser(str(p)))
+
+
+def merged_env(env=None):
+    """Ambient os.environ with `env` overlaid — the spawn-time env view.
+
+    The single source of truth for "which environment does this call see"
+    (issue #32; the #14/#29 bug class was two code paths resolving different
+    views). Public entry points (ct_doctor.run_checks and its checks,
+    ct_status.snapshot) build the view here ONCE and hand it to the
+    primitives below, which consume whatever view they are given AS-IS
+    (only env=None means ambient there).
+
+    Per-key semantics of `env`:
+
+      * key missing      -> the ambient value shows through;
+      * value None       -> treated exactly like a missing key: "the caller
+                            did not specify this key", ambient shows through.
+                            Dropped rather than kept, because a None reaching
+                            subprocess.run(env=...) raises TypeError and
+                            {"PATH": None} would make shutil.which fall back
+                            to the AMBIENT PATH (GLM r3, PR #31);
+      * value ""         -> kept: the documented SUPPRESSION of the ambient
+                            value (reads as unset through a falsy .get());
+      * any other string -> wins over the ambient value.
+
+    This OVERLAYS os.environ, unlike subprocess.run(env=...) which replaces
+    it — so env={} cannot remove an ambient key; use "" for that.
+
+    Documented trade-off: a caller env WITHOUT a PATH key inherits the
+    ambient PATH, so discovery can resolve (and the doctor can spawn) the
+    real installed sidecar. That is deliberate — callers that do not pass a
+    PATH must stay unaffected. A caller that means to control which binary
+    runs must pass PATH; ct_doctor.run_checks refuses to spawn when such an
+    override fails to resolve (issue #28).
+
+    Always returns a NEW dict; neither os.environ nor `env` is mutated.
+    """
+    merged = dict(os.environ)
+    if env:
+        merged.update({k: v for k, v in env.items() if v is not None})
+    return merged
 
 
 class BrainPaths:
@@ -177,23 +220,38 @@ def sidecar_candidates(platform=None, env=None):
     return _linux_candidates()
 
 
+# Where discovery found the sidecar. Constants, not string literals: callers
+# (and the issue #28 guard tests) match on these, so a future rename of
+# "bundled" → "installed" is a one-line change (see the #28 resolution doc).
+SOURCE_PATH = "PATH"
+SOURCE_BUNDLED = "bundled"
+SOURCE_NONE = "none"
+
+
 def find_sidecar(platform=None, env=None):
     """Locate the sidecar. Returns (path|None, realpath|None, source).
 
     `source` is "PATH" or "bundled" so callers can explain where it came from
     without re-deriving the search order.
+
+    Issue #28: the fallback candidates are ambient install locations, NOT
+    env-derived — a caller that passes an env carrying a PATH override (the
+    documented way to control which binary runs) must be able to tell when
+    discovery ignored that override and resolved an ambient binary instead.
+    The `source` return value is that signal; `ct_doctor` uses it to refuse
+    spawning an ambient binary under a caller-owned env (see ct_doctor.run_checks).
     """
     env = os.environ if env is None else env
     found = shutil.which(SIDECAR_NAME, path=env.get("PATH"))
     if found:
-        return found, os.path.realpath(found), "PATH"
+        return found, os.path.realpath(found), SOURCE_PATH
     for cand in sidecar_candidates(platform=platform, env=env):
         try:
             if cand.is_file() and os.access(cand, os.X_OK):
-                return str(cand), os.path.realpath(cand), "bundled"
+                return str(cand), os.path.realpath(cand), SOURCE_BUNDLED
         except OSError:
             continue
-    return None, None, "none"
+    return None, None, SOURCE_NONE
 
 
 # Path segments that mark a development build rather than an installed one.
