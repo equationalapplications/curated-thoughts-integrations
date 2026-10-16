@@ -75,8 +75,8 @@ delivered after OFF.
 (timeout 15); `PostToolUse` matcher `mcp__.*__curated_recall_context` (timeout 10). All use
 the same `python3 … || python …` command shape. `tests/test_hook.py` `HooksManifestTests`
 are updated. Bump `integration.yaml` and `plugin.json` to 0.2.0 and update the
-`plugin.json` description. Add the CHANGELOG `## 0.2.0 — 2026-10-16` section (fold in
-Unreleased), and add a README "Intuitive Wisdom" section.
+`plugin.json` description. Add the CHANGELOG `## 0.2.0 — 2026-10-16` section (above 0.1.2),
+and add a README "Intuitive Wisdom" section.
 
 ## Task 6 — Verify + live e2e (AC 10)
 

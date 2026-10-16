@@ -2,7 +2,7 @@
 
 **Date:** 2026-10-16 · **Status:** Approved (autonomous — design judgment delegated by Kurt; no open questions) ·
 **Repo:** equationalapplications/curated-thoughts-integrations ·
-**Base:** `origin/fix/shared-env-doctor-parity` @ `eb30193` (PR #41, not yet merged) ·
+**Base:** `origin/fix/shared-env-doctor-parity` @ `24970b5` (PR #41, not yet merged) ·
 **Branch / PR:** `feat/claude-code-wisdom-parity` (PR base `fix/shared-env-doctor-parity`).
 **Parent spec:** `2026-10-09-cross-harness-wisdom-parity-design.md` (decision 4 a–e, M2, N3 rule m4,
 N5 table, AC 1–11, annex A). **Plan:** `docs/superpowers/plans/2026-10-16-claude-code-wisdom-parity-leg.md`
@@ -252,11 +252,10 @@ an id, and adding an id only ever suppresses delivery, never duplicates it.
 
 ## Release
 
-claude-code **0.1.1 → 0.2.0** (minor: new capability). `integration.yaml` `version` and
-`.claude-plugin/plugin.json#version` are both set to 0.2.0. The CHANGELOG gets
-`## 0.2.0 — 2026-10-16`, and the `## Unreleased` bullets inherited from PR #41 move under
-it, so the `claude-code-v0.2.0` release body covers everything since `claude-code-v0.1.1`
-(PR #41 does not bump claude-code itself). Hermes is untouched, so it gets no bump. The
+claude-code **0.1.2 → 0.2.0** (minor: new capability; PR #41 head `24970b5` ships 0.1.2
+and hermes 0.4.2). `integration.yaml` `version` and `.claude-plugin/plugin.json#version`
+are both set to 0.2.0. The CHANGELOG gets `## 0.2.0 — 2026-10-16` above `## 0.1.2`, and the
+empty `## Unreleased` heading stays in place. Hermes is untouched, so it gets no bump. The
 top-level README is out of scope (revised separately); the claude-code README gains a
 "Wisdom" section.
 
@@ -274,6 +273,33 @@ top-level README is out of scope (revised separately); the claude-code README ga
 | 8 | CHANGELOG / README | `## 0.2.0 — 2026-10-16`; claude-code README section |
 | 10 | live e2e | isolated `claude` 2.1.301 run (plan Task 6); `ct` is a test wrapper (no local CT, no embedder) — see the PR |
 | 9, 11 | OpenClaw / OpenCode / DSH only | n/a |
+
+### Live e2e record (AC 10, 2026-10-16)
+
+The setup was the real `claude` 2.1.301 with this plugin loaded via `--plugin-dir`, the real
+hooks and the real `${CLAUDE_PLUGIN_DATA}` store. It ran in an isolated temp `HOME` +
+`CLAUDE_CONFIG_DIR`, against ZAI `GLM-5.3-FLASH`. **Stand-ins:** `ct` is a test wrapper. It
+passes the identity probe, `recall` returns the fixed fact `e2e_boot`, and `wisdom match`
+returns the fixed fact `e2e_live` *even when excluded*, which exercises our post-filter. The
+MCP sidecar is a stdio fake whose `curated_recall_context` returns `e2e_live` and
+`e2e_other`. No local CT relevance gate or embedder exists on this machine, and none was used.
+
+1. **startup + live + stub.** `SessionStart` context carried `ct-fact:e2e_boot`, and the
+   store seeded `bootstrap_ids = [e2e_boot]`. `UserPromptSubmit` context carried
+   `ct-fact:e2e_live`, with `ct wisdom match --exclude=e2e_boot`. The model's recall call
+   came back with `e2e_live` as `{"in_context": true, …}` and `e2e_other` intact. The store
+   ended at `live_ids = [e2e_live]`, `tool_ids = [e2e_other]`.
+2. **resume.** The same `session_id`. `SessionStart(resume)` emitted the status only (no
+   bootstrap re-emit). The store went `state = off`, `off_reason = resume`. No
+   `ct wisdom match` call was made, no `UserPromptSubmit` context was injected, and the model
+   still answered from the replayed history.
+3. **compact + clear** (a single `--input-format stream-json` session). Turn 1 delivered
+   `e2e_live`. `/compact` replayed the bootstrap (`ct-fact:e2e_boot`) after the
+   `compact_boundary`. Turn 2 called `match` with `--exclude=e2e_live --exclude=e2e_boot`
+   (newest first). The wrapper returned `e2e_live` anyway and **nothing was injected** (the
+   post-filter held). The model reported `e2e_live` survived only as summary paraphrase.
+   `/clear` produced a **new** `session_id` (F12, reconfirmed). The new id got a fresh store,
+   a fresh bootstrap and a fresh `e2e_live` delivery.
 
 ## Self-review
 
