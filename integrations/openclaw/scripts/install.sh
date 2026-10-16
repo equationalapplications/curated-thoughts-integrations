@@ -6,10 +6,11 @@
 # owns plugin installation, so this script stages a self-contained copy of
 # the plugin and drives the host's own CLI (pin: openclaw 2026.10.3):
 #
-#   1. stage <tmp>/curated-thoughts: lib/, skills/, openclaw.plugin.json and a
-#      package.json whose monorepo-relative ct-wisdom-core dependency is
-#      replaced by the BUILT core vendored at node_modules/ (a file: dep is
-#      meaningless at the install location — deepseek fix e459690)
+#   1. stage <tmp>/curated-thoughts: lib/ (self-contained — the build's
+#      scripts/vendor_core.mjs vendors ct-wisdom-core into lib/ct-wisdom-core
+#      and rewrites the import, so no node_modules is needed), skills/,
+#      openclaw.plugin.json and a package.json without the monorepo-relative
+#      file: dependency (meaningless at the install location)
 #   2. openclaw plugins install <stage> --force --accept-capabilities
 #        (--force/--accept-capabilities: OpenClaw asks before installing a
 #        local copy; you review and accept by opting in with CT_INSTALL_EDIT=1)
@@ -56,18 +57,10 @@ if [ ! -f "${PLUGIN_DIR}/lib/src/index.js" ]; then
   exit 1
 fi
 
-core_lib=""
-for candidate in \
-  "${PLUGIN_DIR}/lib/ct-wisdom-core" \
-  "${PLUGIN_DIR}/../../packages/ct-wisdom-core/lib"; do
-  if [ -f "${candidate}/index.js" ]; then
-    core_lib="$candidate"
-    break
-  fi
-done
-if [ -z "$core_lib" ]; then
-  warn "ct-wisdom-core build output not found — build it first:"
-  warn "  (cd packages/ct-wisdom-core && pnpm install && pnpm run build)"
+if [ ! -f "${PLUGIN_DIR}/lib/ct-wisdom-core/index.js" ] || \
+   grep -rqE --include='*.js' "['\"]@equational-applications/ct-wisdom-core['\"]" "${PLUGIN_DIR}/lib/src" "${PLUGIN_DIR}/lib/scripts"; then
+  warn "lib/ is not self-contained (ct-wisdom-core not vendored) — rebuild with: pnpm run build"
+  warn "  (build the core first: cd packages/ct-wisdom-core && pnpm install && pnpm run build)"
   exit 1
 fi
 
@@ -82,20 +75,9 @@ stage_plugin() {
   # (macOS bash 3.2 has no inherit_errexit), and a half-staged copy must
   # never reach `plugins install --force`.
   local stage="$1"
-  mkdir -p "$stage/node_modules/@equational-applications/ct-wisdom-core"
+  mkdir -p "$stage"
   cp -R "${PLUGIN_DIR}/lib" "${PLUGIN_DIR}/skills" "${PLUGIN_DIR}/openclaw.plugin.json" \
     "${PLUGIN_DIR}/package.json" "$stage/"
-  rm -rf "$stage/lib/ct-wisdom-core"
-  cp -R "${core_lib}/." "$stage/node_modules/@equational-applications/ct-wisdom-core/"
-  cat >"$stage/node_modules/@equational-applications/ct-wisdom-core/package.json" <<'VPKG'
-{
-  "name": "@equational-applications/ct-wisdom-core",
-  "version": "0.1.0",
-  "type": "module",
-  "main": "index.js",
-  "types": "index.d.ts"
-}
-VPKG
   node - "$stage/package.json" <<'NJS'
 const fs = require('fs');
 const p = process.argv[2];
@@ -104,11 +86,10 @@ if (m.dependencies) delete m.dependencies['@equational-applications/ct-wisdom-co
 if (m.dependencies && Object.keys(m.dependencies).length === 0) delete m.dependencies;
 delete m.devDependencies;
 delete m.scripts;
-m.bundleDependencies = ['@equational-applications/ct-wisdom-core'];
 fs.writeFileSync(p, JSON.stringify(m, null, 2) + '\n');
 NJS
   if [ ! -f "$stage/lib/src/index.js" ] || \
-     [ ! -f "$stage/node_modules/@equational-applications/ct-wisdom-core/index.js" ]; then
+     [ ! -f "$stage/lib/ct-wisdom-core/index.js" ]; then
     warn "staging incomplete at $stage — aborting before install"
     exit 1
   fi
@@ -130,7 +111,7 @@ if [ "$edit" -eq 1 ]; then
   stage_plugin "$STAGE"
 else
   say "curated-thoughts OpenClaw install.sh — PREVIEW: nothing will be written (no sudo)"
-  STAGE="<tmp>/${PLUGIN_ID} (self-contained copy with ct-wisdom-core from ${core_lib})"
+  STAGE="<tmp>/${PLUGIN_ID} (self-contained copy: lib/ with vendored ct-wisdom-core)"
 fi
 say ""
 

@@ -13,9 +13,11 @@ stale `language: python` placeholder to `language: node`, `status: implemented`.
 - **Registration.** `openclaw.plugin.json` (id `curated-thoughts`) mounts the CT
   MCP sidecar (`curated-thoughts-mcp --mcp`) as a plugin-owned stdio server and
   ships the three skills (`curated-thoughts-usage`, `-ops`, `-sidecar`; usage and
-  sidecar byte-identical to Hermes). `scripts/install.sh` is preview-first: it
-  stages a self-contained copy (ct-wisdom-core vendored under `node_modules`),
-  then runs `openclaw plugins install … --force --accept-capabilities` and grants
+  sidecar byte-identical to Hermes). The build vendors ct-wisdom-core into
+  `lib/ct-wisdom-core` and rewrites its import (`scripts/vendor_core.mjs`,
+  the opencode leg's approach), so the payload loads with no `node_modules` at
+  all. `scripts/install.sh` is preview-first: it stages that self-contained
+  copy, then runs `openclaw plugins install … --force --accept-capabilities` and grants
   `hooks.allowConversationAccess` plus a 20 s `before_prompt_build` budget, only
   under `CT_INSTALL_EDIT=1`. The doctor (`node lib/scripts/ct_doctor.js check`)
   reads OpenClaw's JSON5 config for the entry and its grant.
