@@ -25,6 +25,10 @@ Commit: `feat(core): ct-wisdom-core — annex A implementation + shared suite`
 3. v1 amendment: markers on bootstrap render + memo ids (Hermes 0.4.0 parity).
 4. Unit + exactly-once tests (AC 1–5, 11); stub-host contract update (AC 7).
 5. Live `pre-step` e2e via `tests/e2e/run.sh` (AC 10) — controller-run, pre-merge.
+   **Done 2026-10-16** (post-merge of PR #37, branch `chore/dsh-live-e2e-verify`):
+   green at DSH 0.2.0-rc.2 / ct 3.5.1 / GLM-5.3-FLASH. It found and fixed the
+   unidentified delivery message, which made continued sessions unloadable
+   (deepseek 0.4.1 pending). Evidence is in the spec, AC 10. **DSH leg: done.**
 6. Supersede the 2026-09-30 DSH step-0 "no per-user-turn hook" claim.
 
 Commit: `feat(deepseek): intuitive wisdom live delivery (0.4.0)`

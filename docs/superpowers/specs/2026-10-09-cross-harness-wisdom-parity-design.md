@@ -227,6 +227,20 @@ ids and must not be rewritten). The stub rewrites the host's wiki-entry envelope
    or the defer-and-accept default is invoked and recorded as such.
 10. **Pre-merge live e2e (m6):** DSH live `pre-step` e2e and OpenCode live
     `chat.message` e2e executed and green before their legs flip to done (decision 8).
+    **DSH: executed 2026-10-16 — green; DSH leg DONE.** `integrations/deepseek/tests/e2e/run.sh`
+    on DSH 0.2.0-rc.2 + GLM-5.3-FLASH (ZAI), ct CLI 3.5.1 (≥ 3.3.0 gate asserted;
+    `wisdom match --help` rc=0), sidecar 2.12.1: 54/54 checks. One session, three
+    turns: turn 1 (2 steps, a tool call) delivered the block once, on its first
+    step, as an identified `user/message` (`source.kind: curated-thoughts-wisdom`)
+    persisted verbatim; the model answered from it. Turn 2 (`--session-id`, new
+    process) called `ct wisdom match --exclude=<id>` (ledger rebuilt from the session
+    log). The fixture returned the fact again and the plugin did not re-deliver it.
+    Turn 3 (continued, degraded brain) showed the `agent/created` health block. CT's
+    relevance gate is fixtured in the container: there is no embedding backend, and a
+    real 3.5.1 match answers `gate: uncalibrated`. Everything else is live. The first
+    run found a shipped bug: the 0.4.0 delivery message had no `id`/`role`, so DSH
+    rejected the stored session on replay. It is fixed in deepseek `## Unreleased`
+    (needs a 0.4.1 patch release).
 11. **Self-trigger guard (n2):** OpenCode test proves a `synthetic: true` delivery
     append does not re-fire N1 delivery; OpenClaw/DSH equivalents cover their own
     channels.

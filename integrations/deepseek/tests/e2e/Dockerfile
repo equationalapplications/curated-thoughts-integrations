@@ -20,12 +20,20 @@ RUN npm install -g "@deepseek-ai/dsh@${DSH_VERSION}" "pnpm@${PNPM_VERSION}" \
 USER root
 # ct CLI (test-only provisioning; NOT part of the user-visible install): the
 # pinned sidecar .deb (2.12.1) does not ship `ct` — it ships standalone from
-# v2.22.0+. Wisdom recall in the e2e needs the real binary on PATH.
-ARG CT_CLI_VERSION=2.22.0
+# v2.22.0+. Wisdom recall in the e2e needs the real binary on PATH, and live
+# delivery (0.4.0) needs `ct wisdom match`, which ships in CT >= 3.3.0 — the
+# 2.22.0 pin this image used before answered `wisdom match --help` with rc=1,
+# so the plugin's capability probe latched delivery OFF and the live pre-step
+# path was never exercised. The digest is GitHub's recorded asset digest.
+# `ct` has no --version flag; CT_CLI_VERSION is exported so e2e.sh can report
+# and gate on the version it actually exercised.
+ARG CT_CLI_VERSION=3.5.1
+ARG CT_CLI_SHA256=912d1be65de3aa8b714e82a2b5f5809bd8daf17bb308514a69c970fab706dce0
+ENV CT_CLI_VERSION=${CT_CLI_VERSION}
 RUN set -eux; \
     curl -fsSL -o /tmp/ct.tar.gz \
       "https://github.com/equationalapplications/curated-thoughts/releases/download/v${CT_CLI_VERSION}/ct_${CT_CLI_VERSION}_linux_amd64.tar.gz"; \
-    echo "37f3bacd6e45d15eb2cf84d2597213faebbbdb7f6bf456386eae1ee269a3c62d  /tmp/ct.tar.gz" | sha256sum -c -; \
+    echo "${CT_CLI_SHA256}  /tmp/ct.tar.gz" | sha256sum -c -; \
     tar -xzf /tmp/ct.tar.gz -C /usr/local/bin ct; \
     rm /tmp/ct.tar.gz; \
     ct --help | grep -q 'Curated Thoughts'

@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+Fix: **a session that received a live wisdom block could not be continued.**
+The `agent/pre-step` delivery message carried only `content` and `source`.
+DSH 0.2.0-rc.2 persists pre-step messages as they are, but on replay
+(`--session-id`, restart) it requires every `user/message` to carry a
+non-empty `id` and `role: "user"`, so it rejected the whole stored session
+("session event at seq N lacks an identified message"). The block is now an
+identified user-role message (a fresh UUID per delivery, the same shape the
+first-party pre-step plugins build). Found by the live container e2e (spec
+AC 10 / m6, 2026-10-16), which now passes at the 0.2.0-rc.2 pin. That run
+also confirmed `agent/created` fires for new and continued sessions, the
+delivered block is persisted verbatim on the turn's first step, and a
+continued session is not re-delivered the same fact (its id rides
+`--exclude`, rebuilt from the session log).
+
+e2e harness: the image's test-only `ct` is now 3.5.1. The old 2.22.0 has no
+`wisdom match` (CT ≥ 3.3.0), so the plugin's capability probe switched
+delivery off and the live path never ran. Session-log lookup now matches
+`session.v*.jsonl.zstd`: the log is v4 at 0.2.0-rc.2, and the v3-only glob
+matched nothing, so the "no block" checks passed without reading a log. A new
+live pre-step section covers three turns of one session.
+
 ## 0.4.0 — 2026-10-09
 
 New: **intuitive wisdom live delivery** (cross-harness parity, DSH leg — spec

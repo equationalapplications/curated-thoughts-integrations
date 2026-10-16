@@ -50,9 +50,14 @@ section() { printf '\n== %s\n' "$1"; }
 # The one-shot log is session.v3.jsonl.zstd — multiple zstd frames, so use the
 # CLI (handles concatenated frames), not a single-shot zlib call. No `head -1`
 # in a pipe: it SIGPIPEs the producer and pipefail would drop the result.
+# The log's schema generation is in the file name and moves with the host pin
+# (0.1.5-rc.2: session.v3; 0.2.0-rc.2: session.v4 — the v3-only glob matched
+# nothing at the new pin, so every session-log check failed or, for the
+# negative "no block" checks, passed vacuously). Match any generation.
+SESSION_LOG_GLOB='session.v*.jsonl.zstd'
 newest_session_log() {
   local after="$1" found
-  found=$(find "$DSH_HOME_DIR/sessions" -name 'session.v3.jsonl.zstd' -newermt "$after" 2>/dev/null | sort -r)
+  found=$(find "$DSH_HOME_DIR/sessions" -name "$SESSION_LOG_GLOB" -newermt "$after" 2>/dev/null | sort -r)
   [ -n "$found" ] || return 1
   # shellcheck disable=SC2086  # find output paths contain no whitespace here
   set -- $(ls -t $found)
@@ -62,6 +67,13 @@ dump_session_log() { # dump_session_log <out-file>
   local zlog
   zlog="$(newest_session_log "$1")"
   if [ -n "$zlog" ]; then zstd -dc "$zlog" >"$2" 2>/dev/null; fi
+}
+# The log of one named session (its directory carries the id), for runs that
+# continue a session with --session-id — "newest" is ambiguous there.
+dump_session_log_by_id() { # dump_session_log_by_id <session-id> <out-file>
+  local zlog
+  zlog=$(find "$DSH_HOME_DIR/sessions" -path "*/$1/*" -name "$SESSION_LOG_GLOB" 2>/dev/null | sort | tail -1)
+  if [ -n "$zlog" ]; then zstd -dc "$zlog" >"$2" 2>/dev/null; else : >"$2"; fi
 }
 
 # ---------------------------------------------------------------------------
@@ -269,7 +281,9 @@ else
   check "degraded run exits 0 (rc=$run2_rc)" test "$run2_rc" -eq 0
   dump_session_log "$run2_start" "$OUT/run2.session.jsonl"
   check 'degraded session log captured' test -s "$OUT/run2.session.jsonl"
-  check 'degraded health block reaches the prompt' \
+  # The block text is '' until the agent/created listener runs probe(), so
+  # the DEGRADED block in the prompt also proves that listener fired.
+  check 'degraded health block reaches the prompt (agent/created fired)' \
     sh -c "grep -q 'Memory sidecar DEGRADED' '$OUT/run2.session.jsonl'"
   check 'routing reminder reaches the prompt' \
     sh -c "grep -q 'Curated Thoughts memory is available over MCP' '$OUT/run2.session.jsonl'"
@@ -285,14 +299,186 @@ else
     check 'exactly one wisdom block in the prompt' \
       sh -c "[ \"\$(grep -c '## Curated Thoughts — relevant memory' '$OUT/run1.session.jsonl')\" -eq 1 ]"
   else
-    check 'wisdom section is a silent no-op without a backend (no block, no error)' \
-      sh -c "! grep -q '## Curated Thoughts — relevant memory' '$OUT/run1.session.jsonl' && ! grep -qiE 'wisdom.*(error|fail)' '$OUT/run1.err'"
+    # Real CT >= 3.3.0 is on PATH, so run 1's pre-step also ran the REAL
+    # `ct wisdom match` (an empty, uncalibrated brain answers entries: []):
+    # no v1 block, no live block (no ct-fact marker), no error text. The log
+    # must exist — a missing log would make these negatives pass vacuously.
+    check 'wisdom is a silent no-op without a backend (no v1 block, no live block, no error)' \
+      sh -c "test -s '$OUT/run1.session.jsonl' && ! grep -q '## Curated Thoughts — relevant memory' '$OUT/run1.session.jsonl' && ! grep -q 'ct-fact:' '$OUT/run1.session.jsonl' && ! grep -qiE 'wisdom.*(error|fail)' '$OUT/run1.err'"
   fi
   # Degraded run 2 points at a MISSING brain dir: the wisdom section must be a
   # silent no-op there (no block, no error text).
   check 'degraded run has NO wisdom block (missing brain → no-op)' \
-    sh -c "! grep -q '## Curated Thoughts — relevant memory' '$OUT/run2.session.jsonl'"
+    sh -c "test -s '$OUT/run2.session.jsonl' && ! grep -q '## Curated Thoughts — relevant memory' '$OUT/run2.session.jsonl' && ! grep -q 'ct-fact:' '$OUT/run2.session.jsonl'"
   if [ "$run2_rc" -ne 0 ]; then tail -20 "$OUT/run2.err" | sed 's/^/      /'; fi
+fi
+
+# ---------------------------------------------------------------------------
+section 'live pre-step wisdom delivery (spec AC 10 / m6)'
+# The 0.4.0 live path, on the real DSH agent loop and the live model:
+#   (a) CT gate: live delivery needs `ct wisdom match` (CT >= 3.3.0). The
+#       image's ct is checked here; an older ct fails this section loudly.
+#   (b) turn 1 (fresh session, a multi-step turn — it makes a tool call): the
+#       FIRST pre-step of the turn delivers the block, appended as a user-role
+#       message that the loop persists verbatim in the session log; later steps
+#       of the same turn do not call CT again;
+#   (c) turn 2 (same session, continued with --session-id in a NEW process —
+#       the in-memory state is gone, only the session log carries over): the
+#       ledger is rebuilt from the log (the fact id rides --exclude) and the
+#       fact is NOT re-delivered, even though the fixture below still returns
+#       it (the plugin's own post-filter must drop it);
+#   (d) the `agent/created` listener fired: the health block reached the
+#       system prompt of both the fresh and the continued session.
+#
+# Embedder gate: CT's relevance gate scores embeddings (semantic-v1, cosine
+# over wiki embeddings, calibrated per embed model). This container has no
+# embedding backend by design (no Ollama; see the wisdom seed section), so a
+# real `ct wisdom match` here answers `"gate": "uncalibrated", entries: []`
+# and can never select a fact. With WISDOM_E2E=0 the CT-owned gate is
+# replaced by a contract-shaped fixture — a `ct` wrapper first on PATH that
+# answers `wisdom match <query>` with one fixed fact (and logs its argv) and
+# delegates EVERYTHING else, the `wisdom match --help` capability probe and
+# the `--help` identity probe included, to the real ct. Only CT's scoring is
+# fixtured; the plugin, the DSH 0.2.0-rc.2 loop, the session log, and the
+# model are all real. With an embedder (WISDOM_E2E=1) the real gate is used.
+CT_MIN='3.3.0'
+ct_ver="${CT_CLI_VERSION:-unknown}"
+echo "      ct CLI version: $ct_ver (live delivery requires >= $CT_MIN)"
+check "ct CLI is >= $CT_MIN (have $ct_ver)" \
+  sh -c "[ '$ct_ver' != unknown ] && [ \"\$(printf '%s\n' '$CT_MIN' '$ct_ver' | sort -V | head -1)\" = '$CT_MIN' ]"
+check 'real ct answers the capability probe (`ct wisdom match --help` rc=0)' \
+  sh -c 'ct wisdom match --help >/dev/null 2>&1'
+ct wisdom match --json --max 2 -- 'what is the fleet tire pressure' \
+  >"$OUT/real-match.json" 2>"$OUT/real-match.err"
+real_match_rc=$?
+echo "      real ct wisdom match: rc=$real_match_rc gate=$(jq -r '.gate // "?"' "$OUT/real-match.json" 2>/dev/null) entries=$(jq -r '.entries | length' "$OUT/real-match.json" 2>/dev/null)"
+check 'real ct wisdom match honors the JSON contract (rc=0, schema 1)' \
+  sh -c "[ '$real_match_rc' -eq 0 ] && jq -e '.schema == 1 and (.entries | type) == \"array\"' '$OUT/real-match.json' >/dev/null"
+
+if [ -z "${ZAI_API_KEY:-}" ]; then
+  echo 'SKIP  ZAI_API_KEY not set — live pre-step delivery not exercised'
+else
+  FACT_ID='fact_0e2e00000000000000000a42'
+  FACT_TITLE='E2E live wisdom — fleet tire pressure'
+  FACT_TEXT='The fleet tire pressure for the e2e fleet is 42 psi.'
+  # The block the plugin must render for that entry (ct-wisdom-core
+  # renderBlock: bold title + marker, newline, text).
+  EXPECTED_BLOCK=$(printf '**%s** <!-- ct-fact:%s -->\n%s' "$FACT_TITLE" "$FACT_ID" "$FACT_TEXT")
+  live_path="$PATH"
+  MATCH_ARGV="$OUT/wisdom-match.argv"
+  : >"$MATCH_ARGV"
+  if [ "$WISDOM_E2E" -eq 0 ]; then
+    real_ct=$(command -v ct)
+    mkdir -p "$HOME/ct-fixture"
+    cat >"$HOME/ct-fixture/ct" <<EOF
+#!/usr/bin/env bash
+# e2e fixture: CT's relevance gate only (see e2e.sh). Everything else is real.
+if [ "\$1" = wisdom ] && [ "\$2" = match ] && [ "\${3:-}" != --help ]; then
+  printf '%s\n' "\$*" >>'$MATCH_ARGV'
+  jq -nc --arg id '$FACT_ID' --arg title '$FACT_TITLE' --arg text '$FACT_TEXT' \
+    '{schema: 1, gate: "e2e-fixture", entries: [{id: \$id, title: \$title, text: \$text, score: 0.9, supersedes: [], provenance: null}], corrections: []}'
+  exit 0
+fi
+exec '$real_ct' "\$@"
+EOF
+    chmod +x "$HOME/ct-fixture/ct"
+    live_path="$HOME/ct-fixture:$PATH"
+    echo '      CT relevance gate: e2e fixture (no embedder); plugin + DSH loop + model are live'
+  fi
+
+  # Turn 1 — fresh session.
+  PATH="$live_path" timeout 300 dsh --profile "$PROFILE" --json \
+    'Call the mcp__curated-thoughts__curated_proposals_list tool exactly once with no arguments. Then, using only what you were told in this conversation, reply with the fleet tire pressure as a bare number.' \
+    >"$OUT/live1.jsonl" 2>"$OUT/live1.err"
+  live1_rc=$?
+  check "live turn 1 exits 0 (rc=$live1_rc)" test "$live1_rc" -eq 0
+  SID=$(jq -r 'select(.type == "session") | .sessionId' "$OUT/live1.jsonl" 2>/dev/null | head -1)
+  echo "      session: ${SID:-<none>}"
+  check 'live turn 1 reports its session id' test -n "$SID"
+  dump_session_log_by_id "$SID" "$OUT/live1.session.jsonl"
+  check 'live turn 1 session log captured' test -s "$OUT/live1.session.jsonl"
+  L1="$OUT/live1.session.jsonl"
+  # Session log v4 shape: one JSON event per line; user/message events carry
+  # the message itself in .data ({id, role, source, content}).
+  wisdom_msgs='select(.type == "user/message" and .data.source.kind == "curated-thoughts-wisdom")'
+  calls1=$(grep -c . "$MATCH_ARGV")
+  steps1=$(jq -s '[.[] | select(.type == "step/start")] | length' "$L1" 2>/dev/null)
+  check "turn 1 is multi-step (steps=$steps1, it made a tool call)" \
+    sh -c "[ '${steps1:-0}' -ge 2 ] && grep 'tool/call' '$L1' | grep -q curated_proposals_list"
+  if [ "$WISDOM_E2E" -eq 0 ]; then
+    check "CT match ran exactly once in turn 1, on its first step only (calls=$calls1)" test "$calls1" -eq 1
+    check 'exactly one wisdom message in turn 1' \
+      sh -c "[ \"\$(jq -c '$wisdom_msgs' '$L1' | grep -c .)\" -eq 1 ]"
+    check 'wisdom message is an identified user-role message (role=user, non-empty id)' \
+      sh -c "jq -e -s '[.[] | $wisdom_msgs] | length == 1 and (.[0].data.role == \"user\") and ((.[0].data.id | type) == \"string\") and (.[0].data.id != \"\")' '$L1' >/dev/null"
+    check 'wisdom block persisted verbatim in the session log' \
+      sh -c "jq -e -s --arg b \"\$1\" '[.[] | $wisdom_msgs | .data.content] == [[{type: \"text\", text: \$b}]]' '$L1' >/dev/null" _ "$EXPECTED_BLOCK"
+    # First pre-step: inside turn 1's FIRST step (after its step/start, before
+    # the second step/start) and ahead of any assistant message.
+    check 'wisdom message lands in the first step, before any assistant message' \
+      sh -c "jq -e -s '
+        ([.[] | select(.type == \"step/start\") | .seq]) as \$steps
+        | ([.[] | $wisdom_msgs | .seq][0]) as \$w
+        | ([.[] | select(.type == \"assistant/message\") | .seq][0]) as \$a
+        | \$w > \$steps[0] and \$w < \$steps[1] and \$w < \$a' '$L1' >/dev/null"
+    final1=$(jq -r 'select(.type == "final") | .text' "$OUT/live1.jsonl" 2>/dev/null)
+    echo "      turn 1 final answer: $final1"
+    check 'the model used the delivered fact (turn 1 answer carries 42)' \
+      sh -c "printf '%s' \"\$1\" | grep -q 42" _ "$final1"
+  fi
+  [ "$live1_rc" -ne 0 ] && tail -20 "$OUT/live1.err" | sed 's/^/      /'
+
+  # Turn 2 — the same session, continued in a new process.
+  PATH="$live_path" timeout 300 dsh --profile "$PROFILE" --json --session-id "$SID" \
+    'What is the fleet tire pressure? Reply with a bare number.' \
+    >"$OUT/live2.jsonl" 2>"$OUT/live2.err"
+  live2_rc=$?
+  check "live turn 2 (--session-id) exits 0 (rc=$live2_rc)" test "$live2_rc" -eq 0
+  dump_session_log_by_id "$SID" "$OUT/live2.session.jsonl"
+  check 'live turn 2 session log captured' test -s "$OUT/live2.session.jsonl"
+  if [ "$WISDOM_E2E" -eq 0 ]; then
+    calls2=$(grep -c . "$MATCH_ARGV")
+    check "CT match ran once more in turn 2 (calls=$calls2)" test "$calls2" -eq 2
+    check 'turn 2 match excludes the delivered id (ledger rebuilt from the session log)' \
+      sh -c "sed -n 2p '$MATCH_ARGV' | grep -qF -- '--exclude=$FACT_ID'"
+    L2="$OUT/live2.session.jsonl"
+    turns2=$(jq -s '[.[] | select(.type == "turn/start")] | length' "$L2" 2>/dev/null)
+    check "continued log holds both turns (turn/start count=$turns2)" test "${turns2:-0}" -eq 2
+    # Exactly-once: the fixture returned the same fact again in turn 2; the
+    # plugin must drop it (post-filter) — still ONE wisdom message and ONE
+    # marker for the id across the whole session.
+    check 'no re-delivery in turn 2: still exactly one wisdom message in the session' \
+      sh -c "[ \"\$(jq -c '$wisdom_msgs' '$L2' | grep -c .)\" -eq 1 ]"
+    check 'no re-delivery in turn 2: the fact id appears in exactly one user message' \
+      sh -c "[ \"\$(jq -c 'select(.type == \"user/message\") | select(tostring | contains(\"ct-fact:$FACT_ID\"))' '$L2' | grep -c .)\" -eq 1 ]"
+    final2=$(jq -r 'select(.type == "final") | .text' "$OUT/live2.jsonl" 2>/dev/null)
+    echo "      turn 2 final answer: $final2"
+  fi
+  [ "$live2_rc" -ne 0 ] && tail -20 "$OUT/live2.err" | sed 's/^/      /'
+
+  # Turn 3 — continued again, with a MISSING brain dir. A healthy brain
+  # renders no health block by design (formatStatusBlock returns null on
+  # 'ok'), so the degraded block is the observable: the block text is '' until
+  # the agent/created listener runs probe(), so the DEGRADED block in this
+  # turn's runtime context proves the listener fired for a CONTINUED session
+  # (agent/created source=resume) in a fresh process. (The fresh-session case
+  # is the degraded run above.)
+  CURATED_BRAIN_DIR="$HOME/.brain-missing" PATH="$live_path" timeout 300 \
+    dsh --profile "$PROFILE" --json --session-id "$SID" 'Reply with the single word DONE.' \
+    >"$OUT/live3.jsonl" 2>"$OUT/live3.err"
+  live3_rc=$?
+  check "live turn 3 (--session-id, degraded brain) exits 0 (rc=$live3_rc)" test "$live3_rc" -eq 0
+  dump_session_log_by_id "$SID" "$OUT/live3.session.jsonl"
+  check 'agent/created fired on the continued session: DEGRADED health block in turn 3 runtime context' \
+    sh -c "jq -e -s '
+      ([.[] | select(.type == \"turn/start\") | .seq][2]) as \$t3
+      | [.[] | select(.type == \"user/message\" and .seq > \$t3 and .data.source.kind == \"runtime-context\")
+           | .data.content[]?.text // empty | select(contains(\"Memory sidecar DEGRADED\"))] | length >= 1' '$OUT/live3.session.jsonl' >/dev/null"
+  if [ "$WISDOM_E2E" -eq 0 ]; then
+    check 'no re-delivery across all three turns: one wisdom message in the session' \
+      sh -c "[ \"\$(jq -c '$wisdom_msgs' '$OUT/live3.session.jsonl' | grep -c .)\" -eq 1 ]"
+  fi
+  [ "$live3_rc" -ne 0 ] && tail -20 "$OUT/live3.err" | sed 's/^/      /'
 fi
 
 # ---------------------------------------------------------------------------
