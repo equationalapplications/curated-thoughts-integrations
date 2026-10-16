@@ -708,9 +708,12 @@ entries, all `instr1`-stamped.
 **Scores below the floor.** CT only reports scores for entries that pass the floor, so a
 closed answer shows no score. To see how far below the floor a query landed, a shadow
 scorer embedded the same instruction-prefixed query text with the same model and took raw
-cosine against every live entry blob. On every opened query its top score matches CT's to
-three decimals (for example 0.6841 against 0.684), so the right-hand column is CT's own
-number.
+cosine against every live entry blob. On every opened query it picked the same top entry
+as CT, and its score was within 0.002 of CT's (largest gap 0.0018: `run git rebase main
+branches`, 0.746 against CT's 0.748). The gap comes from embedding the query in a separate
+API call. The right-hand column is the shadow score, so read values within about 0.002 of
+the floor as borderline. In the text below, open queries cite CT's score and closed
+queries cite the shadow score.
 
 | Query (activity line) | Kind | Fact it targets | Gate | Entries returned (score, title) | Top score (shadow) |
 |---|---|---|---|---|---|
@@ -757,25 +760,29 @@ number.
 ### What it shows
 
 - **The gate opens on activity lines, but only sometimes.** Across the 22 activity lines
-  aimed at a fact, 14 opened (64%). For the eight lines in the proposed `<verb> <target>`
-  shape, the seven aimed at a fact opened 4 times (`run pnpm test`, `write .env.local`,
-  `search "MCP tool name"`, `edit src/index.ts`) and stayed closed 3 times
-  (`edit src/db/migrations/0042_add_users.sql`, `read .github/workflows/release.yml`,
-  `run git rebase`).
+  aimed at a fact, 14 opened (64%). Those 22 are the seven facts × three shapes (verb +
+  target, bare target, target + hint), plus one extra short variant, `edit migration`
+  (closed). The brief listed eight `<verb> <target>` lines. One of them, `read README.md`,
+  targets no fact and is counted with the negatives. The other seven opened 4 times
+  (`run pnpm test`, `write .env.local`, `search "MCP tool name"`, `edit src/index.ts`) and
+  stayed closed 3 times (`edit src/db/migrations/0042_add_users.sql`,
+  `read .github/workflows/release.yml`, `run git rebase`). That is the 4 of 7 used below.
+  `edit migration` is not in it.
 - **What decides it is shared surface text, not the verb.** The gate opens when the line
   contains the fact's own token: `.env.local`, `src/index.ts`, `pnpm test`, `MCP tool`,
   `git rebase origin/main`. It stays closed when the fact is a *rule about a concept* and
   the path only implies the concept. The migration rule never opened from a migration
   path: the best score was 0.588 with a directory hint, and 0.590 for `edit migration`.
-  Yet the natural-language question about it scored **0.897**.
-- **Shapes.** A bare target did best (6 of 7 opened). `<verb> <target>` and
-  target-plus-a-one-word-hint each opened 4 of 7. Verbs add little and can hurt:
-  `.github/workflows/release.yml` scored 0.645 (open), while
+  Yet the natural-language question about it scored **0.898**.
+- **Shapes** (seven facts each). A bare target did best (6 of 7 opened). `<verb> <target>`
+  and target-plus-a-one-word-hint each opened 4 of 7. The extra `edit migration` variant
+  closed, at 0.590. Verbs add little and can hurt:
+  `.github/workflows/release.yml` scored 0.644 (open), while
   `read .github/workflows/release.yml` scored 0.596 (closed). Extra flags dilute the match
   (`run pnpm test --filter deepseek` scored 0.583, closed).
 - **No false positives.** No near-miss (0 of 6) or negative (0 of 8) opened. Near-misses
   topped out at 0.601 (`edit src/format.ts` against the entry-point fact) and negatives at
-  0.420. All three natural-language controls opened (0.698 to 0.897).
+  0.420. All three natural-language controls opened (0.699 to 0.898).
 - **The floor can't simply be lowered for activity lines.** Relevant lines that stayed
   closed scored 0.549 to 0.631, and the best near-misses scored 0.500 to 0.601. The two
   ranges overlap: `edit src/db/schema.ts` (near-miss, 0.599) and `edit src/format.ts`
