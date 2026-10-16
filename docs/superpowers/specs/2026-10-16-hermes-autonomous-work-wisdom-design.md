@@ -489,8 +489,18 @@ All stdlib `unittest`, in `integrations/hermes/tests/`:
 - `tests/tools/test_shared_script_parity.py` stays green (claude-code copy of
   `ct_ledger.py`).
 
-E2E on a scratch `HERMES_HOME` (never the live profile or brain) is wanted but optional on
-this machine; if not run it is recorded as pending in the PR.
+**E2E (done, 2026-10-16):** `integrations/hermes/tests/e2e/run.sh` (Docker, Hermes at the
+pin, scratch `HERMES_HOME` and brain, CT 3.5.1 real gate, GLM-5.3-FLASH, verbose on). It
+checks: (1) an activity block in a tool result, once, with its marker; (2) no re-query or
+re-delivery on a later step with the same key; (3) a `write_file` result with the spliced
+key still counts as landed for Hermes's verifier; (4) no query from CT tools; (5) CT
+receives the bare target; plus the verbose notice and JSONL line. All pass. Findings: the
+Tool Search bridge (`tool_search` / `tool_describe` / `tool_call`) unwraps to the real
+MCP tool name `mcp__curated_thoughts__curated_recall_context`, which `is_ct_tool` and
+`ct_tool_dedup` both recognize; `hermes -z` sends stderr to `/dev/null` (verbose notices
+show in `hermes chat`); and the MCP sidecar needs the embedding key passed through
+`mcp_servers.<name>.env` (`${OPENROUTER_API_KEY}`), because Hermes does not hand its
+environment to MCP subprocesses.
 
 ## Versioning and docs
 

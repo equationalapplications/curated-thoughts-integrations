@@ -45,6 +45,27 @@ format below is load-bearing: `## <version> — <date>`.
   Per-call rate and filter skips are not recorded. The log gains an optional
   `activity` field (`scripts/ct_wisdom_verbose.py`, byte-identical with
   Claude Code). With verbose off the tool result bytes are unchanged.
+- Added: live e2e harness `tests/e2e/` (local only, not in CI; needs
+  `ZAI_API_KEY` and `OPENROUTER_API_KEY`). Docker, Hermes at the
+  `ee8dd6c8` pin, a scratch `HERMES_HOME` and a scratch brain, CT 3.5.1's
+  REAL relevance gate (qwen3-embedding-4b, instr1), GLM-5.3-FLASH as the
+  model, verbose mode on. Verified 2026-10-16, all checks pass. From one
+  user message the agent ran `pnpm test`, `pnpm test --silent`, wrote and
+  read `.env.local`, and called `curated_recall_context`:
+  - CT received exactly the bare targets `TASK.md`, `pnpm test` and
+    `.env.local`, once each. The second `pnpm test` step and the
+    `.env.local` read did not re-query, and no CT tool triggered a query.
+  - One fact arrived in the `terminal` result and one in the `write_file`
+    result, each with its marker and each visible exactly once. The later
+    recall showed the delivered fact as an "already in context" stub.
+  - The `write_file` result kept valid JSON with the spliced key, and
+    Hermes's own write verifier (`file_mutation_result_landed`) still
+    reported the write as landed.
+  - Verbose mode printed the `[activity]` notices on stderr and wrote
+    activity JSONL lines (query, label, gate, score, block). Neither key
+    appears in any artifact.
+  - Note: `hermes -z` sends stderr to `/dev/null`, so verbose notices show
+    only in `hermes chat` (the JSONL log is written either way).
 - Added: `ct_ledger.LedgerCache.claim()`, an atomic check-and-add used by
   autonomous-work delivery and `ct_tool_dedup`, so parallel tool threads can
   never both show one fact. `ct_tool_dedup`'s output is unchanged.
