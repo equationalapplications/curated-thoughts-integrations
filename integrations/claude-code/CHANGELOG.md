@@ -6,6 +6,8 @@ heading format below is load-bearing: `## <version> — <date>`.
 
 ## Unreleased
 
+## 0.1.2 — 2026-10-16
+
 - Fixed: `scripts/ct_doctor.py` re-synced with the Hermes doctor post-#14
   (issue #33). `run_checks(env=...)` now discovers the sidecar and resolves
   the brain, vault, embedding and engine-manifest checks through the

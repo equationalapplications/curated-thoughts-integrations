@@ -6,6 +6,8 @@ format below is load-bearing: `## <version> — <date>`.
 
 ## Unreleased
 
+## 0.4.2 — 2026-10-16
+
 - Changed: the spawn-time env merge moved from `ct_doctor._merged_env` into
   `ct_env.merged_env(env=None)`, the single source of truth (issue #32).
   Semantics are unchanged: `os.environ` overlaid with `env`; a `None` value
