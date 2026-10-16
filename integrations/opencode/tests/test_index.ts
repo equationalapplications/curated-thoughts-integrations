@@ -61,11 +61,19 @@ describe('module exports', () => {
 });
 
 describe('CuratedThoughts hooks object', () => {
-  it('returns exactly the system transform and dispose hooks', async () => {
+  it('returns exactly the v0 hooks plus the wisdom live-delivery hooks', async () => {
     const { hooks } = await load();
-    // No `event` hook: OpenCode 1.18.31 emits no MCP status event
+    // No `event` hook: OpenCode 1.18.x emits no MCP status event
     // (tests/host/compatibility.json → findings.mcpStatusEvents = false).
-    expect(Object.keys(hooks).sort()).toEqual(['dispose', 'experimental.chat.system.transform']);
+    // Wisdom (leg spec LD1): chat.message = N1+N2, tool.execute.after = N3,
+    // experimental.session.compacting = decision-3 carry-forward snapshot.
+    expect(Object.keys(hooks).sort()).toEqual([
+      'chat.message',
+      'dispose',
+      'experimental.chat.system.transform',
+      'experimental.session.compacting',
+      'tool.execute.after',
+    ]);
     await hooks.dispose!();
   });
 

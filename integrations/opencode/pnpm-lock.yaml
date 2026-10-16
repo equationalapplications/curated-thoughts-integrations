@@ -7,10 +7,14 @@ settings:
 importers:
 
   .:
+    dependencies:
+      '@equational-applications/ct-wisdom-core':
+        specifier: file:../../packages/ct-wisdom-core
+        version: file:../../packages/ct-wisdom-core
     devDependencies:
       '@opencode-ai/plugin':
-        specifier: 1.18.31
-        version: 1.18.31
+        specifier: 1.18.35
+        version: 1.18.35
       '@types/better-sqlite3':
         specifier: ^9.6.0
         version: 9.6.0
@@ -44,6 +48,9 @@ packages:
   '@ai-sdk/provider@3.0.8':
     resolution: {integrity: sha512-oGMAgGoQdBXbZqNG0Ze56CHjDZ1IDYOwGYxYjO5KLSlz5HiNQ9udIXsPZ61VWaHGZ5XW/jyjmr6t2xz2jGVwbQ==}
     engines: {node: '>=18'}
+
+  '@equational-applications/ct-wisdom-core@file:../../packages/ct-wisdom-core':
+    resolution: {directory: ../../packages/ct-wisdom-core, type: directory}
 
   '@esbuild/aix-ppc64@0.25.12':
     resolution: {integrity: sha512-Hhmwd6CInZ3dwpuGTF8fJG6yoWmsToE+vYgD4nytZVxcu1ulHpUQRAB1UJ8+N1Am3Mz4+xOByoQoSZf4D+CpkA==}
@@ -244,8 +251,8 @@ packages:
     cpu: [x64]
     os: [linux]
 
-  '@opencode-ai/plugin@1.18.31':
-    resolution: {integrity: sha512-Rdc1bPK06PByaGyGd0kf7JUZ4pTkexz2OOUNlqZWLpHOiMEZ+/rFGjt46ypZ3QwA697gNdWwwwQbHbKG5NMwGA==}
+  '@opencode-ai/plugin@1.18.35':
+    resolution: {integrity: sha512-mjM0N4tceFiNy+t28VKnU9XAOhflWsyzLDZWrf3D3HLpSF3dX3dFc/0xf/PaRK76V7hIIkA3vWy/ZvLk8SZBKw==}
     peerDependencies:
       '@opentui/core': '>=0.4.5'
       '@opentui/keymap': '>=0.4.5'
@@ -258,8 +265,8 @@ packages:
       '@opentui/solid':
         optional: true
 
-  '@opencode-ai/sdk@1.18.31':
-    resolution: {integrity: sha512-Raouthf8Lhe9edjvYeeSK7SgvdoU6bBjH9qV3f70dHoa6h+z0X2TMz/e22/wKp/StlFUZ4kIRpYYxFnY8/k01w==}
+  '@opencode-ai/sdk@1.18.35':
+    resolution: {integrity: sha512-cp3IFKwnqgeUbflrrwz/WmG/dALVyM2k0LA1aqCvWe58Tu4utNTNw+BwZzQEML1HxDaLrIB+Fc4Ztb8S16Ijcw==}
 
   '@rollup/rollup-android-arm-eabi@4.63.3':
     resolution: {integrity: sha512-w3Jnvi1ocaVm/c7yVPpfB98XeSRBMyzp6njL5MVVbGyXjpmUkN+s6Hp4t0PqhGCCaI1ZHMKXt/w0lA1RCaLVcw==}
@@ -790,6 +797,8 @@ snapshots:
     dependencies:
       json-schema: 0.4.0
 
+  '@equational-applications/ct-wisdom-core@file:../../packages/ct-wisdom-core': {}
+
   '@esbuild/aix-ppc64@0.25.12':
     optional: true
 
@@ -895,14 +904,14 @@ snapshots:
   '@napi-rs/lzma-linux-x64-gnu@1.5.1':
     optional: true
 
-  '@opencode-ai/plugin@1.18.31':
+  '@opencode-ai/plugin@1.18.35':
     dependencies:
       '@ai-sdk/provider': 3.0.8
-      '@opencode-ai/sdk': 1.18.31
+      '@opencode-ai/sdk': 1.18.35
       effect: 4.0.0-beta.83
       zod: 4.1.8
 
-  '@opencode-ai/sdk@1.18.31':
+  '@opencode-ai/sdk@1.18.35':
     dependencies:
       cross-spawn: 7.0.6
 

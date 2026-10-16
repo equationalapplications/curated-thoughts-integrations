@@ -2,6 +2,63 @@
 
 ## Unreleased
 
+## 0.2.0 — 2026-10-16
+
+New: **Intuitive Wisdom live delivery** for OpenCode. This is the cross-harness
+parity OpenCode leg. Specs: `docs/superpowers/specs/2026-10-09-cross-harness-wisdom-parity-design.md`
+and the leg refinement `docs/superpowers/specs/2026-10-16-opencode-wisdom-parity-leg-design.md`.
+
+- **v1 bootstrap (new for OpenCode).** On a session's first turn the plugin
+  recalls the brain's wisdom layer:
+  - it runs `ct recall "curated thoughts agent memory wisdom procedures"
+    --json --k 3`;
+  - it attaches the sanitized block (at most 2500 chars, one
+    `<!-- ct-fact:<id> -->` marker per fact) to the user's message as a
+    `synthetic: true` part.
+  It renders only once per session. Later turns and later processes find the
+  block's ids in the saved history.
+- **Live delivery (`chat.message`).** Before each user turn reaches the model,
+  the plugin:
+  - asks `ct wisdom match` (CT ≥ 3.3.0 owns relevance) about the user's own
+    text;
+  - drops anything already in context;
+  - appends up to 2 facts per turn (1200-char block, at most 12 facts per
+    session; corrections are exempt) as another `synthetic: true` part.
+  The parts are saved by OpenCode, so the system prompt and its provider
+  cache are never touched.
+- **Exactly once.** Each turn the list of delivered facts is rebuilt from the
+  saved session (`client.session.messages()`); the plugin keeps no store of
+  its own. It survives `--continue` and restarts. Compaction carries every
+  delivered fact forward on purpose: a fact compacted out of context is never
+  re-delivered (parent decision 3).
+- **Recall dedup (`tool.execute.after`).** When the agent calls
+  `curated_recall_context` itself, entries already in context are rewritten to
+  one-line stubs, and the facts it brings in are tagged so later turns know
+  them.
+- **Main sessions only.** Subagent (child) sessions receive no bootstrap and no
+  live delivery. Their recall results are deduped against the parent's context.
+- **Self-trigger guard.** Only the user's genuine text drives a match.
+  Synthetic parts, ours or OpenCode's, never do, and a re-fired hook delivers
+  nothing more.
+- **Failure handling.** Failures are silent and bounded:
+  - a missing `ct`, or one without `wisdom match`, makes the plugin a no-op;
+  - three consecutive failures open a five-minute pause;
+  - each `ct` call has a 3 s budget.
+
+**Host pin:** OpenCode `1.18.31` → `1.18.35`, for both `opencode-ai` and
+`@opencode-ai/plugin` (the hook types are byte-identical). The host contract
+now runs the real built plugin against the real binary end to end (bootstrap,
+live append, recall rewrite, and no redelivery across two processes).
+
+**Packaging:** the plugin now depends on the workspace-internal
+`@equational-applications/ct-wisdom-core`. The build copies it into
+`lib/ct-wisdom-core/` and rewrites the import to a relative path, so the
+installed payload still runs with no `node_modules`. No installer change is
+needed.
+
+**Known caveat:** auxiliary OpenCode calls such as title generation re-read the
+session and see delivered parts. Exactly-once is not affected.
+
 ## 0.1.2 — 2026-10-09
 
 Dependency hygiene release: bump the transitive `source-map-js` 1.2.1 → 1.2.2

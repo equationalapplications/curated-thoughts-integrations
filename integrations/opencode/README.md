@@ -14,6 +14,10 @@ same doctor, same three-rule discipline.
   block into every session's system prompt.
 - **Bounded health refresh** — the status block reflects the last probe, and
   refresh logic never blocks or reconnects at runtime.
+- **Intuitive Wisdom** (0.2.0) — on a session's first turn, a short
+  memory block recalled from the brain's wisdom layer; on every turn after
+  that, the facts CT judges relevant to your message, delivered **once**. See
+  [Intuitive Wisdom](#intuitive-wisdom) below.
 - **Three skills** — `curated-thoughts-usage`, `curated-thoughts-ops`,
   `curated-thoughts-sidecar` (ported from Hermes).
 - **Doctor** — `node lib/scripts/ct_doctor.js check` reads configuration and
@@ -25,6 +29,41 @@ same doctor, same three-rule discipline.
   integrations' `ct_preflight`.
 - **Preview-first installer** — `scripts/install.sh` prints a structured
   proposal and writes nothing until you set `CT_INSTALL_EDIT=1`.
+
+## Intuitive Wisdom
+
+Needs the standalone `ct` CLI from Curated Thoughts ≥ 3.3.0 (`ct wisdom match`)
+on `PATH` or at a standard location. Without it, the plugin skips wisdom and
+works as before.
+
+- **Bootstrap (first turn).** The plugin runs one `ct recall` against the
+  wisdom layer and attaches the result, at most 2500 characters, to your first
+  message.
+- **Live delivery (every turn).** In the `chat.message` hook, before the model
+  runs, the plugin asks `ct wisdom match` which facts relevant to your message
+  are not yet in context, and appends up to 2 of them (1200 characters max).
+  The cap is 12 facts per session; corrections to facts you already have are
+  exempt from the cap.
+- **No system-prompt changes.** Both blocks are `synthetic: true` text parts
+  on your message, which OpenCode saves with the session. The system prompt
+  (and its provider cache) stays as it is.
+- **Exactly once.** Each fact carries a `<!-- ct-fact:<id> -->` marker. The
+  plugin keeps no store of its own. Each turn it rebuilds the list of facts
+  already in context from the session history (`session.messages`), so
+  `--continue`, a restart, and compaction never repeat a fact. Compaction
+  carries every delivered fact forward deliberately.
+- **Recall dedup.** When the agent calls `curated_recall_context` itself,
+  entries already in context are cut down to one-line stubs.
+- **Main sessions only.** Subagent (child) sessions never receive deliveries.
+  Their recall results are still deduped against the parent's context.
+- **Failure handling.** Failures are silent and bounded:
+  - if `ct` is missing, or lacks `wisdom match`, the plugin does nothing;
+  - three consecutive failures pause it for five minutes;
+  - each `ct` call times out after 3 s.
+
+Note: OpenCode's auxiliary calls, such as title generation, re-read the
+session, so they also see delivered parts. This affects nothing except those
+calls.
 
 ## Install
 
@@ -89,11 +128,12 @@ the payload directory, the `curated-thoughts` `mcp` entry from
 
 - **Sidecar:** `curated-thoughts-mcp` ≥ 2.5 (compat tier `v2.5-full`).
 - **Platforms:** macOS, Linux, Windows (covered by the CI matrix).
-- **Tested host versions** (from `tests/host/compatibility.json`,
-  verified 2026-09-17 on darwin-x64; Linux/Windows are covered by the CI
-  host job, not re-executed locally):
-  - OpenCode `1.18.31` (npm package `opencode-ai@1.18.31`)
-  - `@opencode-ai/plugin` `1.18.31`
+- **Tested host versions** (from `tests/host/compatibility.json`; v0
+  findings first verified 2026-09-17, the 1.18.35 pin and the wisdom
+  live-delivery contract verified 2026-10-16 on darwin-x64; Linux is covered
+  by the CI host job):
+  - OpenCode `1.18.35` (npm package `opencode-ai@1.18.35`)
+  - `@opencode-ai/plugin` `1.18.35`
   - `bun` `1.4.2` (test runner); host-embedded runtime as seen by the
     plugin: bun `1.3.14` / node `24.3.0`
   - Node fallback `22.23.2`
@@ -105,6 +145,7 @@ the payload directory, the `curated-thoughts` `mcp` entry from
 - A POSIX shell for the installer: on Windows, run `scripts/install.sh` from
   Git Bash or WSL (PowerShell and Command Prompt cannot run it directly)
 - Optional: `better-sqlite3`, for the doctor's import pre-flight check
+- Optional: the Curated Thoughts `ct` CLI ≥ 3.3.0, for Intuitive Wisdom
 
 ## License
 
