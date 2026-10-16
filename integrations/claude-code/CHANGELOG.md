@@ -6,6 +6,14 @@ heading format below is load-bearing: `## <version> — <date>`.
 
 ## Unreleased
 
+## 0.2.2 — 2026-10-16
+
+- Changed: the vendored `scripts/ct_ledger.py` gains
+  `LedgerCache.claim()`, an atomic check-and-add, kept byte-identical with
+  the Hermes reference (shared-script parity gate). No behavior change:
+  Claude Code's hooks do not call it. It is there for Claude Code's later
+  autonomous-work leg (Hermes 0.5.0 uses it).
+
 ## 0.2.1 — 2026-10-16
 
 - Changed: Intuitive Wisdom live delivery has no per-session cap. The

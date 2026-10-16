@@ -6,6 +6,43 @@ format below is load-bearing: `## <version> — <date>`.
 
 ## Unreleased
 
+## 0.5.0 — 2026-10-16
+
+- Added: Intuitive Wisdom **autonomous-work delivery**. While the agent works
+  on its own between user messages, the file it reads or edits, the command
+  it runs or the pattern it searches can bring in one relevant fact
+  (new `scripts/ct_wisdom_activity.py`; spec
+  `docs/superpowers/specs/2026-10-16-hermes-autonomous-work-wisdom-design.md`).
+  - Trigger: a new `pre_tool_call` hook starts `ct wisdom match --max 1` in
+    the background when the tool's activity is new for the session (a new
+    file, command or search), at most once per model step
+    (`api_request_id`). No ceiling per user message or per session. CT's own
+    tools never trigger it.
+  - Query: the bare target only (CT 3.5.1 real-gate results, A6): a relative
+    path, a search pattern, or program plus subcommand for shell commands
+    (the first two non-flag tokens, with env assignments, flags, URLs and
+    credential-shaped tokens dropped). Never file contents, tool output,
+    diffs, the agent's text or full command lines.
+  - Delivery: `transform_tool_result` of the same call adds at most 1 fact in
+    at most 600 characters under `## Curated Thoughts — relevant to this
+    step`, marker first. JSON-object results get a `curated_thoughts_wisdom`
+    key spliced in (Hermes's own result parsers keep working); plain text
+    gets the block appended. The system prompt is never touched.
+  - Applies in subagents and scheduled runs; fails closed (no delivery)
+    without an in-turn ledger, e.g. a restored session.
+  - Budget: the 3 s timeout and the 3-failure / 300 s breaker are shared with
+    user-turn delivery; the CT call overlaps the tool's own run.
+  - Known limit: concept rules reached only via paths need CT activity mode
+    ([curated-thoughts#282](https://github.com/equationalapplications/curated-thoughts/issues/282)).
+    From a bare path the gate reaches facts about that file or command, not
+    a concept-level rule the path only implies. No query expansion is added
+    here (INTENT rule 8).
+- Added: `ct_ledger.LedgerCache.claim()`, an atomic check-and-add used by
+  autonomous-work delivery and `ct_tool_dedup`, so parallel tool threads can
+  never both show one fact. `ct_tool_dedup`'s output is unchanged.
+- Unchanged: user-turn live delivery, the session-start block and the
+  system prompt.
+
 ## 0.4.3 — 2026-10-16
 
 - Changed: Intuitive Wisdom live delivery has no per-session cap. The
