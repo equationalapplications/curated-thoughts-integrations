@@ -16,6 +16,7 @@ import {
   PASS, WARN, FAIL,
   type CheckResult,
 } from '../scripts/ct_doctor.js';
+import { sidecarCandidates } from '../scripts/ct_env.js';
 
 // lib/scripts/ct_doctor.js is emitted by `pnpm run build`; lib/ is
 // gitignored, so a fresh clone running `pnpm test` before `pnpm run build`
@@ -36,6 +37,10 @@ beforeEach(() => {
   process.env.HOME = tmpHome;
   process.env.USERPROFILE = tmpHome;
   delete process.env.CURATED_BRAIN_DIR;
+  // Inherited host settings must not leak into the checks under test.
+  delete process.env.OPENCLAW_CONFIG_PATH;
+  delete process.env.OPENCLAW_STATE_DIR;
+  delete process.env.CT_ENGINE_PACKAGE_JSON;
   process.env.PATH = ''; // force a clean PATH so sidecar discovery is deterministic
 });
 
@@ -51,7 +56,11 @@ function names(rs: CheckResult[]) {
 describe('runChecks', () => {
   it('reports FAIL on a clean machine with no sidecar and no brain', () => {
     const rs = runChecks();
-    expect(names(rs)).toContain(`sidecar-binary:${FAIL}`);
+    // Absolute system install locations are outside PATH/HOME isolation; on a
+    // machine with CT installed the sidecar is legitimately found.
+    if (!sidecarCandidates().some((p) => existsSync(p))) {
+      expect(names(rs)).toContain(`sidecar-binary:${FAIL}`);
+    }
     expect(names(rs)).toContain(`brain-dir:${FAIL}`);
   });
 

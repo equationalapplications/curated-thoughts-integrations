@@ -33,8 +33,13 @@ export function nodeSpawnFn(env: NodeJS.ProcessEnv = process.env): SpawnFn {
         resolve({ code: null, stdout: '', stderr: '', spawnError: true, timedOut: false });
         return;
       }
-      let stdout = '';
-      let stderr = '';
+      // Raw Buffers, decoded ONCE in finish(): per-chunk toString would split
+      // a multi-byte character across chunk boundaries, and the cap below is
+      // a true byte count.
+      const out: Buffer[] = [];
+      const err: Buffer[] = [];
+      let outBytes = 0;
+      let errBytes = 0;
       let overflow = false;
       let timedOut = false;
       let settled = false;
@@ -57,24 +62,32 @@ export function nodeSpawnFn(env: NodeJS.ProcessEnv = process.env): SpawnFn {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
-        resolve({ code, stdout, stderr, spawnError: spawnError || overflow, timedOut });
+        resolve({
+          code,
+          stdout: Buffer.concat(out).toString('utf8'),
+          stderr: Buffer.concat(err).toString('utf8'),
+          spawnError: spawnError || overflow,
+          timedOut,
+        });
       };
       child.on('error', () => finish(null, true));
       child.stdout?.on('data', (chunk: Buffer) => {
-        if (stdout.length + chunk.length > CAP) {
+        if (outBytes + chunk.length > CAP) {
           overflow = true;
           killTree();
           return;
         }
-        stdout += chunk.toString('utf8');
+        outBytes += chunk.length;
+        out.push(chunk);
       });
       child.stderr?.on('data', (chunk: Buffer) => {
-        if (stderr.length + chunk.length > CAP) {
+        if (errBytes + chunk.length > CAP) {
           overflow = true;
           killTree();
           return;
         }
-        stderr += chunk.toString('utf8');
+        errBytes += chunk.length;
+        err.push(chunk);
       });
       child.on('close', (code) => finish(code, false));
     });

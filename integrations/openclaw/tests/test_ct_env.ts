@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, writeFileSync, mkdirSync, rmSync, symlinkSync, chmodSync } from 'node:fs';
+import { existsSync, mkdtempSync, writeFileSync, mkdirSync, rmSync, symlinkSync, chmodSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join, delimiter } from 'node:path';
 import {
@@ -205,10 +205,21 @@ describe('allPathMatches', () => {
   });
 });
 
+/**
+ * The platform fallback list includes absolute system locations (/usr/bin,
+ * /usr/local/bin, /opt, /Applications) that an empty PATH and a tmp HOME do
+ * not cover. On a machine with Curated Thoughts installed, a "not found"
+ * assertion is unprovable, so those tests skip there instead of failing.
+ */
+function hostHasInstalledSidecar(): boolean {
+  return sidecarCandidates().some((p) => existsSync(p));
+}
+
 describe('findSidecar', () => {
-  it('returns null when not on PATH and no platform location matches', () => {
+  it('returns null when not on PATH and no platform location matches', (ctx) => {
     // Empty PATH; the platform install locations under tmpHome don't exist.
     process.env.PATH = '';
+    if (hostHasInstalledSidecar()) ctx.skip();
     const found = findSidecar();
     expect(found).toBeNull();
   });
@@ -227,11 +238,12 @@ describe('findSidecar', () => {
     expect(found?.source).toBe('PATH');
   });
 
-  it('ignores a non-executable sidecar on PATH (POSIX shutil.which parity)', () => {
+  it('ignores a non-executable sidecar on PATH (POSIX shutil.which parity)', (ctx) => {
     if (process.platform === 'win32') {
       // No executable bit on Windows; every file passes the check.
       return;
     }
+    if (hostHasInstalledSidecar()) ctx.skip();
     const binDir = join(tmpHome, 'bin');
     mkdirSync(binDir);
     const fake = join(binDir, 'curated-thoughts-mcp');

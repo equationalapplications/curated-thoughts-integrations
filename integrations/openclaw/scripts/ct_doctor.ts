@@ -742,7 +742,7 @@ export function checkOpenclawRegistration(
       name,
       `no OpenClaw config at ${path}`,
       'Install with: CT_INSTALL_EDIT=1 ./scripts/install.sh '
-        + '(or `openclaw plugins install <dir>` and grant '
+        + '(it stages a self-contained copy and grants '
         + `plugins.entries.${OPENCLAW_PLUGIN_ID}.hooks.allowConversationAccess=true). `
         + 'Set OPENCLAW_CONFIG_PATH if the config lives elsewhere.',
     );

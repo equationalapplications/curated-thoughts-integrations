@@ -105,16 +105,21 @@ if the assertion fails. `shared/compat.yaml` lists what must travel.
 The plugin is a native OpenClaw plugin (`openclaw.plugin.json`, id
 `curated-thoughts`). Its manifest declares the three skill directories and
 the `curated-thoughts` MCP server (`curated-thoughts-mcp --mcp`), which
-OpenClaw mounts only while the plugin is enabled. Install and grant it:
+OpenClaw mounts only while the plugin is enabled. Install and grant it with
+the installer, never a raw `openclaw plugins install` of the source directory
+(its monorepo-relative ct-wisdom-core dependency cannot resolve at the install
+location):
 
 ```
-openclaw plugins install <path-to-this-plugin> --force
-openclaw config set plugins.entries.curated-thoughts.hooks.allowConversationAccess true
-openclaw config set plugins.entries.curated-thoughts.hooks.timeouts.before_prompt_build 20000
+./scripts/install.sh                    # preview: prints the plan
+CT_INSTALL_EDIT=1 ./scripts/install.sh  # apply
 ```
 
-`scripts/install.sh` prints exactly these commands by default and runs them
-only under `CT_INSTALL_EDIT=1`. OpenClaw refuses non-bundled prompt hooks
+Applying stages a self-contained copy (ct-wisdom-core vendored), runs
+`openclaw plugins install <staged copy> --force --accept-capabilities`, then
+sets `plugins.entries.curated-thoughts.hooks.allowConversationAccess true` and
+`plugins.entries.curated-thoughts.hooks.timeouts.before_prompt_build 20000`
+with `openclaw config set`. OpenClaw refuses non-bundled prompt hooks
 without `allowConversationAccess`; `allowPromptInjection: false` blocks them
 as well. Verify with `node lib/scripts/ct_doctor.js check` (check 7) and
 `openclaw plugins inspect curated-thoughts --runtime --json`.

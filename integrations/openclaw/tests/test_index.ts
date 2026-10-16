@@ -167,6 +167,25 @@ describe('durable salvage channel (enqueueNextTurnInjection) + three-channel ded
     expect(String(inj.text)).toContain('ct-fact:w1');
   });
 
+  it('a rejected salvage is not memoized: a retry of the same admission tries again', async () => {
+    const ct = new FakeCt();
+    ct.pool = () => FACTS;
+    const api = boot(ct);
+    let fail = true;
+    const enqueue = api.session.workflow.enqueueNextTurnInjection;
+    api.session.workflow.enqueueNextTurnInjection = async (inj) => {
+      if (fail) throw new Error('store unavailable');
+      return enqueue(inj);
+    };
+    const ctx = userCtx({ hookInvocation: { assertActive: () => { throw new Error('inactive'); } } });
+    const ev = { prompt: 'p', currentUserMessage: 'x', currentUserMessageId: 'm', messages: [] };
+    expect(await build(api, ev, ctx)).toBeUndefined();
+    expect(api.warnings).toHaveLength(1);
+    fail = false;
+    await build(api, ev, ctx);
+    expect(api.enqueued).toHaveLength(1);
+  });
+
   it('ids drained into this turn (agent_turn_prepare, own plugin only) are excluded from the live match', async () => {
     const ct = new FakeCt();
     ct.pool = () => FACTS;

@@ -77,8 +77,11 @@ if [ "${CT_INSTALL_EDIT:-0}" = "1" ]; then
 fi
 
 stage_plugin() {
-  # $1 = stage parent dir; prints the staged plugin path.
-  local stage="$1/${PLUGIN_ID}"
+  # $1 = the staged plugin path. Called directly (never inside $(...)) so
+  # that `set -e` applies: bash clears errexit in command substitutions
+  # (macOS bash 3.2 has no inherit_errexit), and a half-staged copy must
+  # never reach `plugins install --force`.
+  local stage="$1"
   mkdir -p "$stage/node_modules/@equational-applications/ct-wisdom-core"
   cp -R "${PLUGIN_DIR}/lib" "${PLUGIN_DIR}/skills" "${PLUGIN_DIR}/openclaw.plugin.json" \
     "${PLUGIN_DIR}/package.json" "$stage/"
@@ -104,7 +107,11 @@ delete m.scripts;
 m.bundleDependencies = ['@equational-applications/ct-wisdom-core'];
 fs.writeFileSync(p, JSON.stringify(m, null, 2) + '\n');
 NJS
-  printf '%s\n' "$stage"
+  if [ ! -f "$stage/lib/src/index.js" ] || \
+     [ ! -f "$stage/node_modules/@equational-applications/ct-wisdom-core/index.js" ]; then
+    warn "staging incomplete at $stage — aborting before install"
+    exit 1
+  fi
 }
 
 if [ "$edit" -eq 1 ]; then
@@ -119,7 +126,8 @@ if [ "$edit" -eq 1 ]; then
   fi
   INSTALL_TMP="$(mktemp -d)"
   trap 'rm -rf "$INSTALL_TMP"' EXIT
-  STAGE="$(stage_plugin "$INSTALL_TMP")"
+  STAGE="${INSTALL_TMP}/${PLUGIN_ID}"
+  stage_plugin "$STAGE"
 else
   say "curated-thoughts OpenClaw install.sh — PREVIEW: nothing will be written (no sudo)"
   STAGE="<tmp>/${PLUGIN_ID} (self-contained copy with ct-wisdom-core from ${core_lib})"

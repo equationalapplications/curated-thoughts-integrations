@@ -221,8 +221,12 @@ export function createPlugin(deps: PluginDeps = {}) {
             const prior = admissions.get(admissionKey);
             if (prior) return await prior; // rebuild/retry: same bytes, no new CT call
           }
+          // Only a SUCCESSFUL result is memoized for the admission: a failure
+          // (e.g. a rejected salvage enqueue) drops the entry so a host retry
+          // of the same request gets a fresh attempt instead of a cached nothing.
           const run = compute(event, ctx, sessionKey, admissionKey).catch((error) => {
             warn('before_prompt_build failed', error);
+            if (admissionKey !== null) admissions.delete(admissionKey);
             return undefined;
           });
           if (admissionKey !== null) lruSet(admissions, admissionKey, run);

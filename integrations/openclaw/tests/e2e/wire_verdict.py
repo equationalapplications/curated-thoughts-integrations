@@ -1,7 +1,38 @@
-"""AC 9 byte-level verdict from two recorded Anthropic Messages requests."""
+"""AC 9 byte-level verdict from two recorded Anthropic Messages requests.
+
+Exit codes: 0 cache-safe, 1 not cache-safe, 2 capture unusable (not exactly
+two well-formed POST /v1/messages requests — e.g. a provider retry or a
+failed turn); the comparison is never run on the wrong pair.
+"""
 import json, sys, hashlib, re
-rows = [json.loads(l) for l in open(sys.argv[1])]
-reqs = [json.loads(r['body']) for r in rows]
+
+
+def _load(path):
+    reqs = []
+    for n, line in enumerate(open(path, encoding='utf-8'), 1):
+        try:
+            row = json.loads(line)
+        except ValueError:
+            print(f'capture unusable: line {n} of {path} is not JSON', file=sys.stderr)
+            sys.exit(2)
+        if row.get('method') != 'POST' or not str(row.get('path', '')).split('?')[0].endswith('/v1/messages'):
+            continue
+        try:
+            body = json.loads(row.get('body') or '')
+        except ValueError:
+            print(f'capture unusable: request on line {n} has a non-JSON body', file=sys.stderr)
+            sys.exit(2)
+        if not isinstance(body, dict) or not isinstance(body.get('messages'), list):
+            print(f'capture unusable: request on line {n} has no messages array', file=sys.stderr)
+            sys.exit(2)
+        reqs.append(body)
+    if len(reqs) != 2:
+        print(f'capture unusable: expected exactly 2 model requests, found {len(reqs)}', file=sys.stderr)
+        sys.exit(2)
+    return reqs
+
+
+reqs = _load(sys.argv[1])
 MK = re.compile(r'ct-fact:([A-Za-z0-9._:-]+)')
 def canon(x): return json.dumps(x, sort_keys=True, ensure_ascii=False)
 def h(x): return hashlib.sha256(canon(x).encode()).hexdigest()[:16]
