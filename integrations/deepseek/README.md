@@ -14,8 +14,15 @@ discipline.
   and exposes the Curated Thoughts tool surface as
   `mcp__curated-thoughts__<tool>`.
 - **Cached health snapshot** — a named prompt context whose text is the
-  latest health probe, refreshed on every `agent/session-start`. The model
-  knows whether memory is usable before its first tool call.
+  latest completed health probe, refreshed on every `agent/created` (the
+  lifecycle event at the 0.2.0-rc.2 pin; the pre-0.2 `agent/session-start`
+  has no dispatcher there). A probe that throws leaves the previous snapshot
+  in place, or an empty block before the first probe completes. A degraded
+  result is a completed probe and replaces the snapshot. The model knows
+  whether memory is usable before its first tool call.
+- **Intuitive Wisdom live delivery** (0.4.0): relevant facts arrive once per
+  user turn, never repeating one already in context. See [Intuitive Wisdom](#intuitive-wisdom)
+  below.
 - **Three skills** — `curated-thoughts-usage`, `curated-thoughts-ops`,
   `curated-thoughts-sidecar` (verbatim from Hermes).
 - **Doctor** — `node lib/scripts/ct_doctor.js check` runs the nine deep checks
@@ -40,6 +47,38 @@ discipline.
   briefly (seconds) on recall attempts, bounded per process by the retry
   budget + circuit breaker. Troubleshooting: set `CT_WISDOM_DEBUG=1` to emit
   a per-render `wisdom:` line on stderr.
+
+## Intuitive Wisdom
+
+Needs the standalone `ct` CLI from Curated Thoughts ≥ 3.3.0
+(`ct wisdom match`). Without it, live delivery is a silent no-op.
+
+- **Live delivery (every turn).** On the first `agent/pre-step` step of each
+  user turn, the plugin asks `ct wisdom match` which facts are relevant to
+  the user's message (CT owns relevance), drops anything already in context,
+  and appends up to 2 of them (1200 characters max, at most 12 per session;
+  corrections to a fact already shown still flow after the cap) as a
+  user-role message. The agent loop persists it
+  verbatim in the session log. The system prompt is never touched.
+- **Exactly once.** Each fact carries a `<!-- ct-fact:<id> -->` marker. Every
+  turn the plugin rebuilds the list of facts already in context from the
+  session log (`agent.session.deriveMessages()`), plus the ids this process
+  recorded next to the auto-inclusion block (its own ids and the ones
+  delivered since). A session continued with `--session-id`, or after a
+  restart, is not re-delivered a fact it already has. The agent id survives
+  compaction, so within one process compaction repeats nothing; after a
+  restart, a fact whose marker was compacted out of the session log may be
+  delivered again.
+- **Recall dedup.** When the agent calls `curated_recall_context` itself
+  (`tools/post-execute`), entries already in context become one-line stubs;
+  the rest of CT's envelope is kept as is.
+- **Failure handling.** Silent and bounded: each `ct` call has a 3 s budget,
+  and three consecutive timeouts, non-zero exits or unparseable results
+  pause matching for five minutes (one half-open probe then retries). A `ct`
+  that cannot be started does not count.
+- **Since 0.4.1** the delivery message is an identified user message (`id`,
+  `role: "user"`), so a session that received a block can be continued; in
+  0.4.0 DSH rejected such a session on replay.
 
 ## Install
 
