@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
+import shlex
 import stat
 import subprocess
 import sys
@@ -44,32 +44,10 @@ POSIX_PATHS_SKIP = (
 )
 
 
-def _scrub_path(raw):
-    """Drop PATH entries that hold a real curated-thoughts-mcp.
-
-    A developer with Curated Thoughts installed has the real sidecar on
-    PATH. If a test leaves it reachable, the doctor spawns it against the
-    fixture brain, the V18 repair migration runs, and the fixture home
-    grows a .brain/repair-export-186/ directory — the upstream issue #14
-    class of bug, which test_doctor_is_read_only catches. Scrubbing is
-    done once, at import, against the inherited PATH.
-    """
-    keep = []
-    for entry in (raw or "").split(os.pathsep):
-        if not entry:
-            continue
-        try:
-            if shutil.which(ct_env.SIDECAR_NAME, path=entry):
-                continue
-        except OSError:
-            continue
-        keep.append(entry)
-    return os.pathsep.join(keep)
-
-
-# PATH with every real-sidecar directory removed. setUp prepends the fake
-# bin dir to this, so discovery can only ever find the mock.
-SCRUBBED_PATH = _scrub_path(os.environ.get("PATH", ""))
+MOCK_SPAWN_SKIP = (
+    "POSIX-only: the stand-in sidecar is an extensionless shebang script, "
+    "which Windows cannot exec (WinError 193)"
+)
 
 
 MOCK_SIDECAR = r'''#!/usr/bin/env python3
@@ -188,8 +166,18 @@ class DoctorTestCase(unittest.TestCase):
                 '"{}" "%~dp0mock_sidecar.py" %*\r\n'.format(sys.executable)
             )
         else:
+            # The POSIX twin of the .bat shim: /bin/sh is absolute and
+            # sys.executable is baked in, so the mock needs NOTHING on PATH
+            # (a `#!/usr/bin/env python3` mock needed the ambient PATH, which
+            # is why this suite once had to scrub real sidecars out of it).
+            # Unlike a `#!<sys.executable>` shebang, quoting through sh also
+            # survives an interpreter path containing a space.
             self.mock_path = self.bin_dir / "curated-thoughts-mcp"
-            self.mock_path.write_text(MOCK_SIDECAR)
+            self.mock_path.write_text(
+                "#!/bin/sh\n"
+                f"exec {shlex.quote(sys.executable)} "
+                f'{shlex.quote(str(self.mock_py))} "$@"\n'
+            )
             self.mock_path.chmod(
                 self.mock_path.stat().st_mode
                 | stat.S_IXUSR
@@ -197,10 +185,13 @@ class DoctorTestCase(unittest.TestCase):
                 | stat.S_IXOTH
             )
         self._env_patches = {}
-        # Discovery is not env-injectable: ct_doctor.run_checks() calls
-        # find_sidecar() with no env, so it reads the *process* PATH. Patch
-        # it, so the mock wins in-process and in every child alike.
-        self.patch_env("PATH", str(self.bin_dir) + os.pathsep + SCRUBBED_PATH)
+        # Bare bin_dir PATH (issue #28 / #33). The helpers pass it as the
+        # caller env, which discovery honors (run_checks merges it). The
+        # process PATH is patched too, for the CLI-subprocess tests, whose
+        # child calls run_checks() with env=None. Since the mock needs
+        # nothing on PATH, no ambient entry (and no real installed sidecar)
+        # is ever reachable through it.
+        self.patch_env("PATH", str(self.bin_dir))
         self.patch_env("HOME", str(self.fake_home))
         # Path.home() reads USERPROFILE on Windows and HOME elsewhere, so
         # both must point at the fake home or CLAUDE_SETTINGS would
@@ -224,6 +215,21 @@ class DoctorTestCase(unittest.TestCase):
         ct_doctor.CLAUDE_CONFIG = Path(os.environ["CLAUDE_CONFIG_PATH"])
         ct_doctor.CLAUDE_SETTINGS = self.fake_home / ".claude" / "settings.json"
         self.addCleanup(self._cleanup)
+        # Issue #28 precondition (ported from Hermes): the mock MUST be what
+        # discovery resolves through the helpers' PATH, or a broken fixture
+        # could fall through to an ambient install and spawn the real
+        # sidecar against the fixture brain. Fail at setup, not later. Runs
+        # on Windows too: the .bat shim is PATHEXT-resolvable.
+        found, _real, source = ct_env.find_sidecar(env=self.with_path())
+        self.assertTrue(
+            found
+            and source == ct_env.SOURCE_PATH
+            and os.path.normcase(os.path.realpath(found))
+            == os.path.normcase(os.path.realpath(self.mock_path)),
+            f"mock sidecar fixture broken: discovery returned "
+            f"({found!r}, {source!r}) instead of the mock — fix the fixture "
+            f"before running the suite (issue #28)",
+        )
 
     def _cleanup(self):
         for key, value in self._env_patches.items():
@@ -322,13 +328,13 @@ class DoctorTestCase(unittest.TestCase):
     def results_by_name(self, env=None):
         results = ct_doctor.run_checks(
             timeout=3.0,
-            env={"PATH": os.environ["PATH"], **(env or {})},
+            env={**self.with_path(), **(env or {})},
         )
         return {r.name: r for r in results}
 
     def with_path(self):
-        """Return env dict carrying the patched PATH (mock first, scrubbed)."""
-        return {"PATH": os.environ["PATH"]}
+        """Return env dict putting ONLY the mock dir on PATH."""
+        return {"PATH": str(self.bin_dir)}
 
 
 class MockSidecarRpcTests(DoctorTestCase):
@@ -1903,6 +1909,253 @@ class StatusSnapshotTests(DoctorTestCase):
     def test_snapshot_never_raises_on_broken_env(self):
         snap = ct_status.snapshot(env={"CURATED_BRAIN_DIR": "\x00bad"})
         self.assertIn(snap["status"], (ct_status.OK, ct_status.DEGRADED, ct_status.UNKNOWN))
+
+    def test_snapshot_env_merges_over_ambient(self):
+        # Issue #32: snapshot(env=...) used to REPLACE the view (no HOME, no
+        # PATH); it now merges over os.environ like the doctor.
+        from unittest import mock
+
+        other = self.fake_home / "other-brain"
+        seen = {}
+        real = ct_env.find_sidecar
+
+        def spy(platform=None, env=None):
+            seen["env"] = env
+            return real(platform=platform, env=env)
+
+        with mock.patch.object(ct_env, "find_sidecar", side_effect=spy):
+            snap = ct_status.snapshot(env={"CURATED_BRAIN_DIR": str(other)})
+        self.assertEqual(snap["brain_dir"], str(other))
+        self.assertEqual(seen["env"].get("HOME"), os.environ.get("HOME"))
+        self.assertEqual(seen["env"].get("PATH"), os.environ.get("PATH"))
+
+
+class MergedEnvTests(unittest.TestCase):
+    """ct_env.merged_env: the one spawn-time env view (issue #32)."""
+
+    def setUp(self):
+        self._saved = dict(os.environ)
+        self.addCleanup(self._restore)
+        os.environ["CT_MERGE_AMBIENT"] = "ambient"
+        os.environ.pop("CT_MERGE_NEW", None)
+
+    def _restore(self):
+        os.environ.clear()
+        os.environ.update(self._saved)
+
+    def test_none_env_is_a_fresh_copy_of_ambient(self):
+        view = ct_env.merged_env()
+        self.assertEqual(view, dict(os.environ))
+        view["CT_MERGE_AMBIENT"] = "mutated"
+        self.assertEqual(os.environ["CT_MERGE_AMBIENT"], "ambient")
+
+    def test_none_value_means_not_specified(self):
+        view = ct_env.merged_env({"CT_MERGE_AMBIENT": None, "CT_MERGE_NEW": None})
+        self.assertEqual(view["CT_MERGE_AMBIENT"], "ambient")
+        self.assertNotIn("CT_MERGE_NEW", view)
+
+    def test_empty_string_suppresses_ambient(self):
+        self.assertEqual(
+            ct_env.merged_env({"CT_MERGE_AMBIENT": ""})["CT_MERGE_AMBIENT"], ""
+        )
+
+    def test_caller_value_wins(self):
+        self.assertEqual(
+            ct_env.merged_env({"CT_MERGE_AMBIENT": "caller"})["CT_MERGE_AMBIENT"],
+            "caller",
+        )
+
+    def test_doctor_delegate_matches(self):
+        env = {"CT_MERGE_AMBIENT": "", "CT_MERGE_NEW": None}
+        self.assertEqual(ct_doctor._merged_env(env), ct_env.merged_env(env))
+
+
+class EnvViewTests(DoctorTestCase):
+    """Issue #33: the re-synced doctor resolves every check except check 7
+    through the caller's merged env view (Hermes #14/#29), and check 7 keeps
+    reading the host config ambiently."""
+
+    def test_discovery_honors_env_path_over_process_path(self):
+        # Process PATH points at an empty dir; only the caller env can find
+        # the mock. Before the re-sync, discovery read the process PATH.
+        empty = self.fake_home / "empty-process-path"
+        empty.mkdir()
+        self.patch_env("PATH", str(empty))
+        results = self.results_by_name()
+        self.assertEqual(results["sidecar-binary"].status, ct_doctor.PASS)
+        self.assertIn(str(self.bin_dir), results["sidecar-binary"].detail)
+
+    def test_find_sidecar_wrapper_applies_merged_env(self):
+        from unittest import mock
+
+        sentinel = {"PATH": str(self.bin_dir), "MERGED_SENTINEL": "1"}
+        with mock.patch.object(ct_doctor, "_merged_env", return_value=sentinel):
+            path, _resolved, source = ct_doctor.find_sidecar(
+                env={"PATH": str(self.fake_home / "ignored-by-the-wrapper")}
+            )
+        self.assertEqual(
+            os.path.normcase(path), os.path.normcase(str(self.mock_path))
+        )
+        self.assertEqual(source, ct_env.SOURCE_PATH)
+
+    def test_brain_dir_comes_from_env_view(self):
+        self.make_brain()
+        elsewhere = self.fake_home / "env-brain"
+        results = self.results_by_name(env={"CURATED_BRAIN_DIR": str(elsewhere)})
+        self.assertEqual(results["brain-dir"].status, ct_doctor.FAIL)
+        self.assertIn(str(elsewhere), results["brain-dir"].detail)
+
+    def test_explicit_env_key_wins_over_ambient(self):
+        r = ct_doctor.check_embedding(env={"CT_EMBED_API_KEY": "test-only-not-a-secret"})
+        self.assertEqual(r.status, ct_doctor.PASS)
+
+    def test_ambient_key_suppressed_by_empty_string_override(self):
+        self.patch_env("CT_EMBED_API_KEY", "test-only-not-a-secret")
+        r = ct_doctor.check_embedding(env={"CT_EMBED_API_KEY": ""})
+        self.assertEqual(r.status, ct_doctor.WARN)
+
+    def test_ollama_host_threads_from_env_view(self):
+        self.patch_env("OLLAMA_HOST", "http://127.0.0.1:9911")  # ambient decoy
+        r = ct_doctor.check_embedding(env={"OLLAMA_HOST": "http://127.0.0.1:1"})
+        self.assertNotIn("9911", r.detail)
+
+    def test_engine_manifest_override_threads_from_env_view(self):
+        self.make_brain()
+        manifest = self.fake_home / "runner-package.json"
+        manifest.write_text(json.dumps({"name": "core-llm-wiki", "version": "1.2.3-runner"}))
+        results = self.results_by_name(env={"CT_ENGINE_PACKAGE_JSON": str(manifest)})
+        self.assertIn("1.2.3-runner", results["import-preflight"].detail)
+
+    def test_registration_config_is_ambient_by_design(self):
+        # The Claude Code config belongs to the HOST install (ct_doctor
+        # harness-config comment): a caller env naming another config file
+        # must not redirect check 7.
+        self.write_config()
+        decoy = self.fake_home / "decoy.claude.json"
+        results = self.results_by_name(env={"CLAUDE_CONFIG_PATH": str(decoy)})
+        self.assertNotIn("decoy", results["claude-code-registration"].detail)
+
+    def test_run_checks_forwards_cwd_to_registration_adapter(self):
+        from unittest import mock
+
+        with mock.patch.object(
+            ct_doctor, "_check_registration", wraps=ct_doctor._check_registration
+        ) as spy:
+            ct_doctor.run_checks(timeout=3.0, env=self.with_path(), cwd=str(self.fake_home))
+        spy.assert_called_once_with(cwd=str(self.fake_home))
+
+    def test_client_info_version_comes_from_the_plugin_manifest(self):
+        manifest = INTEGRATION / ".claude-plugin" / "plugin.json"
+        expected = json.loads(manifest.read_text(encoding="utf-8"))["version"]
+        self.assertEqual(ct_doctor._plugin_version(), expected)
+        self.assertEqual(ct_doctor.HARNESS_LABEL, "Claude Code")
+
+
+class BundledFallbackGuardTests(DoctorTestCase):
+    """Issue #28, ported from Hermes with the re-sync (#33): the bundled
+    (ambient install location) fallback must never execute an installed
+    sidecar under a caller env whose PATH override failed to resolve.
+    ct_env.sidecar_candidates is patched to a stand-in, so these tests are
+    deterministic on any machine."""
+
+    def setUp(self):
+        super().setUp()
+        self.make_brain()
+        self.write_config()
+        self.write_settings()
+
+    def _candidates(self, path):
+        from unittest import mock
+
+        return mock.patch.object(ct_env, "sidecar_candidates", return_value=[Path(path)])
+
+    def _stand_in(self, python_body, name="curated-thoughts-mcp"):
+        """An executable stand-in sidecar running `python_body`."""
+        d = self.fake_home / "poison-install"
+        d.mkdir(exist_ok=True)
+        body = d / (name + ".py")
+        body.write_text(python_body)
+        exe = d / name
+        exe.write_text(
+            "#!/bin/sh\n"
+            f'exec {shlex.quote(sys.executable)} {shlex.quote(str(body))} "$@"\n'
+        )
+        exe.chmod(exe.stat().st_mode | stat.S_IXUSR)
+        return exe
+
+    def _marker_poison(self, marker):
+        return self._stand_in(f"open({str(marker)!r}, 'w').write('ran')\n")
+
+    def _benign(self):
+        tools = ", ".join(f'{{"name":"t{i}"}}' for i in range(14))
+        return self._stand_in(
+            "print('{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":"
+            "\"2024-11-05\",\"serverInfo\":{\"name\":\"benign\",\"version\":\"9.9.9\"},"
+            "\"capabilities\":{}}}')\n"
+            "print('{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"tools\":"
+            "[" + tools + "]}}')\n"
+        )
+
+    def _run(self, env):
+        return {r.name: r for r in ct_doctor.run_checks(timeout=3.0, env=env)}
+
+    def test_gated_run_warns_skips_spawn_and_poison_never_runs(self):
+        from unittest import mock
+
+        marker = self.fake_home / "POISON-RAN"
+        poison = self._marker_poison(marker)
+        empty = self.fake_home / "empty-path"
+        empty.mkdir()
+        with self._candidates(poison), mock.patch.object(
+            ct_doctor, "mcp_tools_list",
+            side_effect=AssertionError("gated run spawned the sidecar"),
+        ):
+            results = self._run({"PATH": str(empty)})
+        self.assertFalse(marker.exists(), "poison sidecar was spawned despite the gate")
+        self.assertEqual(results["sidecar-binary"].status, ct_doctor.WARN)
+        self.assertIn(ct_env.SOURCE_BUNDLED, results["sidecar-binary"].detail)
+        self.assertEqual(results["sidecar-mcp"].status, ct_doctor.WARN)
+        self.assertIn("refusing to spawn", results["sidecar-mcp"].detail)
+        self.assertEqual(results["version-compat"].status, ct_doctor.PASS)
+        self.assertIn("bundled-fallback gate", results["version-compat"].detail)
+        self.assertEqual(list(results), list(EXPECTED_CHECKS))
+
+    def test_empty_path_string_counts_as_override(self):
+        marker = self.fake_home / "POISON-RAN-EMPTY"
+        with self._candidates(self._marker_poison(marker)):
+            results = self._run({"PATH": ""})
+        self.assertFalse(marker.exists())
+        self.assertEqual(results["sidecar-mcp"].status, ct_doctor.WARN)
+
+    def test_allow_bundled_only_exact_one_opts_out(self):
+        empty = self.fake_home / "empty-path-2"
+        empty.mkdir()
+        poison = self._marker_poison(self.fake_home / "POISON-RAN-2")
+        for spelling in ("true", "yes", "0", "1 "):
+            with self._candidates(poison):
+                results = self._run({"PATH": str(empty), "CT_DOCTOR_ALLOW_BUNDLED": spelling})
+            self.assertEqual(results["sidecar-mcp"].status, ct_doctor.WARN, spelling)
+
+    @unittest.skipIf(IS_WINDOWS, MOCK_SPAWN_SKIP)
+    def test_allow_bundled_opt_out_probes_normally(self):
+        empty = self.fake_home / "empty-path-3"
+        empty.mkdir()
+        with self._candidates(self._benign()):
+            results = self._run({"PATH": str(empty), "CT_DOCTOR_ALLOW_BUNDLED": "1"})
+        self.assertEqual(results["sidecar-binary"].status, ct_doctor.PASS)
+        self.assertEqual(results["sidecar-mcp"].status, ct_doctor.PASS)
+
+    @unittest.skipIf(IS_WINDOWS, MOCK_SPAWN_SKIP)
+    def test_path_none_does_not_fire_gate(self):
+        # None = "caller did not specify PATH" (merged_env contract), so no
+        # override was attempted and the bundled candidate is probed.
+        pathless = self.fake_home / "pathless-bin"
+        pathless.mkdir()
+        self.patch_env("PATH", str(pathless))
+        with self._candidates(self._benign()):
+            results = self._run({"PATH": None})
+        self.assertEqual(results["sidecar-binary"].status, ct_doctor.PASS)
+        self.assertEqual(results["sidecar-mcp"].status, ct_doctor.PASS)
 
 
 class ReviewRegressionTests(DoctorTestCase):
