@@ -25,23 +25,28 @@ mkdir -p "$OUT"
 export HERMES_HOME="$HOME/hermes-home"
 export CURATED_VAULT_ROOT="$HOME/vault"
 section() { printf '\n== %s ==\n' "$*"; }
+# Setup must not fail silently: a broken step would make later checks vacuous.
+die() { echo "FAIL  setup: $*"; echo 'RESULT FAIL (setup)'; exit 1; }
 
 section 'scratch brain: onboard, migrate, real-gate config'
 printf '1\n0\n1\n' | curated-thoughts-mcp --onboard --vault "$HOME/vault" --force >"$OUT/onboard.log" 2>&1
 curated-thoughts-mcp >"$OUT/migrate.log" 2>&1 || true
+test -s "$HOME/.brain/brain.db" || die 'brain.db was not migrated'
 cfg="$HOME/.brain/config.json"
 # The Librarian's generation block has no env fallback, so the key is written
 # into this throwaway container's brain config for the deposits only, then
-# removed. The embedding key stays in the environment.
-jq --arg k "$ZAI_API_KEY" '
+# removed. The embedding key stays in the environment. jq reads the key as
+# env.ZAI_API_KEY, so it never appears in a process argument vector.
+jq '
   .embed_profile = {type: "external", base_url: "https://openrouter.ai/api/v1", model: "qwen/qwen3-embedding-4b"}
   | .generation = {provider: "external", external_url: "https://api.z.ai/api/coding/paas/v4",
-                   model_name: "GLM-5.3-FLASH", api_key: $k, model_path: null, timeout_secs: 120}' \
-  "$cfg" >"$cfg.tmp" && mv "$cfg.tmp" "$cfg"
+                   model_name: "GLM-5.3-FLASH", api_key: env.ZAI_API_KEY, model_path: null, timeout_secs: 120}' \
+  "$cfg" >"$cfg.tmp" || die 'brain config edit'
+mv "$cfg.tmp" "$cfg" || die 'brain config write'
 deposit() { # deposit <slug> <title> <body>
   ct wisdom deposit --yes --path "immutable-source-files/agents/e2e/$1.md" \
-    --title "$2" --body "$3" >>"$OUT/deposit.log" 2>&1
-  echo "deposit $1 rc=$?"
+    --title "$2" --body "$3" >>"$OUT/deposit.log" 2>&1 || die "deposit $1 (see deposit.log)"
+  echo "deposit $1 ok"
 }
 # Facts whose words the bare targets share (A6), plus distractors.
 deposit pnpm 'Run pnpm test before every commit' \
@@ -52,9 +57,11 @@ deposit tire 'Fleet tire pressure is 42 psi' \
   'The fleet tire pressure for all e2e fleet vehicles is 42 psi, checked cold every Monday.'
 deposit freeze 'Production deploy freeze starts Friday 15:00' \
   'Production deploys are frozen from Friday 15:00 until Monday 09:00 local time.'
-ct wisdom scheme activate instr1 >>"$OUT/deposit.log" 2>&1
+ct wisdom scheme activate instr1 >>"$OUT/deposit.log" 2>&1 || die 'scheme activate instr1'
 ct wisdom scheme status | tee "$OUT/scheme.txt"
-jq 'del(.generation.api_key)' "$cfg" >"$cfg.tmp" && mv "$cfg.tmp" "$cfg"
+grep -q '^active read scheme: instr1' "$OUT/scheme.txt" || die 'instr1 is not the active read scheme'
+jq 'del(.generation.api_key)' "$cfg" >"$cfg.tmp" || die 'brain config key removal'
+mv "$cfg.tmp" "$cfg" || die 'brain config write'
 
 section 'direct real-gate probes'
 for q in 'pnpm test' '.env.local' 'TASK.md'; do
@@ -100,8 +107,9 @@ mcp_servers:
     env:
       OPENROUTER_API_KEY: "${OPENROUTER_API_KEY}"
 EOF
-bash /home/tester/plugin/scripts/install.sh >"$OUT/install.log" 2>&1
-echo "install rc=$?"
+bash /home/tester/plugin/scripts/install.sh >"$OUT/install.log" 2>&1 || die 'plugin install (see install.log)'
+test -f "$HERMES_HOME/plugins/curated-thoughts/__init__.py" || die 'plugin files not installed'
+echo 'install ok'
 
 section 'workspace'
 W="$HOME/work"; mkdir -p "$W"; cd "$W" || exit 1
