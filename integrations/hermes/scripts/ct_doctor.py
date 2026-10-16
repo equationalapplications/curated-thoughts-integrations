@@ -180,21 +180,11 @@ def find_sidecar(env=None):
 def _merged_env(env=None):
     """Ambient os.environ with `env` overlaid — the spawn-time view.
 
-    Tests set CURATED_BRAIN_DIR by patching ambient os.environ while passing
-    an `env` that only overrides PATH; resolving through the merge keeps both
-    visible with `env` winning collisions. Note this OVERLAYS os.environ,
-    unlike `subprocess.run(env=...)` which replaces it.
+    Thin delegate to ct_env.merged_env, which owns the None / "" / missing
+    contract (issue #32). Kept as a doctor-local seam: tests patch it to pin
+    that each check resolves through the merged view.
     """
-    merged = dict(os.environ)
-    if env:
-        # GLM r3 (PR #31): drop None-valued keys. A None surviving into
-        # subprocess.run(env=...) raises TypeError, and {"PATH": None} would
-        # make shutil.which fall back to the AMBIENT PATH — a literal-None
-        # override must never do that. Semantics: None means "the caller did
-        # not specify this key" (ambient shows through), distinct from the
-        # documented "" suppression which HIDES the ambient value.
-        merged.update({k: v for k, v in env.items() if v is not None})
-    return merged
+    return ct_env.merged_env(env)
 
 
 def check_sidecar_binary(found=None, gated=False):

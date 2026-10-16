@@ -1862,6 +1862,79 @@ class StatusSnapshotTests(DoctorTestCase):
         snap = ct_status.snapshot(env={"CURATED_BRAIN_DIR": "\x00bad"})
         self.assertIn(snap["status"], (ct_status.OK, ct_status.DEGRADED, ct_status.UNKNOWN))
 
+    def test_snapshot_env_merges_over_ambient(self):
+        # Issue #32: snapshot(env=...) used to hand `env` to ct_env AS-IS, so
+        # a caller passing only CURATED_BRAIN_DIR got a view with no HOME and
+        # no PATH — replace semantics, unlike the doctor's merge. The view
+        # discovery sees must now carry the ambient keys too.
+        from unittest import mock
+
+        other = self.fake_home / "other-brain"
+        seen = {}
+        real = ct_env.find_sidecar
+
+        def spy(platform=None, env=None):
+            seen["env"] = env
+            return real(platform=platform, env=env)
+
+        with mock.patch.object(ct_env, "find_sidecar", side_effect=spy):
+            snap = ct_status.snapshot(env={"CURATED_BRAIN_DIR": str(other)})
+        self.assertEqual(snap["brain_dir"], str(other))
+        self.assertEqual(seen["env"].get("HOME"), os.environ.get("HOME"))
+        self.assertEqual(seen["env"].get("PATH"), os.environ.get("PATH"))
+
+
+class MergedEnvTests(unittest.TestCase):
+    """ct_env.merged_env: the one spawn-time env view (issue #32).
+
+    Pins the None / "" / missing contract the GLM r3 review of PR #31 asked
+    to carry over when the merge moved out of ct_doctor.
+    """
+
+    def setUp(self):
+        self._saved = dict(os.environ)
+        self.addCleanup(self._restore)
+        os.environ["CT_MERGE_AMBIENT"] = "ambient"
+        os.environ.pop("CT_MERGE_NEW", None)
+
+    def _restore(self):
+        os.environ.clear()
+        os.environ.update(self._saved)
+
+    def test_none_env_is_a_fresh_copy_of_ambient(self):
+        view = ct_env.merged_env()
+        self.assertEqual(view, dict(os.environ))
+        view["CT_MERGE_AMBIENT"] = "mutated"
+        self.assertEqual(os.environ["CT_MERGE_AMBIENT"], "ambient")
+
+    def test_missing_key_shows_ambient(self):
+        view = ct_env.merged_env({"CT_MERGE_NEW": "x"})
+        self.assertEqual(view["CT_MERGE_AMBIENT"], "ambient")
+        self.assertEqual(view["CT_MERGE_NEW"], "x")
+
+    def test_none_value_means_not_specified(self):
+        view = ct_env.merged_env({"CT_MERGE_AMBIENT": None, "CT_MERGE_NEW": None})
+        self.assertEqual(view["CT_MERGE_AMBIENT"], "ambient")
+        self.assertNotIn("CT_MERGE_NEW", view)
+        self.assertNotIn(None, view.values())
+
+    def test_empty_string_suppresses_ambient(self):
+        view = ct_env.merged_env({"CT_MERGE_AMBIENT": ""})
+        self.assertEqual(view["CT_MERGE_AMBIENT"], "")
+
+    def test_caller_value_wins(self):
+        view = ct_env.merged_env({"CT_MERGE_AMBIENT": "caller"})
+        self.assertEqual(view["CT_MERGE_AMBIENT"], "caller")
+
+    def test_caller_env_is_not_mutated(self):
+        env = {"CT_MERGE_AMBIENT": None}
+        ct_env.merged_env(env)
+        self.assertEqual(env, {"CT_MERGE_AMBIENT": None})
+
+    def test_doctor_delegate_matches(self):
+        env = {"CT_MERGE_AMBIENT": "", "CT_MERGE_NEW": None}
+        self.assertEqual(ct_doctor._merged_env(env), ct_env.merged_env(env))
+
 
 class ReviewRegressionTests(DoctorTestCase):
     """Pinned regressions from the PR #5 review."""

@@ -18,7 +18,6 @@ Stdlib only. Every entry point swallows exceptions and degrades to "unknown".
 
 from __future__ import annotations
 
-import os
 import sys
 from pathlib import Path
 
@@ -35,8 +34,12 @@ def snapshot(env=None):
     """Return a small status dict. Never raises.
 
     Keys: status, sidecar, brain_dir, vault, notes (list of short strings).
+
+    `env` (a mapping) is MERGED over os.environ through ct_env.merged_env —
+    the same view the doctor resolves (issue #32). Before, an env argument
+    REPLACED the view, so env={"CURATED_BRAIN_DIR": ...} saw no HOME and no
+    PATH. env=None is the ambient environment, as before.
     """
-    env = os.environ if env is None else env
     out = {
         "status": UNKNOWN,
         "sidecar": None,
@@ -45,14 +48,15 @@ def snapshot(env=None):
         "notes": [],
     }
     try:
-        path, resolved, _source = ct_env.find_sidecar(env=env)
+        view = ct_env.merged_env(env)
+        path, resolved, _source = ct_env.find_sidecar(env=view)
         out["sidecar"] = path
         if path is None:
             out["notes"].append("sidecar curated-thoughts-mcp not found")
         elif ct_env.looks_like_dev_build(resolved):
             out["notes"].append("sidecar is a development build, not an installed one")
 
-        paths = ct_env.resolve_brain_paths(env=env)
+        paths = ct_env.resolve_brain_paths(env=view)
         out["brain_dir"] = str(paths.brain_dir)
         if not paths.brain_dir.is_dir():
             out["notes"].append(f"brain dir missing: {paths.brain_dir}")
