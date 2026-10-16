@@ -38,6 +38,13 @@ format below is load-bearing: `## <version> — <date>`.
     From a bare path the gate reaches facts about that file or command, not
     a concept-level rule the path only implies. No query expansion is added
     here (INTENT rule 8).
+- Added: verbose mode covers autonomous work. With `CT_WISDOM_VERBOSE=1`,
+  each activity delivery, and each activity query that delivered nothing, is
+  recorded with `channel: "activity"`, the query CT received, the activity
+  label (`read src/x.py`), CT's gate and scores, and the delivered block.
+  Per-call rate and filter skips are not recorded. The log gains an optional
+  `activity` field (`scripts/ct_wisdom_verbose.py`, byte-identical with
+  Claude Code). With verbose off the tool result bytes are unchanged.
 - Added: `ct_ledger.LedgerCache.claim()`, an atomic check-and-add used by
   autonomous-work delivery and `ct_tool_dedup`, so parallel tool threads can
   never both show one fact. `ct_tool_dedup`'s output is unchanged.

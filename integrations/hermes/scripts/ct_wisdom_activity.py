@@ -23,6 +23,10 @@ Fail-closed classes (no CT call or no delivery, one debug line):
   spawn, exit, parse_error, budget, zero_hits, unsupported_result,
   hook_failed.
 
+Verbose mode (CT_WISDOM_VERBOSE=1, ct_wisdom_verbose) records each delivery
+and each query that delivered nothing with channel "activity"; per-call rate
+and filter skips are not recorded.
+
 Read-only: `ct` subprocess only (via ct_wisdom_live.match_wisdom). Stdlib
 only. Neither hook ever raises; the pre-hook always returns None (Hermes
 blocks a tool whose pre_tool_call callback raises).
@@ -43,6 +47,7 @@ from collections import OrderedDict, namedtuple
 import ct_ledger
 import ct_wisdom
 import ct_wisdom_live
+import ct_wisdom_verbose
 
 logger = logging.getLogger(__name__)
 
@@ -250,18 +255,21 @@ class ActivityState:
         self._lock = threading.Lock()
         self._sessions = OrderedDict()
 
+    def _state(self, session_id):
+        state = self._sessions.get(session_id)
+        if state is None:
+            state = (OrderedDict(), OrderedDict(), OrderedDict())
+            self._sessions[session_id] = state
+            while len(self._sessions) > SESSIONS_MAX:
+                self._sessions.popitem(last=False)
+        self._sessions.move_to_end(session_id)
+        return state
+
     def admit(self, session_id, api_request_id, key):
         """None when this call may start the step's query (and records it);
         else the failure class. A rejected call changes nothing."""
         with self._lock:
-            state = self._sessions.get(session_id)
-            if state is None:
-                state = (OrderedDict(), OrderedDict())
-                self._sessions[session_id] = state
-                while len(self._sessions) > SESSIONS_MAX:
-                    self._sessions.popitem(last=False)
-            self._sessions.move_to_end(session_id)
-            keys, steps = state
+            keys, steps, _ = self._state(session_id)
             if api_request_id in steps:
                 return "step_used"
             if key in keys:
@@ -274,6 +282,25 @@ class ActivityState:
             while len(steps) > STEP_IDS_MAX:
                 steps.popitem(last=False)
             return None
+
+    def peek(self, session_id, api_request_id, key):
+        """What admit() would answer, without recording anything."""
+        with self._lock:
+            keys, steps, _ = self._state(session_id)
+            if api_request_id in steps:
+                return "step_used"
+            return "seen_key" if key in keys else None
+
+    def first_report(self, session_id, api_request_id):
+        """True once per step: bounds verbose skip records to one per step."""
+        with self._lock:
+            _, _, reported = self._state(session_id)
+            if api_request_id in reported:
+                return False
+            reported[api_request_id] = True
+            while len(reported) > STEP_IDS_MAX:
+                reported.popitem(last=False)
+            return True
 
     def reset(self):
         with self._lock:
@@ -357,9 +384,15 @@ def _run_prefetch(p):
         p.done.set()
 
 
-def _skip(session_id, failure_class):
+def _skip(session_id, failure_class, record=False, **detail):
+    """Log one skip. With record=True it is also reported to verbose mode
+    (only for decisions about a real would-be query, never for the per-call
+    rate and filter checks, which would flood the user's terminal)."""
     logger.debug("wisdom-activity: skip session=%s class=%s",
                  session_id or "<empty>", failure_class)
+    if record:
+        _record_activity_skip(dict(detail, host="hermes", channel="activity",
+                                   session_id=session_id, reason=failure_class))
     return None
 
 
@@ -384,14 +417,19 @@ def _pre_tool_call(tool_name, args, session_id, tool_call_id, api_request_id):
         return _skip(session_id, "empty_id")
     if is_ct_tool(tool_name):
         return _skip(session_id, "ct_tool")
-    ledger = ct_ledger.LEDGER_CACHE.get(session_id)
-    if ledger is None:
-        return _skip(session_id, "no_ledger")
-    if ct_wisdom_live._BREAKER.is_open():
-        return _skip(session_id, "breaker_open")
     activity = activity_for(tool_name, args)
     if activity is None or not query_for(activity):
         return _skip(session_id, "no_activity")
+    ledger = ct_ledger.LEDGER_CACHE.get(session_id)
+    blocked = "no_ledger" if ledger is None else (
+        "breaker_open" if ct_wisdom_live._BREAKER.is_open() else None)
+    if blocked is not None:
+        # A would-be trigger that cannot run: verbose mode hears of it once
+        # per step; nothing is recorded in the key tracker.
+        report = (_STATE.peek(session_id, api_request_id, activity.key) is None
+                  and _STATE.first_report(session_id, api_request_id))
+        return _skip(session_id, blocked, record=report, query=query_for(activity),
+                     activity=activity.line)
     refused = _STATE.admit(session_id, api_request_id, activity.key)
     if refused is not None:
         return _skip(session_id, refused)
@@ -502,10 +540,22 @@ def splice(result, block):
 
 
 def _record_activity_delivery(event):
-    """Seam for the planned verbose mode: called exactly once per delivered
-    activity block. No-op here; wired to ct_wisdom_verbose.record_delivery
-    by whichever PR merges second."""
-    return None
+    """The one seam every activity delivery goes through: verbose mode
+    (ct_wisdom_verbose, a no-op unless CT_WISDOM_VERBOSE is on). Never
+    changes the delivered bytes; never raises."""
+    try:
+        ct_wisdom_verbose.record_delivery(event)
+    except Exception:  # pragma: no cover - the recorder never raises
+        pass
+
+
+def _record_activity_skip(event):
+    """Verbose record of an activity that queried (or would have) but
+    delivered nothing."""
+    try:
+        ct_wisdom_verbose.record_non_delivery(event)
+    except Exception:  # pragma: no cover - the recorder never raises
+        pass
 
 
 def on_transform_tool_result(**kwargs):
@@ -527,15 +577,16 @@ def _transform(result, session_id, tool_call_id):
         if p is None or p.session_id != session_id:
             return None
         del _pending[tool_call_id]
+    base = {"query": p.query, "activity": p.activity.line}
     if _splice_mode(result) is None:
-        return _skip(session_id, "unsupported_result")
+        return _skip(session_id, "unsupported_result", record=True, **base)
     if not p.done.wait(max(0.0, p.deadline - _clock())):
-        return _skip(session_id, "budget")
+        return _skip(session_id, "budget", record=True, **base)
     if p.failure is not None:
-        return _skip(session_id, p.failure)
+        return _skip(session_id, p.failure, record=True, **base)
     ledger = ct_ledger.LEDGER_CACHE.get(session_id)
     if ledger is None:
-        return _skip(session_id, "no_ledger")
+        return _skip(session_id, "no_ledger", record=True, **base)
     for item, superseded in render_candidates(
             p.result["entries"], p.result["corrections"], ledger):
         block = render_activity_block(item, superseded, p.activity)
@@ -543,17 +594,22 @@ def _transform(result, session_id, tool_call_id):
             continue
         out = splice(result, block)
         if out is None:
-            return _skip(session_id, "unsupported_result")
+            return _skip(session_id, "unsupported_result", record=True, **base)
         claimed = ct_ledger.LEDGER_CACHE.claim(session_id, [item["id"]])
         if claimed is None:
-            return _skip(session_id, "no_ledger")
+            return _skip(session_id, "no_ledger", record=True, **base)
         if not claimed:
             continue  # another tool thread delivered it first
         logger.debug("wisdom-activity: deliver session=%s ids=%s", session_id, item["id"])
         _record_activity_delivery({
-            "kind": "activity", "session_id": session_id, "fact_ids": [item["id"]],
-            "block": block, "query": p.query, "tool_name": p.tool_name,
-            "api_request_id": p.api_request_id, "gate": None,
+            "host": "hermes", "channel": "activity", "session_id": session_id,
+            "query": p.query, "activity": p.activity.line, "result": p.result,
+            "ledger": sorted(ledger), "delivered": [item["id"]], "block": block,
+            "tool_name": p.tool_name, "api_request_id": p.api_request_id,
         })
         return out
-    return _skip(session_id, "zero_hits")
+    # Nothing new survived: report against the ledger as it is now, including
+    # anything a concurrent tool thread just claimed.
+    after = ct_ledger.LEDGER_CACHE.get(session_id) or ledger
+    return _skip(session_id, "zero_hits", record=True, result=p.result,
+                 ledger=sorted(after), **base)

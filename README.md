@@ -131,6 +131,8 @@ keyed to what the agent is doing:
   context means no delivery).
 - **Cost:** the CT call starts when the tool starts, so it overlaps the
   tool; the 3 s timeout and the breaker are shared with live delivery.
+- **Verbose mode** (below) records these deliveries with channel
+  `activity` and the activity label (`read src/x.py`).
 
 ### Verbose mode
 

@@ -13,6 +13,7 @@ import os
 import random
 import shlex
 import sys
+import tempfile
 import threading
 import unittest
 from pathlib import Path
@@ -24,6 +25,7 @@ import ct_ledger  # noqa: E402
 import ct_wisdom  # noqa: E402
 import ct_wisdom_activity as act  # noqa: E402
 import ct_wisdom_live  # noqa: E402
+import ct_wisdom_verbose  # noqa: E402
 
 ORIGINAL_SEAM = act._record_activity_delivery
 
@@ -388,16 +390,17 @@ class TestDelivery(Harness):
         out = self.post(READ_RESULT)
         self.assertEqual(len(self.deliveries), 1)
         ev = self.deliveries[0]
-        self.assertEqual(set(ev), {"kind", "session_id", "fact_ids", "block", "query",
-                                   "tool_name", "api_request_id", "gate"})
-        self.assertEqual(ev["kind"], "activity")
-        self.assertEqual(ev["fact_ids"], ["f1"])
+        self.assertEqual(set(ev), {"host", "channel", "session_id", "query", "activity",
+                                   "result", "ledger", "delivered", "block", "tool_name",
+                                   "api_request_id"})
+        self.assertEqual((ev["host"], ev["channel"]), ("hermes", "activity"))
+        self.assertEqual(ev["delivered"], ["f1"])
         self.assertEqual(ev["query"], "src/x.py")
         self.assertEqual(ev["block"], json.loads(out)[act.ACTIVITY_RESULT_KEY])
         self.assertEqual(ev["api_request_id"], "t:api:1")
 
-    def test_default_seam_is_noop(self):
-        self.assertIsNone(ORIGINAL_SEAM({"kind": "activity", "fact_ids": ["f1"]}))
+    def test_default_seam_returns_none(self):
+        self.assertIsNone(ORIGINAL_SEAM({"host": "hermes", "channel": "activity"}))
 
     def test_other_calls_in_step_pass_through(self):
         ct_ledger.LEDGER_CACHE.put("s1", set())
@@ -661,6 +664,105 @@ class TestRegistration(unittest.TestCase):
         self.assertEqual(self.plugin._transform_tool_result(tool_name="ct"), "D")
         self.assertEqual(self.plugin._transform_tool_result(tool_name="read_file"), "A")
         self.assertEqual(calls, ["dedup", "dedup", "act"])
+
+
+class TestVerboseWiring(Harness):
+    """Seam wired to ct_wisdom_verbose (spec "Seam for verbose mode")."""
+
+    def setUp(self):
+        super().setUp()
+        act._record_activity_delivery = ORIGINAL_SEAM  # undo the Harness stub
+        self.tmp = tempfile.mkdtemp()
+        self.log = os.path.join(self.tmp, "v.jsonl")
+        self.notices = []
+        prev = ct_wisdom_verbose.set_sink(self.notices.append)
+        self.addCleanup(ct_wisdom_verbose.set_sink, prev)
+        for key in ("CT_WISDOM_VERBOSE", "CT_WISDOM_VERBOSE_LOG"):
+            self.addCleanup(self._restore_env, key, os.environ.get(key))
+        os.environ["CT_WISDOM_VERBOSE_LOG"] = self.log
+
+    @staticmethod
+    def _restore_env(key, value):
+        if value is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = value
+
+    def events(self):
+        if not os.path.exists(self.log):
+            return []
+        with open(self.log, encoding="utf-8") as handle:
+            return [json.loads(line) for line in handle if line.strip()]
+
+    def run_delivery(self, verbose):
+        if verbose:
+            os.environ["CT_WISDOM_VERBOSE"] = "1"
+        else:
+            os.environ.pop("CT_WISDOM_VERBOSE", None)
+        act.reset_state()
+        ct_ledger.LEDGER_CACHE.put("s1", set())
+        args = {"path": "src/x.py", "content": "SECRET_CONTENT_VALUE"}
+        self.pre(tool="write_file", args=args)
+        return self.post(json.dumps({"bytes_written": 3}), tool="write_file", args=args)
+
+    def test_off_bytes_unchanged_and_nothing_written(self):
+        off = self.run_delivery(False)
+        self.assertEqual(self.events(), [])
+        self.assertEqual(self.notices, [])
+        on = self.run_delivery(True)
+        self.assertEqual(off, on)
+
+    def test_on_records_activity_delivery(self):
+        out = self.run_delivery(True)
+        events = self.events()
+        self.assertEqual(len(events), 1)
+        ev = events[0]
+        self.assertEqual((ev["host"], ev["channel"], ev["event"]), ("hermes", "activity", "delivery"))
+        self.assertEqual(ev["query"], "src/x.py")
+        self.assertEqual(ev["activity"], "write src/x.py")
+        self.assertEqual(ev["delivered_ids"], ["f1"])
+        self.assertEqual(ev["block"], json.loads(out)[act.ACTIVITY_RESULT_KEY])
+        self.assertEqual([m["outcome"] for m in ev["matched"]], ["delivered"])
+        with open(self.log, encoding="utf-8") as handle:
+            raw = handle.read()
+        self.assertNotIn("SECRET_CONTENT_VALUE", raw)
+        self.assertEqual(len(self.notices), 1)
+        self.assertIn("[activity]", self.notices[0])
+
+    def test_on_records_skip_after_query(self):
+        os.environ["CT_WISDOM_VERBOSE"] = "1"
+        ct_ledger.LEDGER_CACHE.put("s1", {"f1"})
+        self.pre()
+        self.assertIsNone(self.post(READ_RESULT))
+        ev = self.events()
+        self.assertEqual(len(ev), 1)
+        self.assertEqual((ev[0]["channel"], ev[0]["event"]), ("activity", "skip"))
+        self.assertEqual(ev[0]["reason"], "deduped")
+        self.assertEqual(ev[0]["query"], "src/x.py")
+
+    def test_rate_and_filter_skips_are_not_recorded(self):
+        os.environ["CT_WISDOM_VERBOSE"] = "1"
+        ct_ledger.LEDGER_CACHE.put("s1", set())
+        self.pre(call="c1")
+        self.post(READ_RESULT, call="c1")
+        self.events_before = len(self.events())
+        self.pre(call="c2", req="r2")  # seen_key
+        self.pre(call="c3", args={"path": "other.py"})  # step_used
+        self.pre(call="c4", req="r4", tool="web_search", args={"query": "x"})  # no_activity
+        self.pre(call="c5", req="r5", tool="mcp__curated-thoughts__curated_recall_context",
+                 args={"query": "x"})  # ct_tool
+        self.assertEqual(len(self.events()), self.events_before)
+
+    def test_breaker_open_recorded_once_for_a_would_be_trigger(self):
+        os.environ["CT_WISDOM_VERBOSE"] = "1"
+        ct_ledger.LEDGER_CACHE.put("s1", set())
+        for _ in range(ct_wisdom_live.BREAKER_FAILS):
+            ct_wisdom_live._BREAKER.record_failure()
+        self.pre(call="c1")
+        self.pre(call="c2", args={"path": "y.py"})  # same step: not a second record
+        ev = self.events()
+        self.assertEqual([(e["event"], e["reason"]) for e in ev], [("skip", "breaker_open")])
+        self.assertEqual(ev[0]["query"], "src/x.py")
 
 
 if __name__ == "__main__":

@@ -393,15 +393,26 @@ Every one means "no CT call or no delivery", one debug line
 - Claude Code: only the shared `ct_ledger.py` copy changes; its hooks do not call
   `claim`. Its autonomous-work leg is a later spec.
 
-### Seam for the planned verbose mode
+### Verbose mode (wired; spec `2026-10-16-wisdom-verbose-mode-design.md`)
 
-Every activity delivery goes through one local function,
-`_record_activity_delivery(event)`, called exactly once per delivered block with
-`{"kind": "activity", "session_id", "fact_ids", "block", "query", "tool_name",
-"api_request_id", "gate": <CT score/gate fields if present, else None>}`. It is a no-op in
-this PR. The parallel verbose-mode PR adds `scripts/ct_wisdom_verbose.py` with
-`record_delivery(event)`; whichever PR merges second wires the seam to it. Nothing else
-in this design depends on verbose mode.
+Verbose mode (PR #53) merged first, so this PR wires the seam. Every activity delivery
+goes through one function, `_record_activity_delivery(event)`, which calls
+`ct_wisdom_verbose.record_delivery` with `host: "hermes"`, `channel: "activity"`,
+`session_id`, `query` (the bare target CT received), `activity` (the label, for example
+`read src/x.py`), `result` (CT's answer, with its `gate` and scores), `ledger`,
+`delivered` and `block`. `_record_activity_skip(event)` calls `record_non_delivery` with
+the same fields and a `reason`.
+
+- **Recorded skips:** every outcome of a query that ran (`budget`, the CT failure
+  classes, `zero_hits` → `deduped`/`no_match`, `unsupported_result`, `no_ledger`), and,
+  at `pre_tool_call`, `no_ledger` / `breaker_open` for a would-be trigger (a new key in a
+  step that has not queried), at most once per step.
+- **Not recorded:** the per-call rate and filter checks (`empty_id`, `ct_tool`,
+  `no_activity`, `seen_key`, `step_used`). They fire on most tool calls and would flood
+  the user's terminal without saying anything about wisdom.
+- `ct_wisdom_verbose.build_event` gains one optional allowlisted field, `activity`
+  (byte-identical in both copies). Tool args other than the target never reach the log.
+- With verbose off nothing is written and the tool result bytes are unchanged (tested).
 
 ## Alignment with INTENT.md
 
@@ -492,5 +503,4 @@ this machine; if not run it is recorded as pending in the PR.
 ## Out of scope
 
 - Other hosts' autonomous legs (DSH, OpenCode, Claude Code, OpenClaw).
-- Verbose mode itself (only the seam).
 - A CT-side activity query mode or batch form (investigation "CT-side support").

@@ -13,6 +13,9 @@ heading format below is load-bearing: `## <version> — <date>`.
   the Hermes reference (shared-script parity gate). No behavior change:
   Claude Code's hooks do not call it. It is there for Claude Code's later
   autonomous-work leg (Hermes 0.6.0 uses it).
+- Changed: the vendored `scripts/ct_wisdom_verbose.py` records an optional
+  `activity` field when an event carries one (Hermes autonomous-work
+  delivery). Claude Code's events never do, so its log is unchanged.
 
 ## 0.3.0 — 2026-10-16
 
