@@ -20,9 +20,9 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { createServer, type IncomingMessage, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { delimiter, dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { gzipSync } from 'node:zlib';
 import type { ProbeRecord } from './fixtures/probe-shared.js';
@@ -77,6 +77,10 @@ interface CapturedRequest {
   body: { messages?: ChatMessage[]; tools?: Array<{ function?: { name?: string; description?: string } }> };
 }
 
+/** Optional per-test script: return a tool call to stream instead of text. */
+type ProviderScript = (body: CapturedRequest['body']) => { name: string; args: Record<string, unknown> } | null;
+let providerScript: ProviderScript | null = null;
+
 interface FakeProvider {
   baseURL: string;
   requests: CapturedRequest[];
@@ -111,6 +115,7 @@ async function startFakeProvider(): Promise<FakeProvider> {
     }
     requests.push({ url, body });
     const created = Math.floor(Date.now() / 1000);
+    const scripted = body.stream ? providerScript?.(body) ?? null : null;
     if (!body.stream) {
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(
@@ -130,6 +135,30 @@ async function startFakeProvider(): Promise<FakeProvider> {
     const chunk = (extra: object) =>
       `data: ${JSON.stringify({ id: 'fake-1', object: 'chat.completion.chunk', created, model: 'fake-model', ...extra })}\n\n`;
     res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' });
+    if (scripted) {
+      // Scripted tool call (wisdom N3 contract): one tool_calls delta, then
+      // finish_reason 'tool_calls'; the host runs the tool and calls back.
+      res.write(
+        chunk({
+          choices: [
+            {
+              index: 0,
+              delta: {
+                role: 'assistant',
+                tool_calls: [
+                  { index: 0, id: `call_${requests.length}`, type: 'function', function: { name: scripted.name, arguments: JSON.stringify(scripted.args) } },
+                ],
+              },
+              finish_reason: null,
+            },
+          ],
+        }),
+      );
+      res.write(chunk({ choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }] }));
+      res.write(chunk({ choices: [], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } }));
+      res.end('data: [DONE]\n\n');
+      return;
+    }
     res.write(chunk({ choices: [{ index: 0, delta: { role: 'assistant', content: 'probe-ok' }, finish_reason: null }] }));
     res.write(chunk({ choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] }));
     res.write(chunk({ choices: [], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } }));
@@ -712,6 +741,161 @@ describe('OpenCode host contract', () => {
       } finally {
         await registry.close();
       }
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  // Leg spec LD11 (cross-harness parity, OpenCode leg; AC 2/7/10/11 at the
+  // host): the REAL built payload (lib/ incl. the vendored ct-wisdom-core),
+  // loaded through the v0 loader file, against the real pinned binary. CT is
+  // a test-only stub `ct` on PATH (tests/fixtures/ct-stub.mjs) plus a fake CT
+  // MCP server; the fake provider scripts one recall tool call per turn.
+  test(
+    'wisdom live delivery: bootstrap + chat.message append + MCP N3 rewrite, exactly once across processes',
+    async () => {
+      const sb = makeSandboxTracked('wisdom');
+      const pkgRoot = join(HERE, '..', '..');
+      const builtEntry = join(pkgRoot, 'lib', 'src', 'index.js');
+      if (!existsSync(builtEntry) || !existsSync(join(pkgRoot, 'lib', 'ct-wisdom-core', 'index.js'))) {
+        throw new Error('built payload missing: run `pnpm run build` (core built first) before the host contract');
+      }
+      // Install the payload the way registration.ts does: lib/ + package.json.
+      const payloadDir = join(sb.dataHome, 'curated-thoughts', 'opencode');
+      cpSync(join(pkgRoot, 'lib'), join(payloadDir, 'lib'), { recursive: true });
+      cpSync(join(pkgRoot, 'package.json'), join(payloadDir, 'package.json'));
+      const payloadIndex = join(payloadDir, 'lib', 'src', 'index.js');
+      const loaderPath = join(sb.configHome, 'opencode', 'plugins', 'curated-thoughts.js');
+      mkdirSync(dirname(loaderPath), { recursive: true });
+      writeFileSync(loaderPath, loaderSource(payloadIndex));
+
+      // Test-only `ct` on PATH.
+      const stubBin = join(sb.root, 'bin');
+      mkdirSync(stubBin, { recursive: true });
+      cpSync(join(HERE, '..', 'fixtures', 'ct-stub.mjs'), join(stubBin, 'ct'));
+      chmodSync(join(stubBin, 'ct'), 0o755);
+      const ctLog = join(sb.root, 'ct.jsonl');
+      const mcpLog = join(sb.root, 'mcp.jsonl');
+      const fact = (id: string) => ({ id, title: `Fact ${id}`, text: `The body of ${id}.` });
+      const extraEnv = {
+        PATH: `${stubBin}${delimiter}${process.env.PATH ?? ''}`, // POSIX-only stub (ubuntu CI job)
+        CURATED_BRAIN_DIR: join(sb.root, 'brain'),
+        CT_STUB_LOG: ctLog,
+        CT_STUB_RECALL: JSON.stringify([fact('hc-boot-1')]),
+        // The stub ignores --exclude: the plugin's own post-filter must hold.
+        CT_STUB_MATCH: JSON.stringify([fact('hc-live-1'), fact('hc-live-2')]),
+        CT_STUB_IGNORE_EXCLUDE: '1',
+        CT_HC_RECALL_IDS: 'hc-live-1,hc-recall-1',
+        CT_HC_MCP_LOG: mcpLog,
+      };
+
+      const RECALL_TOOL = 'curated-thoughts_curated_recall_context';
+      writeOpencodeConfig(sb, provider, {
+        mcp: { 'curated-thoughts': { type: 'local', command: [process.execPath, join(FIXTURES, 'ct-mcp-server.ts')], enabled: true } },
+        permission: { 'curated-thoughts_*': 'allow' },
+      });
+      providerScript = (body) => {
+        const messages = body.messages ?? [];
+        const last = messages.at(-1);
+        const offersRecall = toolNames({ url: '', body }).includes(RECALL_TOOL);
+        if (offersRecall && last?.role === 'user' && textOf(last.content).includes('CALL_RECALL')) {
+          return { name: RECALL_TOOL, args: { query: 'tire pressure' } };
+        }
+        return null;
+      };
+      const requestsBefore = provider.requests.length;
+      let first: RunResult;
+      let second: RunResult;
+      let turnOneEnd = 0;
+      try {
+        first = await runOpencode(bin, sb, ['run', 'CALL_RECALL turn one: what is the tire pressure?'], extraEnv);
+        turnOneEnd = provider.requests.length;
+        second = await runOpencode(bin, sb, ['run', '--continue', 'CALL_RECALL turn two: and again?'], extraEnv);
+      } finally {
+        providerScript = null;
+      }
+      for (const [name, run] of [['first', first], ['second', second]] as const) {
+        if (run.exitCode !== 0 || run.timedOut) console.error(`[${name}] exit=${run.exitCode}\n${run.stderr.slice(-4000)}`);
+        expect(run.timedOut).toBe(false);
+        expect(run.exitCode).toBe(0);
+      }
+
+      const chat = (from: number, to: number) =>
+        provider.requests.slice(from, to).filter((r) => toolNames(r).includes(RECALL_TOOL));
+      // Parts joined by newlines (textOf concatenates them, which would glue
+      // a part's last line to the next part's first).
+      const partsText = (content: unknown) =>
+        Array.isArray(content) ? content.map((p) => textOf([p])).join('\n') : textOf(content);
+      const all = (r: CapturedRequest) => (r.body.messages ?? []).map((m) => partsText(m.content)).join('\n');
+      const toolResults = (r: CapturedRequest) =>
+        (r.body.messages ?? []).filter((m) => m.role === 'tool').map((m) => partsText(m.content));
+      const t1 = chat(requestsBefore, turnOneEnd);
+      const t2 = chat(turnOneEnd, provider.requests.length);
+      expect(t1.length).toBeGreaterThanOrEqual(2); // user turn + after-tool callback
+      expect(t2.length).toBeGreaterThanOrEqual(2);
+      const LIVE = 'source.kind: curated-thoughts/wisdom';
+      const BOOT = 'source.kind: curated-thoughts/wisdom-bootstrap';
+      const lines = (text: string, line: string) => text.split('\n').filter((l) => l.trim() === line).length;
+
+      // (a) Turn 1, first request: bootstrap block + live block, each once;
+      // the bootstrap fact is not live-delivered again; the stub's
+      // already-delivered ids never re-enter (post-filter).
+      const t1first = all(t1[0]!);
+      expect(lines(t1first, BOOT)).toBe(1);
+      expect(lines(t1first, LIVE)).toBe(1);
+      expect(countOccurrences(t1first, 'ct-fact:hc-boot-1')).toBe(1);
+      expect(countOccurrences(t1first, 'ct-fact:hc-live-1')).toBe(1);
+      expect(countOccurrences(t1first, 'ct-fact:hc-live-2')).toBe(1);
+
+      // (b) N3 on the real MCP shape: the tool result the host sent back
+      // stubs the id delivered this turn and trails the new one.
+      expect(readFileSync(mcpLog, 'utf8')).toContain('curated_recall_context');
+      const t1tool = toolResults(t1.at(-1)!).join('\n');
+      expect(t1tool).toContain('"in_context":true');
+      expect(t1tool).toContain('already in context: ct-fact:hc-live-1');
+      expect(t1tool).toContain('<!-- ct-fact:hc-recall-1 -->');
+      expect(t1tool).toContain('Recalled body of hc-recall-1.');
+      expect(t1tool).not.toContain('Recalled body of hc-live-1.');
+
+      // (c) Turn 2 in a NEW process: nothing redelivered — the ledger came
+      // from the persisted history; both recall ids are stubbed now.
+      const t2first = all(t2[0]!);
+      expect(lines(t2first, BOOT)).toBe(1);
+      expect(lines(t2first, LIVE)).toBe(1);
+      for (const id of ['hc-boot-1', 'hc-live-1', 'hc-live-2']) {
+        expect(countOccurrences(t2first, `<!-- ct-fact:${id} -->`), id).toBe(1);
+      }
+      const t2tool = toolResults(t2.at(-1)!).at(-1) ?? '';
+      expect(t2tool).toContain('already in context: ct-fact:hc-recall-1');
+      expect(t2tool).toContain('already in context: ct-fact:hc-live-1');
+      const ctCalls = readFileSync(ctLog, 'utf8').split('\n').filter(Boolean).map((l) => (JSON.parse(l) as { argv: string[] }).argv);
+      const matches = ctCalls.filter((a) => a[0] === 'wisdom' && !a.includes('--help'));
+      expect(matches.length).toBe(2);
+      expect(matches[1]).toEqual(expect.arrayContaining(['--exclude=hc-live-1', '--exclude=hc-live-2', '--exclude=hc-boot-1', '--exclude=hc-recall-1']));
+      expect(ctCalls.filter((a) => a[0] === 'recall').length).toBe(1); // bootstrap: first turn only
+
+      // (d) Persisted: our parts are synthetic, host-format ids, on user rows.
+      const list = await runOpencode(bin, sb, ['session', 'list', '--format', 'json'], extraEnv);
+      const sessions = JSON.parse(list.stdout) as Array<{ id: string }>;
+      expect(sessions.length).toBe(1);
+      const exported = await runOpencode(bin, sb, ['export', sessions[0]!.id], extraEnv);
+      const dump = JSON.parse(exported.stdout.slice(exported.stdout.indexOf('{'))) as {
+        messages: Array<{ info: { role: string }; parts: Array<{ id: string; type: string; text?: string; synthetic?: boolean }> }>;
+      };
+      const ours = dump.messages.flatMap((m) =>
+        m.parts.filter((p) => p.type === 'text' && typeof p.text === 'string' && (lines(p.text, LIVE) + lines(p.text, BOOT)) > 0).map((p) => ({ role: m.info.role, p })),
+      );
+      expect(ours.length).toBe(2);
+      for (const { role, p } of ours) {
+        expect(role).toBe('user');
+        expect(p.synthetic).toBe(true);
+        expect(p.id).toMatch(/^prt_[0-9a-f]{12}[0-9A-Za-z]{14}$/);
+      }
+      record('wisdomLiveDelivery', {
+        turnOneRequests: t1.length,
+        turnTwoRequests: t2.length,
+        persistedWisdomParts: ours.length,
+        ctMatchCalls: matches.length,
+      });
     },
     TEST_TIMEOUT_MS,
   );

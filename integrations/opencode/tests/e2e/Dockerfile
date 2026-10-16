@@ -7,7 +7,7 @@
 ARG BASE_IMAGE=ct-e2e-base
 FROM ${BASE_IMAGE}
 
-ARG OPENCODE_VERSION=1.18.31
+ARG OPENCODE_VERSION=1.18.35
 
 # The shared base ends as the non-root tester; the global npm install needs
 # root (same pattern as the deepseek harness Dockerfile).

@@ -5,6 +5,12 @@
  * allowed as `import type` in source, which tsc erases.
  *
  * The lib/ half is skipped until `pnpm run build` has produced lib/src/index.js.
+ *
+ * One exception, in SOURCE only: the workspace-internal shared core
+ * `@equational-applications/ct-wisdom-core` (a `file:` dep). The build
+ * (scripts/vendor_core.mjs) copies its compiled lib into lib/ct-wisdom-core/
+ * and rewrites the specifier to a relative path — the same staging release.yml
+ * performs — so the SHIPPED payload still carries no bare specifier at all.
  */
 import { describe, it, expect } from 'vitest';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
@@ -23,8 +29,15 @@ function runtimeSpecifiers(source: string): string[] {
   return out;
 }
 
+const VENDORED_CORE = '@equational-applications/ct-wisdom-core';
+
 function isAllowed(spec: string): boolean {
   return spec.startsWith('node:') || spec.startsWith('./') || spec.startsWith('../');
+}
+
+/** Source-only: the vendored core is the single permitted bare specifier. */
+function isAllowedInSource(spec: string): boolean {
+  return isAllowed(spec) || spec === VENDORED_CORE;
 }
 
 function filesIn(dir: string, ext: string): string[] {
@@ -42,12 +55,19 @@ describe('runtime imports', () => {
   });
 
   it('src/*.ts has only node: and relative runtime imports', () => {
-    const files = filesIn(join(PKG_ROOT, 'src'), '.ts');
+    const files = [...filesIn(join(PKG_ROOT, 'src'), '.ts'), ...filesIn(join(PKG_ROOT, 'src', 'wisdom-live'), '.ts')];
     expect(files.length).toBeGreaterThan(0);
     for (const f of files) {
-      const bad = runtimeSpecifiers(readFileSync(f, 'utf8')).filter((s) => !isAllowed(s));
+      const bad = runtimeSpecifiers(readFileSync(f, 'utf8')).filter((s) => !isAllowedInSource(s));
       expect(bad, f).toEqual([]);
     }
+  });
+
+  it('the source exception is exactly one specifier', () => {
+    expect(isAllowedInSource(VENDORED_CORE)).toBe(true);
+    expect(isAllowedInSource('@equational-applications/ct-wisdom-core/lib/index.js')).toBe(false);
+    expect(isAllowedInSource('@equational-applications/other')).toBe(false);
+    expect(isAllowedInSource('left-pad')).toBe(false);
   });
 
   const built = existsSync(join(PKG_ROOT, 'lib', 'src', 'index.js'));
@@ -55,14 +75,27 @@ describe('runtime imports', () => {
     // The plugin entry and everything it pulls in: lib/src/* plus ct_env.
     const files = [
       ...filesIn(join(PKG_ROOT, 'lib', 'src'), '.js'),
+      ...filesIn(join(PKG_ROOT, 'lib', 'src', 'wisdom-live'), '.js'),
       join(PKG_ROOT, 'lib', 'scripts', 'ct_env.js'),
     ];
+    let referencesCore = false;
     for (const f of files) {
       const text = readFileSync(f, 'utf8');
       // Any quoted reference to the SDK as a module specifier (comments aside).
       expect(text, f).not.toMatch(/['"]@opencode-ai\/plugin['"]/);
-      const bad = runtimeSpecifiers(text).filter((s) => !isAllowed(s));
+      // The vendored core must have been rewritten to a relative specifier.
+      expect(text, f).not.toMatch(/['"]@equational-applications\/ct-wisdom-core['"]/);
+      const specs = runtimeSpecifiers(text);
+      const bad = specs.filter((s) => !isAllowed(s));
       expect(bad, f).toEqual([]);
+      // Every relative runtime import resolves to a file that actually ships.
+      for (const s of specs.filter((x) => !x.startsWith('node:'))) {
+        expect(existsSync(resolve(dirname(f), s)), `${f} -> ${s}`).toBe(true);
+        if (s.includes('ct-wisdom-core/')) referencesCore = true;
+      }
     }
+    // src imports the shared core, so the built payload must reach the vendored copy.
+    expect(referencesCore).toBe(true);
+    expect(existsSync(join(PKG_ROOT, 'lib', 'ct-wisdom-core', 'index.js'))).toBe(true);
   });
 });

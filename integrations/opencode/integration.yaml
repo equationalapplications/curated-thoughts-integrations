@@ -1,6 +1,6 @@
 id: opencode
 name: Curated Thoughts for OpenCode
-version: 0.1.2
+version: 0.2.0
 status: implemented
 language: node
 requires_sidecar: ">=2.5"

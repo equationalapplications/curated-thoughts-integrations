@@ -31,10 +31,16 @@ ctx="$(mktemp -d)"
 trap 'rm -rf "$ctx"' EXIT
 mkdir -p "$ctx/dist"
 # lib/ is gitignored and the packager ships what is on disk, so build first.
-(cd "$PKG" && pnpm -s build)
+# The opencode build vendors the shared core into lib/ct-wisdom-core
+# (scripts/vendor_core.mjs), so the core must be built before it.
+# (`pnpm run`, not `pnpm -s`: newer pnpm releases reject the -s shorthand.)
+(cd "$REPO/packages/ct-wisdom-core" && pnpm run build >/dev/null)
+(cd "$PKG" && pnpm run build >/dev/null)
 VERSION="$(node -p "require('$PKG/package.json').version")"
 (cd "$REPO" && python3 tools/ct_ci.py package --tag "opencode-v$VERSION" --out "$ctx/dist" >/dev/null)
 cp "$HERE/e2e.sh" "$HERE/zai-provider.json" "$ctx/dist/"
+# Test-only ct stub for the live wisdom step (never part of the release).
+cp "$PKG/tests/fixtures/ct-stub.mjs" "$ctx/dist/"
 cp "$HERE/Dockerfile" "$ctx/"
 
 docker build -q \

@@ -50,7 +50,7 @@ export const ENV_BRAIN_CONFIG = 'CURATED_BRAIN_CONFIG';
  */
 const TILDE_HOME_RE = /^~(?=[/\\]|$)/;
 
-function expandHome(p: string, env: NodeJS.ProcessEnv = process.env): string {
+export function expandHome(p: string, env: NodeJS.ProcessEnv = process.env): string {
   /** Expand a leading ~ the way CT's doctor does, then return a string. */
   if (TILDE_HOME_RE.test(p)) {
     const home = env['HOME'] ?? env['USERPROFILE'] ?? homedir();
@@ -286,6 +286,54 @@ function whichOnPath(
     }
   }
   return null;
+}
+
+/**
+ * EVERY existing PATH entry naming `name` (shutil.which returns only the
+ * first). Ported from the DSH integration (integrations/deepseek/scripts/
+ * ct_env.ts) for the v1 `ct` discovery walk (src/wisdom.ts):
+ * - win32 appends PATHEXT candidates (plus the bare name) per dir;
+ * - POSIX requires the X_OK bit (no-op on win32, where every file runs);
+ * - the env lookup is case-insensitive (win32 `Path`-key darkness) and the
+ *   name comparison is case-insensitive on win32 too.
+ */
+export function allPathMatches(
+  name: string,
+  env: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform = osPlatform(),
+): string[] {
+  const isWin = platform === 'win32' || platform.startsWith('win');
+  const pathSep = isWin ? ';' : ':';
+  const pathValue =
+    env['PATH'] ??
+    env[Object.keys(env).find((k) => k.toLowerCase() === 'path') ?? ''] ??
+    '';
+  const dirs = pathValue.split(pathSep).filter((d) => d.length > 0);
+  const exts = isWin
+    ? [
+        '',
+        ...(env.PATHEXT ?? '.COM;.EXE;.BAT;.CMD')
+          .split(';')
+          .filter((e) => e.length > 0)
+          .map((e) => e.toLowerCase()),
+      ]
+    : [''];
+  const out: string[] = [];
+  for (const dir of dirs) {
+    for (const ext of exts) {
+      const candidate = join(dir, name + ext);
+      if (isWin) {
+        // CreateProcess-style matching is case-insensitive; compare the
+        // basename instead of trusting the caller's casing of `name`.
+        const base = candidate.split(/[\\/]/).pop() ?? candidate;
+        if (!base.toLowerCase().includes(name.toLowerCase() + ext)) continue;
+        if (existsSync(candidate)) out.push(candidate);
+      } else if (existsSync(candidate) && isExecutable(candidate, platform)) {
+        out.push(candidate);
+      }
+    }
+  }
+  return out;
 }
 
 export function findSidecar(

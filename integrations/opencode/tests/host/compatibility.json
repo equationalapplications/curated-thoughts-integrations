@@ -1,6 +1,6 @@
 {
-  "opencode": "1.18.31",
-  "pluginSdk": "1.18.31",
+  "opencode": "1.18.35",
+  "pluginSdk": "1.18.35",
   "bun": "1.4.2",
   "nodeFallback": "22.23.2",
   "hostEmbeddedRuntime": {
@@ -9,10 +9,10 @@
     "note": "process.versions as seen by a plugin running inside the opencode 1.18.31 binary. `bun` above is the test runner (bun test), not the plugin runtime."
   },
   "install": {
-    "opencode": "npm install --prefix <dir> opencode-ai@1.18.31",
+    "opencode": "npm install --prefix <dir> opencode-ai@1.18.35",
     "bun": "npm install --prefix <dir> bun@1.4.2",
     "binary": "OPENCODE_BIN=<dir>/node_modules/.bin/opencode; fallback: `opencode` on PATH (Bun.which). The test fails if neither resolves, and fails if `opencode --version` != `opencode` above.",
-    "homeSideEffect": "Installing opencode-ai@1.18.31 creates empty ~/.config/opencode, ~/.local/share/opencode/{log,repos}, ~/.cache/opencode/bin and ~/.local/state/opencode under the installing process's HOME. Run the install with HOME pointed at a throwaway directory.",
+    "homeSideEffect": "Installing opencode-ai@1.18.35 creates empty ~/.config/opencode, ~/.local/share/opencode/{log,repos}, ~/.cache/opencode/bin and ~/.local/state/opencode under the installing process's HOME. Run the install with HOME pointed at a throwaway directory.",
     "verifiedWith": {
       "platform": "darwin-x64",
       "prefix": "<session scratchpad>/host (outside the repo; not the user's HOME)",
@@ -40,7 +40,15 @@
     "bareNpmSpecNote": "Record-only. A `plugin: [\"<name>@<version>\"]` entry is installed from the configured registry (HOME/.npmrc and NPM_CONFIG_REGISTRY both pointed at a local fake registry) into ~/.cache/opencode/packages/<name>@<version>/node_modules/<name> — not ~/.cache/opencode/node_modules as spec §4 says — and its named export is invoked. The host also fetched @opencode-ai/plugin from the registry.",
     "optionsPropagated": true,
     "optionsNote": "The [\"<spec>\", { ... }] tuple form (tested with a file:// URL spec) delivers the object verbatim as the plugin's second argument. Under the v0 loader file the second argument is undefined.",
-    "pluginInputKeys": ["$", "client", "directory", "experimental_workspace", "project", "serverUrl", "worktree"],
+    "pluginInputKeys": [
+      "$",
+      "client",
+      "directory",
+      "experimental_workspace",
+      "project",
+      "serverUrl",
+      "worktree"
+    ],
     "systemTransform": {
       "fires": true,
       "sessionIdPresentOnChatCall": true,
@@ -82,11 +90,21 @@
     "provider": {
       "fixture": "@ai-sdk/openai-compatible custom provider pointed at a local HTTP server; no credentials.",
       "minimalResponse": "POST /v1/chat/completions with stream:true answered as text/event-stream: one delta chunk {role:'assistant',content}, one chunk with finish_reason 'stop', one usage chunk (choices: []), then `data: [DONE]`. That makes `opencode run` exit 0."
+    },
+    "wisdomLiveDelivery": {
+      "source": "read from the bundled JS of opencode-darwin-x64@1.18.35 (2026-10-16); leg spec docs/superpowers/specs/2026-10-16-opencode-wisdom-parity-leg-design.md H1-H8; asserted end-to-end by the 'wisdom live delivery' host-contract test",
+      "chatMessageOrdering": "createUserMessage assigns part ids, triggers chat.message({sessionID, agent, model, messageID, variant}, {message, parts}), then persists the message and EVERY part in output.parts (validation failures are only logged). The in-flight message is not in the history while the hook runs.",
+      "pluginPartIds": "parts pushed by a plugin skip the host's id assignment; they must carry a prt_<12 hex ascending><14 base62> id",
+      "historyEndpoint": "GET /session/{id}/message without limit returns every message; compaction appends a summary:true assistant message and never deletes rows; pruning keeps tool state.output",
+      "compactingHook": "experimental.session.compacting({sessionID}, {context: [], prompt}) fires before the summary call; the auto-continue user message after compaction does not pass through chat.message",
+      "mcpToolExecuteAfter": "for MCP tools the hook output is the raw CallToolResult {content: [{type:'text', text}], ...}; the host builds the persisted state.output from content[].text AFTER the hook",
+      "mcpToolName": "<sanitize(server)>_<sanitize(tool)>; with the shipped server name: curated-thoughts_curated_recall_context",
+      "subagents": "the task tool prompts a child session (Session.parentID set), which fires chat.message with the child sessionID"
     }
   },
   "verification": {
     "executedLocally": [
-      "binary is the pinned release (opencode --version == 1.18.31)",
+      "binary is the pinned release (opencode --version == 1.18.35)",
       "namedExportInvoked via the v0 loader file",
       "systemTransformFired",
       "sessionIdPresentOnChatCall",
@@ -102,5 +120,6 @@
       "Tarball round trip: the payload was bundled straight into <data dir>/curated-thoughts/opencode/lib/src/index.js, not packed with tools/ct_ci_package.py and unpacked (no plugin source exists before Task 3). The loader-file delivery path itself was exercised.",
       "A session-less transform call: none occurs in `opencode run`, so behaviour with sessionID absent was not observed."
     ]
-  }
+  },
+  "pinNote": "Bumped 1.18.31 -> 1.18.35 (2026-10-16, opencode 0.2.0 / cross-harness parity decision 2): npm latest for opencode-ai and @opencode-ai/plugin was 1.18.35 at freeze; the plugin SDK hook types are byte-identical 1.18.31<->1.18.35. Findings below that name 1.18.31 were first recorded there and are re-verified against 1.18.35 by the host contract on every run."
 }

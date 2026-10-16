@@ -19,7 +19,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const PKG_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const REPO_ROOT = resolve(PKG_ROOT, '..', '..');
@@ -126,6 +126,8 @@ const ARCHIVE_FILES = [
   'lib/src/index.js',
   'lib/scripts/ct_doctor.js',
   'lib/scripts/install.js',
+  // The vendored shared core (scripts/vendor_core.mjs; release.yml stages it too).
+  'lib/ct-wisdom-core/index.js',
   'scripts/install.sh',
   'skills/curated-thoughts-usage/SKILL.md',
   'skills/curated-thoughts-ops/SKILL.md',
@@ -204,6 +206,25 @@ describe('the unpacked archive runs with no node_modules (the real user situatio
       if (entry.endsWith('.js')) walk(join(unpacked, 'lib', 'src', entry));
     }
     expect(seen.size).toBeGreaterThan(0);
+  });
+
+  it('the unpacked lib/src/index.js loads with no node_modules and exports CuratedThoughts', (ctx) => {
+    requireArchive(ctx);
+    const entry = pathToFileURL(join(unpacked, 'lib', 'src', 'index.js')).href;
+    const proc = spawnSync(
+      'node',
+      [
+        '--input-type=module',
+        '-e',
+        "const m = await import(process.argv[1]); process.exit(typeof m.CuratedThoughts === 'function' ? 0 : 3);",
+        entry,
+      ],
+      { cwd: unpacked, encoding: 'utf8', env: { ...process.env, NODE_PATH: '' }, timeout: 60_000 },
+    );
+    const output = `${proc.stdout}\n${proc.stderr}`;
+    expect(output).not.toContain('ERR_MODULE_NOT_FOUND');
+    expect(output).not.toContain('Cannot find package');
+    expect(proc.status, output).toBe(0);
   });
 
   it('node lib/scripts/ct_doctor.js check runs; only the pre-flight check degrades without better-sqlite3', (ctx) => {
