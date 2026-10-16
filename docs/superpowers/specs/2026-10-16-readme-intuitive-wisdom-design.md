@@ -38,7 +38,8 @@ and keeps links out of column 2.
    - Plain-language summary: a short bootstrap block at session start; then, once per user
      turn, CT (`ct wisdom match`) decides which curated facts are relevant to the message.
      The not-yet-seen facts are added to that turn, never to the system prompt, and each fact
-     reaches the session at most once. Agent-run `curated_recall_context` results show
+     is in context at most once (on Hermes, DeepSeek and OpenClaw a fact whose marker was
+     compacted out may arrive again; OpenCode and Claude Code never re-deliver). Agent-run `curated_recall_context` results show
      repeats as "already in context" stubs. Needs CT ≥ 3.3.0; older or absent CT is a
      silent no-op.
    - Shared budgets: ≤ 2 facts per turn, ≤ 1200-char block, ≤ 12 per session (corrections

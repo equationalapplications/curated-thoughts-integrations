@@ -14,12 +14,14 @@ discipline.
   and exposes the Curated Thoughts tool surface as
   `mcp__curated-thoughts__<tool>`.
 - **Cached health snapshot** — a named prompt context whose text is the
-  latest health probe, refreshed on every `agent/created` (the lifecycle
-  event at the 0.2.0-rc.2 pin; the pre-0.2 `agent/session-start` has no
-  dispatcher there). The model knows whether memory is usable before its
-  first tool call.
+  latest completed health probe, refreshed on every `agent/created` (the
+  lifecycle event at the 0.2.0-rc.2 pin; the pre-0.2 `agent/session-start`
+  has no dispatcher there). A probe that throws leaves the previous snapshot
+  in place, or an empty block before the first probe completes. A degraded
+  result is a completed probe and replaces the snapshot. The model knows
+  whether memory is usable before its first tool call.
 - **Intuitive Wisdom live delivery** (0.4.0): relevant facts arrive once per
-  user turn, each exactly once. See [Intuitive Wisdom](#intuitive-wisdom)
+  user turn, never repeating one already in context. See [Intuitive Wisdom](#intuitive-wisdom)
   below.
 - **Three skills** — `curated-thoughts-usage`, `curated-thoughts-ops`,
   `curated-thoughts-sidecar` (verbatim from Hermes).
@@ -62,7 +64,9 @@ Needs the standalone `ct` CLI from Curated Thoughts ≥ 3.3.0
   session log (`agent.session.deriveMessages()`), plus the auto-inclusion
   block's ids, never from its own decisions. A session continued with
   `--session-id`, or after a restart, is not re-delivered a fact it already
-  has. The agent id survives compaction.
+  has. The agent id survives compaction, but a fact whose marker was
+  compacted out of the session log may be delivered again (Hermes
+  semantics).
 - **Recall dedup.** When the agent calls `curated_recall_context` itself
   (`tools/post-execute`), entries already in context become one-line stubs;
   the rest of CT's envelope is kept as is.

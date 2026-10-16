@@ -34,7 +34,7 @@ Each integration ships the same layers, adapted to its harness:
    Curated Thoughts correctly: tool routing, write paths (vault notes vs
    wisdom entries), and OKF frontmatter hygiene.
 5. **Intuitive Wisdom**: curated facts arrive in context when they are
-   relevant, each exactly once. See the next section.
+   relevant, never repeating one already in context. See the next section.
 
 ## Intuitive Wisdom
 
@@ -49,10 +49,13 @@ Wisdom, every integration does two things:
   They never go into the system prompt, so the prompt and its provider cache
   stay untouched.
 
-A fact reaches a session **exactly once**. Each delivered fact carries a
-`ct-fact:<id>` marker, and the integration skips any fact the session already
-has, whether it came from the bootstrap block, an earlier turn, or a recall.
-When the agent runs `curated_recall_context` itself, entries it already has
+A fact is in the session's context **at most once**. Each delivered fact
+carries a `ct-fact:<id>` marker, and the integration skips any fact the
+session already has, whether it came from the bootstrap block, an earlier
+turn, or a recall. Compaction is the one exception, and it differs by host
+(see the table below). On Hermes, DeepSeek Harness and OpenClaw, a fact whose
+marker was compacted out of context may be delivered again. OpenCode and
+Claude Code never re-deliver it. When the agent runs `curated_recall_context` itself, entries it already has
 come back as one-line "already in context" stubs.
 
 Relevance is Curated Thoughts' job: integrations never score, rank or
@@ -75,7 +78,7 @@ silent no-op and the session runs as before.
 | Host | Trigger | Delivered as | Resume / restart | Compaction |
 |------|---------|--------------|------------------|------------|
 | [Hermes](integrations/hermes/) | `pre_llm_call` hook | appended to the user turn | a restored session (`/branch`, or `/resume` after a restart) gets no live delivery | delivery continues; a fact compacted out of context may arrive again |
-| [DeepSeek Harness](integrations/deepseek/README.md#intuitive-wisdom) | first `agent/pre-step` step of a turn | a user message persisted in the session log | `--session-id` and restarts keep delivering, with no repeats (the record is rebuilt from the session log) | delivery continues; the record is whatever the session log still holds |
+| [DeepSeek Harness](integrations/deepseek/README.md#intuitive-wisdom) | first `agent/pre-step` step of a turn | a user message persisted in the session log | `--session-id` and restarts keep delivering, with no repeats (the record is rebuilt from the session log) | delivery continues; a fact compacted out of the session log may arrive again |
 | [OpenCode](integrations/opencode/README.md#intuitive-wisdom) | `chat.message` hook | a `synthetic: true` part on the user message | `--continue` and restarts keep delivering, with no repeats | delivered facts are carried forward on purpose, so a compacted-out fact is never re-delivered |
 | [Claude Code](integrations/claude-code/README.md#intuitive-wisdom) | `UserPromptSubmit` hook | `additionalContext` | `--resume`, `--continue`, `/resume` and forks turn live delivery **off** for the life of the session; `/clear` starts a fresh session | `/compact` keeps delivering, with no repeats |
 | [OpenClaw](integrations/openclaw/README.md) | `before_prompt_build`, user turns only | `prependContext` inside the user message | a new process gets no live delivery for a session until its bootstrap is settled | the session key survives; a fact compacted out of context may arrive again |
