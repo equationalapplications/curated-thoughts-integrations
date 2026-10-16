@@ -168,9 +168,14 @@ export function nodeSpawnFn(env: NodeJS.ProcessEnv = process.env): SpawnFn {
 
 export const RECALL_TOOL_SUFFIX = '__curated_recall_context';
 
-/** Inner wiki-entry envelope: the parsed shape N3 reads and rewrites. */
+/**
+ * Inner recall envelope: the FULL parsed object (every CT key, in CT's key
+ * order), of which N3 reads and rewrites only `wiki_entries`. Narrowing it to
+ * `{ wiki_entries }` dropped every sibling key from the rewritten result.
+ */
 interface InnerEnvelope {
   wiki_entries: Array<Record<string, unknown>>;
+  [key: string]: unknown;
 }
 
 function parseEnvelope(result: unknown):
@@ -192,10 +197,9 @@ function parseEnvelope(result: unknown):
   }
   const obj = inner as Record<string, unknown>;
   if (!Array.isArray(obj.wiki_entries)) return null;
-  return {
-    outer,
-    inner: { wiki_entries: obj.wiki_entries as Array<Record<string, unknown>> },
-  };
+  // Keep the whole object: JSON.parse preserves key order, so re-serializing
+  // it changes only what the rewrite replaces (OpenCode leg parity).
+  return { outer, inner: obj as InnerEnvelope };
 }
 
 export function isRecallToolName(name: unknown): boolean {
