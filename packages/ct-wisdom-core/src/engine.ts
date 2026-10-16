@@ -20,6 +20,7 @@ import type {
   SessionRef,
   WisdomMatchResult,
 } from './types.js';
+import type { VerboseTurn } from './verbose.js';
 
 /** Query derived from the user message: sanitized + char-capped. */
 export function buildQuery(userMessage: unknown): string {
@@ -37,13 +38,25 @@ export async function onUserTurn(
   userMessage: unknown,
   breaker: Breaker = new Breaker(),
 ): Promise<string | null> {
+  // Verbose mode: report this exit to the adapter's recorder, if it has one.
+  // Never feeds back into delivery; a throwing recorder is ignored.
+  const report = (turn: Omit<VerboseTurn, 'sessionId'>): null => {
+    if (typeof host.recordVerbose === 'function') {
+      try {
+        host.recordVerbose({ sessionId: typeof session?.id === 'string' ? session.id : '', ...turn });
+      } catch {
+        /* fail quietly (INTENT rule 4) */
+      }
+    }
+    return null;
+  };
   // Invariant 3: no session identity — nothing is trackable, deliver nothing.
   if (!session || typeof session.id !== 'string' || session.id === '') {
-    return null;
+    return report({ kind: 'skip', reason: 'no_session' });
   }
   // Latching OFF switch (GLM r2): CC resume marks the session OFF-for-life in
   // the store; this fires before any bootstrap check and must not re-enable.
-  if (!host.deliveryEnabled(session)) return null;
+  if (!host.deliveryEnabled(session)) return report({ kind: 'skip', reason: 'delivery_off' });
 
   // N4 source of truth; cached BEFORE any early return (m1): degraded turns
   // still dedup agent-initiated CT calls in the N3 transform.
@@ -51,11 +64,15 @@ export async function onUserTurn(
   host.cacheLedger(session, ledger);
 
   // Fail closed on restored sessions with no known bootstrap (Hermes M2).
-  if (host.restored(session) && !ledger.knownBootstrap) return null;
-  if (host.wisdomMatchAbsent() || breaker.isOpen()) return null;
+  const ledgerIds = [...ledger.idsMostRecentFirst];
+  if (host.restored(session) && !ledger.knownBootstrap) {
+    return report({ kind: 'skip', reason: 'restored_unknown_bootstrap', ledgerIds });
+  }
+  if (host.wisdomMatchAbsent()) return report({ kind: 'skip', reason: 'capability_missing', ledgerIds });
+  if (breaker.isOpen()) return report({ kind: 'skip', reason: 'breaker_open', ledgerIds });
 
   const query = buildQuery(userMessage);
-  if (query === '') return null;
+  if (query === '') return report({ kind: 'skip', reason: 'empty_query', ledgerIds });
 
   // No per-session cap (removed 2026-10-16): every turn asks for a full
   // turn's worth; the per-turn limits and the ledger dedup bound delivery.
@@ -67,7 +84,7 @@ export async function onUserTurn(
   if (attempt.outcome !== 'ok' || !attempt.result) {
     if (attempt.outcome === 'timeout_or_exit') breaker.recordFailure();
     if (attempt.outcome === 'spawn') host.resetDiscoveryAndProbeCaches(); // n3
-    return null;
+    return report({ kind: 'skip', reason: attempt.outcome === 'ok' ? 'parse_error' : attempt.outcome, query, ledgerIds });
   }
   breaker.recordSuccess();
 
@@ -82,7 +99,9 @@ export async function onUserTurn(
   const match: WisdomMatchResult = { entries, corrections };
 
   const { text, deliveredIds } = renderBlock(match);
-  if (text.trim() === '') return null;
+  if (text.trim() === '') {
+    return report({ kind: 'skip', reason: 'zero_hits', query, result: attempt.result, ledgerIds });
+  }
 
   host.deliver(session, text);
   if (deliveredIds.length > 0) {
@@ -99,6 +118,7 @@ export async function onUserTurn(
       knownBootstrap: ledger.knownBootstrap,
     });
   }
+  report({ kind: 'delivery', reason: null, query, result: attempt.result, ledgerIds, deliveredIds: [...deliveredIds], block: text });
   return text;
 }
 

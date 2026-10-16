@@ -201,6 +201,39 @@ describe('apply', () => {
     expect(msg.content).toEqual([{ type: 'text', text: block }]);
   });
 
+  it('wires the verbose recorder only when CT_WISDOM_VERBOSE is on (and the message bytes are the same)', async () => {
+    const block = '**T** <!-- ct-fact:fact_0123456789abcdef01234567 -->\nbody';
+    const claimed = [{ id: 'u1', role: 'user', content: [{ type: 'text', text: 'hi' }], source: { kind: 'user' } }];
+    const run = async (on: boolean) => {
+      const before = process.env.CT_WISDOM_VERBOSE;
+      const beforeLog = process.env.CT_WISDOM_VERBOSE_LOG;
+      process.env.CT_WISDOM_VERBOSE = on ? '1' : '0';
+      process.env.CT_WISDOM_VERBOSE_LOG = '/dev/null/never-written.jsonl';
+      try {
+        const mm = mockCtx();
+        vi.mocked(runUserTurn).mockClear();
+        vi.mocked(runUserTurn).mockResolvedValueOnce(block);
+        apply(mm.ctx as unknown as Parameters<typeof apply>[0], {} as Parameters<typeof apply>[1]);
+        const decision = (await mm.preStepListeners[0](
+          { agent: { id: 'agent-1', session: { deriveMessages: () => [] } }, messages: claimed, turn: 1, step: 1 },
+          async () => ({ kind: 'enter', messages: [...claimed] }),
+        )) as { messages: Array<Record<string, unknown>> };
+        const adapterArg = vi.mocked(runUserTurn).mock.calls[0]![0] as { recordVerbose?: unknown };
+        return { content: decision.messages[1].content, recorder: typeof adapterArg.recordVerbose };
+      } finally {
+        if (before === undefined) delete process.env.CT_WISDOM_VERBOSE;
+        else process.env.CT_WISDOM_VERBOSE = before;
+        if (beforeLog === undefined) delete process.env.CT_WISDOM_VERBOSE_LOG;
+        else process.env.CT_WISDOM_VERBOSE_LOG = beforeLog;
+      }
+    };
+    const off = await run(false);
+    const on = await run(true);
+    expect(off.recorder).toBe('undefined');
+    expect(on.recorder).toBe('function');
+    expect(on.content).toEqual(off.content);
+  });
+
   it('registers three skills', () => {
     apply(m.ctx as unknown as Parameters<typeof apply>[0], {} as Parameters<typeof apply>[1]);
     const names = m.skillRegistrations.map((s) => s.name).sort();

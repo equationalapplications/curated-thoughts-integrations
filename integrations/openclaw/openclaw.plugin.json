@@ -2,7 +2,7 @@
   "id": "curated-thoughts",
   "name": "Curated Thoughts",
   "description": "Curated Thoughts memory for OpenClaw: CT MCP sidecar, skills, bootstrap memory block and Intuitive Wisdom live delivery.",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "skills": [
     "skills"
   ],

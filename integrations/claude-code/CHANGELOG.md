@@ -6,6 +6,28 @@ heading format below is load-bearing: `## <version> — <date>`.
 
 ## Unreleased
 
+## 0.3.0 — 2026-10-16
+
+- Added: Verbose mode for Intuitive Wisdom (opt-in, off by default). With
+  `CT_WISDOM_VERBOSE=1`, every live-delivery decision is recorded: the
+  delivered block with its fact ids, titles, provenance and CT's scores, or
+  the reason nothing was delivered (`deduped`, `no_match`,
+  `gate_uncalibrated`, `budget`, `breaker_open`, a timeout, ...). It goes to a
+  local JSON Lines log (`CT_WISDOM_VERBOSE_LOG` overrides the path) and to a
+  channel the user sees and the model does not. Verbose output never changes
+  the system prompt, the delivered block or any tool result; with verbose off
+  the hooks behave and return exactly as before (tests compare both).
+  Spec: `docs/superpowers/specs/2026-10-16-wisdom-verbose-mode-design.md`.
+  On Claude Code the notice is the `UserPromptSubmit` hook's top-level
+  `systemMessage`, shown in the transcript ("… says: Curated Thoughts
+  wisdom: …") and never sent to the model (verified in Claude Code 2.1.301).
+  The log is `${CLAUDE_PLUGIN_DATA}/wisdom/ct-wisdom-verbose.jsonl`. Reader:
+  `python3 scripts/ct_wisdom_log.py --host claude-code [-n N] [-f]` (outside
+  a hook it finds the log under `~/.claude/plugins/data/curated-thoughts*/`).
+  `additionalContext` is byte-identical with verbose on or off.
+- Changed: the shared `scripts/ct_wisdom_live.py` keeps CT's `gate` and
+  `score` for the log (never rendered).
+
 ## 0.2.1 — 2026-10-16
 
 - Changed: Intuitive Wisdom live delivery has no per-session cap. The

@@ -65,6 +65,17 @@ Note: OpenCode's auxiliary calls, such as title generation, re-read the
 session, so they also see delivered parts. This affects nothing except those
 calls.
 
+### Verbose mode
+
+Set `CT_WISDOM_VERBOSE=1` before starting `opencode` to get a TUI toast per
+turn: what was delivered (with titles) or why nothing was. Toasts are not
+session parts, so the model never sees them. Each decision is also appended
+to `$XDG_DATA_HOME/opencode/log/ct-wisdom-verbose.jsonl` (default
+`~/.local/share/opencode/log/`; override: `CT_WISDOM_VERBOSE_LOG`). Read it
+with `node lib/ct-wisdom-core/cli/ct-wisdom-log.js --host opencode [-n 20] [-f] [--block]`
+from the installed plugin directory. Under `opencode run` there is no TUI, so
+only the log is written. See the [spec](../../docs/superpowers/specs/2026-10-16-wisdom-verbose-mode-design.md).
+
 ## Install
 
 Download the `opencode-v<version>` release tarball from the Curated Thoughts

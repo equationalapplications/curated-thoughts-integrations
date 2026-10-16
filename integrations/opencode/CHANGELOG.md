@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+## 0.3.0 — 2026-10-16
+
+- Added: Verbose mode for Intuitive Wisdom (opt-in, off by default). With
+  `CT_WISDOM_VERBOSE=1`, every live-delivery decision is recorded: the
+  delivered block with its fact ids, titles, provenance and CT's scores, or
+  the reason nothing was delivered (`deduped`, `no_match`,
+  `gate_uncalibrated`, `budget`, `breaker_open`, a timeout, ...). It goes to a
+  local JSON Lines log (`CT_WISDOM_VERBOSE_LOG` overrides the path) and to a
+  channel the user sees and the model does not. Verbose output never changes
+  the system prompt, the delivered block or any tool result; with verbose off
+  the hooks behave and return exactly as before (tests compare both).
+  Spec: `docs/superpowers/specs/2026-10-16-wisdom-verbose-mode-design.md`.
+  On OpenCode the notice is a TUI toast (`client.tui.showToast`): what was
+  delivered, with titles, or why nothing was. The log is
+  `$XDG_DATA_HOME/opencode/log/ct-wisdom-verbose.jsonl` (default
+  `~/.local/share/opencode/log/`), next to OpenCode's own logs. Reader:
+  `node lib/ct-wisdom-core/cli/ct-wisdom-log.js --host opencode` from the
+  installed plugin directory.
+
 ## 0.2.1 — 2026-10-16
 
 - Changed: Intuitive Wisdom live delivery has no per-session cap. The

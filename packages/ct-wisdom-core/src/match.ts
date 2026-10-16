@@ -68,7 +68,9 @@ export function parseMatchStdout(stdout: string): WisdomMatchResult | null {
     const obj = parsed as Record<string, unknown>;
     const entries = Array.isArray(obj.entries) ? obj.entries : [];
     const corrections = Array.isArray(obj.corrections) ? obj.corrections : [];
+    const gate = typeof obj.gate === 'string' ? { gate: obj.gate } : {};
     return {
+      ...gate,
       entries: entries.filter(
         (e): e is WisdomMatchResult['entries'][number] =>
           e !== null && typeof e === 'object' && typeof (e as { id?: unknown }).id === 'string',

@@ -72,7 +72,7 @@ export type HookHandler = (event: never, ctx: never) => unknown;
 export interface OpenClawApiLike {
   id: string;
   pluginConfig?: Record<string, unknown>;
-  logger?: { warn?(message: string): void; debug?(message: string): void };
+  logger?: { warn?(message: string): void; info?(message: string): void; debug?(message: string): void };
   on(hookName: string, handler: HookHandler, opts?: { timeoutMs?: number; priority?: number }): void;
   registerAgentToolResultMiddleware?(
     handler: (event: never, ctx: never) => unknown,

@@ -28,6 +28,7 @@ import {
   type Ledger,
   type MatchOutcome,
   type SessionRef,
+  type VerboseTurn,
   type SpawnFn,
   type WisdomMatchResult,
 } from '@equational-applications/ct-wisdom-core';
@@ -149,6 +150,8 @@ export interface TurnInput {
 export interface AdapterDeps {
   spawnFn: SpawnFn;
   locator: CtLocator;
+  /** Verbose-mode recorder; set only when CT_WISDOM_VERBOSE is on. */
+  recordVerbose?: (turn: VerboseTurn) => void;
 }
 
 const LRU_MAX = 256;
@@ -169,7 +172,12 @@ export class OpenClawWisdomAdapter implements HostAdapter {
   /** null = not probed yet; true = `ct wisdom match` present; false = absent (latched). */
   private capable: boolean | null = null;
 
-  constructor(private readonly deps: AdapterDeps) {}
+  /** Verbose mode only (absent when off, so the adapter is unchanged). */
+  declare readonly recordVerbose?: (turn: VerboseTurn) => void;
+
+  constructor(private readonly deps: AdapterDeps) {
+    if (deps.recordVerbose) this.recordVerbose = deps.recordVerbose;
+  }
 
   setTurn(sessionId: string, input: TurnInput): void {
     lruSet(this.turns, sessionId, input);
