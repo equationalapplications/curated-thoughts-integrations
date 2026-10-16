@@ -709,5 +709,128 @@ class MainDispatchTests(AdapterTestCase):
         self.assertIsNone(cc.handle("garbage", env=self.env))
 
 
+# ---------------------------------------------------------------------------
+# verbose mode (spec 2026-10-16-wisdom-verbose-mode-design.md, D3/D8)
+# ---------------------------------------------------------------------------
+
+SECRET = "sk-cc-SECRET-never-logged-5555"
+
+
+class VerboseTests(AdapterTestCase):
+    """`respond` is what main() writes. Verbose adds only a top-level
+    `systemMessage` (user-only); `additionalContext` stays byte-identical."""
+
+    SCENARIOS = (
+        ("delivery", {"entries": [item("b"), item("c")], "corrections": []}, None),
+        ("deduped", {"entries": [item("a")], "corrections": []}, None),
+        ("no_match", {"gate": "semantic-v1:m", "entries": [], "corrections": []}, None),
+        ("timeout", None, "timeout"),
+    )
+
+    def setUp(self):
+        super().setUp()
+        import ct_wisdom_verbose
+
+        self.V = ct_wisdom_verbose
+        self.log = os.path.join(self.data, "wisdom", ct_wisdom_verbose.LOG_NAME)
+
+    def run_scenarios(self, on):
+        env = dict(self.env, ANTHROPIC_API_KEY=SECRET, CT_WISDOM_VERBOSE="1" if on else "0")
+        outs = []
+        for name, result, failure in self.SCENARIOS:
+            sid = "%s-%s" % (SID[:8], name)
+            self.recall_entries = [("Ta", "body a", "a")]
+            cc.session_start({"session_id": sid, "hook_event_name": "SessionStart",
+                              "source": "startup", "cwd": "/tmp/project"}, env=env)
+            self.match_result = (result, failure)
+            outs.append((name, cc.respond(prompt_payload(session_id=sid), env=env)))
+        return outs
+
+    def events(self):
+        if not os.path.exists(self.log):
+            return []
+        with open(self.log, encoding="utf-8") as handle:
+            return [json.loads(line) for line in handle]
+
+    @staticmethod
+    def model_visible(outs):
+        return [(name, (out or {}).get("hookSpecificOutput")) for name, out in outs]
+
+    def test_off_output_is_identical_to_handle(self):
+        off = self.run_scenarios(False)
+        self.assertFalse(os.path.exists(self.log))
+        for name, out in off:
+            self.assertNotIn("systemMessage", out or {}, name)
+        self.assertIsNotNone(off[0][1])
+        self.assertEqual([out is None for _, out in off], [False, True, True, True])
+
+    def test_on_adds_system_message_and_keeps_context_bytes(self):
+        off = self.run_scenarios(False)
+        on = self.run_scenarios(True)  # SessionStart(startup) reseeds each store
+        self.assertEqual(self.model_visible(on), self.model_visible(off))
+        delivered_ctx = off[0][1]["hookSpecificOutput"]["additionalContext"]
+        self.assertIn(delivered_ctx, on[0][1]["systemMessage"])
+        self.assertTrue(on[0][1]["systemMessage"].startswith("Curated Thoughts wisdom: delivered 2"))
+        self.assertEqual(set(on[1][1]), {"systemMessage"})
+        self.assertIn("nothing delivered (deduped)", on[1][1]["systemMessage"])
+        self.assertEqual([(e["host"], e["channel"], e["event"], e["reason"]) for e in self.events()], [
+            ("claude-code", "UserPromptSubmit", "delivery", None),
+            ("claude-code", "UserPromptSubmit", "skip", "deduped"),
+            ("claude-code", "UserPromptSubmit", "skip", "no_match"),
+            ("claude-code", "UserPromptSubmit", "skip", "timeout"),
+        ])
+        first = self.events()[0]
+        self.assertEqual(first["block"], delivered_ctx)
+        self.assertEqual(first["query"], "what about deploys?")
+        self.assertEqual(first["delivered_ids"], ["b", "c"])
+
+    def test_early_skips_are_recorded(self):
+        env = dict(self.env, CT_WISDOM_VERBOSE="1")
+        cc.respond(prompt_payload(), env=env)  # no store yet
+        out = cc.respond(prompt_payload(agent_id="sub-1"), env=env)
+        self.assertIn("nothing delivered (provenance)", out["systemMessage"])
+        self.assertEqual([e["reason"] for e in self.events()], ["no_store", "provenance"])
+
+    def test_post_tool_use_unchanged_by_verbose(self):
+        env = dict(self.env, CT_WISDOM_VERBOSE="1")
+        self.start(boot=["a"])
+        self.assertEqual(cc.respond(tool_payload([entry("a")]), env=env),
+                         cc.handle(tool_payload([entry("a")]), env=self.env))
+
+    def test_recorder_failures_never_change_the_output(self):
+        off = self.run_scenarios(False)
+
+        def boom(*a, **k):
+            raise RuntimeError("recorder down")
+
+        orig = self.V._append
+        self.V._append = boom
+        self.addCleanup(setattr, self.V, "_append", orig)
+        orig_fmt = self.V.format_notice
+        self.V.format_notice = boom
+        self.addCleanup(setattr, self.V, "format_notice", orig_fmt)
+        self.assertEqual(self.run_scenarios(True), off)
+
+    def test_no_env_or_keys_logged(self):
+        on = self.run_scenarios(True)
+        with open(self.log, encoding="utf-8") as handle:
+            raw = handle.read()
+        self.assertNotIn(SECRET, raw)
+        self.assertNotIn("ANTHROPIC_API_KEY", raw)
+        self.assertNotIn(SECRET, json.dumps(on))
+
+    def test_main_writes_respond_output(self):
+        import io
+
+        env = dict(self.env, CT_WISDOM_VERBOSE="1")
+        payload = prompt_payload()
+        stdin, stdout = io.StringIO(json.dumps(payload)), io.StringIO()
+        self._patch(sys, "stdin", stdin)
+        self._patch(sys, "stdout", stdout)
+        self._patch(cc.ct_env, "merged_env", lambda e=None: env)
+        cc.main()
+        self.assertIn("systemMessage", json.loads(stdout.getvalue()))
+
+
 if __name__ == "__main__":
     unittest.main()

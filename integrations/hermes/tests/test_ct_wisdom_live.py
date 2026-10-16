@@ -13,8 +13,10 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / "scripts"))
@@ -382,6 +384,134 @@ class TestPreLlmCall(LiveHarness, unittest.TestCase):
         ct_wisdom_live.match_wisdom = boom
         self.boot["s1"] = ""
         self.assertIsNone(self.hook())
+
+
+# ---------------------------------------------------------------------------
+# verbose mode (spec 2026-10-16-wisdom-verbose-mode-design.md, D8)
+# ---------------------------------------------------------------------------
+
+SECRET = "sk-live-SECRET-never-logged-9876"
+
+
+class TestMatchKeepsGateAndScore(unittest.TestCase, RunPatch):
+    def test_gate_and_score_kept_when_present(self):
+        self._patch_run(self._ok({"schema": 1, "gate": "semantic-v1:m",
+                                  "entries": [_item("e1")], "corrections": []}))
+        result, _ = ct_wisdom_live.match_wisdom(CT, "q", 2, [])
+        self.assertEqual(result["gate"], "semantic-v1:m")
+        self.assertEqual(result["entries"][0]["score"], 0.9)
+
+    def test_render_ignores_them(self):
+        plain = {"id": "e1", "title": "T", "text": "x", "supersedes": [], "provenance": "p"}
+        scored = dict(plain, score=0.42)
+        self.assertEqual(ct_wisdom_live.render_live_block([plain], [], set()),
+                         ct_wisdom_live.render_live_block([scored], [], set()))
+
+
+class TestVerbose(LiveHarness, unittest.TestCase):
+    """Verbose on or off, the hook returns the same bytes; on, it records."""
+
+    SCENARIOS = (
+        ("delivery", {"entries": [_item("e1", "Deploy"), _item("e2")], "corrections": []}, None),
+        ("deduped", {"entries": [_item("b1")], "corrections": []}, None),
+        ("no_match", {"gate": "semantic-v1:m", "entries": [], "corrections": []}, None),
+        ("uncalibrated", {"gate": "uncalibrated", "entries": [], "corrections": []}, None),
+        ("timeout", None, "timeout"),
+    )
+
+    def setUp(self):
+        super().setUp()
+        import ct_wisdom_verbose
+
+        self.V = ct_wisdom_verbose
+        self.tmp = tempfile.mkdtemp()
+        self.log = os.path.join(self.tmp, "v.jsonl")
+        self.notices = []
+        prev = ct_wisdom_verbose.set_sink(self.notices.append)
+        self.addCleanup(ct_wisdom_verbose.set_sink, prev)
+
+    def env(self, on):
+        values = {"CT_WISDOM_VERBOSE_LOG": self.log, "ZAI_API_KEY": SECRET}
+        values["CT_WISDOM_VERBOSE"] = "1" if on else "0"
+        return mock.patch.dict(os.environ, values)
+
+    def run_scenarios(self, on):
+        outs = []
+        for name, reply, cls in self.SCENARIOS:
+            ct_ledger.LEDGER_CACHE.clear()
+            self.boot["s1"] = "**B** <!-- ct-fact:b1 -->"
+            self.reply = (reply, cls)
+            with self.env(on):
+                outs.append((name, self.hook()))
+        return outs
+
+    def events(self):
+        if not os.path.exists(self.log):
+            return []
+        with open(self.log, encoding="utf-8") as handle:
+            return [json.loads(line) for line in handle]
+
+    def test_off_is_identical_and_silent(self):
+        off = self.run_scenarios(False)
+        self.assertFalse(os.path.exists(self.log))
+        self.assertEqual(self.notices, [])
+        # Same as a run with the recorder removed entirely.
+        noop = mock.patch.multiple(self.V, record_delivery=lambda *a, **k: None,
+                                   record_non_delivery=lambda *a, **k: None)
+        with noop:
+            bare = self.run_scenarios(False)
+        self.assertEqual(off, bare)
+        self.assertIn("ct-fact:e1", off[0][1]["context"])
+
+    def test_on_records_and_bytes_unchanged(self):
+        off = self.run_scenarios(False)
+        on = self.run_scenarios(True)
+        self.assertEqual(on, off)
+        events = self.events()
+        self.assertEqual([(e["event"], e["reason"]) for e in events], [
+            ("delivery", None), ("skip", "deduped"), ("skip", "no_match"),
+            ("skip", "gate_uncalibrated"), ("skip", "timeout"),
+        ])
+        first = events[0]
+        self.assertEqual((first["host"], first["channel"], first["session_id"]),
+                         ("hermes", "pre_llm_call", "s1"))
+        self.assertEqual(first["query"], "how do I deploy?")
+        self.assertEqual(first["block"], off[0][1]["context"])
+        self.assertEqual(first["delivered_ids"], ["e1", "e2"])
+        self.assertEqual(first["matched"][0]["score"], 0.9)
+        self.assertEqual(first["ledger_size"], 1)
+        self.assertEqual(len(self.notices), 5)
+        self.assertIn(off[0][1]["context"], self.notices[0])
+
+    def test_early_skips_are_recorded(self):
+        with self.env(True):
+            self.hook(sid="restored", history=[{"role": "user", "content": "hi"}])
+            self.boot["s1"] = ""
+            self.hook(msg="   ")
+        self.assertEqual([e["reason"] for e in self.events()],
+                         ["restored_unknown_bootstrap", "empty_query"])
+
+    def test_recorder_failures_never_change_the_return(self):
+        off = self.run_scenarios(False)
+
+        def boom(*a, **k):
+            raise RuntimeError("recorder down")
+
+        self.V.set_sink(boom)
+        with mock.patch.object(self.V, "_append", boom):
+            failing = self.run_scenarios(True)
+        with mock.patch.object(self.V, "build_event", boom):
+            failing_build = self.run_scenarios(True)
+        self.assertEqual(failing, off)
+        self.assertEqual(failing_build, off)
+
+    def test_no_env_or_keys_logged(self):
+        self.run_scenarios(True)
+        with open(self.log, encoding="utf-8") as handle:
+            raw = handle.read()
+        self.assertNotIn(SECRET, raw)
+        self.assertNotIn("ZAI_API_KEY", raw)
+        self.assertNotIn(SECRET, "\n".join(self.notices))
 
 
 if __name__ == "__main__":
