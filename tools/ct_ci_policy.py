@@ -209,6 +209,7 @@ STDLIB_ALLOWLIST = frozenset(sys.stdlib_module_names) | {
     "ct_ledger",
     "ct_wisdom_live",
     "ct_tool_dedup",
+    "ct_wisdom_cc",  # claude-code hooks/ adapter over the vendored wisdom core
 }
 
 # CONTRIBUTING rule 3 / the environment contract: these three and nothing else.

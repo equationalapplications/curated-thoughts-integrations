@@ -17,10 +17,12 @@ three-rule discipline, re-shaped around Claude Code's plugin directory,
   `claude mcp add --scope user curated-thoughts -- "<path>" --mcp`. It is a
   path, not a bare name, because on Windows the sidecar is not on `PATH`.
 - **Session-start health snapshot** — `hooks/hooks.json` runs
-  `hooks/session-start.py` on `startup|resume|clear|compact` and injects a
+  `hooks/session-start.py` on `startup|resume|clear|compact|fork` and injects a
   `## Curated Thoughts` block as `additionalContext`, so the model knows
   whether memory is usable before its first tool call. Fast, read-only,
   always exits 0.
+- **Intuitive Wisdom** — the curated fact arrives when it is relevant, and
+  only once. See [Intuitive Wisdom](#intuitive-wisdom) below.
 - **Three skills** — `/curated-thoughts:usage`, `/curated-thoughts:ops`,
   `/curated-thoughts:sidecar` (bodies verbatim from Hermes).
 - **Doctor** — `python3 scripts/ct_doctor.py check` runs the nine deep checks
@@ -77,12 +79,50 @@ claude mcp list                             # curated-thoughts should report con
 Then, inside a session started with `--plugin-dir`:
 
 - `/mcp` — the `curated-thoughts` server is connected and lists its tools.
-- `/hooks` — the `SessionStart` hook is registered.
+- `/hooks` — the `SessionStart`, `UserPromptSubmit` and `PostToolUse` hooks are registered.
 - `/plugin` — the `curated-thoughts` plugin is loaded.
 
 Doctor check 7 reports plugin enablement from `~/.claude/settings.json` as
 a WARN, never a FAIL: a `--plugin-dir` session leaves nothing on disk for it
 to confirm.
+
+## Intuitive Wisdom
+
+The same algorithm as the Hermes plugin, which it runs from byte-identical
+copies of the Hermes core (`scripts/ct_wisdom_live.py`, `ct_wisdom.py`,
+`ct_ledger.py`). Curated Thoughts owns relevance: the plugin asks
+`ct wisdom match` and never scores or ranks anything itself.
+
+| Hook | What it does |
+|------|--------------|
+| `SessionStart` | Appends a `## Curated Thoughts — relevant memory` block (top 3 wiki entries for the project) after the status section, and records its fact ids in the plugin's data dir. |
+| `UserPromptSubmit` | On each genuine user turn, asks `ct wisdom match` for up to 2 relevant facts not yet in context (at most 12 per session; corrections to a fact already shown are exempt) and appends them as `additionalContext`. The system prompt is never touched. |
+| `PostToolUse` (`curated_recall_context`) | A recalled wiki entry the session already has is replaced by a one-line `already in context` stub. |
+
+**Exactly once.** The record of what this session has seen lives in
+`${CLAUDE_PLUGIN_DATA}/wisdom/` (Claude Code creates it; it survives plugin
+updates) and nowhere else. The plugin never reads the transcript. Missing or
+unreadable state means no delivery, never a repeat.
+
+**When it stays quiet**, deliberately:
+
+- **Resumed sessions** (`--resume`, `--continue`, `/resume`) and **forks** get
+  no live delivery for the rest of their life. What they already contain
+  cannot be known without the transcript. The status section still renders.
+- **Subagents** never get live delivery or stubs. Only the main thread does.
+- **Not a user turn.** Background-agent reports and other harness-generated
+  prompts (anything that opens with an envelope tag such as
+  `<agent-message …>`) are skipped.
+- **No CT, or CT older than 3.3.0** (no `ct wisdom match`): a silent no-op.
+- **CT is struggling**: three timeouts or errors in a row pause matching
+  for 5 minutes.
+
+`/compact` keeps delivering and does not repeat a fact the session already
+had. `/clear` starts a fresh session.
+
+**Requirements.** Curated Thoughts ≥ 3.3.0 with `ct` on `PATH` (or in the
+platform install location), and Python 3.9+. Managed deployments that set
+`allowManagedHooksOnly` disable plugin hooks, and Intuitive Wisdom with them.
 
 ## Environment contract
 
