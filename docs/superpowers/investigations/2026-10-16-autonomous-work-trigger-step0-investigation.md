@@ -101,15 +101,17 @@ prefix, so it is cache-safe by construction. The system prompt is untouched.
 
 Ledger view: the next `pre_llm_call` rebuilds the ledger by scanning `conversation_history`,
 tool-role messages included. Markers in the augmented result are therefore ledgered on the
-next turn [V `ct_ledger.history_ids`; `ct_wisdom_live.py:373` counts only user-role ids
-for the budget]. **Within the turn**, the transform has only the per-process
-`LEDGER_CACHE` that `pre_llm_call` filled (PR #35 design "Ledger"). It must update that
-cache under a lock, because of the 8-thread batches.
+next turn [V `ct_ledger.history_ids`, which scans every role unless `roles` is passed].
+**Within the turn**, the transform has only the per-process `LEDGER_CACHE` that
+`pre_llm_call` filled (PR #35 design "Ledger"). It must update that cache under a lock,
+because of the 8-thread batches.
 
 Gaps:
 
-- (a) The M1 live budget counts user-role markers only, so activity deliveries would not
-  count. They need their own counter (a distinct heading or marker class).
+- (a) Activity blocks need a distinct heading, so that the self-trigger guard can keep
+  them out of later queries and so that tests and telemetry can tell them apart from
+  user-turn blocks. Since PR #49 there is no per-session budget to count against [V
+  `ct_wisdom_live.py:373` now always passes `LIVE_MAX_PER_TURN`].
 - (b) A restored session never fills the cache, so the transform must fail closed when the
   cache has no entry. That matches Hermes M2.
 - (c) If `transform_tool_result` returns a string that replaces a CT recall result, the
@@ -127,7 +129,7 @@ the live path was 0.44–2.07 s, p95 1.22 s (PR #35 investigation, Step 10).
 ### 5. Verdict: **feasible with caveats**
 
 The channel is proven and documented, and the triggers are per tool call. The caveats are
-the in-turn ledger (cache plus lock), thread concurrency, a separate activity budget, and
+the in-turn ledger (cache plus lock), thread concurrency, a distinct activity heading, and
 the synchronous latency.
 
 *Minimal sketch:* `pre_tool_call` computes an activity key from the args. If the key is
@@ -197,10 +199,10 @@ Two persisted, append-only channels exist. Both are first-party patterns.
   (`dsh-hooks-claude-code/lib/index.js:265-291`, `createUserMessage` at `:204-212`).
 
 Both land in the session log, so they replay on resume. The ledger rule m5 ("rebuild from
-`deriveMessages`") sees them at the next trigger without any change. Exactly-once
-machinery: the delivered message must carry a **distinct `source.kind`** (for example
-`curated-thoughts-wisdom-activity`). That keeps the live budget (M1) counting user-turn
-deliveries only and gives activity deliveries their own count.
+`deriveMessages`") sees them at the next trigger without any change. Dedup machinery: the
+delivered message should carry a **distinct `source.kind`** (for example
+`curated-thoughts-wisdom-activity`), so that the user-turn query builder and the
+self-trigger guard can skip it. Since PR #49 there is no session budget to keep it out of.
 
 **Trap [V]:** pending `next-step` input keeps the turn open. "The conclusion never
 short-circuits already-submitted next-step work: same-step `additionalContexts` … still
@@ -275,9 +277,9 @@ persisted as `state.output` [V bundle line 65865; OC H5 "Builtin tools keep
 
 Ledger: LD5's history scan already covers "completed tool `state.output`", so markers in
 augmented tool output are ledgered across processes with no change. The in-process
-`delivered` set covers the gap before persistence. The M1 count (LD6) counts only the
-`curated-thoughts/wisdom` user-row marker, so activity deliveries need their own marker
-line and count.
+`delivered` set covers the gap before persistence. Activity deliveries should carry their
+own marker line, so that LD8's query rule (genuine user text only) and the self-trigger
+guard can recognise them. The LD6 session count no longer gates anything after PR #49.
 
 Not usable:
 
@@ -297,7 +299,8 @@ per session and in process, and at most one call may be in flight per session.
 
 The caveats: subagent policy (most autonomous work in OpenCode happens in task children,
 and LD7 excludes them), per-call rather than per-step granularity (no per-step persisted
-hook), and the separate activity budget.
+hook, and no assistant-message or step id in the hook input, see the coalescing note in
+the contract), and the distinct activity marker.
 
 *Minimal sketch:* compute the activity key at `tool.execute.before`, then prefetch if the
 key changed. In `tool.execute.after`, await (bounded), post-filter against the LD5 ledger,
@@ -360,7 +363,8 @@ tool result" (hooks, "Add context for Claude").
 
 Ledger: the `${CLAUDE_PLUGIN_DATA}` store (D3) is the only ledger. An activity delivery
 writes its ids to the store **before** it emits (D4, at-most-once). It needs a new
-`activity_ids` list next to `live_ids` and `tool_ids`, which also gives a separate budget.
+`activity_ids` list next to `live_ids` and `tool_ids`. It joins the ledger union and keeps
+activity deliveries distinguishable (no session budget exists after PR #49).
 Concurrency: `PostToolBatch` runs once per batch, which removes the parallel-writer case.
 D3's `flock` still applies. Subagents: D6 says main thread only (`agent_id` present ⇒
 pass-through), which is consistent.
@@ -475,24 +479,43 @@ decision (see below).
 | Recommended channel | tool-result string append | pre-step `decision.messages` (user/message) | tool `output` append | `PostToolBatch` additionalContext (system reminder) | middleware content append |
 | Persisted, replayed on resume | yes [V] | yes [V] | yes [V] | yes [V doc] | likely [U] |
 | Cache-safe (append-only) | yes | yes | yes | yes [V doc] | yes (by construction) |
-| Ledger sees it next trigger | history scan, tool role [V] | `deriveMessages` [V] | LD5 tool `state.output` scan [V] | plugin-data store (write first) | `event.messages` toolResult scan [V] |
+| Ledger sees it next trigger | history scan, tool role [V] | `deriveMessages` [V] | LD5 tool `state.output` scan [V] | plugin-data store (write first) | `event.messages` toolResult scan [V]; sees the block only if the rewrite is persisted and replayed (A3) [U] |
 | In-step ledger needs | `LEDGER_CACHE` + lock (8 threads) | none (log is the truth) | in-process `delivered` set | store lock (one writer per batch) | in-process run ledger |
 | Fires in subagents | yes, child session [V/U] | yes, child agent [V/U] | yes, child session [V] | yes, with `agent_id` [V] | yes, `subagent:` key [V] |
 | Hot-path cost | sync thread, 3 s | awaited pre-step, 3 s | awaited hook, 3 s | process spawn per batch | awaited, no host timeout |
 | **Verdict** | feasible w/ caveats | **feasible** | feasible w/ caveats | feasible w/ caveats | feasible w/ caveats (embedded only) |
 
-No host is "not feasible" at the pin. Every host has a persisted, append-only channel
-next to tool results, and none of them needs the system prompt.
+No host is "not feasible" at the pin. Hermes, DSH, OpenCode and Claude Code have a
+persisted, append-only channel next to tool results. OpenClaw's channel is append-only,
+but whether it is persisted and replayed stays conditional on A3. None of them needs the
+system prompt.
 
 ### Recommended common contract
 
 1. **Trigger class: "after a batch of agent actions, before the next model call."**
    - Hosts with a per-step hook use it: DSH pre-step at step ≥ 2, Claude Code
      `PostToolBatch`.
-   - Hosts without one use the per-tool post hook with a **per-step coalescing rule**: at
-     most one CT call in flight per session, and at most one activity delivery per model
-     step (Hermes and OpenClaw `turn_id`/`runId` plus step counter; OpenCode `messageID`
-     of the assistant message).
+   - Hosts without one use their per-tool post hook. Whether they can coalesce per step
+     depends on whether the hook input names the model request that emitted the tool call:
+     - **Hermes: per-step coalescing is possible.** `transform_tool_result` receives
+       `api_request_id` [V `hooks.md:453`; `model_tools.py:859-861` via
+       `ids.hook_kwargs()`]. The executor reads the value from the agent attribute
+       `_current_api_request_id` at dispatch (`agent/tool_executor.py:826`, `:1692`), and
+       the attribute is reset at turn start (`agent/turn_context.py:585`). Every call in one
+       batch therefore reads the same attribute while no new request is in flight [V for
+       the read sites]. Where the attribute is set per provider request was not located,
+       so that part is [U]. The rule: at most one activity delivery per
+       `(session_id, api_request_id)`. Plan target A8 closes it.
+     - **OpenCode and OpenClaw: per-tool only.** OpenCode's `tool.execute.after` input is
+       `{tool, sessionID, callID, args}`, with no assistant-message or step id
+       [V `index.d.ts:249-253`]. OpenClaw's middleware event carries `toolCallId`,
+       `turnId` and `threadId` and ctx `runId` (`builtin-openclaw-C66TYl5I.mjs:17261-17289`).
+       `runId` identifies a run, not a model step, and what `turnId` identifies is [U].
+       For these two the rule is in-flight coalescing instead: at most one CT call in
+       flight per session. A tool result that arrives while a call is in flight does not
+       start another; it only adds its activity line to the pending key set. At most one
+       delivery comes from each completed call, attached to the first tool result after
+       it resolves. This bounds the call rate by CT latency rather than by model steps.
    - Never on CT's own tools: the N3 dedup rule (m4) stays as is.
 2. **Query construction rule (deterministic, no semantics; rule 8):**
    - The query is a short **activity line** made only of the action's target:
@@ -508,19 +531,27 @@ next to tool results, and none of them needs the system prompt.
    - Sanitize with the existing `stripForged`.
    - The integration does not expand, summarize or rank: it only renders the action.
 3. **Rate-limiting rule: query only on activity-key change.**
-   - Activity key = the set of `(verb class, target path directory + basename | command
-     head token)` for the batch.
+   - Activity key = the set of `(verb class, target)` pairs for the batch.
+     - For file actions, `target` is the path's directory plus basename.
+     - For commands, `target` is the **first two non-flag tokens** (program plus
+       subcommand or first target): `npm test` → `npm test`, `npm run build` →
+       `npm run`, `pytest tests/billing` → `pytest tests/billing`. That way different
+       operations by the same program are not collapsed into one key.
+     - For searches, `target` is the pattern plus path.
    - Skip the call when every element is in a per-session recent-keys set (LRU, about 32
      keys).
-   - Plus a floor of at most **one CT call per model step**, and the existing breaker
+   - Plus a floor of at most **one CT call per model step** (per in-flight window on
+     OpenCode and OpenClaw, see item 1), and the existing breaker
      (3 failures ⇒ 300 s pause), shared with the live path.
    - "Every N tool calls" was rejected because it fires on noise and misses topic changes.
      "On file-path change" alone misses `run`/`search` work. The key-change rule covers
      both.
 4. **Delivery budget (rule 6):** an activity delivery carries **at most 1 fact and 600
-   chars**. It is counted separately from user-turn live deliveries (its own marker or
-   source kind). The 12-per-session cap is being removed in the parallel PR. Whether
-   activity deliveries get any session or turn ceiling is an open decision (below).
+   chars**, and is marked as an activity delivery (its own heading or source kind) so it
+   stays distinguishable from user-turn deliveries. Live delivery has no per-session cap
+   since PR #49 (`2026-10-16-remove-session-wisdom-cap-design.md`). Noise is bounded per
+   delivery, and dedup bounds the total. Whether activity deliveries get a per-user-turn
+   ceiling is an open decision (below).
 5. **Channel per host:**
    - Hermes: `transform_tool_result` append.
    - DSH: pre-step `decision.messages` with `source.kind: curated-thoughts-wisdom-activity`.
@@ -530,8 +561,12 @@ next to tool results, and none of them needs the system prompt.
 
    All render the same block with heading `## Curated Thoughts — relevant to this step`
    and the standard `<!-- ct-fact:<id> -->` markers.
-6. **Exactly-once:** the same ledger and post-filter as annex A. Activity ids join the
-   ledger at once (in-step cache or store write before emit). Corrections may ride an
+6. **At most once (INTENT rule 1):** the same ledger and post-filter as annex A. Activity
+   ids join the ledger at once: in-step cache or store write before emit. If the process
+   dies between recording and emitting, the fact is lost, never duplicated. That is
+   at-most-once, the same failure direction CC D4 already chose. No retry or recovery of
+   an interrupted delivery is proposed; the fact can still arrive later through recall,
+   or after compaction drops it from the ledger (Hermes scope b). Corrections may ride an
    activity delivery only when they supersede a ledgered id, same as live.
 7. **Latency:** prefetch at the pre-tool hook where the host allows it (all but Claude
    Code). The total wall budget per step stays 3 s. On timeout, deliver nothing and never
@@ -547,7 +582,9 @@ next to tool results, and none of them needs the system prompt.
   - an `ActivityKeyTracker` (LRU per session);
   - new constants `ACTIVITY_MAX_PER_STEP = 1`, `ACTIVITY_MAX_BLOCK_CHARS = 600` and
     `ACTIVITY_QUERY_CHARS = 300`;
-  - `Ledger.activityDeliveredCount`;
+  - an activity marker or source kind that the ledger recognises, so the query builders
+    and the self-trigger guard can skip activity blocks (no budget count is needed after
+    PR #49);
   - a `renderBlock` variant with the activity heading.
 
   `HostAdapter` gains `deliverActivity` (or a `channel` argument on `deliver`) and
@@ -559,13 +596,13 @@ next to tool results, and none of them needs the system prompt.
     activity branch in the `transform_tool_result` callback, composed with
     `ct_tool_dedup`;
   - `LEDGER_CACHE` gains a lock;
-  - `ct_ledger` gains an activity-marker count;
+  - `ct_ledger` learns to recognise the activity heading (for the self-trigger guard);
   - `__init__.py` registers `pre_tool_call`.
 
   This makes a Hermes 0.5.0 and a matching claude-code bump. Claude Code also needs a
   persisted discovery and capability cache in the store, and a `PostToolBatch` entry in
   `hooks.json`.
-- **Test obligations (INTENT "How changes are made" 3):** the randomized exactly-once
+- **Test obligations (INTENT "How changes are made" 3):** the randomized exactly-once (no-duplicate)
   test gains activity events interleaved with user turns, recalls, compaction and
   restore. Plus a self-trigger guard: our own activity block is never part of the next
   activity query or user-turn query.
@@ -651,3 +688,4 @@ next to tool results, and none of them needs the system prompt.
 | A5 | DSH root-registered listeners receive child-agent `pre-step` / `post-execute` | stub-host contract test |
 | A6 | Real-gate behavior on activity lines (does `edit src/x.py` ever open at the 0.64 floor?) | extend PR #47's opt-in real-gate e2e with activity queries |
 | A7 | OpenCode MCP tool path: augmentation after the `content[]` join keeps markers on line ≥ 2 without breaking the LD2 line-1 envelope parse | unit test plus host contract |
+| A8 | Hermes: all tool calls of one model response carry the same `api_request_id` in `transform_tool_result` (per-step coalescing key) | read `agent/tool_executor.py` / `turn_api_request.py` call-id plumbing, or a stub-plugin run |
