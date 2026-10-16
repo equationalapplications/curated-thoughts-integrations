@@ -438,6 +438,21 @@ jobs:
         working-directory: ${{ needs.identify.outputs.dir }}
         run: pnpm install --frozen-lockfile
 
+      - name: Build the integration payload
+        # The host contract loads the BUILT payload (opencode's wisdom test
+        # needs lib/src/index.js + the vendored lib/ct-wisdom-core). CI gets
+        # the build for free from its `pnpm pack` step (prepack); this job
+        # has no pack step, so build explicitly (opencode-v0.2.0 release run
+        # 38945884872 failed on exactly this). Skips when no build script.
+        working-directory: ${{ needs.identify.outputs.dir }}
+        shell: bash
+        run: |
+          if node -e "process.exit(require('./package.json').scripts?.build ? 0 : 1)"; then
+            pnpm run build
+          else
+            echo "no build script — skipping"
+          fi
+
       - name: Install the pinned host binary (throwaway HOME)
         # Versions come from the integration's tests/host/compatibility.json —
         # the same file the contract test validates against, so a release can
