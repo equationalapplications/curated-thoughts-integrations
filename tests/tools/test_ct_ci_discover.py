@@ -2,6 +2,7 @@
 import json
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -24,16 +25,29 @@ DEEPSEEK_VERSION = ct_ci_manifest.load_manifest(
 class TestSelect(unittest.TestCase):
     def test_all_selects_every_implemented_integration(self):
         entries = ct_ci_discover.select(REPO, base_ref=None, all_=True)
-        self.assertEqual({e["id"] for e in entries}, {"claude-code", "deepseek", "hermes", "opencode"})
+        self.assertEqual(
+            {e["id"] for e in entries},
+            {"claude-code", "deepseek", "hermes", "openclaw", "opencode"},
+        )
 
     def test_planned_integrations_are_never_selected(self):
-        entries = ct_ci_discover.select(REPO, base_ref=None, all_=True)
-        self.assertNotIn("openclaw", [e["id"] for e in entries])
+        # Every real integration is implemented now, so the rule is pinned on
+        # a synthetic tree holding one planned manifest.
+        with tempfile.TemporaryDirectory() as tmp:
+            planned = Path(tmp) / "integrations" / "someday"
+            planned.mkdir(parents=True)
+            (planned / "integration.yaml").write_text(
+                "id: someday\nname: Someday\nversion: 0.0.0\nlanguage: node\n"
+                'status: planned\nrequires_sidecar: ">=2.5"\ncompat_tier: v2.5-full\n',
+                encoding="utf-8",
+            )
+            self.assertEqual(ct_ci_discover.select(tmp, base_ref=None, all_=True), [])
 
     def test_matrix_is_the_flat_os_x_interpreter_cross_product(self):
         entries = ct_ci_discover.select(REPO, base_ref=None, all_=True)
-        # claude-code/deepseek/hermes/opencode: 3 os x 2 interpreters each.
-        self.assertEqual(len(entries), 24)
+        # claude-code/deepseek/hermes/opencode: 3 os x 2 interpreters each;
+        # openclaw: 3 os x node 24.x (OpenClaw's engine floor is Node 24.16).
+        self.assertEqual(len(entries), 27)
         oses = ("ubuntu-latest", "macos-latest", "windows-latest")
         triples = {
             "claude-code": {
@@ -42,7 +56,9 @@ class TestSelect(unittest.TestCase):
             "deepseek": {(e["os"], e["node"]) for e in entries if e["id"] == "deepseek"},
             "hermes": {(e["os"], e["python"]) for e in entries if e["id"] == "hermes"},
             "opencode": {(e["os"], e["node"]) for e in entries if e["id"] == "opencode"},
+            "openclaw": {(e["os"], e["node"]) for e in entries if e["id"] == "openclaw"},
         }
+        self.assertEqual(triples["openclaw"], {(os_name, "24.x") for os_name in oses})
         self.assertEqual(
             triples["claude-code"], {(os_name, v) for os_name in oses for v in ("3.9", "3.13")}
         )
@@ -103,8 +119,11 @@ class TestCli(unittest.TestCase):
             capture_output=True, text=True, check=True,
         ).stdout
         entries = json.loads(out)
-        self.assertEqual(len(entries), 24)
-        self.assertEqual({e["id"] for e in entries}, {"claude-code", "deepseek", "hermes", "opencode"})
+        self.assertEqual(len(entries), 27)
+        self.assertEqual(
+            {e["id"] for e in entries},
+            {"claude-code", "deepseek", "hermes", "openclaw", "opencode"},
+        )
 
 
 if __name__ == "__main__":

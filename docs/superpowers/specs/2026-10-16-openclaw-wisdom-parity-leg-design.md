@@ -238,6 +238,32 @@ exist, mcpServers row), and asserts every hook name and result field we use is
 in the recorded pin facts. It does **not** run the real gateway — weaker than
 opencode's real-binary contract, and ci.yml says so.
 
+## Results (2026-10-16, recorded at implementation)
+
+- **Real-host install** (isolated `OPENCLAW_STATE_DIR`, openclaw 2026.10.3 native):
+  `scripts/install.sh` → `plugins install` accepted surface
+  `contracts: agentToolResultMiddleware: openclaw`, `mcpServers: curated-thoughts`,
+  `skills: skills`; `plugins inspect --runtime` → `status: loaded`, typed hooks
+  `agent_turn_prepare` + `before_prompt_build`, `policy.allowConversationAccess:
+  true`, `hookTimeouts.before_prompt_build: 20000`, no diagnostics; `skills list`
+  → all three skills `ready`; doctor check 7 PASS on the real config.
+- **AC 9 — cache-safe (embedded runner).** `tests/e2e/run.sh`, two
+  `openclaw agent --local` turns (fresh process each — restore path) against ZAI
+  `GLM-5.3-FLASH` through a body-only recording proxy: system prompt (bootstrap
+  marker `boot-procedures`, `cache_control` set) byte-identical across turns;
+  turn-1 user message with its live block replayed byte-identically as turn 2's
+  prefix; turn-2 block only in the last user message. Persisted transcript event
+  carries `__openclaw.modelPromptProjection.text` = block + user text (F8 live).
+  Provider cache counters were inconsistent between runs and are not evidence.
+- **Live exactly-once:** turn-2 `ct wisdom match` argv carried
+  `--exclude=w-release --exclude=w-lockfile --exclude=boot-procedures` (snapshot
+  projection ids newest first, then bootstrap) and delivered only `w-third`.
+- **Not exercised live:** N3 middleware rewrite (the model made no recall call),
+  salvage injection (needs a real hook timeout), `openclaw gateway` mode. Covered
+  by unit + property tests; post-merge tracking per parent decision 8.
+- `llm_input` observation hooks did not fire on one-shot `--local` runs, hence the
+  proxy-based capture.
+
 ## Out of scope / follow-ups
 
 - Persisting the bootstrap memo in `registerSessionExtension` state across
