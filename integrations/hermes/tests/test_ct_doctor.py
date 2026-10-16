@@ -2422,6 +2422,29 @@ class HermesConfigImportTimeTests(DoctorTestCase):
         self.assertIn("not found", reg.detail)
 
 
+class SharedRunnerShapeTests(DoctorTestCase):
+    """run_checks is shared verbatim with the Claude Code copy (issue #33):
+    check 7 is reached through the harness-specific `_check_registration`
+    adapter, which receives run_checks' `cwd` (Hermes ignores it)."""
+
+    def test_run_checks_forwards_cwd_to_registration_adapter(self):
+        from unittest import mock
+
+        self.make_brain()
+        self.write_config()
+        with mock.patch.object(
+            ct_doctor, "_check_registration", wraps=ct_doctor._check_registration
+        ) as spy:
+            results = ct_doctor.run_checks(
+                timeout=3.0, env=self.with_path(), cwd=str(self.fake_home)
+            )
+        spy.assert_called_once_with(cwd=str(self.fake_home))
+        self.assertEqual([r.name for r in results], list(EXPECTED_CHECKS))
+
+    def test_cli_description_names_the_harness(self):
+        self.assertEqual(ct_doctor.HARNESS_LABEL, "Hermes")
+
+
 class PluginConcurrencyTests(unittest.TestCase):
     """The cached system-prompt section is reachable from concurrent
     on_session_start callbacks (Hermes runs several sessions per process)."""

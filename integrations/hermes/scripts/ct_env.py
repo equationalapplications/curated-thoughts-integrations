@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """ct_env.py — Curated Thoughts environment resolution, shared by the doctor,
-the session-start hook, and the Hermes plugin entry point.
+the session-start hooks, and the plugin entry points.
 
 Single source of truth for three things the integration kept getting wrong:
 
@@ -21,6 +21,10 @@ Single source of truth for three things the integration kept getting wrong:
    only in `/usr/bin`.
 
 Stdlib only. Every function is read-only and non-raising.
+
+Shared script: integrations/hermes/scripts and integrations/claude-code/scripts
+carry byte-identical copies. Change both together;
+tests/tools/test_shared_script_parity.py fails on any drift.
 """
 
 from __future__ import annotations

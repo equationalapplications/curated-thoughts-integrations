@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """ct_status.py — fast, read-only Curated Thoughts health snapshot.
 
-Used by both Hermes session-start paths:
+Used by every session-start path that carries it:
 
-  * the native plugin hook (`__init__.py`, `on_session_start`), and
-  * the shell-hook entry point (`hooks/session-start.py`) for users who wire
-    it up in `~/.hermes/config.yaml` instead of installing the plugin.
+  * Hermes: the native plugin hook (`__init__.py`, `on_session_start`), and
+    the shell-hook entry point (`hooks/session-start.py`) for users who wire
+    it up in `~/.hermes/config.yaml` instead of installing the plugin;
+  * Claude Code: the SessionStart hook (`hooks/session-start.py`).
 
 Design constraints (spec §8): fast (<200ms target), read-only, fail-open. It
 never spawns the sidecar — that costs an MCP handshake — and never opens the
@@ -14,6 +15,10 @@ brain where it is supposed to be", which is what a session start needs. Deep
 verification is `ct_doctor.py check`.
 
 Stdlib only. Every entry point swallows exceptions and degrades to "unknown".
+
+Shared script: integrations/hermes/scripts and integrations/claude-code/scripts
+carry byte-identical copies. Change both together;
+tests/tools/test_shared_script_parity.py fails on any drift.
 """
 
 from __future__ import annotations
