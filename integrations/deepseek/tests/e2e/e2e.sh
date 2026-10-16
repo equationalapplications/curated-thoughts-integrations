@@ -586,5 +586,186 @@ check 'profile unchanged (manifest, bundle list, patch)' test "$profile_before" 
 check 'installer wrote no curated-thoughts rows into the profile patch' \
   sh -c "! grep -qE 'curated-thoughts' '$PROFILE_DIR/cordis.patch.yml'"
 
+# ---------------------------------------------------------------------------
+section 'live delivery through CT'"'"'s REAL relevance gate (opt-in: CT_E2E_REAL_GATE=1)'
+# The default run fixtures CT's relevance gate (see the live pre-step
+# section). This opt-in mode runs the real one: CT 3.5.1 scores raw cosine
+# over wiki-entry embeddings against a per-embed-model floor
+# (wisdom_match.rs WISDOM_GATE_FLOORS); only `external:qwen/qwen3-embedding-4b`
+# (0.70 raw, 0.64 under the instr1 scheme) is calibrated, every other model
+# answers `gate: uncalibrated`. So this mode configures:
+#   - embed_profile = external OpenRouter qwen/qwen3-embedding-4b. CT reads
+#     the key from OPENROUTER_API_KEY (env only; never written anywhere);
+#   - generation = external ZAI GLM-5.3-FLASH (OpenAI-compatible
+#     https://api.z.ai/api/coding/paas/v4) for the Librarian, which turns
+#     deposits into wiki entries. CT's generation block has no env fallback,
+#     so the key goes into this throwaway container's brain config.json
+#     (never into out/, never into the image);
+#   - facts via CT's sanctioned agent write path, `ct wisdom deposit`
+#     (immutable-source-files/agents/ is CT's own auto-approve folder rule);
+#   - `ct wisdom scheme activate instr1`: new entries are embedded under the
+#     instr1 scheme, and the default raw read scheme would see none of them.
+# A transparent tap (`ct` first on PATH, exec's the real binary, tees argv,
+# stdout and stderr) records what the plugin asked and what CT answered; it
+# never alters a result.
+if [ "${CT_E2E_REAL_GATE:-0}" != 1 ]; then
+  echo 'SKIP  real relevance gate not requested (set CT_E2E_REAL_GATE=1)'
+elif [ -z "${OPENROUTER_API_KEY:-}" ]; then
+  echo 'SKIP  CT_E2E_REAL_GATE=1 but OPENROUTER_API_KEY is not set — real gate not exercised'
+elif [ -z "${ZAI_API_KEY:-}" ]; then
+  echo 'SKIP  CT_E2E_REAL_GATE=1 but ZAI_API_KEY is not set — real gate not exercised'
+else
+  export CURATED_VAULT_ROOT="$HOME/vault"
+  cfg="$HOME/.brain/config.json"
+  jq --arg k "$ZAI_API_KEY" '
+    .embed_profile = {type: "external", base_url: "https://openrouter.ai/api/v1", model: "qwen/qwen3-embedding-4b"}
+    | .generation = {provider: "external", external_url: "https://api.z.ai/api/coding/paas/v4",
+                     model_name: "GLM-5.3-FLASH", api_key: $k, model_path: null, timeout_secs: 120}' \
+    "$cfg" >"$cfg.tmp" && mv "$cfg.tmp" "$cfg"
+  check 'brain config: external qwen3-embedding-4b + ZAI GLM-5.3-FLASH librarian' \
+    sh -c "jq -e '.embed_profile.model == \"qwen/qwen3-embedding-4b\" and .generation.model_name == \"GLM-5.3-FLASH\"' '$cfg' >/dev/null"
+  # One relevant fact plus unrelated distractors. Each deposit runs ingest +
+  # Librarian synthesis + embedding for that one document.
+  deposit() { # deposit <slug> <title> <body>
+    ct wisdom deposit --yes --path "immutable-source-files/agents/e2e/$1.md" \
+      --title "$2" --body "$3" >>"$OUT/gate-deposit.log" 2>&1
+  }
+  deposit tire 'Fleet tire pressure is 42 psi' \
+    'The fleet tire pressure for all e2e fleet vehicles is 42 psi, checked cold every Monday.'
+  deposit backups 'Staging database backups run nightly at 02:00 UTC' \
+    'Staging Postgres backups run nightly at 02:00 UTC and are kept for 14 days.'
+  deposit freeze 'Production deploy freeze starts Friday 15:00' \
+    'Production deploys are frozen from Friday 15:00 until Monday 09:00 local time.'
+  deposit branches 'Release branches are named release/YYYY.MM' \
+    'Release branches follow the pattern release/YYYY.MM, cut on the first business day of the month.'
+  deposit oncall 'On-call handoff happens Tuesdays at 10:00' \
+    'The on-call rotation hands off every Tuesday at 10:00 in the ops channel.'
+  ct wisdom scheme activate instr1 >>"$OUT/gate-deposit.log" 2>&1
+  ct wisdom scheme status >"$OUT/gate-scheme.txt" 2>&1
+  sed 's/^/      /' "$OUT/gate-scheme.txt"
+  check 'wiki entries exist and the active read scheme is instr1' \
+    sh -c "grep -q '^active read scheme: instr1' '$OUT/gate-scheme.txt' && ! grep -qE '^instr1: +0$' '$OUT/gate-scheme.txt'"
+
+  RELEVANT='What tire pressure should the fleet vehicles run at? Answer with the number.'
+  UNRELATED='Write a haiku about autumn leaves.'
+  # Direct real-gate probes (no DSH): the gate must open for the relevant
+  # prompt and stay closed for the unrelated one.
+  ct wisdom match --json --max 2 -- "$RELEVANT" >"$OUT/gate-probe-relevant.json" 2>"$OUT/gate-probe-relevant.err"
+  ct wisdom match --json --max 2 -- "$UNRELATED" >"$OUT/gate-probe-unrelated.json" 2>"$OUT/gate-probe-unrelated.err"
+  for f in relevant unrelated; do
+    echo "      probe $f: $(jq -c '{gate, entries: [.entries[] | {id, score, title}]}' "$OUT/gate-probe-$f.json" 2>/dev/null) | $(tr '\t' ' ' <"$OUT/gate-probe-$f.err")"
+  done
+  check '(a) real gate opens for the relevant prompt and returns the 42 psi fact' \
+    sh -c "jq -e '.gate == \"semantic-v1:external:qwen/qwen3-embedding-4b\" and ([.entries[] | select(.text + .title | test(\"42 psi\"))] | length >= 1)' '$OUT/gate-probe-relevant.json' >/dev/null"
+  check '(b) real gate stays closed for the unrelated prompt (no entries)' \
+    sh -c "jq -e '.gate == \"semantic-v1:external:qwen/qwen3-embedding-4b\" and (.entries | length == 0)' '$OUT/gate-probe-unrelated.json' >/dev/null"
+
+  # The tap: records each `ct wisdom match` the plugin runs, verbatim.
+  real_ct=$(command -v ct)
+  TAP="$OUT/gate-tap.log"
+  : >"$TAP"
+  mkdir -p "$HOME/ct-tap"
+  cat >"$HOME/ct-tap/ct" <<EOF
+#!/usr/bin/env bash
+# e2e tap: exec the real ct; only record wisdom-match traffic. Never alters it.
+if [ "\$1" = wisdom ] && [ "\$2" = match ] && [ "\${3:-}" != --help ]; then
+  o=\$(mktemp); e=\$(mktemp)
+  '$real_ct' "\$@" >"\$o" 2>"\$e"; rc=\$?
+  { printf 'ARGV %s\n' "\$*"; printf 'RC %s\n' "\$rc"; printf 'OUT %s\n' "\$(jq -c . "\$o" 2>/dev/null || cat "\$o")"; printf 'ERR %s\n' "\$(tr '\t' ' ' <"\$e")"; } >>'$TAP'
+  cat "\$o"; cat "\$e" >&2; rm -f "\$o" "\$e"; exit "\$rc"
+fi
+exec '$real_ct' "\$@"
+EOF
+  chmod +x "$HOME/ct-tap/ct"
+  gate_path="$HOME/ct-tap:$PATH"
+  wisdom_msgs='select(.type == "user/message" and .data.source.kind == "curated-thoughts-wisdom")'
+  gate_turn() { # gate_turn <tag> <prompt> [session-id]
+    local sid_args=()
+    [ -n "${3:-}" ] && sid_args=(--session-id "$3")
+    PATH="$gate_path" timeout 300 dsh --profile "$PROFILE" --json ${sid_args[@]+"${sid_args[@]}"} "$2" \
+      >"$OUT/$1.jsonl" 2>"$OUT/$1.err"
+  }
+
+  # (b) negative control on the real DSH loop: a fresh session, an unrelated
+  # prompt — the plugin asks CT, the gate stays closed, nothing is delivered.
+  gate_turn gate-neg "$UNRELATED"; neg_rc=$?
+  NSID=$(jq -r 'select(.type == "session") | .sessionId' "$OUT/gate-neg.jsonl" 2>/dev/null | head -1)
+  dump_session_log_by_id "$NSID" "$OUT/gate-neg.session.jsonl"
+  check "(b) negative-control run exits 0 (rc=$neg_rc)" test "$neg_rc" -eq 0
+  check '(b) plugin asked the real gate and CT answered no entries' \
+    sh -c "grep -q '^OUT .*\"entries\":\[\]' '$TAP' && [ \"\$(grep -c '^ARGV' '$TAP')\" -eq 1 ]"
+  check '(b) no wisdom message in the negative-control session' \
+    sh -c "test -s '$OUT/gate-neg.session.jsonl' && [ \"\$(jq -c '$wisdom_msgs' '$OUT/gate-neg.session.jsonl' | grep -c .)\" -eq 0 ]"
+
+  # (a) turn 1 — fresh session, relevant prompt: real-gate delivery.
+  gate_turn gate-t1 "$RELEVANT"; t1_rc=$?
+  GSID=$(jq -r 'select(.type == "session") | .sessionId' "$OUT/gate-t1.jsonl" 2>/dev/null | head -1)
+  dump_session_log_by_id "$GSID" "$OUT/gate-t1.session.jsonl"
+  check "(a) turn 1 exits 0 (rc=$t1_rc)" test "$t1_rc" -eq 0
+  check '(a) turn 1: exactly one wisdom message, an identified user message carrying 42 psi' \
+    sh -c "jq -e -s '[.[] | $wisdom_msgs] | length == 1 and .[0].data.role == \"user\" and (.[0].data.id | length > 0) and (.[0].data.content[0].text | test(\"42 psi\"))' '$OUT/gate-t1.session.jsonl' >/dev/null"
+  T1_IDS=$(jq -r "$wisdom_msgs | .data.content[0].text" "$OUT/gate-t1.session.jsonl" 2>/dev/null \
+    | grep -oE 'ct-fact:[A-Za-z0-9._:-]+' | sed 's/^ct-fact://' | sort -u)
+  echo "      turn 1 delivered ids: $(printf '%s ' $T1_IDS)"
+  ids_from_t1_gate() { # every delivered id is in CT's own answer for turn 1
+    local out id
+    out=$(grep '^OUT' "$TAP" | sed -n 2p)
+    [ -n "$T1_IDS" ] || return 1
+    for id in $T1_IDS; do printf '%s' "$out" | grep -qF "\"id\":\"$id\"" || return 1; done
+  }
+  check '(a) every delivered id came from the real gate output for this turn' ids_from_t1_gate
+  echo "      turn 1 final answer: $(jq -r 'select(.type == "final") | .text' "$OUT/gate-t1.jsonl" 2>/dev/null)"
+
+  # (c) turns 2 and 3 — the same session continued (new processes) with
+  # prompts the gate opens for: the real `--exclude` carries every turn-1 id,
+  # CT therefore never returns them, and no id is delivered twice.
+  # Control for (c): WITHOUT --exclude the turn-2 prompt opens the real gate
+  # on the turn-1 facts, so an empty answer in turn 2 is the exclusion at
+  # work, not a closed gate.
+  T2_PROMPT='Remind me what PSI we keep the fleet tires at.'
+  ct wisdom match --json --max 2 -- "$T2_PROMPT" >"$OUT/gate-probe-t2.json" 2>/dev/null
+  echo "      probe turn-2 prompt without --exclude: $(jq -c '[.entries[] | {id, score}]' "$OUT/gate-probe-t2.json" 2>/dev/null)"
+  t2_probe_hits_t1() {
+    local id
+    for id in $T1_IDS; do jq -e --arg id "$id" 'any(.entries[]; .id == $id)' "$OUT/gate-probe-t2.json" >/dev/null && return 0; done
+    return 1
+  }
+  check '(c) control: without --exclude the turn-2 prompt opens the gate on a turn-1 fact' t2_probe_hits_t1
+  gate_turn gate-t2 "$T2_PROMPT" "$GSID"; t2_rc=$?
+  gate_turn gate-t3 'Once more: what tire pressure do the fleet vehicles run at?' "$GSID"; t3_rc=$?
+  dump_session_log_by_id "$GSID" "$OUT/gate-t3.session.jsonl"
+  check "(c) turns 2 and 3 (--session-id) exit 0 (rc=$t2_rc/$t3_rc)" sh -c "[ $t2_rc -eq 0 ] && [ $t3_rc -eq 0 ]"
+  calls=$(grep -c '^ARGV' "$TAP")
+  check "(c) the plugin asked the real gate once per turn (calls=$calls, incl. the negative control)" test "$calls" -eq 4
+  excludes_t1_ids() { # excludes_t1_ids <tap call number>
+    local line id
+    line=$(grep '^ARGV' "$TAP" | sed -n "${1}p")
+    [ -n "$T1_IDS" ] || return 1
+    for id in $T1_IDS; do printf '%s' "$line" | grep -qF -- "--exclude=$id" || return 1; done
+  }
+  check '(c) turn 2 match excludes every turn-1 id' excludes_t1_ids 3
+  check '(c) turn 3 match excludes every turn-1 id' excludes_t1_ids 4
+  no_dup_ids() {
+    local dups
+    dups=$(jq -r "$wisdom_msgs | .data.content[0].text" "$OUT/gate-t3.session.jsonl" \
+      | grep -oE 'ct-fact:[A-Za-z0-9._:-]+' | sort | uniq -d)
+    [ -z "$dups" ]
+  }
+  check '(c) no fact id delivered twice across the three turns' no_dup_ids
+  t1_ids_once() { # each turn-1 id rides exactly one user message in the session
+    local id n
+    [ -n "$T1_IDS" ] || return 1
+    for id in $T1_IDS; do
+      n=$(jq -c --arg m "ct-fact:$id" 'select(.type == "user/message") | select(tostring | contains($m))' \
+        "$OUT/gate-t3.session.jsonl" | grep -c .)
+      [ "$n" -eq 1 ] || return 1
+    done
+  }
+  check '(c) turn-1 facts are not re-delivered (each turn-1 id in exactly one user message)' t1_ids_once
+  echo "      wisdom messages across the session: $(jq -c "$wisdom_msgs" "$OUT/gate-t3.session.jsonl" | grep -c .)"
+  echo "      real-gate tap (argv / CT answer / gate decision):"
+  sed -e 's/^/        /' "$TAP" | cut -c1-400
+fi
+
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 test "$fail" -eq 0

@@ -126,8 +126,13 @@ call, the degraded-health prompt block, live wisdom delivery on the real
 re-delivery when the session is continued with `--session-id`, CT ≥ 3.3.0
 capability gate), literal-`~` handling in `CURATED_BRAIN_DIR`, and installer
 idempotency. With no embedding backend in the container, CT's relevance gate
-is replaced by a fixture that returns one fact; everything else is real. The
-verified DSH version is
+is replaced by a fixture that returns one fact; everything else is real.
+`CT_E2E_REAL_GATE=1` (also needs `OPENROUTER_API_KEY`) adds a run against
+CT's real gate. It embeds with OpenRouter `qwen/qwen3-embedding-4b`, the
+model CT has a calibrated floor for, and synthesizes facts with the ZAI
+librarian. It checks that the gate delivers a relevant fact, delivers
+nothing for an unrelated prompt, and stays exactly-once across
+`--session-id` turns. The verified DSH version is
 pinned in `tests/host/compatibility.json`. It shares its base image
 (Node 24, sidecar `.deb`, non-root user) with the OpenCode harness — see
 `tests/e2e/base.Dockerfile` at the repo root. Requires Docker and, for the
