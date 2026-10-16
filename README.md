@@ -11,7 +11,7 @@ common architecture.
 | Harness | Directory | Status | Version |
 |---------|-----------|--------|---------|
 | [Hermes Agent](https://github.com/NousResearch/hermes-agent) | [`integrations/hermes/`](integrations/hermes/) | implemented | [0.4.2](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=hermes) |
-| DeepSeek Harness | [`integrations/deepseek/`](integrations/deepseek/) | implemented | [0.4.0](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=deepseek) |
+| DeepSeek Harness | [`integrations/deepseek/`](integrations/deepseek/) | implemented | [0.4.1](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=deepseek) |
 | OpenCode | [`integrations/opencode/`](integrations/opencode/) | implemented | [0.1.2](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=opencode) |
 | OpenClaw | `integrations/openclaw/` | planned | — |
 | Claude Code | [`integrations/claude-code/`](integrations/claude-code/) | implemented | [0.1.2](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=claude-code) |
@@ -77,8 +77,8 @@ rewrites repeats in agent-initiated `curated_recall_context` results to
 (`tests/host/compatibility.json`), live-verified in the container e2e on
 2026-10-16 (spec m6). That run found that 0.4.0's delivery message lacked
 the `id`/`role` DSH needs to replay a session, so a session that received a
-block could not be continued (`--session-id`, restart); the fix is in
-deepseek's `## Unreleased` and ships in the next patch release. The doctor is
+block could not be continued (`--session-id`, restart); fixed in
+deepseek 0.4.1. The doctor is
 `node lib/scripts/ct_doctor.js check` (nine deep checks, `--json` for
 machine-readable output). DeepSeek Harness ships on Windows as well as macOS
 and Linux, so CI verifies the integration on all three — install is

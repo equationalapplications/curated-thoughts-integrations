@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.4.1 — 2026-10-16
+
 Fix: **a session that received a live wisdom block could not be continued.**
 The `agent/pre-step` delivery message carried only `content` and `source`.
 DSH 0.2.0-rc.2 persists pre-step messages as they are, but on replay

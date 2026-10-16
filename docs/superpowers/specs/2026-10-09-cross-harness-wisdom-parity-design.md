@@ -239,8 +239,7 @@ ids and must not be rewritten). The stub rewrites the host's wiki-entry envelope
     relevance gate is fixtured in the container: there is no embedding backend, and a
     real 3.5.1 match answers `gate: uncalibrated`. Everything else is live. The first
     run found a shipped bug: the 0.4.0 delivery message had no `id`/`role`, so DSH
-    rejected the stored session on replay. It is fixed in deepseek `## Unreleased`
-    (needs a 0.4.1 patch release).
+    rejected the stored session on replay. It is fixed in deepseek 0.4.1.
 11. **Self-trigger guard (n2):** OpenCode test proves a `synthetic: true` delivery
     append does not re-fire N1 delivery; OpenClaw/DSH equivalents cover their own
     channels.
