@@ -1,45 +1,37 @@
 /**
  * wisdom-live/adapter.ts — the OpenCode HostAdapter binding for the shared
- * `ct-wisdom-core` algorithm (spec: 2026-10-09 cross-harness parity,
- * OpenCode leg; host evidence base: OpenCode 1.18.35 plugin SDK,
- * tests/host/compatibility.json; DSH reference: ../deepseek/src/wisdom-live).
+ * `ct-wisdom-core` algorithm. Contract: parent spec
+ * docs/superpowers/specs/2026-10-09-cross-harness-wisdom-parity-design.md
+ * (OpenCode row) as refined by the leg spec
+ * docs/superpowers/specs/2026-10-16-opencode-wisdom-parity-leg-design.md —
+ * host facts H1–H8 were read from the pinned 1.18.35 binary; do not re-derive.
  *
- * Mapping (spec "Per-host adapter contracts", OpenCode row — do not re-derive):
- *   N1 trigger   — `chat.message` (UserMessage, pre-LLM, persisted channel;
- *                  registered in ../index.ts).
- *   N2 delivery  — SAME `chat.message` invocation: an appended part with
- *                  `synthetic: true` on output.parts. The part is persisted
- *                  by the host, so the ledger (N4) reads it back from the
- *                  persisted history (investigation F1 decision 3:
- *                  messages.transform is wire-only and is NOT used).
- *   N3 transform — `tool.execute.after`: output.output is the tool's string
- *                  output as persisted; rewrite the recall envelope there.
- *   Ledger       — rebuilt from the persisted history via
- *                  client.session.messages() ({info, parts} rows): user-role
- *                  text parts + completed tool parts are the scan surface
- *                  (roles per the core's historyIds N4 rule).
- *   Compaction   — the persisted history IS the ledger source, so compaction
- *                  is visible: the synthetic summary replaces the compacted
- *                  messages. Decision 3 carry-forward (spec §opencode): a
- *                  text-part id the summary preserves keeps the fact known
- *                  (no redelivery); ids the summary dropped are forgotten
- *                  (allowed again after M1 budget checks) — the assertion
- *                  comes for free from rebuilding on the post-compaction
- *                  history, and `experimental.session.compacting` is where
- *                  the pre-compaction ledger snapshot gets invalidated.
- *   Restore      — persisted history again: a resumed session rebuilds from
- *                  the same store; fail-safe child policy per decision 3
- *                  (deliveryEnabled=true; the restored+no-bootstrap
- *                  fail-closed rule stays host-local: OpenCode resume keeps
- *                  the bootstrap ids in history, so knownBootstrap carries
- *                  the semantics — same reasoning as the DSH row).
- *   Session id   — `sessionID` (stable; compaction does not rotate it).
+ *   N1 trigger   — `chat.message` (index.ts). The in-flight message is NOT yet
+ *                  persisted while the hook runs (H1).
+ *   N2 delivery  — a `synthetic: true` text part pushed on output.parts with a
+ *                  host-format `prt_` id (LD9); the host persists it (H1).
+ *   N3 transform — `tool.execute.after`. For MCP tools the hook output is the
+ *                  raw MCP CallToolResult; the host derives the persisted
+ *                  `state.output` from `content[].text` AFTER the hook (H5), so
+ *                  the rewrite targets the content text item (LD2). Tool names
+ *                  are `<server>_<tool>` (H6).
+ *   Ledger (N4)  — persisted history via client.session.messages() (every row;
+ *                  never compaction-filtered, H3) ∪ compaction carry set ∪
+ *                  bootstrap memo ids ∪ ids this process delivered (LD5).
+ *   Compaction   — decision 3 carry-forward: the pre-compaction ledger is
+ *                  snapshotted into a per-process carry set that is never
+ *                  cleared, so post-compaction ⊇ pre-compaction ∪ deliveries.
+ *   Subagents    — parent-only delivery (LD7): `parentID` set or lookup
+ *                  failure ⇒ no N1/N2; N3 dedups against child ∪ parent
+ *                  history, best-effort.
+ *   Restore      — none separate: resume rebuilds from the same history (LD10).
  */
 
 import {
   marker,
   onToolResult as coreOnToolResult,
   onUserTurn as coreOnUserTurn,
+  scanIds,
   wisdomMatch as coreWisdomMatch,
   validId,
   type HostAdapter,
@@ -50,9 +42,15 @@ import {
   type WisdomMatchResult,
 } from '@equational-applications/ct-wisdom-core';
 import { spawn } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import { discoverCt } from '../wisdom.js';
 
-/** One v1 memo record: the rendered block plus the fact ids it delivered. */
+/** Exact marker LINE of a live delivery part (identity + provenance). */
+export const LIVE_MARKER = 'source.kind: curated-thoughts/wisdom';
+/** Exact marker LINE of the v1 bootstrap part (LD4). */
+export const BOOT_MARKER = 'source.kind: curated-thoughts/wisdom-bootstrap';
+
+/** One v1 memo record: the rendered block plus the fact ids it carries. */
 export interface MemoRecord {
   block: string;
   ids: string[];
@@ -60,66 +58,115 @@ export interface MemoRecord {
 
 /**
  * One persisted-history row as `client.session.messages()` returns it:
- * { info: Message, parts: Part[] }. Typed loosely — the SDK shape is
- * verified (types.gen.d.ts) but the ledger must tolerate extra/missing
- * fields without throwing.
+ * { info: Message, parts: Part[] }. Typed loosely — the ledger must tolerate
+ * extra/missing fields without throwing.
  */
 export interface HistoryRow {
-  info?: { role?: unknown };
+  info?: { role?: unknown; id?: unknown };
   parts?: unknown[];
 }
 
-/** Text parts of one history row (type: 'text', non-ignored only). */
+function isObj(v: unknown): v is Record<string, unknown> {
+  return v !== null && typeof v === 'object' && !Array.isArray(v);
+}
+
+function roleOf(row: unknown): unknown {
+  if (!isObj(row) || !isObj(row.info)) return undefined;
+  return row.info.role;
+}
+
+function hasMarkerLine(text: string, line: string): boolean {
+  return text.split('\n').some((l) => l.trim() === line);
+}
+
+/** True for a text part this plugin wrote (live or bootstrap). */
+export function isOurPart(part: unknown): boolean {
+  if (!isObj(part) || part.type !== 'text' || part.synthetic !== true) return false;
+  if (typeof part.text !== 'string') return false;
+  return hasMarkerLine(part.text, LIVE_MARKER) || hasMarkerLine(part.text, BOOT_MARKER);
+}
+
+function isLivePart(part: unknown): boolean {
+  return isOurPart(part) && hasMarkerLine((part as { text: string }).text, LIVE_MARKER);
+}
+
+function isBootPart(part: unknown): boolean {
+  return isOurPart(part) && hasMarkerLine((part as { text: string }).text, BOOT_MARKER);
+}
+
+/** Text of every non-ignored text part of a row (synthetic included). */
 function rowTexts(row: HistoryRow): string[] {
   const out: string[] = [];
   if (!Array.isArray(row.parts)) return out;
   for (const part of row.parts) {
-    if (
-      part !== null &&
-      typeof part === 'object' &&
-      (part as { type?: unknown }).type === 'text' &&
-      typeof (part as { text?: unknown }).text === 'string' &&
-      (part as { ignored?: unknown }).ignored !== true
-    ) {
-      out.push((part as { text: string }).text);
+    if (isObj(part) && part.type === 'text' && typeof part.text === 'string' && part.ignored !== true) {
+      out.push(part.text);
     }
   }
   return out;
 }
 
-/**
- * The persisted output text of a COMPLETED tool part (ToolStateCompleted
- * carries `output: string`; pending/running/error states carry none).
- */
-function toolOutputText(row: HistoryRow): string[] {
+/** Persisted output text of COMPLETED tool parts (ToolStateCompleted.output). */
+function toolOutputTexts(row: HistoryRow): string[] {
   const out: string[] = [];
   if (!Array.isArray(row.parts)) return out;
   for (const part of row.parts) {
-    if (
-      part !== null &&
-      typeof part === 'object' &&
-      (part as { type?: unknown }).type === 'tool'
-    ) {
-      const state = (part as { state?: unknown }).state;
-      if (
-        state !== null &&
-        typeof state === 'object' &&
-        (state as { status?: unknown }).status === 'completed' &&
-        typeof (state as { output?: unknown }).output === 'string'
-      ) {
-        out.push((state as { output: string }).output);
-      }
+    if (!isObj(part) || part.type !== 'tool') continue;
+    const state = part.state;
+    if (isObj(state) && state.status === 'completed' && typeof state.output === 'string') {
+      out.push(state.output);
     }
   }
   return out;
 }
 
 /**
- * The user message's text for the query. N1 hands us `output.parts` (the
- * incoming message's parts); text parts joined.
+ * The query text (LD8 self-trigger guard): GENUINE user text only —
+ * non-synthetic, non-ignored text parts. Our own parts and host-synthetic
+ * parts ("Called the Read tool…") never feed `ct wisdom match`.
  */
-export function userMessageText(parts: unknown[]): string {
-  return rowTexts({ parts } as HistoryRow).join('\n');
+export function userQueryText(parts: unknown[]): string {
+  if (!Array.isArray(parts)) return '';
+  const out: string[] = [];
+  for (const part of parts) {
+    if (
+      isObj(part) &&
+      part.type === 'text' &&
+      typeof part.text === 'string' &&
+      part.synthetic !== true &&
+      part.ignored !== true
+    ) {
+      out.push(part.text);
+    }
+  }
+  return out.join('\n');
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Part ids (LD9 / H2): `prt_` + 12 hex of (ms*4096 + counter), 48 bits
+// big-endian, + 14 base62 chars — the host's own ascending format. Parts the
+// plugin pushes skip the host's id assignment (H1), so they must arrive
+// well-formed and sort after the message's earlier parts.
+// ─────────────────────────────────────────────────────────────────────────
+
+const BASE62 = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz';
+let idLastMs = 0;
+let idCounter = 0;
+
+export function partId(now: number = Date.now()): string {
+  // Monotonic even if the clock steps back or callers pass a fixed time.
+  const ms = Math.max(now, idLastMs);
+  if (ms !== idLastMs) {
+    idLastMs = ms;
+    idCounter = 0;
+  }
+  idCounter++;
+  const value = (BigInt(ms) * 4096n + BigInt(idCounter)) & 0xffffffffffffn;
+  const hex = value.toString(16).padStart(12, '0');
+  const rnd = randomBytes(14);
+  let tail = '';
+  for (let i = 0; i < 14; i++) tail += BASE62[rnd[i]! % 62];
+  return `prt_${hex}${tail}`;
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -207,76 +254,94 @@ export function nodeSpawnFn(env: NodeJS.ProcessEnv = process.env): SpawnFn {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// The curated_recall_context envelope (N3).
+// The curated_recall_context envelope (N3, LD2).
 //
-// A successful MCP call arrives at `tool.execute.after` with
-// `output.output` — the tool's string output as the host PERSISTS it. The
-// CT recall shape is { result: "<CT JSON>" } whose inner wiki_entries carry
-// fact ids. Anything else — errors, other shapes, other tools — passes
-// through untouched. Parse rule (handoff landmine): the envelope JSON is
-// line 1 only; ct-fact trailer lines follow it (JSON.stringify emits no
-// literal newlines), so parsing must never hand the trailers to JSON.parse.
+// Two carriers: the OpenCode MCP CallToolResult `{content:[{type:'text',
+// text}], …}` (the real shape, H5) and a plain string. Inside the text, the
+// envelope is line 1 only (ct-fact trailers follow it; JSON.stringify emits
+// no literal newlines): either the CT recall JSON itself (`wiki_entries`) or
+// the Hermes wrapper `{"result": "<CT JSON>"}`. Every key other than
+// `wiki_entries` (inner) and `result` (wrapper) is preserved verbatim.
 // ─────────────────────────────────────────────────────────────────────────
 
-export const RECALL_TOOL_SUFFIX = '__curated_recall_context';
+export const RECALL_TOOL = 'curated_recall_context';
 
-/** Inner wiki-entry envelope: the parsed shape N3 reads and rewrites. */
-interface InnerEnvelope {
-  wiki_entries: Array<Record<string, unknown>>;
-}
-
-function parseEnvelope(result: unknown):
-  | { outer: Record<string, unknown>; inner: InnerEnvelope }
-  | null {
-  if (typeof result !== 'string') return null;
-  // Line 1 only: the persisted output may carry ct-fact trailer lines that
-  // are NOT part of the JSON (this module's own rewrite appends them).
-  const line1 = (result.split('\n', 1)[0] ?? '').trim();
-  if (line1 === '') return null;
-  let outer: unknown;
-  try {
-    outer = JSON.parse(line1);
-  } catch {
-    return null;
-  }
-  if (outer === null || typeof outer !== 'object' || Array.isArray(outer)) {
-    return null;
-  }
-  const obj = outer as Record<string, unknown>;
-  if (typeof obj.result !== 'string') return null;
-  // Same rule one level down: the inner envelope JSON is line 1 of `result`.
-  let inner: unknown;
-  try {
-    inner = JSON.parse((obj.result.split('\n', 1)[0] ?? '').trim() || obj.result);
-  } catch {
-    return null;
-  }
-  if (inner === null || typeof inner !== 'object' || Array.isArray(inner)) {
-    return null;
-  }
-  const innerObj = inner as Record<string, unknown>;
-  if (!Array.isArray(innerObj.wiki_entries)) return null;
-  return {
-    outer: obj,
-    inner: { wiki_entries: innerObj.wiki_entries as Array<Record<string, unknown>> },
-  };
-}
-
+/** m4: the CT recall surface only — never curated_get_wiki_entry. */
 export function isRecallToolName(name: unknown): boolean {
-  return typeof name === 'string' && name.endsWith(RECALL_TOOL_SUFFIX);
+  return typeof name === 'string' && (name === RECALL_TOOL || name.endsWith(`_${RECALL_TOOL}`));
+}
+
+interface ParsedText {
+  inner: Record<string, unknown> & { wiki_entries: unknown[] };
+  wrapper: Record<string, unknown> | null;
+  /** Lines after line 1 of the carrier text (pre-existing trailers etc.). */
+  rest: string[];
+}
+
+function line1(text: string): string {
+  return (text.split('\n', 1)[0] ?? '').trim();
+}
+
+function parseEnvelopeText(text: unknown): ParsedText | null {
+  if (typeof text !== 'string') return null;
+  const first = line1(text);
+  if (first === '') return null;
+  let obj: unknown;
+  try {
+    obj = JSON.parse(first);
+  } catch {
+    return null;
+  }
+  if (!isObj(obj)) return null;
+  const rest = text.split('\n').slice(1);
+  if (Array.isArray(obj.wiki_entries)) {
+    return { inner: obj as ParsedText['inner'], wrapper: null, rest };
+  }
+  if (typeof obj.result === 'string') {
+    let inner: unknown;
+    try {
+      inner = JSON.parse(line1(obj.result));
+    } catch {
+      return null;
+    }
+    if (isObj(inner) && Array.isArray(inner.wiki_entries)) {
+      return { inner: inner as ParsedText['inner'], wrapper: obj, rest };
+    }
+  }
+  return null;
+}
+
+interface Located {
+  parsed: ParsedText;
+  /** Index into result.content, or -1 for a plain-string carrier. */
+  index: number;
+}
+
+function locate(result: unknown): Located | null {
+  if (typeof result === 'string') {
+    const parsed = parseEnvelopeText(result);
+    return parsed ? { parsed, index: -1 } : null;
+  }
+  if (!isObj(result) || !Array.isArray(result.content)) return null;
+  for (let i = 0; i < result.content.length; i++) {
+    const item = result.content[i];
+    if (isObj(item) && item.type === 'text') {
+      const parsed = parseEnvelopeText(item.text);
+      if (parsed) return { parsed, index: i };
+    }
+  }
+  return null;
 }
 
 function stubEntry(factId: string): Record<string, unknown> {
-  return {
-    id: factId,
-    in_context: true,
-    note: `already in context: ct-fact:${factId}`,
-  };
+  return { id: factId, in_context: true, note: `already in context: ct-fact:${factId}` };
 }
 
 // ─────────────────────────────────────────────────────────────────────────
 // OpenCodeWisdomAdapter
 // ─────────────────────────────────────────────────────────────────────────
+
+export type SessionKind = 'parent' | 'child';
 
 export interface AdapterDeps {
   /** Resolved brain env for discovery + spawns (CURATED_BRAIN_DIR carried). */
@@ -285,212 +350,195 @@ export interface AdapterDeps {
   spawnFn?: SpawnFn;
   /** Injected discovery (tests); defaults to the v1 module discovery. */
   discover?: () => { path: string | null; failure: string | null };
-  /** Injected clock for the breaker (tests). */
-  now?: () => number;
-  /**
-   * Injected persisted-history fetch (tests); production passes the plugin
-   * input's `client`. Returns the {info, parts} rows of the session, newest
-   * last. A rejected/failed fetch yields null (empty ledger, fail-open).
-   */
+  /** Persisted history rows of a session, oldest first; null/throw ⇒ empty. */
   fetchHistory?: (sessionId: string) => Promise<HistoryRow[] | null>;
+  /** Session info (`parentID`), null/throw ⇒ unknown ⇒ treated as child. */
+  fetchSession?: (sessionId: string) => Promise<{ parentID?: unknown } | null>;
 }
 
-/**
- * Per-turn state: the ledger rebuilt at N1, cached BEFORE any early return
- * (m1) so N3 can dedup even on turns that deliver nothing. Turn-scoped only —
- * the next turn's N1 rebuild is the source of truth (INTENT M1).
- */
-interface TurnState {
-  ledger: Ledger;
+const LRU_MAX = 256;
+
+function lruSet<K, V>(map: Map<K, V>, key: K, value: V): void {
+  map.delete(key);
+  map.set(key, value);
+  while (map.size > LRU_MAX) {
+    const oldest = map.keys().next();
+    if (oldest.done) break;
+    map.delete(oldest.value);
+  }
+}
+
+function unionInto(set: Set<string> | undefined, ids: Iterable<string>): Set<string> {
+  const out = set ?? new Set<string>();
+  for (const id of ids) out.add(id);
+  return out;
+}
+
+function makeLedger(ids: string[], live: number, knownBootstrap: boolean): Ledger {
+  const set = new Set(ids);
+  return { idsMostRecentFirst: ids, has: (id) => set.has(id), liveDeliveredCount: live, knownBootstrap };
 }
 
 export class OpenCodeWisdomAdapter implements HostAdapter {
-  private readonly env: NodeJS.ProcessEnv;
   private readonly spawnFn: SpawnFn;
   private readonly discover: () => { path: string | null; failure: string | null };
-  private readonly now: () => number;
   private readonly fetchHistory: (sessionId: string) => Promise<HistoryRow[] | null>;
-  private readonly turns = new Map<string, TurnState>();
+  private readonly fetchSession: (sessionId: string) => Promise<{ parentID?: unknown } | null>;
+  /** m1 turn cache: the N1 rebuild, read by N3 within the turn. */
+  private readonly turns = new Map<string, Ledger>();
+  /** Definitive session kinds (lookup failures are not cached). */
+  private readonly kinds = new Map<string, { kind: SessionKind; parentID: string | null }>();
+  /** Decision 3 carry-forward: pre-compaction ids, never cleared. */
+  private readonly carry = new Map<string, Set<string>>();
+  /** Ids this process delivered live (persistence-gap cover, LD5). */
+  private readonly delivered = new Map<string, string[]>();
+  /** Whether the last rebuild saw any persisted user row (LD4 first-turn rule). */
+  private readonly userHistory = new Map<string, boolean>();
   private capabilityAbsent = false;
 
+  /** v1 bootstrap memo, per session (LD4). */
+  bootstrapMemo: Record<string, MemoRecord> = {};
+
   constructor(deps: AdapterDeps) {
-    this.env = deps.env;
     this.spawnFn = deps.spawnFn ?? nodeSpawnFn(deps.env);
     this.discover = deps.discover ?? (() => discoverCt(deps.env));
-    this.now = deps.now ?? (() => Date.now());
-    this.fetchHistory =
-      deps.fetchHistory ??
-      (async (_sessionId: string) => {
-        // Production wiring (index.ts) always injects fetchHistory from the
-        // plugin input's client. This default keeps the adapter honest if
-        // constructed bare: an empty ledger instead of a crash.
-        return null;
-      });
+    this.fetchHistory = deps.fetchHistory ?? (async () => null);
+    this.fetchSession = deps.fetchSession ?? (async () => null);
   }
 
-  /** TEST-ONLY: drop all turn caches. */
+  /** TEST-ONLY: drop all process state. */
   _resetForTests(): void {
     this.turns.clear();
+    this.kinds.clear();
+    this.carry.clear();
+    this.delivered.clear();
+    this.userHistory.clear();
+    this.bootstrapMemo = {};
     this.capabilityAbsent = false;
   }
 
-  /**
-   * The v1 memo record for this session, when this process rendered one. The
-   * index.ts wiring sets this before the N1 rebuild each turn.
-   */
-  bootstrapMemo: Record<string, MemoRecord> = {};
+  // ── session kind (LD7) ────────────────────────────────────────────────
 
-  /** Sessions in the compaction window (set at `beginCompaction`). */
-  private readonly compactionPending = new Set<string>();
-
-  /**
-   * Decision 3 carry-forward (spec §opencode): called from
-   * `experimental.session.compacting`. The summary may drop the bootstrap
-   * block and prior deliveries, so the advisory memo ids must not survive
-   * compaction — the next N1 rebuild reads the post-compaction history:
-   * ids the summary preserved stay known (no redelivery); dropped ids are
-   * forgotten. Cleared at the next rebuild (the window closes once the
-   * post-compaction history has been read once).
-   */
-  beginCompaction(sessionId: string): void {
-    this.compactionPending.add(sessionId);
-    this.turns.delete(sessionId);
+  async sessionKind(sessionId: string): Promise<SessionKind> {
+    const known = this.kinds.get(sessionId);
+    if (known) return known.kind;
+    let info: { parentID?: unknown } | null = null;
+    try {
+      info = await this.fetchSession(sessionId);
+    } catch {
+      return 'child'; // fail-safe, not cached: retried next turn
+    }
+    if (!isObj(info)) return 'child';
+    const parentID = typeof info.parentID === 'string' && info.parentID !== '' ? info.parentID : null;
+    const kind: SessionKind = parentID === null ? 'parent' : 'child';
+    lruSet(this.kinds, sessionId, { kind, parentID });
+    return kind;
   }
 
-  deliveryEnabled(_session: SessionRef): boolean {
-    // OpenCode has no resume-OFF latch (decision 4d is claude-code-only); the
-    // restored+unknown-bootstrap fail-closed rule covers resume below.
-    return true;
+  /** Parent-only delivery: only a session positively known as a parent. */
+  deliveryEnabled(session: SessionRef): boolean {
+    return this.kinds.get(session.id)?.kind === 'parent';
   }
 
   restored(_session: SessionRef): boolean {
-    // No separate restore path (host row, Restore rule): resume reuses the
-    // same persisted history, so knownBootstrap below carries the semantics.
-    return false;
+    return false; // LD10: resume rebuilds from the same persisted history
+  }
+
+  hasUserHistory(sessionId: string): boolean {
+    return this.userHistory.get(sessionId) === true;
+  }
+
+  // ── v1 bootstrap memo (LD4) ───────────────────────────────────────────
+
+  setBootstrap(sessionId: string, block: string): MemoRecord {
+    const rec: MemoRecord = { block, ids: scanIds(block) };
+    this.bootstrapMemo[sessionId] = rec;
+    return rec;
+  }
+
+  // ── ledger (LD5/LD6) ──────────────────────────────────────────────────
+
+  private async rows(sessionId: string): Promise<HistoryRow[]> {
+    try {
+      const rows = await this.fetchHistory(sessionId);
+      return Array.isArray(rows) ? rows : [];
+    } catch {
+      return [];
+    }
   }
 
   /**
-   * m5 source of truth: rebuild from the PERSISTED history the NEXT trigger
-   * reads — client.session.messages() — plus the memo bootstrap ids. Never
-   * from the in-flight hook payload (N1's output.message is not yet
-   * persisted when the hook runs; the fetch may include it later, which is
-   * harmless: the scan is idempotent on markers).
-   *
-   * Async rebuild over a sync HostAdapter operation: the fetch is issued per
-   * rebuild and awaited through `rebuildLedgerAsync`; the sync entry point
-   * serves the cached view (m1/m2), which every N1 call path refreshes
-   * BEFORE the engine runs.
+   * m5 source of truth: rebuild from what the NEXT trigger reads — the
+   * persisted history (child: ∪ parent history) — plus carry, memo and this
+   * process's deliveries. Cached for N3 (m1).
    */
   async rebuildLedgerAsync(session: SessionRef): Promise<Ledger> {
-    const rows = await this.fetchHistory(session.id).catch(() => null);
-    // The compaction window closes once the post-compaction history has been
-    // read: memo bootstrap ids rejoin the ledger from here on.
-    const inCompactionWindow = this.compactionPending.has(session.id);
-    if (inCompactionWindow) this.compactionPending.delete(session.id);
-    const logIds = this.scanRows(rows, 'all');
-    const rec = this.bootstrapMemo[session.id];
-    const bootIds = !inCompactionWindow && rec ? rec.ids : [];
-    const merged: string[] = [...logIds];
-    for (const id of bootIds) {
-      if (!merged.includes(id)) merged.push(id);
-    }
-    const set = new Set(merged);
-    const knownBootstrap = bootIds.length > 0 || logIds.length > 0;
-    const ledger: Ledger = {
-      idsMostRecentFirst: merged,
-      has: (id) => set.has(id),
-      liveDeliveredCount: this.liveDeliveredCount(rows, set),
-      knownBootstrap,
-    };
-    this.turns.set(session.id, { ledger });
-    this.pruneTurns();
+    const own = await this.rows(session.id);
+    const parentID = this.kinds.get(session.id)?.parentID ?? null;
+    const parentRows = parentID !== null ? await this.rows(parentID) : [];
+    const ledger = this.buildLedger(session.id, [...parentRows, ...own]);
+    this.userHistory.set(session.id, own.some((r) => roleOf(r) === 'user'));
+    lruSet(this.turns, session.id, ledger);
     return ledger;
   }
 
-  rebuildLedger(session: SessionRef): Ledger {
-    // Sync fallback: serve the last cached rebuild for this session — the m1
-    // cache — or EMPTY. Every engine call path refreshes the cache first via
-    // rebuildLedgerAsync; a cold sync read would block the host on HTTP.
-    return this.cachedLedger(session) ?? {
-      idsMostRecentFirst: [],
-      has: () => false,
-      liveDeliveredCount: 0,
-      knownBootstrap: this.compactionPending.has(session.id)
-        ? false
-        : (this.bootstrapMemo[session.id]?.ids.length ?? 0) > 0,
-    };
-  }
-
-  /**
-   * Scan history rows for ct-fact markers, newest row first. `mode`:
-   * 'all' = user + tool roles (N4 scan surface); the synthetic N2 block
-   * lands on the user role and recall trailers on completed tool parts.
-   */
-  private scanRows(rows: HistoryRow[] | null, mode: 'all'): string[] {
-    if (rows === null || rows.length === 0) return [];
-    const out: string[] = [];
+  private buildLedger(sessionId: string, rows: HistoryRow[]): Ledger {
+    const ordered: string[] = [];
     const seen = new Set<string>();
+    const push = (id: string) => {
+      if (!seen.has(id)) {
+        seen.add(id);
+        ordered.push(id);
+      }
+    };
+    const delivered = this.delivered.get(sessionId) ?? [];
+    for (let i = delivered.length - 1; i >= 0; i--) push(delivered[i]!);
+    const live = new Set<string>(delivered);
+    let bootSeen = false;
     for (let i = rows.length - 1; i >= 0; i--) {
       const row = rows[i] as HistoryRow;
-      if (row === null || typeof row !== 'object') continue;
-      const role = row.info?.role;
-      if (mode === 'all' && role !== 'user' && role !== 'tool' && role !== 'assistant') {
-        continue;
-      }
-      for (const text of [...rowTexts(row), ...toolOutputText(row)]) {
-        const re = /ct-fact:([A-Za-z0-9._:-]{1,128})/g;
-        let m: RegExpExecArray | null;
-        while ((m = re.exec(text)) !== null) {
-          if (!seen.has(m[1])) {
-            seen.add(m[1]);
-            out.push(m[1]);
-          }
+      if (!isObj(row)) continue;
+      const role = roleOf(row);
+      if (role !== 'user' && role !== 'assistant' && role !== 'tool') continue;
+      for (const t of [...rowTexts(row), ...toolOutputTexts(row)]) for (const id of scanIds(t)) push(id);
+      if (role === 'user' && Array.isArray(row.parts)) {
+        for (const part of row.parts) {
+          if (isLivePart(part)) for (const id of scanIds((part as { text: string }).text)) live.add(id);
+          if (isBootPart(part)) bootSeen = true;
         }
       }
     }
-    return out;
+    const memo = this.bootstrapMemo[sessionId];
+    for (const id of memo?.ids ?? []) push(id);
+    for (const id of this.carry.get(sessionId) ?? []) push(id);
+    return makeLedger(ordered, live.size, bootSeen || memo !== undefined);
+  }
+
+  /** Sync HostAdapter entry: the turn cache (every call path refreshes it first). */
+  rebuildLedger(session: SessionRef): Ledger {
+    return this.turns.get(session.id) ?? this.buildLedger(session.id, []);
   }
 
   /**
-   * M1 live budget: count distinct ids delivered via the LIVE path — markers
-   * on USER-role rows of the persisted history (the N2 channel), same rule
-   * as the Hermes reference and the core's SimHost.
+   * Decision 3 carry-forward (`experimental.session.compacting`): snapshot the
+   * pre-compaction ledger into the carry set — never removed.
    */
-  private liveDeliveredCount(rows: HistoryRow[] | null, known: Set<string>): number {
-    if (rows === null) return 0;
-    const live = new Set<string>();
-    for (const row of rows) {
-      if (row === null || typeof row !== 'object') continue;
-      if (row.info?.role !== 'user') continue;
-      for (const text of rowTexts(row)) {
-        const re = /ct-fact:([A-Za-z0-9._:-]{1,128})/g;
-        let match: RegExpExecArray | null;
-        while ((match = re.exec(text)) !== null) {
-          if (known.has(match[1])) live.add(match[1]);
-        }
-      }
-    }
-    return live.size;
+  async snapshotForCompaction(sessionId: string): Promise<void> {
+    const cached = this.turns.get(sessionId); // same-turn additions (N3 unions)
+    const ledger = await this.rebuildLedgerAsync({ id: sessionId });
+    const ids = [...ledger.idsMostRecentFirst, ...(cached?.idsMostRecentFirst ?? [])];
+    lruSet(this.carry, sessionId, unionInto(this.carry.get(sessionId), ids));
   }
 
-  private pruneTurns(): void {
-    while (this.turns.size > 256) {
-      const oldest = this.turns.keys().next();
-      if (oldest.done) break;
-      this.turns.delete(oldest.value);
-    }
-  }
-
-  /** m1: cache the N1 rebuild before any early return. */
   cacheLedger(session: SessionRef, ledger: Ledger): void {
-    this.turns.set(session.id, { ledger });
-    this.pruneTurns();
+    lruSet(this.turns, session.id, ledger);
   }
 
-  /** m2: the N1 rebuild, when this turn produced one. */
   cachedLedger(session: SessionRef): Ledger | null {
-    return this.turns.get(session.id)?.ledger ?? null;
+    return this.turns.get(session.id) ?? null;
   }
+
+  // ── CT ────────────────────────────────────────────────────────────────
 
   async wisdomMatch(
     query: string,
@@ -500,64 +548,16 @@ export class OpenCodeWisdomAdapter implements HostAdapter {
     if (this.capabilityAbsent) return { outcome: 'timeout_or_exit' };
     const { path } = this.discover();
     if (path === null) return { outcome: 'spawn' };
-    const probe = await this.spawnFn({
-      command: path,
-      // Capability gate per the live-delivery spec: `ct wisdom match --help`
-      // exits 0 (Hermes ct_wisdom_live.has_match_capability parity).
-      args: ['wisdom', 'match', '--help'],
-      timeoutMs: 3000,
-    });
-    if (probe.spawnError || probe.timedOut) {
-      return { outcome: 'spawn' };
-    }
+    // Capability gate (Hermes has_match_capability parity).
+    const probe = await this.spawnFn({ command: path, args: ['wisdom', 'match', '--help'], timeoutMs: 3000 });
+    if (probe.spawnError || probe.timedOut) return { outcome: 'spawn' };
     if (probe.code !== 0) {
-      // Deterministic absence of the subcommand: latch OFF for the process
-      // (n3 retry-next-turn does not apply — the binary answered).
-      this.capabilityAbsent = true;
+      this.capabilityAbsent = true; // deterministic absence: latch OFF for the process
       return { outcome: 'timeout_or_exit' };
     }
     return coreWisdomMatch(path, query, max, exclude, this.spawnFn);
   }
 
-  /** m4: N3 fires on the CT recall surface only. */
-  isCtRecallResult(result: unknown): boolean {
-    return parseEnvelope(result) !== null;
-  }
-
-  /** Fact ids carried by a recall envelope (empty on malformed). */
-  envelopeFactIds(result: unknown): string[] {
-    const parsed = parseEnvelope(result);
-    if (parsed === null) return [];
-    const ids: string[] = [];
-    for (const entry of parsed.inner.wiki_entries) {
-      const id = (entry as { id?: unknown } | null)?.id;
-      if (validId(id) && !ids.includes(id)) ids.push(id);
-    }
-    return ids;
-  }
-
-  /**
-   * Reference dedup (ct_tool_dedup.transform_tool_result): stub repeated
-   * wiki entries down to one-line stubs (option A), then append a
-   * `ct-fact:<id>` trailer line for every NEW id — envelope JSON first,
-   * one trailer line per new id after it, exactly as the reference writes
-   * `outer['result'] = json.dumps(inner) + trailer`. The persisted tool
-   * output then carries the markers the next ledger scan picks up. The
-   * returned STRING replaces output.output at `tool.execute.after`.
-   */
-  rewriteEnvelopeStub(result: unknown, repeats: string[], newIds: string[]): unknown {
-    const parsed = parseEnvelope(result);
-    if (parsed === null) return result;
-    const stubs = new Set(repeats);
-    parsed.inner.wiki_entries = parsed.inner.wiki_entries.map((entry) => {
-      const id = (entry as { id?: unknown } | null)?.id;
-      return validId(id) && stubs.has(id) ? stubEntry(id) : entry;
-    });
-    const trailer = newIds.map((id) => `\n${marker(id)}`).join('');
-    return JSON.stringify(parsed.inner) + trailer;
-  }
-
-  /** n3: a spawn-class failure drops the process capability latch. */
   resetDiscoveryAndProbeCaches(): void {
     this.capabilityAbsent = false;
   }
@@ -566,27 +566,66 @@ export class OpenCodeWisdomAdapter implements HostAdapter {
     return this.capabilityAbsent;
   }
 
+  // ── N3 ────────────────────────────────────────────────────────────────
+
+  isCtRecallResult(result: unknown): boolean {
+    return locate(result) !== null;
+  }
+
+  envelopeFactIds(result: unknown): string[] {
+    const found = locate(result);
+    if (found === null) return [];
+    const ids: string[] = [];
+    for (const entry of found.parsed.inner.wiki_entries) {
+      const id = isObj(entry) ? entry.id : undefined;
+      if (validId(id) && !ids.includes(id)) ids.push(id);
+    }
+    return ids;
+  }
+
   /**
-   * N2 delivery: the BLOCK text is returned to index.ts (which appends the
-   * synthetic part); here we only record the memo's delivered ids so the
-   * ledger can find them even if the host never persisted our part
-   * (fail-open bookkeeping — the history scan stays authoritative).
+   * Reference dedup (ct_tool_dedup.transform_tool_result): stub repeats,
+   * append one `ct-fact:<id>` trailer line per NEW id after the envelope JSON.
+   * Returns the SAME carrier shape (string, or a CallToolResult copy whose
+   * located text item is replaced); index.ts copies `content` back onto the
+   * host's output object.
    */
+  rewriteEnvelopeStub(result: unknown, repeats: string[], newIds: string[]): unknown {
+    const found = locate(result);
+    if (found === null) return result;
+    const { inner, wrapper, rest } = found.parsed;
+    const stubs = new Set(repeats);
+    const newInner = {
+      ...inner,
+      wiki_entries: inner.wiki_entries.map((entry) => {
+        const id = isObj(entry) ? entry.id : undefined;
+        return validId(id) && stubs.has(id) ? stubEntry(id) : entry;
+      }),
+    };
+    const trailer = newIds.map((id) => `\n${marker(id)}`).join('');
+    const body = JSON.stringify(newInner) + trailer;
+    const head = wrapper === null ? body : JSON.stringify({ ...wrapper, result: body });
+    const text = [head, ...rest].join('\n');
+    if (found.index < 0) return text;
+    const obj = result as Record<string, unknown> & { content: unknown[] };
+    return {
+      ...obj,
+      content: obj.content.map((item, i) => (i === found.index ? { ...(item as object), text } : item)),
+    };
+  }
+
+  // ── N2 bookkeeping ────────────────────────────────────────────────────
+
   deliver(_session: SessionRef, _block: string): void {
-    // No host-side write: the N2 channel is the returned block itself.
+    // The N2 channel is the returned block itself (index.ts pushes the part).
   }
 
   noteDelivered(session: SessionRef, ids: string[]): void {
-    const rec = this.bootstrapMemo[session.id];
-    if (rec) {
-      for (const id of ids) if (!rec.ids.includes(id)) rec.ids.push(id);
-    }
+    const list = this.delivered.get(session.id) ?? [];
+    for (const id of ids) if (!list.includes(id)) list.push(id);
+    lruSet(this.delivered, session.id, list);
   }
 }
 
-// ─────────────────────────────────────────────────────────────────────────
-// N1 / N3 entry points for index.ts (thin wrappers around the core so the
-// adapter + Breaker pairing lives in one place).
-// ─────────────────────────────────────────────────────────────────────────
-
+// N1 / N3 entry points for index.ts.
 export { coreOnUserTurn as runUserTurn, coreOnToolResult as runToolResult };

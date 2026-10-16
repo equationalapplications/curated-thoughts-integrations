@@ -7,28 +7,27 @@
  * invokes only `server` when a module has one and ignores the named export
  * (tests/host/compatibility.json → findings.exportForms).
  *
- * Hooks (per-host adapter contract, spec table — do not re-derive):
+ * Hooks (parent spec OpenCode row, refined by the leg spec
+ * docs/superpowers/specs/2026-10-16-opencode-wisdom-parity-leg-design.md):
  *   - `experimental.chat.system.transform` — v0 health block (unchanged).
  *   - `chat.message`                       — N1 trigger + N2 delivery: the
- *     same invocation appends a `synthetic: true` text part carrying the
- *     wisdom block. The part is persisted by the host, so the ledger reads
- *     it back from the persisted history (decision 3; the wire-only
+ *     same invocation pushes `synthetic: true` text parts (v1 bootstrap on the
+ *     session's first turn, then the live block). The host persists them
+ *     after the hook returns (H1), and the ledger reads them back from the
+ *     persisted history (decision 3; the wire-only
  *     `experimental.chat.messages.transform` is NOT the delivery channel).
  *   - `tool.execute.after`                 — N3: rewrite CT recall envelopes
- *     in the tool's persisted output (stub repeats + ct-fact trailers).
+ *     inside the MCP CallToolResult `content[].text` the host persists (H5).
  *   - `experimental.session.compacting`    — decision 3 carry-forward:
- *     invalidate the advisory bootstrap memo and the turn cache so the next
- *     N1 rebuild reads the post-compaction history (surviving summary ids
- *     stay known; dropped ids are forgotten).
+ *     snapshot the pre-compaction ledger; it is never forgotten.
  *
  * Known caveat (accepted, per decision 3's aux-call note): auxiliary LLM
  * calls such as title generation re-read the session and will see delivered
  * wisdom parts. `experimental.chat.messages.transform` input carries no
- * primary/auxiliary signal (verified: `input: {}` in the 1.18.31 SDK), so no
- * wire-only suppression is attempted — a wrong guess there could strip the
- * block from a PRIMARY call, which would break delivery itself. Aux visibility
- * has no exactly-once impact: the ledger and the budget read the persisted
- * history, not the wire view.
+ * primary/auxiliary signal (`input: {}`), so no wire-only suppression is
+ * attempted — a wrong guess there could strip the block from a PRIMARY call.
+ * Aux visibility has no exactly-once impact: the ledger and the budget read
+ * the persisted history, not the wire view.
  *
  * No `event` hook: 1.18.31 delivers no MCP status event to plugins
  * (findings.mcpStatusEvents = false), so `connection` stays honestly
@@ -45,14 +44,18 @@ import { ENV_BRAIN_DIR, resolveBrainPaths } from '../scripts/ct_env.js';
 import { formatStatusBlock, isStatusBlock } from './format.js';
 import { createHealthCache } from './refresh.js';
 import {
+  BOOT_MARKER,
+  LIVE_MARKER,
   OpenCodeWisdomAdapter,
+  isOurPart,
   isRecallToolName,
+  partId,
   runToolResult,
   runUserTurn,
-  userMessageText,
+  userQueryText,
   type HistoryRow,
 } from './wisdom-live/adapter.js';
-import { keyOf, renderWisdom } from './wisdom.js';
+import { renderWisdom } from './wisdom.js';
 
 /**
  * Brain dir precedence: options.brainDir → CURATED_BRAIN_DIR → ~/.brain.
@@ -67,30 +70,20 @@ function resolveEnv(options: PluginOptions | undefined): NodeJS.ProcessEnv {
   return { ...process.env };
 }
 
-/** Marker of OUR synthetic parts (identity + provenance in one string). */
-const WISDOM_PART_MARKER = 'source.kind: curated-thoughts/wisdom';
-
-function isWisdomPart(part: unknown): boolean {
-  return (
-    part !== null &&
-    typeof part === 'object' &&
-    (part as { type?: unknown }).type === 'text' &&
-    (part as { synthetic?: unknown }).synthetic === true &&
-    typeof (part as { text?: unknown }).text === 'string' &&
-    (part as { text: string }).text.includes(WISDOM_PART_MARKER)
-  );
-}
-
-/** One synthetic text part bound to the message being assembled. */
-function wisdomPart(sessionID: string, messageID: string, id: string, block: string) {
+/** One synthetic text part bound to the message being assembled (LD9 id). */
+function wisdomPart(sessionID: string, messageID: string, block: string, markerLine: string) {
   return {
-    id,
+    id: partId(),
     sessionID,
     messageID,
     type: 'text' as const,
-    text: `${block}\n\n${WISDOM_PART_MARKER}`,
+    text: `${block}\n\n${markerLine}`,
     synthetic: true,
   };
+}
+
+function isObj(v: unknown): v is Record<string, unknown> {
+  return v !== null && typeof v === 'object' && !Array.isArray(v);
 }
 
 export const CuratedThoughts: Plugin = async (input, options) => {
@@ -117,6 +110,17 @@ export const CuratedThoughts: Plugin = async (input, options) => {
       if (res.error !== undefined) return null;
       const data: unknown = res.data;
       return Array.isArray(data) ? (data as HistoryRow[]) : null;
+    },
+    fetchSession: async (sessionId) => {
+      // LD7: `parentID` marks a subagent (child) session. A failed lookup is
+      // null → treated as a child (fail-safe: no delivery).
+      const res = await input.client.session.get({
+        path: { id: sessionId },
+        query: { directory: input.directory },
+      });
+      if (res.error !== undefined) return null;
+      const data: unknown = res.data;
+      return isObj(data) ? (data as { parentID?: unknown }) : null;
     },
   });
   const wisdomBreakers = new Map<string, Breaker>();
@@ -150,55 +154,38 @@ export const CuratedThoughts: Plugin = async (input, options) => {
     },
 
     // ── N1 + N2: pre-LLM, once per turn, persisted append ─────────────────
-    'chat.message': async ({ sessionID, agent }, output) => {
+    'chat.message': async ({ sessionID }, output) => {
       if (!sessionID) return;
       try {
-        // Idempotence guard: chat.message must deliver at most one wisdom
-        // part per message, even if the host re-fires the hook.
-        if (output.parts.some(isWisdomPart)) return;
+        // LD8 (AC 11): one delivery per message even if the host re-fires.
+        if (output.parts.some(isOurPart)) return;
+        const session = { id: sessionID };
+        const kind = await wisdomAdapter.sessionKind(sessionID);
+        // m1/m5: rebuild from the PERSISTED history (child: ∪ parent) and
+        // cache it for N3 before any early return.
+        await wisdomAdapter.rebuildLedgerAsync(session);
+        if (kind !== 'parent') return; // LD7: parent-only delivery
+        // LD8: genuine user text only; an all-synthetic message is a no-op.
+        const query = userQueryText(output.parts);
+        if (query.trim() === '') return;
+        const messageID = output.message.id;
 
-        // v1 bootstrap block: seed-query recall memoized per agent (N5).
-        // Runs BEFORE the live turn so a fresh agent still sees its memory;
-        // the memo record joins the ledger via bootstrapIdsFor.
-        const memoKey = keyOf({ agent }) || 'default';
-        let memoRecord = wisdomAdapter.bootstrapMemo[sessionID];
-        if (memoRecord === undefined) {
-          const block = renderWisdom({ agent }, { env });
-          memoRecord = { block, ids: [] };
-          wisdomAdapter.bootstrapMemo[sessionID] = memoRecord;
-          if (block !== '') {
-            output.parts.push(
-              wisdomPart(
-                sessionID,
-                output.message.id,
-                `ctboot_${sessionID}_${memoKey}`,
-                block,
-              ),
-            );
-          }
+        // LD4: v1 bootstrap on the session's FIRST turn only — later turns and
+        // later processes find its ids in the persisted history.
+        if (
+          wisdomAdapter.bootstrapMemo[sessionID] === undefined &&
+          !wisdomAdapter.hasUserHistory(sessionID)
+        ) {
+          const boot = renderWisdom({ agent: { id: sessionID } }, { env });
+          wisdomAdapter.setBootstrap(sessionID, boot);
+          if (boot !== '') output.parts.push(wisdomPart(sessionID, messageID, boot, BOOT_MARKER));
+          // Memo ids join THIS turn's ledger before the live call.
+          await wisdomAdapter.rebuildLedgerAsync(session);
         }
 
-        // m5/m1: the ledger rebuild reads the PERSISTED history — never the
-        // in-flight payload — and is cached before any early return.
-        await wisdomAdapter.rebuildLedgerAsync({ id: sessionID });
-
-        const query = userMessageText(output.parts);
-        const block = await runUserTurn(
-          wisdomAdapter,
-          { id: sessionID },
-          query,
-          breakerFor(sessionID),
-        );
+        const block = await runUserTurn(wisdomAdapter, session, query, breakerFor(sessionID));
         if (block !== null && block.trim() !== '') {
-          // N2: persisted append — synthetic text part on THIS message.
-          output.parts.push(
-            wisdomPart(
-              sessionID,
-              output.message.id,
-              `ctwisdom_${sessionID}_${output.parts.length}`,
-              block,
-            ),
-          );
+          output.parts.push(wisdomPart(sessionID, messageID, block, LIVE_MARKER));
         }
       } catch {
         // Fail-open: a wisdom failure must never break the user's turn.
@@ -209,29 +196,37 @@ export const CuratedThoughts: Plugin = async (input, options) => {
     'tool.execute.after': async ({ sessionID, tool }, output) => {
       if (!sessionID) return;
       try {
-        // m4: N3 fires on the CT recall surface only.
-        if (!isRecallToolName(tool)) return;
-        const rewritten = runToolResult(
-          wisdomAdapter,
-          { id: sessionID },
-          output.output,
-        );
-        if (typeof rewritten === 'string' && rewritten !== output.output) {
-          output.output = rewritten;
+        if (!isRecallToolName(tool)) return; // m4
+        const session = { id: sessionID };
+        if (wisdomAdapter.cachedLedger(session) === null) {
+          await wisdomAdapter.sessionKind(sessionID);
+          await wisdomAdapter.rebuildLedgerAsync(session);
+        }
+        // H5: for MCP tools the hook output is the CallToolResult; the host
+        // derives the persisted text from `content` AFTER this hook.
+        const raw = output as unknown;
+        if (isObj(raw) && Array.isArray(raw.content)) {
+          const rewritten = runToolResult(wisdomAdapter, session, raw);
+          if (rewritten !== raw && isObj(rewritten) && Array.isArray(rewritten.content)) {
+            raw.content = rewritten.content;
+          }
+        } else if (isObj(raw) && typeof raw.output === 'string') {
+          const rewritten = runToolResult(wisdomAdapter, session, raw.output);
+          if (typeof rewritten === 'string') raw.output = rewritten;
         }
       } catch {
         // Fail-open: leave the tool result untouched on any error.
       }
     },
 
-    // ── Decision 3 carry-forward: compaction invalidation ──────────────────
+    // ── Decision 3 carry-forward ──────────────────────────────────────────
     'experimental.session.compacting': async ({ sessionID }) => {
       if (!sessionID) return;
-      // The summary may drop the bootstrap block and prior deliveries: the
-      // advisory memo bootstrap ids must not survive it. The next N1 rebuild
-      // reads the post-compaction history — ids the summary preserved stay
-      // known (no redelivery); dropped ids are forgotten.
-      wisdomAdapter.beginCompaction(sessionID);
+      try {
+        await wisdomAdapter.snapshotForCompaction(sessionID);
+      } catch {
+        // Fail-open: compaction must proceed regardless.
+      }
     },
 
     dispose: async () => {
