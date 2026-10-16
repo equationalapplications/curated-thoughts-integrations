@@ -7,6 +7,7 @@ Run: python3 -m unittest tests.test_ct_ledger -v
 from __future__ import annotations
 
 import sys
+import threading
 import unittest
 from pathlib import Path
 
@@ -94,6 +95,38 @@ class TestLedgerCache(unittest.TestCase):
         c.put("c", set())
         self.assertIsNotNone(c.get("a"))
         self.assertIsNone(c.get("b"))
+
+
+class TestClaim(unittest.TestCase):
+    def test_claim_returns_only_new_and_adds_them(self):
+        cache = ct_ledger.LedgerCache()
+        cache.put("s", {"a"})
+        self.assertEqual(cache.claim("s", ["a", "b", "b", "c"]), ["b", "c"])
+        self.assertEqual(cache.get("s"), {"a", "b", "c"})
+        self.assertEqual(cache.claim("s", ["b"]), [])
+
+    def test_claim_without_entry_is_none(self):
+        cache = ct_ledger.LedgerCache()
+        self.assertIsNone(cache.claim("nope", ["a"]))
+        self.assertIsNone(cache.get("nope"))
+
+    def test_claim_race_each_id_won_once(self):
+        for _ in range(50):
+            cache = ct_ledger.LedgerCache()
+            cache.put("s", set())
+            wins = []
+            barrier = threading.Barrier(8)
+
+            def worker():
+                barrier.wait()
+                wins.extend(cache.claim("s", ["x", "y"]))
+
+            threads = [threading.Thread(target=worker) for _ in range(8)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+            self.assertEqual(sorted(wins), ["x", "y"])
 
 
 if __name__ == "__main__":
