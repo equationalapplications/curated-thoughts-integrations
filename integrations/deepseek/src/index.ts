@@ -15,6 +15,7 @@ import {
   runToolResult,
 } from './wisdom-live/adapter.js';
 import { Breaker } from '@equational-applications/ct-wisdom-core';
+import { dshVerboseRecorder } from './verbose.js';
 import type { MemoRecord } from './wisdom-live/adapter.js';
 import { expandHome } from '../scripts/ct_env.js';
 
@@ -316,7 +317,10 @@ export function apply(ctx: Context, config: Config): void {
   // the first pre-step call whose claimed `messages` batch carries new user
   // input for this turn. We track (agent.id, turn) pairs: multi-step turns
   // and model-retry re-entries of the SAME step must not deliver twice.
-  const adapter = new DshWisdomAdapter({ env: wisdomEnv });
+  const adapter = new DshWisdomAdapter({
+    env: wisdomEnv,
+    recordVerbose: dshVerboseRecorder(ctx, process.env),
+  });
   const breaker = new Breaker();
   // Memo-record parity (N5): the live ledger needs the v1 bootstrap ids. The
   // section's memo is module state; mirror it here by recording ids whenever

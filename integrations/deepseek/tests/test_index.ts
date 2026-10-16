@@ -1,4 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { apply, Config, inject } from '../src/index.js';
 
 // test_index stays UNIT-scoped: the real wisdom module's spawns/governor
@@ -199,6 +201,40 @@ describe('apply', () => {
     expect(msg.role).toBe('user');
     expect(msg.source).toEqual({ kind: 'curated-thoughts-wisdom' });
     expect(msg.content).toEqual([{ type: 'text', text: block }]);
+  });
+
+  it('wires the verbose recorder only when CT_WISDOM_VERBOSE is on (and the message bytes are the same)', async () => {
+    const block = '**T** <!-- ct-fact:fact_0123456789abcdef01234567 -->\nbody';
+    const claimed = [{ id: 'u1', role: 'user', content: [{ type: 'text', text: 'hi' }], source: { kind: 'user' } }];
+    const run = async (on: boolean) => {
+      const before = process.env.CT_WISDOM_VERBOSE;
+      const beforeLog = process.env.CT_WISDOM_VERBOSE_LOG;
+      process.env.CT_WISDOM_VERBOSE = on ? '1' : '0';
+      // runUserTurn is mocked here, so the recorder never runs; keep any write in tmp anyway.
+      process.env.CT_WISDOM_VERBOSE_LOG = join(tmpdir(), 'ct-dsh-index-verbose.jsonl');
+      try {
+        const mm = mockCtx();
+        vi.mocked(runUserTurn).mockClear();
+        vi.mocked(runUserTurn).mockResolvedValueOnce(block);
+        apply(mm.ctx as unknown as Parameters<typeof apply>[0], {} as Parameters<typeof apply>[1]);
+        const decision = (await mm.preStepListeners[0](
+          { agent: { id: 'agent-1', session: { deriveMessages: () => [] } }, messages: claimed, turn: 1, step: 1 },
+          async () => ({ kind: 'enter', messages: [...claimed] }),
+        )) as { messages: Array<Record<string, unknown>> };
+        const adapterArg = vi.mocked(runUserTurn).mock.calls[0]![0] as { recordVerbose?: unknown };
+        return { content: decision.messages[1].content, recorder: typeof adapterArg.recordVerbose };
+      } finally {
+        if (before === undefined) delete process.env.CT_WISDOM_VERBOSE;
+        else process.env.CT_WISDOM_VERBOSE = before;
+        if (beforeLog === undefined) delete process.env.CT_WISDOM_VERBOSE_LOG;
+        else process.env.CT_WISDOM_VERBOSE_LOG = beforeLog;
+      }
+    };
+    const off = await run(false);
+    const on = await run(true);
+    expect(off.recorder).toBe('undefined');
+    expect(on.recorder).toBe('function');
+    expect(on.content).toEqual(off.content);
   });
 
   it('registers three skills', () => {

@@ -11,3 +11,4 @@ export * from './render.js';
 export * from './match.js';
 export * from './engine.js';
 export * from './types.js';
+export * from './verbose.js';

@@ -2,7 +2,7 @@
 
 **Date:** 2026-10-16 · **Status:** Approved for implementation (user decisions 1–7 binding; query shape from A6) ·
 **Branch:** `feat/hermes-autonomous-work-wisdom` · **Base:** `origin/main` @ `38437e6`
-**Release:** hermes 0.4.3 → 0.5.0 (first host to roll out, decision 6) ·
+**Release:** hermes 0.6.0 (planned as 0.5.0; verbose mode, PR #53, took 0.5.0 first) (first host to roll out, decision 6) ·
 **Query shape:** from the A6 real-gate results (PR #51)
 **Builds on:** [Step-0 investigation](../investigations/2026-10-16-autonomous-work-trigger-step0-investigation.md)
 (Hermes section, "Recommended common contract", target A8) and
@@ -483,10 +483,10 @@ this machine; if not run it is recorded as pending in the PR.
 
 ## Versioning and docs
 
-- hermes `0.4.3 → 0.5.0` (`plugin.yaml`, `integration.yaml`), CHANGELOG `## 0.5.0 — <date>`,
+- hermes `0.5.0 → 0.6.0` (`plugin.yaml`, `integration.yaml`), CHANGELOG `## 0.6.0 — <date>`,
   README (the Intuitive Wisdom section and limitations), README table regenerated with
   `tools/ct_ci.py readme`.
-- claude-code: patch bump only if the policy gate requires it for the shipped `ct_ledger.py`
+- claude-code `0.3.0 → 0.3.1`: patch bump because the policy gate requires it for the shipped `ct_ledger.py`
   change, with a CHANGELOG note "no behavior change".
 
 ## Out of scope

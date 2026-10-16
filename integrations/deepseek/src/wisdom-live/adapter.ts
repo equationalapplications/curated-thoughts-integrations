@@ -31,6 +31,7 @@ import {
   type MatchOutcome,
   type SessionRef,
   type SpawnFn,
+  type VerboseTurn,
   type WisdomMatchResult,
 } from '@equational-applications/ct-wisdom-core';
 import { spawn } from 'node:child_process';
@@ -232,6 +233,8 @@ export interface AdapterDeps {
   discover?: () => { path: string | null; failure: string | null };
   /** Injected clock for the breaker (tests). */
   now?: () => number;
+  /** Verbose-mode recorder; set only when CT_WISDOM_VERBOSE is on. */
+  recordVerbose?: (turn: VerboseTurn) => void;
 }
 
 /**
@@ -250,8 +253,11 @@ export class DshWisdomAdapter implements HostAdapter {
   private readonly now: () => number;
   private readonly turns = new Map<string, TurnState>();
   private capabilityAbsent = false;
+  /** Verbose mode only (absent when off, so the adapter is unchanged). */
+  declare readonly recordVerbose?: (turn: VerboseTurn) => void;
 
   constructor(deps: AdapterDeps) {
+    if (deps.recordVerbose) this.recordVerbose = deps.recordVerbose;
     this.env = deps.env;
     this.spawnFn = deps.spawnFn ?? nodeSpawnFn(deps.env);
     this.discover = deps.discover ?? (() => discoverCt(deps.env));

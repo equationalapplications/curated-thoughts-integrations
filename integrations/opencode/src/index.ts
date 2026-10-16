@@ -43,6 +43,7 @@ import { ENV_BRAIN_DIR, resolveBrainPaths } from '../scripts/ct_env.js';
 import { formatStatusBlock, isStatusBlock } from './format.js';
 import { createHealthCache } from './refresh.js';
 import type { HistoryRow } from './wisdom-live/adapter.js';
+import { opencodeVerboseRecorder } from './verbose.js';
 import { createWisdomHooks } from './wisdom-live/hooks.js';
 
 /**
@@ -75,6 +76,7 @@ export const CuratedThoughts: Plugin = async (input, options) => {
   // ── Wisdom live delivery (v1 bootstrap block + N1/N2/N3 + ledger) ──────
   const { hooks: wisdomHooks } = createWisdomHooks({
     env,
+    recordVerbose: opencodeVerboseRecorder(input.client, input.directory, env),
     fetchHistory: async (sessionId) => {
       // The persisted history IS the ledger record (host contract): the
       // {info, parts} rows of the session, oldest first. Any failure is a

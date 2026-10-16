@@ -6,7 +6,7 @@ format below is load-bearing: `## <version> — <date>`.
 
 ## Unreleased
 
-## 0.5.0 — 2026-10-16
+## 0.6.0 — 2026-10-16
 
 - Added: Intuitive Wisdom **autonomous-work delivery**. While the agent works
   on its own between user messages, the file it reads or edits, the command
@@ -43,6 +43,27 @@ format below is load-bearing: `## <version> — <date>`.
   never both show one fact. `ct_tool_dedup`'s output is unchanged.
 - Unchanged: user-turn live delivery, the session-start block and the
   system prompt.
+
+## 0.5.0 — 2026-10-16
+
+- Added: Verbose mode for Intuitive Wisdom (opt-in, off by default). With
+  `CT_WISDOM_VERBOSE=1`, every live-delivery decision is recorded: the
+  delivered block with its fact ids, titles, provenance and CT's scores, or
+  the reason nothing was delivered (`deduped`, `no_match`,
+  `gate_uncalibrated`, `budget`, `breaker_open`, a timeout, ...). It goes to a
+  local JSON Lines log (`CT_WISDOM_VERBOSE_LOG` overrides the path) and to a
+  channel the user sees and the model does not. Verbose output never changes
+  the system prompt, the delivered block or any tool result; with verbose off
+  the hooks behave and return exactly as before (tests compare both).
+  Spec: `docs/superpowers/specs/2026-10-16-wisdom-verbose-mode-design.md`.
+  On Hermes the notice goes to stderr and the log is
+  `$HERMES_HOME/logs/ct-wisdom-verbose.jsonl`. New shared modules
+  `scripts/ct_wisdom_verbose.py` (the recorder) and `scripts/ct_wisdom_log.py`
+  (the reader: `python3 scripts/ct_wisdom_log.py --host hermes [-n N] [-f]`),
+  byte-identical with the Claude Code copies.
+- Changed: `ct_wisdom_live.match_wisdom` keeps CT's `gate` and each item's
+  `score` when CT sends them, for the log only. Rendering never reads them,
+  so the delivered bytes are unchanged.
 
 ## 0.4.3 — 2026-10-16
 

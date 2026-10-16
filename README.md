@@ -10,11 +10,11 @@ common architecture.
 
 | Harness | Directory | Status | Version |
 |---------|-----------|--------|---------|
-| [Hermes Agent](https://github.com/NousResearch/hermes-agent) | [`integrations/hermes/`](integrations/hermes/) | implemented | [0.5.0](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=hermes) |
-| DeepSeek Harness | [`integrations/deepseek/`](integrations/deepseek/) | implemented | [0.4.2](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=deepseek) |
-| OpenCode | [`integrations/opencode/`](integrations/opencode/) | implemented | [0.2.1](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=opencode) |
-| OpenClaw | [`integrations/openclaw/`](integrations/openclaw/) | implemented | [0.1.1](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=openclaw) |
-| Claude Code | [`integrations/claude-code/`](integrations/claude-code/) | implemented | [0.2.2](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=claude-code) |
+| [Hermes Agent](https://github.com/NousResearch/hermes-agent) | [`integrations/hermes/`](integrations/hermes/) | implemented | [0.6.0](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=hermes) |
+| DeepSeek Harness | [`integrations/deepseek/`](integrations/deepseek/) | implemented | [0.5.0](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=deepseek) |
+| OpenCode | [`integrations/opencode/`](integrations/opencode/) | implemented | [0.3.0](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=opencode) |
+| OpenClaw | [`integrations/openclaw/`](integrations/openclaw/) | implemented | [0.2.0](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=openclaw) |
+| Claude Code | [`integrations/claude-code/`](integrations/claude-code/) | implemented | [0.3.1](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=claude-code) |
 
 Each version links to that integration's releases.
 
@@ -107,7 +107,7 @@ receive live delivery. Host-specific gates:
 
 ### Autonomous-work delivery (Hermes)
 
-Since hermes 0.5.0, Hermes also delivers facts *between* user messages,
+Since hermes 0.6.0, Hermes also delivers facts *between* user messages,
 keyed to what the agent is doing:
 
 - **Trigger:** a `read_file`, `write_file`, `patch`, `search_files` or
@@ -131,6 +131,38 @@ keyed to what the agent is doing:
   context means no delivery).
 - **Cost:** the CT call starts when the tool starts, so it overlaps the
   tool; the 3 s timeout and the breaker are shared with live delivery.
+
+### Verbose mode
+
+To see what Intuitive Wisdom adds to your conversation, and why it added
+nothing on a turn, set `CT_WISDOM_VERBOSE=1` in the environment the host
+runs in. It is off by default. When it is on, every live-delivery decision is:
+
+- **shown to you** on a channel the model never reads (table below), and
+- **recorded** as one JSON line in a local log: the query as CT received it,
+  CT's gate, every matched fact with its id, title, text, provenance, score
+  and outcome (delivered, already in context, or did not fit), the delivered
+  block, or the reason nothing was delivered (`deduped`, `no_match`,
+  `gate_uncalibrated`, `budget`, `breaker_open`, a timeout, ...).
+
+Verbose output never changes the system prompt, the delivered block or any
+tool result, so the prompt cache is unaffected. No environment variables or
+keys are logged. Set `CT_WISDOM_VERBOSE_LOG=<file>` to choose the log path.
+
+| Host | What you see | Log (default) |
+|------|--------------|---------------|
+| Hermes | a summary and the block on stderr | `$HERMES_HOME/logs/ct-wisdom-verbose.jsonl` |
+| Claude Code | `Curated Thoughts wisdom: …` in the transcript (the hook's `systemMessage`) | `${CLAUDE_PLUGIN_DATA}/wisdom/ct-wisdom-verbose.jsonl` |
+| DeepSeek Harness | the plugin's `curated-thoughts` logger | `$DSH_HOME/logs/ct-wisdom-verbose.jsonl` |
+| OpenCode | a TUI toast | `$XDG_DATA_HOME/opencode/log/ct-wisdom-verbose.jsonl` |
+| OpenClaw | the gateway log (`openclaw logs --follow`) | `$OPENCLAW_STATE_DIR/logs/ct-wisdom-verbose.jsonl` |
+
+To read the log, run `python3 scripts/ct_wisdom_log.py --host hermes` (or
+`--host claude-code`) from the Hermes or Claude Code plugin directory, or
+`node <core>/cli/ct-wisdom-log.js --host opencode` (or `deepseek`,
+`openclaw`) on the TypeScript hosts. Both take `-n N` for the last N events,
+`-f` to follow, `--block` to print delivered blocks and `--json` for the raw
+records. Each integration's README gives the exact path.
 
 ### Known limits
 

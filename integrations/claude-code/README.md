@@ -124,6 +124,20 @@ had. `/clear` starts a fresh session.
 platform install location), and Python 3.9+. Managed deployments that set
 `allowManagedHooksOnly` disable plugin hooks, and Intuitive Wisdom with them.
 
+### Verbose mode
+
+Set `CT_WISDOM_VERBOSE=1` in the environment you start `claude` from to see
+what each turn's wisdom delivery added, or why it added nothing. The hook
+then returns a top-level `systemMessage`, which Claude Code shows in the
+transcript ("… says: Curated Thoughts wisdom: delivered 2 facts …", with the
+block) and does not send to the model; `additionalContext` is unchanged. Each
+decision is also appended to
+`${CLAUDE_PLUGIN_DATA}/wisdom/ct-wisdom-verbose.jsonl` (override:
+`CT_WISDOM_VERBOSE_LOG`). Read it with
+`python3 scripts/ct_wisdom_log.py --host claude-code [-n 20] [-f] [--block]`
+from the plugin directory; outside a hook the reader looks under
+`~/.claude/plugins/data/curated-thoughts*/`. See the [spec](../../docs/superpowers/specs/2026-10-16-wisdom-verbose-mode-design.md).
+
 ## Environment contract
 
 The integration resolves the brain exactly the way Curated Thoughts does, and

@@ -38,6 +38,7 @@ import {
   type Ledger,
   type MatchOutcome,
   type SessionRef,
+  type VerboseTurn,
   type SpawnFn,
   type WisdomMatchResult,
 } from '@equational-applications/ct-wisdom-core';
@@ -352,6 +353,8 @@ export interface AdapterDeps {
   fetchSession?: (sessionId: string) => Promise<{ parentID?: unknown } | null>;
   /** n3 discovery reset (tests); defaults to dropping the accepted ct path. */
   invalidateDiscovery?: () => void;
+  /** Verbose-mode recorder; set only when CT_WISDOM_VERBOSE is on. */
+  recordVerbose?: (turn: VerboseTurn) => void;
 }
 
 const LRU_MAX = 256;
@@ -399,8 +402,11 @@ export class OpenCodeWisdomAdapter implements HostAdapter {
 
   /** v1 bootstrap memo, per session (LD4). */
   bootstrapMemo: Record<string, MemoRecord> = {};
+  /** Verbose mode only (absent when off, so the adapter is unchanged). */
+  declare readonly recordVerbose?: (turn: VerboseTurn) => void;
 
   constructor(deps: AdapterDeps) {
+    if (deps.recordVerbose) this.recordVerbose = deps.recordVerbose;
     this.spawnFn = deps.spawnFn ?? nodeSpawnFn(deps.env);
     this.discover = deps.discover ?? (() => discoverCt(deps.env));
     this.fetchHistory = deps.fetchHistory ?? (async () => null);
