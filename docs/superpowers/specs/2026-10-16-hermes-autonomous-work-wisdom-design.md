@@ -197,8 +197,9 @@ copied out of one of our blocks into a tool argument can never become a query.
 
 **Shell commands** (decision 2: only the first two non-flag tokens):
 
-1. Tokenize with `shlex.split(command, posix=True)`; on a parse error fall back to
-   `command.split()`.
+1. Tokenize with `shlex.split(command, posix=False)`, which keeps quote characters in
+   the tokens, so a quoted value (`grep "SecretPassword"`) fails the word shape below and
+   is never sent (CodeRabbit, PR #52). On a parse error fall back to `command.split()`.
 2. Consider only the first simple command: stop at the first token that is a shell
    operator (`&&`, `||`, `|`, `;`, `&`, `>`, `<`, …) or contains one of `;|&<>`.
 3. Skip leading `NAME=value` environment assignments (a common place for secrets).

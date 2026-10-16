@@ -21,8 +21,8 @@ format below is load-bearing: `## <version> — <date>`.
   - Query: the bare target only (CT 3.5.1 real-gate results, A6): a relative
     path, a search pattern (none if it holds a credential-shaped word), or
     program plus the word right after it for shell commands (never a flag's
-    value; `python -m <module>` is the one exception; env assignments, URLs
-    and credential-shaped tokens are dropped). Never file contents, tool output,
+    value or a quoted word; `python -m <module>` sends the module name;
+    env assignments, URLs and credential-shaped tokens are dropped). Never file contents, tool output,
     diffs, the agent's text or full command lines.
   - Delivery: `transform_tool_result` of the same call adds at most 1 fact in
     at most 600 characters under `## Curated Thoughts — relevant to this

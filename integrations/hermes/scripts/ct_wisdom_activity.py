@@ -158,8 +158,10 @@ def normalize_path(raw, cwd=None):
 
 
 def _tokens(command):
+    """Shell words with their quotes KEPT (non-POSIX shlex), so a quoted
+    value (`grep "SecretPassword"`) fails the word shape and is never sent."""
     try:
-        return shlex.split(command, posix=True)
+        return shlex.split(command, posix=False)
     except ValueError:
         return command.split()
 
