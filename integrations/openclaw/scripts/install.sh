@@ -3,19 +3,23 @@
 # plugin.
 #
 # Part of curated-thoughts-integrations (MIT). POSIX bash, no sudo. OpenClaw
-# owns plugin installation, so this script only drives the host's own CLI
-# (pin: openclaw 2026.10.3):
+# owns plugin installation, so this script stages a self-contained copy of
+# the plugin and drives the host's own CLI (pin: openclaw 2026.10.3):
 #
-#   1. openclaw plugins install <this plugin dir> --force
-#        (--force acknowledges installing from a local source; the manifest
-#        mounts the curated-thoughts MCP server and the three skills)
-#   2. openclaw config set plugins.entries.curated-thoughts.hooks.allowConversationAccess true
+#   1. stage <tmp>/curated-thoughts: lib/, skills/, openclaw.plugin.json and a
+#      package.json whose monorepo-relative ct-wisdom-core dependency is
+#      replaced by the BUILT core vendored at node_modules/ (a file: dep is
+#      meaningless at the install location — deepseek fix e459690)
+#   2. openclaw plugins install <stage> --force --accept-capabilities
+#        (--force/--accept-capabilities: OpenClaw asks before installing a
+#        local copy; you review and accept by opting in with CT_INSTALL_EDIT=1)
+#   3. openclaw config set plugins.entries.curated-thoughts.hooks.allowConversationAccess true
 #        (OpenClaw refuses non-bundled prompt hooks without this grant)
-#   3. openclaw config set plugins.entries.curated-thoughts.hooks.timeouts.before_prompt_build 20000
+#   4. openclaw config set plugins.entries.curated-thoughts.hooks.timeouts.before_prompt_build 20000
 #        (first-turn worst case is ~14 s against a 15 s default budget)
-#   4. node lib/scripts/ct_doctor.js check   (verification)
+#   5. node lib/scripts/ct_doctor.js check   (verification)
 #
-# By default it PRINTS the commands and writes nothing.
+# By default it PRINTS the plan and writes nothing.
 #
 # Environment:
 #   CT_INSTALL_EDIT=1      opt-in: run the commands. Default: preview only.
@@ -37,7 +41,7 @@ warn() { printf 'WARN: %s\n' "$*" >&2; }
 for arg in ${1+"$@"}; do
   case "$arg" in
     -h|--help)
-      sed -n '2,25p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+      sed -n '2,30p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
       exit 0
       ;;
     *)
@@ -52,10 +56,75 @@ if [ ! -f "${PLUGIN_DIR}/lib/src/index.js" ]; then
   exit 1
 fi
 
+core_lib=""
+for candidate in \
+  "${PLUGIN_DIR}/lib/ct-wisdom-core" \
+  "${PLUGIN_DIR}/../../packages/ct-wisdom-core/lib"; do
+  if [ -f "${candidate}/index.js" ]; then
+    core_lib="$candidate"
+    break
+  fi
+done
+if [ -z "$core_lib" ]; then
+  warn "ct-wisdom-core build output not found — build it first:"
+  warn "  (cd packages/ct-wisdom-core && pnpm install && pnpm run build)"
+  exit 1
+fi
+
 edit=0
 if [ "${CT_INSTALL_EDIT:-0}" = "1" ]; then
   edit=1
 fi
+
+stage_plugin() {
+  # $1 = stage parent dir; prints the staged plugin path.
+  local stage="$1/${PLUGIN_ID}"
+  mkdir -p "$stage/node_modules/@equational-applications/ct-wisdom-core"
+  cp -R "${PLUGIN_DIR}/lib" "${PLUGIN_DIR}/skills" "${PLUGIN_DIR}/openclaw.plugin.json" \
+    "${PLUGIN_DIR}/package.json" "$stage/"
+  rm -rf "$stage/lib/ct-wisdom-core"
+  cp -R "${core_lib}/." "$stage/node_modules/@equational-applications/ct-wisdom-core/"
+  cat >"$stage/node_modules/@equational-applications/ct-wisdom-core/package.json" <<'VPKG'
+{
+  "name": "@equational-applications/ct-wisdom-core",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "index.js",
+  "types": "index.d.ts"
+}
+VPKG
+  node - "$stage/package.json" <<'NJS'
+const fs = require('fs');
+const p = process.argv[2];
+const m = JSON.parse(fs.readFileSync(p, 'utf8'));
+if (m.dependencies) delete m.dependencies['@equational-applications/ct-wisdom-core'];
+if (m.dependencies && Object.keys(m.dependencies).length === 0) delete m.dependencies;
+delete m.devDependencies;
+delete m.scripts;
+m.bundleDependencies = ['@equational-applications/ct-wisdom-core'];
+fs.writeFileSync(p, JSON.stringify(m, null, 2) + '\n');
+NJS
+  printf '%s\n' "$stage"
+}
+
+if [ "$edit" -eq 1 ]; then
+  say "curated-thoughts OpenClaw install.sh — CT_INSTALL_EDIT=1: applying (no sudo)"
+  if ! command -v "$OPENCLAW" >/dev/null 2>&1; then
+    warn "openclaw not found (set OPENCLAW_BIN or install OpenClaw >= 2026.10.3)"
+    exit 1
+  fi
+  if ! command -v node >/dev/null 2>&1; then
+    warn "node not found on PATH — OpenClaw itself requires Node >= 24.16"
+    exit 1
+  fi
+  INSTALL_TMP="$(mktemp -d)"
+  trap 'rm -rf "$INSTALL_TMP"' EXIT
+  STAGE="$(stage_plugin "$INSTALL_TMP")"
+else
+  say "curated-thoughts OpenClaw install.sh — PREVIEW: nothing will be written (no sudo)"
+  STAGE="<tmp>/${PLUGIN_ID} (self-contained copy with ct-wisdom-core from ${core_lib})"
+fi
+say ""
 
 run() {
   # Display every command; execute only under CT_INSTALL_EDIT=1.
@@ -65,25 +134,13 @@ run() {
   fi
 }
 
-if [ "$edit" -eq 1 ]; then
-  say "curated-thoughts OpenClaw install.sh — CT_INSTALL_EDIT=1: applying (no sudo)"
-  if ! command -v "$OPENCLAW" >/dev/null 2>&1; then
-    warn "openclaw not found (set OPENCLAW_BIN or install OpenClaw >= 2026.10.3)"
-    exit 1
-  fi
-else
-  say "curated-thoughts OpenClaw install.sh — PREVIEW: nothing will be written (no sudo)"
-fi
-say ""
-run "$OPENCLAW" plugins install "$PLUGIN_DIR" --force
+run "$OPENCLAW" plugins install "$STAGE" --force --accept-capabilities
 run "$OPENCLAW" config set "plugins.entries.${PLUGIN_ID}.hooks.allowConversationAccess" true
 run "$OPENCLAW" config set "plugins.entries.${PLUGIN_ID}.hooks.timeouts.before_prompt_build" 20000
 
 say ""
 if [ "$edit" -eq 1 ]; then
-  if command -v node >/dev/null 2>&1; then
-    node "${PLUGIN_DIR}/lib/scripts/ct_doctor.js" check || warn "doctor reported problems (see above)"
-  fi
+  node "${PLUGIN_DIR}/lib/scripts/ct_doctor.js" check || warn "doctor reported problems (see above)"
   say "Done. Verify the running gateway with: $OPENCLAW plugins inspect ${PLUGIN_ID} --runtime --json"
 else
   say "This was a preview. To apply it:"
