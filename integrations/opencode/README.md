@@ -42,8 +42,8 @@ works as before.
 - **Live delivery (every turn).** In the `chat.message` hook, before the model
   runs, the plugin asks `ct wisdom match` which facts relevant to your message
   are not yet in context, and appends up to 2 of them (1200 characters max).
-  The cap is 12 facts per session; corrections to facts you already have are
-  exempt from the cap.
+  There is no per-session cap, so a long session keeps receiving relevant
+  facts; corrections to facts you already have also flow.
 - **No system-prompt changes.** Both blocks are `synthetic: true` text parts
   on your message, which OpenCode saves with the session. The system prompt
   (and its provider cache) stays as it is.

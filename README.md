@@ -10,11 +10,11 @@ common architecture.
 
 | Harness | Directory | Status | Version |
 |---------|-----------|--------|---------|
-| [Hermes Agent](https://github.com/NousResearch/hermes-agent) | [`integrations/hermes/`](integrations/hermes/) | implemented | [0.4.2](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=hermes) |
-| DeepSeek Harness | [`integrations/deepseek/`](integrations/deepseek/) | implemented | [0.4.1](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=deepseek) |
-| OpenCode | [`integrations/opencode/`](integrations/opencode/) | implemented | [0.2.0](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=opencode) |
-| OpenClaw | [`integrations/openclaw/`](integrations/openclaw/) | implemented | [0.1.0](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=openclaw) |
-| Claude Code | [`integrations/claude-code/`](integrations/claude-code/) | implemented | [0.2.0](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=claude-code) |
+| [Hermes Agent](https://github.com/NousResearch/hermes-agent) | [`integrations/hermes/`](integrations/hermes/) | implemented | [0.4.3](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=hermes) |
+| DeepSeek Harness | [`integrations/deepseek/`](integrations/deepseek/) | implemented | [0.4.2](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=deepseek) |
+| OpenCode | [`integrations/opencode/`](integrations/opencode/) | implemented | [0.2.1](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=opencode) |
+| OpenClaw | [`integrations/openclaw/`](integrations/openclaw/) | implemented | [0.1.1](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=openclaw) |
+| Claude Code | [`integrations/claude-code/`](integrations/claude-code/) | implemented | [0.2.1](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=claude-code) |
 
 Each version links to that integration's releases.
 
@@ -65,9 +65,10 @@ everywhere, as the Hermes Python core (also used by Claude Code) and the
 TypeScript port in `packages/ct-wisdom-core` (DeepSeek Harness, OpenCode,
 OpenClaw), with the same budgets:
 
-- at most 2 facts per turn, in a block of at most 1200 characters, and at
-  most 12 per session. Corrections to a fact already shown still flow
-  after the cap is reached (a delivered correction counts toward it);
+- at most 2 facts per turn, in a block of at most 1200 characters. There is
+  no per-session cap: a long session keeps receiving relevant facts, and
+  because no fact is delivered twice, the total is bounded by the distinct
+  facts that match. Corrections to a fact already shown flow on every turn;
 - each `ct` call times out after 3 s;
 - three consecutive timeouts or non-zero exits of `ct wisdom match` pause
   matching for 5 minutes. A `ct` that cannot be found or started does not
@@ -110,7 +111,7 @@ receive live delivery. Host-specific gates:
   and corrections for superseded facts stay empty until CT's Librarian
   applies supersessions. Both are CT-side; the integrations are ready for
   them.
-- The per-turn and per-session budgets above cap how much arrives, even when
+- The per-turn limits above cap how much arrives on one turn, even when
   more is relevant.
 
 ## The integrations so far

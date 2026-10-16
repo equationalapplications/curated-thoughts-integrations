@@ -8,6 +8,11 @@ merged 2026-10-09 12:12 EDT — see "Delta vs investigation rev 3" below)
 Builds on: `2026-10-06-intuitive-wisdom-live-delivery-design.md` (Hermes reference, PR #35)
 and INTENT invariant adjudication (2026-10-05).
 
+> **Amendment 2026-10-16:** the per-session cap (Annex A `MAX_PER_SESSION = 12`, the M1 session budget) was removed on every
+> host by user decision; the per-turn limits (2 facts, 1200 chars) are unchanged.
+> `Ledger.liveDeliveredCount` was removed with it. See [`2026-10-16-remove-session-wisdom-cap-design.md`](2026-10-16-remove-session-wisdom-cap-design.md).
+> The text below is kept as the historical design.
+
 ## Problem
 
 Intuitive Wisdom live delivery — the agent knowing the curated fact at the moment it

@@ -10,6 +10,11 @@ decisions 5, 6, 8, 10, N5 table, AC 1–11, annex A, Risks) · **Parent plan:** 
 (docs-based, nothing executed). This spec re-verifies every load-bearing fact
 against the published package at a pinned version — see "Host pin and verified facts".
 
+> **Amendment 2026-10-16:** the per-session cap (annex M1; the user-role live count) was removed on every
+> host by user decision; the per-turn limits (2 facts, 1200 chars) are unchanged.
+> The live count was removed with it. See [`2026-10-16-remove-session-wisdom-cap-design.md`](2026-10-16-remove-session-wisdom-cap-design.md).
+> The text below is kept as the historical design.
+
 ## Problem
 
 OpenClaw is the last harness without a Curated Thoughts integration:

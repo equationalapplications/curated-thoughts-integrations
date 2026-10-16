@@ -56,8 +56,8 @@ Needs the standalone `ct` CLI from Curated Thoughts ≥ 3.3.0
 - **Live delivery (every turn).** On the first `agent/pre-step` step of each
   user turn, the plugin asks `ct wisdom match` which facts are relevant to
   the user's message (CT owns relevance), drops anything already in context,
-  and appends up to 2 of them (1200 characters max, at most 12 per session;
-  corrections to a fact already shown still flow after the cap) as a
+  and appends up to 2 of them (1200 characters max per turn, with no
+  per-session cap; corrections to a fact already shown also flow) as a
   user-role message. The agent loop persists it
   verbatim in the session log. The system prompt is never touched.
 - **Exactly once.** Each fact carries a `<!-- ct-fact:<id> -->` marker. Every

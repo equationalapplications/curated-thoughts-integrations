@@ -142,8 +142,9 @@ gap needs a CT change and a parser change in each integration.
 
 The session-start block and each live delivery have fixed limits on size and
 count (for Hermes: 2500 chars at start; per turn, at most 2 facts and 1200
-chars, with at most 12 per session). Never raise a limit to make up for weak
-matching.
+chars). The per-turn limits keep each delivery small; there is no
+session-wide cap, so a fact that becomes relevant late in a session still
+arrives. Never raise a limit to make up for weak matching.
 
 *Why:* a flood of loosely related facts is noise, not wisdom.
 
