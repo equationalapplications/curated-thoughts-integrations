@@ -303,18 +303,33 @@ class TestPreLlmCall(LiveHarness, unittest.TestCase):
         self.assertEqual(len(sent), ct_wisdom_live.EXCLUDE_MAX)
         self.assertEqual(sent[0], "f299")
 
-    def test_session_budget_switches_to_corrections_only(self):
-        hist = [{"role": "user", "content": "<!-- ct-fact:u%02d -->" % i}
-                for i in range(ct_wisdom_live.LIVE_MAX_PER_SESSION)]
+    def test_no_session_cap_long_session_keeps_two_per_turn(self):
+        # 2026-10-16: the per-session cap (12) was removed. A long session
+        # keeps asking for LIVE_MAX_PER_TURN and receiving fresh facts; dedup
+        # (the ledger) bounds the total, the per-turn limits bound each block.
+        self.boot["s1"] = ""
+        history, delivered = [], []
+        for turn in range(20):
+            fresh = ["f%02d" % (2 * turn), "f%02d" % (2 * turn + 1)]
+            self.reply = ({"entries": [_item(f) for f in fresh], "corrections": []}, None)
+            out = self.hook(msg="question %d" % turn, history=list(history))
+            self.assertIsNotNone(out, "turn %d" % turn)
+            ids = ct_ledger.scan_ids(out["context"])
+            self.assertEqual(ids, fresh, "turn %d" % turn)
+            self.assertLessEqual(len(out["context"]), ct_wisdom_live.LIVE_MAX_BLOCK_CHARS)
+            delivered.extend(ids)
+            history.append({"role": "user", "content": "question %d\n\n%s" % (turn, out["context"])})
+        self.assertEqual([c["max_n"] for c in self.calls], [ct_wisdom_live.LIVE_MAX_PER_TURN] * 20)
+        self.assertEqual(len(set(delivered)), 40)
+
+    def test_many_live_ids_in_history_still_ask_the_per_turn_max(self):
+        hist = [{"role": "user", "content": "<!-- ct-fact:u%02d -->" % i} for i in range(50)]
         self.boot["s1"] = ""
         self.hook(history=hist)
-        self.assertEqual(self.calls[0]["max_n"], 0)
-
-    def test_tool_and_bootstrap_ids_do_not_count_toward_budget(self):
-        hist = [{"role": "tool", "content": "<!-- ct-fact:t%02d -->" % i} for i in range(20)]
-        self.boot["s1"] = "".join("<!-- ct-fact:b%d -->" % i for i in range(3))
-        self.hook(history=hist)
         self.assertEqual(self.calls[0]["max_n"], ct_wisdom_live.LIVE_MAX_PER_TURN)
+
+    def test_session_cap_constant_is_gone(self):
+        self.assertFalse(hasattr(ct_wisdom_live, "LIVE_MAX_PER_SESSION"))
 
     def test_restored_session_fails_closed(self):
         out = self.hook(sid="restored", history=[{"role": "user", "content": "hi"}])

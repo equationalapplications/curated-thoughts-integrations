@@ -125,7 +125,8 @@ class ImportPathTests(unittest.TestCase):
 
     def test_adapter_uses_the_core_constants(self):
         self.assertEqual(cc.ct_wisdom_live.LIVE_MAX_PER_TURN, 2)
-        self.assertEqual(cc.ct_wisdom_live.LIVE_MAX_PER_SESSION, 12)
+        # No per-session cap (removed 2026-10-16).
+        self.assertFalse(hasattr(cc.ct_wisdom_live, "LIVE_MAX_PER_SESSION"))
         self.assertEqual(cc.ct_wisdom_live.EXCLUDE_MAX, 256)
         self.assertEqual(cc.ct_wisdom_live.BREAKER_FAILS, 3)
         self.assertEqual(cc.ct_wisdom_live.BREAKER_PAUSE, 300)
@@ -443,12 +444,28 @@ class DeliveryTests(AdapterTestCase):
         self.assertNotIn("stray", context)
         self.assertEqual(self.store()["live_ids"], ["new"])
 
-    def test_session_budget_forces_corrections_only(self):
+    def test_no_session_cap_long_session_keeps_two_per_turn(self):
+        # 2026-10-16: the per-session cap (12) was removed. Every turn asks
+        # for LIVE_MAX_PER_TURN; the store ledger dedups, so the total is
+        # bounded by the distinct facts that match.
+        self.start()
+        delivered = []
+        for turn in range(20):
+            fresh = ["f%02d" % (2 * turn), "f%02d" % (2 * turn + 1)]
+            self.match_result = ({"entries": [item(f) for f in fresh], "corrections": []}, None)
+            context = self.context_of(self.deliver(prompt="question %d" % turn))
+            self.assertEqual(ct_ledger.scan_ids(context), fresh, "turn %d" % turn)
+            self.assertLessEqual(len(context), ct_wisdom_live.LIVE_MAX_BLOCK_CHARS)
+            delivered.extend(fresh)
+        self.assertEqual([c["max_n"] for c in self.match_calls], [2] * 20)
+        self.assertEqual(self.store()["live_ids"], delivered)
+
+    def test_many_live_ids_in_the_store_still_ask_the_per_turn_max(self):
         self.start()
         st = self.store()
-        cc.save_store(self.data, SID, cc.note_ids(st, "live_ids", ["f%02d" % i for i in range(12)]))
+        cc.save_store(self.data, SID, cc.note_ids(st, "live_ids", ["f%02d" % i for i in range(50)]))
         self.deliver()
-        self.assertEqual(self.match_calls[0]["max_n"], 0)
+        self.assertEqual(self.match_calls[0]["max_n"], 2)
 
     def test_post_filter_rereads_the_store_after_the_match(self):
         # The lock is not held across `ct wisdom match`: a concurrent writer

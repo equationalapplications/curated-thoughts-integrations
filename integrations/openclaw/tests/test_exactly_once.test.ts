@@ -19,7 +19,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { MAX_PER_SESSION, MAX_PER_TURN } from '@equational-applications/ct-wisdom-core';
+import { MAX_PER_TURN } from '@equational-applications/ct-wisdom-core';
 import { createPlugin } from '../src/index.js';
 import { FakeApi, FakeCt, type Fact, userCtx } from './fake_host.js';
 
@@ -127,6 +127,10 @@ async function runSession(seed: number, turns: number, stats: Stats): Promise<{ 
     stats.salvaged += api.enqueued.length - enqueuedSeen;
     enqueuedSeen = api.enqueued.length;
     if (result?.prependContext) stats.live++;
+    // Per-turn limit still holds: one in-turn block carries at most
+    // MAX_PER_TURN facts (FakeCt emits no corrections).
+    const inTurn = [...(result?.prependContext ?? '').matchAll(MARKER_RE)].length;
+    if (inTurn > MAX_PER_TURN) violations.push(`seed ${seed} turn ${t}: ${inTurn} facts in one block`);
 
     // (3) the projection the model sees for this user turn
     const prepend = [...queued.map((q) => q.text), result?.prependContext].filter(Boolean).join('\n\n');
@@ -164,6 +168,11 @@ async function runSession(seed: number, turns: number, stats: Stats): Promise<{ 
     }
     maxLive = Math.max(maxLive, live.size);
   }
+  // No session cap (removed 2026-10-16): every match call asks for a full turn.
+  for (const call of ct.matchCalls()) {
+    const max = call.args[call.args.indexOf('--max') + 1];
+    if (max !== String(MAX_PER_TURN)) violations.push(`seed ${seed}: match call with --max ${max}`);
+  }
   return { violations, maxLive };
 }
 
@@ -178,9 +187,9 @@ describe('exactly-once across prependContext, salvage injections and the middlew
       maxLive = Math.max(maxLive, r.maxLive);
     }
     expect(all).toEqual([]);
-    // M1 budget: the decision sees the visible live count; a pending salvage
-    // block and the same turn's delivery can each add one turn's worth.
-    expect(maxLive).toBeLessThanOrEqual(MAX_PER_SESSION + 2 * MAX_PER_TURN);
+    // No session cap: some session's visible live count passes the old
+    // bound (12 + 2 turns' worth), while violations above stay empty.
+    expect(maxLive).toBeGreaterThan(12 + 2 * MAX_PER_TURN);
     // every channel and path was actually exercised
     expect(stats.live).toBeGreaterThan(100);
     expect(stats.salvaged).toBeGreaterThan(20);

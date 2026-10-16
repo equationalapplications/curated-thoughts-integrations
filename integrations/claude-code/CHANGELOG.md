@@ -6,6 +6,22 @@ heading format below is load-bearing: `## <version> — <date>`.
 
 ## Unreleased
 
+## 0.2.1 — 2026-10-16
+
+- Changed: Intuitive Wisdom live delivery has no per-session cap. The
+  `UserPromptSubmit` hook no longer drops to `--max 0` after 12 live facts
+  (`hooks/ct_wisdom_cc.py`), and `LIVE_MAX_PER_SESSION` is gone from the
+  shared `scripts/ct_wisdom_live.py`; every turn asks `ct wisdom match --max 2`.
+  The session store's `live_ids` list stays: it is part of the ledger.
+  Why: an autonomous agent is better served by more wisdom than less. The
+  cap stopped delivery after about 6 matching turns, though a fact that
+  matches late in a session is as valuable as an early one. Noise stays
+  bounded per turn (at most 2 facts in a 1200-character block, only facts
+  past CT's relevance gate), delivery never touches the system prompt, and
+  dedup keeps the session total to the distinct facts that match.
+  Unchanged: the per-turn limits, CT's score gate, dedup and exactly-once
+  delivery, the breaker, timeouts and the 256-id exclude bound.
+
 ## 0.2.0 — 2026-10-16
 
 - Added: **Intuitive Wisdom** for Claude Code, a port of the Hermes 0.4.x

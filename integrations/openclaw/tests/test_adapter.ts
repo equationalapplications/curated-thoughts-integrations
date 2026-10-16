@@ -29,7 +29,6 @@ describe('snapshotScan (ledger source = before_prompt_build messages, F8/F9)', (
     ];
     const scan = snapshotScan(messages);
     expect(scan.all).toEqual(['b', 't', 'a']);
-    expect([...scan.live].sort()).toEqual(['a', 'b']);
   });
 
   it('tolerates junk without throwing', () => {
@@ -46,7 +45,6 @@ describe('ledger rebuild', () => {
     expect(l.idsMostRecentFirst).toEqual(['d', 'm', 'boot']);
     expect(l.has('boot')).toBe(true);
     expect(l.knownBootstrap).toBe(true);
-    expect(l.liveDeliveredCount).toBe(1);
     a.setTurn('s', { messages: [], drained: [], bootstrapIds: null, restored: true });
     expect(a.rebuildLedger({ id: 's' }).knownBootstrap).toBe(false);
     expect(a.restored({ id: 's' })).toBe(true);

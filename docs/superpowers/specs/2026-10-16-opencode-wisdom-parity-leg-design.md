@@ -12,6 +12,11 @@ the 1.18.35 binary, and three of its OpenCode assumptions turn out to be wrong (
 **Sibling implementation:** the DSH leg (`integrations/deepseek/src/wisdom-live/adapter.ts`,
 deepseek 0.4.0).
 
+> **Amendment 2026-10-16:** the per-session cap (annex M1; LD6's `liveDeliveredCount`) was removed on every
+> host by user decision; the per-turn limits (2 facts, 1200 chars) are unchanged.
+> LD6's live count was removed with it. See [`2026-10-16-remove-session-wisdom-cap-design.md`](2026-10-16-remove-session-wisdom-cap-design.md).
+> The text below is kept as the historical design.
+
 ## Problem
 
 The 2026-10-10 WIP (`4cf17ff`) ported the adapter shape from DSH, but it was never run

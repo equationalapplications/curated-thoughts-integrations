@@ -86,10 +86,6 @@ export function isOurPart(part: unknown): boolean {
   return hasMarkerLine(part.text, LIVE_MARKER) || hasMarkerLine(part.text, BOOT_MARKER);
 }
 
-function isLivePart(part: unknown): boolean {
-  return isOurPart(part) && hasMarkerLine((part as { text: string }).text, LIVE_MARKER);
-}
-
 function isBootPart(part: unknown): boolean {
   return isOurPart(part) && hasMarkerLine((part as { text: string }).text, BOOT_MARKER);
 }
@@ -376,9 +372,9 @@ function unionInto(set: Set<string> | undefined, ids: Iterable<string>): Set<str
   return out;
 }
 
-function makeLedger(ids: string[], live: number, knownBootstrap: boolean): Ledger {
+function makeLedger(ids: string[], knownBootstrap: boolean): Ledger {
   const set = new Set(ids);
-  return { idsMostRecentFirst: ids, has: (id) => set.has(id), liveDeliveredCount: live, knownBootstrap };
+  return { idsMostRecentFirst: ids, has: (id) => set.has(id), knownBootstrap };
 }
 
 export class OpenCodeWisdomAdapter implements HostAdapter {
@@ -500,7 +496,6 @@ export class OpenCodeWisdomAdapter implements HostAdapter {
     };
     const delivered = this.delivered.get(sessionId) ?? [];
     for (let i = delivered.length - 1; i >= 0; i--) push(delivered[i]!);
-    const live = new Set<string>(delivered);
     let bootSeen = false;
     for (let i = rows.length - 1; i >= 0; i--) {
       const row = rows[i] as HistoryRow;
@@ -510,7 +505,6 @@ export class OpenCodeWisdomAdapter implements HostAdapter {
       for (const t of [...rowTexts(row), ...toolOutputTexts(row)]) for (const id of scanIds(t)) push(id);
       if (role === 'user' && Array.isArray(row.parts)) {
         for (const part of row.parts) {
-          if (isLivePart(part)) for (const id of scanIds((part as { text: string }).text)) live.add(id);
           if (isBootPart(part)) bootSeen = true;
         }
       }
@@ -518,7 +512,7 @@ export class OpenCodeWisdomAdapter implements HostAdapter {
     const memo = this.bootstrapMemo[sessionId];
     for (const id of memo?.ids ?? []) push(id);
     for (const id of this.carry.get(sessionId) ?? []) push(id);
-    return makeLedger(ordered, live.size, bootSeen || memo !== undefined);
+    return makeLedger(ordered, bootSeen || memo !== undefined);
   }
 
   /**
@@ -535,7 +529,6 @@ export class OpenCodeWisdomAdapter implements HostAdapter {
     for (const id of prior.idsMostRecentFirst) if (!seen.has(id)) ids.push(id);
     const merged = makeLedger(
       ids,
-      Math.max(fresh.liveDeliveredCount, prior.liveDeliveredCount),
       fresh.knownBootstrap || prior.knownBootstrap,
     );
     lruSet(this.turns, session.id, merged);

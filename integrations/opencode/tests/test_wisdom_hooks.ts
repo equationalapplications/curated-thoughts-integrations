@@ -167,19 +167,26 @@ describe.skipIf(!posix)('chat.message — v1 bootstrap (LD4)', () => {
     expect(recallCalls(h2).length).toBe(0);
   });
 
-  it('bootstrap ids do not count toward the live session budget', async () => {
+  it('no session cap: a long session keeps receiving 2 facts per turn past 12', async () => {
+    // 2026-10-16: the per-session cap (12) was removed; the per-turn limits
+    // stay, and the ledger dedup bounds the session total.
     const h = await makeHost({
       CT_STUB_RECALL: JSON.stringify(Array.from({ length: 3 }, (_, i) => fact(`b${i}`))),
       CT_STUB_MATCH: JSON.stringify(Array.from({ length: 40 }, (_, i) => fact(`l${i}`))),
     });
-    let live = 0;
+    const live: string[] = [];
     for (let t = 0; t < 10; t++) {
       const parts = await h.turn('s1', `turn ${t}`);
-      for (const p of ours(parts, LIVE_MARKER)) live += ((p.text as string).match(/ct-fact:/g) ?? []).length;
+      const ids = ours(parts, LIVE_MARKER).flatMap((p) =>
+        [...(p.text as string).matchAll(/ct-fact:([A-Za-z0-9._:-]+)/g)].map((m) => m[1]!),
+      );
+      expect(ids, `turn ${t}`).toHaveLength(2); // MAX_PER_TURN, every turn
+      live.push(...ids);
     }
-    expect(live).toBe(12); // MAX_PER_SESSION live ids, bootstrap not counted
-    // Exhausted: later calls run corrections-only (--max 0).
-    expect(matchCalls(h).at(-1)).toEqual(expect.arrayContaining(['--max', '0']));
+    expect(live).toHaveLength(20);
+    expect(new Set(live).size).toBe(20); // no fact twice
+    expect(live.some((id) => id.startsWith('b'))).toBe(false);
+    for (const call of matchCalls(h)) expect(call).toEqual(expect.arrayContaining(['--max', '2']));
   });
 
   // Only meaningful where no real ct sits on a discovery fallback path.
