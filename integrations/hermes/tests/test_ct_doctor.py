@@ -197,7 +197,9 @@ class DoctorTestCase(unittest.TestCase):
         self._tmp.cleanup()
 
     def patch_env(self, key, value):
-        self._env_patches[key] = os.environ.get(key)
+        # setdefault: re-patching a key setUp already patched must not record
+        # setUp's value as "the original" (cleanup would leak it).
+        self._env_patches.setdefault(key, os.environ.get(key))
         if value is None:
             os.environ.pop(key, None)
         else:

@@ -6,6 +6,31 @@ heading format below is load-bearing: `## <version> — <date>`.
 
 ## Unreleased
 
+- Fixed: `scripts/ct_doctor.py` re-synced with the Hermes doctor post-#14
+  (issue #33). `run_checks(env=...)` now discovers the sidecar and resolves
+  the brain, vault, embedding and engine-manifest checks through the
+  caller's env merged over `os.environ` (previously discovery and checks
+  4/5/6/8 read the ambient process env only, so a caller-supplied PATH could
+  be ignored and the real installed sidecar spawned against a test brain).
+  Adds the issue #28 bundled-fallback gate (refuse to spawn an ambient
+  install when the caller's PATH override fails to resolve;
+  `CT_DOCTOR_ALLOW_BUNDLED=1` opts out) and derives the MCP `clientInfo`
+  version from `.claude-plugin/plugin.json` instead of a stale literal.
+  Check 7 (Claude Code registration) is unchanged.
+- Changed: `ct_env.py`, `ct_status.py`, `ct_preflight.py` are byte-identical
+  to Hermes, gaining `ct_env.merged_env(env=None)` and the `SOURCE_*`
+  discovery constants; `ct_status.snapshot(env=...)` now merges `env` over
+  `os.environ` instead of replacing the view (issue #32 — no shipped caller
+  passes `env`). A repo-level parity gate
+  (`tests/tools/test_shared_script_parity.py`) now fails CI on any drift
+  outside the doctor's marked harness-specific regions.
+- Tests: the `SCRUBBED_PATH` workaround is gone — the POSIX mock sidecar is
+  a `/bin/sh` shim exec'ing the absolute interpreter, so a bare mock-dir
+  PATH suffices, and a setUp precondition fails the suite if discovery does
+  not resolve the mock. Env-view and #28 gate tests ported from Hermes.
+- Fixed (packaging): release tarballs no longer pick up `.ruff_cache/` and
+  other tool caches (issue #33).
+
 ## 0.1.1 — 2026-10-09
 
 - Sync `skills/usage/SKILL.md` with Hermes: the `## Wisdom that arrives on

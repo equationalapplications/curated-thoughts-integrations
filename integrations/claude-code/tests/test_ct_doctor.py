@@ -246,7 +246,10 @@ class DoctorTestCase(unittest.TestCase):
         self._tmp.cleanup()
 
     def patch_env(self, key, value):
-        self._env_patches[key] = os.environ.get(key)
+        # setdefault: a test re-patching a key setUp already patched (PATH)
+        # must not record setUp's value as "the original", or cleanup would
+        # leak the fixture PATH into every later test module.
+        self._env_patches.setdefault(key, os.environ.get(key))
         if value is None:
             os.environ.pop(key, None)
         else:
