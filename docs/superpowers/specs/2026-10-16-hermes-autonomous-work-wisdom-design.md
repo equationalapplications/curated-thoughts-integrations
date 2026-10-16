@@ -1,8 +1,9 @@
 # Intuitive Wisdom: autonomous-work delivery for Hermes — design
 
-**Date:** 2026-10-16 · **Status:** Draft (user decisions 1–7 binding, recorded below) ·
+**Date:** 2026-10-16 · **Status:** Approved for implementation (user decisions 1–7 binding; query shape from A6) ·
 **Branch:** `feat/hermes-autonomous-work-wisdom` · **Base:** `origin/main` @ `38437e6`
-**Release:** hermes 0.4.3 → 0.5.0 (first host to roll out, decision 6)
+**Release:** hermes 0.4.3 → 0.5.0 (first host to roll out, decision 6) ·
+**Query shape:** from the A6 real-gate results (PR #51)
 **Builds on:** [Step-0 investigation](../investigations/2026-10-16-autonomous-work-trigger-step0-investigation.md)
 (Hermes section, "Recommended common contract", target A8) and
 [`2026-10-06-intuitive-wisdom-live-delivery-design.md`](2026-10-06-intuitive-wisdom-live-delivery-design.md)
@@ -217,13 +218,21 @@ Examples: `npm test` → `run npm test`; `npm run build` → `run npm run`;
 32 keys per session (sessions LRU 256). A key counts as seen as soon as a query is
 started for it, whatever the outcome.
 
-**The query string.** *TBD — waiting on the A7 real-gate experiment.* The shape that
-opens CT's real gate is being measured in parallel. Until its results land, the builder
-produces the candidate shape `"<verb> <target>"` (for example `read src/billing/invoice.py`),
-passed through `ct_ledger.strip_forged` and capped at `ACTIVITY_QUERY_CHARS = 300`. The
-query builder is one function (`query_for(line)`), so a different shape from A7 changes
-only that function and its tests. Whatever A7 finds, the secret-safety rule above is
-fixed: the query is built only from the line, and the line only from the listed args.
+**The query string: the bare target** (A6 results, PR #51, investigation "A6 results").
+The real CT 3.5.1 gate opened on 14/22 relevant activity lines and 0/14 near-misses and
+negatives. The bare target with no verb opened best (6/7, against 4/7 for both
+`<verb> <target>` and target plus hint); examples that opened: `pnpm test` 0.695,
+`.github/workflows/release.yml` 0.645, `.env.local` 0.776, `src/index.ts` 0.776.
+`query_for(activity)` therefore returns only the target:
+
+- `read`/`write`/`edit`: the normalized relative path;
+- `search`: the bare pattern (the ` in <path>` part stays in the key and the label only);
+- `run`: program plus subcommand, under the secret-safety rules above.
+
+It passes through `ct_ledger.strip_forged` and is capped at `ACTIVITY_QUERY_CHARS = 300`.
+The verb stays in the activity **key** and in the visible `_for: <line>_` label, but is
+never sent to CT. No expansion, hint or rewording is added on our side (rule 8). The
+query is built only from the activity, and the activity only from the listed args.
 
 ### Rate rule: once per `api_request_id`
 
@@ -412,8 +421,11 @@ in this design depends on verbose mode.
 
 ## Known limitations
 
-1. **Query sparsity (risk 2 of the investigation):** terse activity lines may rarely open
-   CT's gate. That is CT's to tune (rule 8). A7 informs the query shape.
+1. **Concept rules are out of reach from a path alone (A6).** The gate never reached a
+   concept-level rule from a path: migration paths stayed closed at ≤ 0.59 while the
+   plain question scored 0.897, and lowering the floor would admit near-misses (up to
+   0.601). Fixing this needs a CT-side activity query mode (recommended in the
+   investigation, not in this PR). Per rule 8 we add no query expansion or hints.
 2. **One line per step:** only the first call with a new key in a step triggers; the
    other calls' new keys stay unseen and can trigger in a later step.
 3. **First-string-wins:** if another plugin's `transform_tool_result` returns a string
