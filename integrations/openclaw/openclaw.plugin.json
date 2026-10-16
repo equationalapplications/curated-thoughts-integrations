@@ -1,0 +1,39 @@
+{
+  "id": "curated-thoughts",
+  "name": "Curated Thoughts",
+  "description": "Curated Thoughts memory for OpenClaw: CT MCP sidecar, skills, bootstrap memory block and Intuitive Wisdom live delivery.",
+  "version": "0.1.0",
+  "skills": [
+    "skills"
+  ],
+  "activation": {
+    "onStartup": true,
+    "onCapabilities": [
+      "hook"
+    ]
+  },
+  "contracts": {
+    "agentToolResultMiddleware": [
+      "openclaw"
+    ]
+  },
+  "mcpServers": {
+    "curated-thoughts": {
+      "transport": "stdio",
+      "command": "curated-thoughts-mcp",
+      "args": [
+        "--mcp"
+      ]
+    }
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "brainDir": {
+        "type": "string",
+        "description": "Brain directory for the plugin's own `ct` calls; an ambient CURATED_BRAIN_DIR wins. Default ~/.brain."
+      }
+    }
+  }
+}

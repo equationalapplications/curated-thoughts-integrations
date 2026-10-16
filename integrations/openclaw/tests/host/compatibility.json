@@ -1,0 +1,45 @@
+{
+  "openclaw": "2026.10.3",
+  "verifiedAt": "2026-10-16",
+  "method": "Published npm tarball openclaw@2026.10.3 read (docs/, dist/*.d.ts, dist/*.mjs) and installed natively (npm install openclaw@2026.10.3; `openclaw --version` -> OpenClaw 2026.10.3 (59cb447)). Shape-level only: CI does not run a gateway. See docs/superpowers/specs/2026-10-16-openclaw-wisdom-parity-leg-design.md (facts F1-F15).",
+  "engines": { "node": ">=24.16.0 <25 || >=26.1.0" },
+  "hookNames": [
+    "before_model_resolve", "agent_turn_prepare", "before_prompt_build", "before_agent_reply",
+    "model_call_started", "model_call_ended", "llm_input", "llm_output", "before_agent_finalize",
+    "agent_end", "before_compaction", "after_compaction", "before_reset", "inbound_claim",
+    "channel_pairing_requested", "message_received", "message_sending", "reply_payload_sending",
+    "message_sent", "before_tool_call", "after_tool_call", "tool_result_persist",
+    "before_message_write", "session_start", "session_end", "subagent_delivery_target",
+    "subagent_spawned", "subagent_progress", "subagent_ended", "gateway_start", "gateway_stop",
+    "heartbeat_prompt_contribution", "cron_reconciled", "cron_changed", "skill_proposal_evaluate",
+    "skill_proposal_changed", "skill_changed", "before_dispatch", "reply_dispatch",
+    "before_install", "before_agent_run", "resolve_exec_env"
+  ],
+  "conversationAccessHooks": [
+    "before_model_resolve", "agent_turn_prepare", "before_prompt_build", "before_agent_reply",
+    "llm_input", "llm_output", "before_agent_finalize", "agent_end", "before_agent_run"
+  ],
+  "hookRegistrationOptions": ["priority", "registrationId", "timeoutMs", "eligibleTriggers", "eligibleDispatchKinds", "matcher", "requiresToolAuthority"],
+  "hookTimeoutMaxMs": 600000,
+  "defaultPromptHookTimeoutMs": 15000,
+  "beforePromptBuildEventFields": ["prompt", "currentUserMessage", "currentUserMessageId", "messages"],
+  "beforePromptBuildResultFields": ["systemPrompt", "prependContext", "appendContext", "toolsAllow", "prependSystemContext", "appendSystemContext"],
+  "agentContextFields": ["runId", "jobId", "agentId", "sessionKey", "sessionId", "trigger", "inputProvenance", "hookInvocation", "toolAuthority"],
+  "agentTriggers": ["cron", "heartbeat", "user"],
+  "inputProvenanceKinds": ["external_user", "inter_session", "internal_system"],
+  "agentTurnPrepareEventFields": ["prompt", "messages", "queuedInjections"],
+  "nextTurnInjectionFields": ["sessionKey", "agentId", "text", "idempotencyKey", "placement", "ttlMs", "metadata"],
+  "nextTurnInjectionPlacements": ["prepend_context", "append_context"],
+  "middlewareRuntimes": ["openclaw", "codex", "agentsapi"],
+  "middlewareEventFields": ["threadId", "turnId", "toolCallId", "toolName", "args", "cwd", "isError", "result"],
+  "middlewareContextFields": ["runtime", "agentId", "sessionId", "sessionKey", "runId"],
+  "middlewareMaxTextChars": 100000,
+  "manifestFields": ["id", "name", "description", "version", "skills", "activation", "contracts", "mcpServers", "configSchema"],
+  "modelPromptProjection": {
+    "metadataKey": "__openclaw",
+    "field": "modelPromptProjection",
+    "version": 1,
+    "note": "embedded runner composes [prependContext, prompt, appendContext] into the user turn's projection, captured once per admission and replayed for historical user messages (builtin-openclaw installModelPromptProjection / projectRecordedModelPrompt); prompt-hook snapshots strip only __openclaw.upstreamUserText (model-context-message projectModelContextMessages)"
+  },
+  "mcpToolNameRule": "<safeServerName>__<toolName>, chars [A-Za-z0-9_-], collision suffix -N (agent-bundle-mcp-names buildSafeToolName)"
+}
