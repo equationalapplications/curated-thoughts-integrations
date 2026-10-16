@@ -20,7 +20,7 @@
     "@equational-applications/ct-wisdom-core": "file:../../packages/ct-wisdom-core"
   },
   "scripts": {
-    "build": "tsc && esbuild scripts/install.ts --bundle --platform=node --format=esm --target=node22 --main-fields=module,main --outfile=lib/scripts/install.js --log-level=warning",
+    "build": "tsc && node scripts/vendor_core.mjs && esbuild scripts/install.ts --bundle --platform=node --format=esm --target=node22 --main-fields=module,main --outfile=lib/scripts/install.js --log-level=warning",
     "prepack": "pnpm run build",
     "test": "vitest run",
     "test:watch": "vitest",
