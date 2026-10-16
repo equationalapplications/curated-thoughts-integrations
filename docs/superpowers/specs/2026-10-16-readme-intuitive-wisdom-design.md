@@ -3,6 +3,11 @@
 **Date:** 2026-10-16 · **Status:** Approved (autonomous; design judgment delegated, no open questions) ·
 **Parent:** `2026-10-09-cross-harness-wisdom-parity-design.md` decision 9, plan Task 6.
 
+> **Amendment 2026-10-16:** the per-session cap ("≤ 12 per session" in the shared budgets) was removed on every
+> host by user decision; the per-turn limits (2 facts, 1200 chars) are unchanged.
+> See [`2026-10-16-remove-session-wisdom-cap-design.md`](2026-10-16-remove-session-wisdom-cap-design.md).
+> The text below is kept as the historical design.
+
 ## Problem
 
 All five integrations have shipped Intuitive Wisdom live delivery (hermes 0.4.2,

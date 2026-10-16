@@ -12,7 +12,8 @@ import { describe, expect, it } from 'vitest';
 
 import { Breaker } from '../src/breaker.js';
 import { onToolResult, onUserTurn } from '../src/engine.js';
-import { historyIds, marker, scanIds } from '../src/ledger.js';
+import { historyIds, marker } from '../src/ledger.js';
+import { MAX_PER_TURN } from '../src/constants.js';
 import { renderBlock } from '../src/render.js';
 import type {
   HostAdapter,
@@ -99,12 +100,6 @@ class SimHost implements HostAdapter {
     return {
       idsMostRecentFirst: ids,
       has: (id) => ids.includes(id),
-      // Live count = ids delivered on user-role messages (Hermes rule).
-      liveDeliveredCount: new Set(
-        this.context
-          .filter((m) => m.role === 'user')
-          .flatMap((m) => scanIds(m.content)),
-      ).size,
       knownBootstrap: true,
     };
   }
@@ -120,7 +115,6 @@ class SimHost implements HostAdapter {
     return {
       idsMostRecentFirst: ids,
       has: (id) => set.has(id),
-      liveDeliveredCount: 0,
       knownBootstrap: true,
     };
   }
@@ -292,10 +286,17 @@ describe('exactly-once across randomized sessions (Hermes port)', () => {
     }
   });
 
-  it('corrections-only turns still dedup (m1) — targeted probe', async () => {
+  it('no session cap: past 12 live ids a turn still asks --max 2, delivers fresh facts and dedups', async () => {
     const host = new SimHost('probe', 1);
-    // Saturate the live budget: 12 ids already delivered on user messages,
-    // in MAX_PER_TURN chunks, each chunk carrying DISTINCT ids (a fact twice
+    // A fake CT that honors --exclude and records --max.
+    const maxes: number[] = [];
+    host.wisdomMatch = async (_q, max, exclude) => {
+      maxes.push(max);
+      const pool = UNIVERSE.filter((f) => !exclude.includes(f));
+      return { outcome: 'ok', result: { entries: pool.slice(0, max).map((f) => fact(f)), corrections: [] } };
+    };
+    // 12 ids already delivered on user messages (the old cap), in
+    // MAX_PER_TURN chunks, each chunk carrying DISTINCT ids (a fact twice
     // in one block would be an exactly-once violation of its own).
     for (let i = 0; i < 6; i++) {
       const chunk = renderBlock({
@@ -304,18 +305,22 @@ describe('exactly-once across randomized sessions (Hermes port)', () => {
       });
       host.context.push({ role: 'user', content: `d${i}\n\n${chunk.text}` });
     }
-    const ledger = host.rebuildLedger(host.session);
-    expect(ledger.liveDeliveredCount).toBe(12);
-
-    // A turn now must be corrections-only: the two ids in `chunk` are already
-    // present, so the block carries nothing new (they are post-filtered).
-    const out = await onUserTurn(host, host.session, 'next question', host.breaker);
-    if (out !== null) {
-      // Whatever the fake CT returned, no already-present id may appear again.
-      for (const id of UNIVERSE.slice(0, 12)) {
-        expect(out.match(new RegExp(`\\*\\*T${id}\\*\\*`))).toBeNull();
+    // Two more turns: each asks for a full turn's worth and gets fresh ids.
+    for (const [turn, expected] of [
+      [0, UNIVERSE.slice(12, 14)],
+      [1, UNIVERSE.slice(14, 16)],
+    ] as const) {
+      const question = `next question ${turn}`;
+      const out = await onUserTurn(host, host.session, question, host.breaker);
+      expect(out, `turn ${turn}`).not.toBeNull();
+      for (const id of expected) expect(out).toContain(`**T${id}**`);
+      // No already-present id may appear again.
+      for (const id of UNIVERSE.slice(0, 12 + turn * 2)) {
+        expect(out!.match(new RegExp(`\\*\\*T${id}\\*\\*`))).toBeNull();
       }
+      host.context.push({ role: 'user', content: `${question}\n\n${out}` });
+      assertNoDupes(host, `post-12 probe turn ${turn}`);
     }
-    assertNoDupes(host, 'saturated probe');
+    expect(maxes).toEqual([MAX_PER_TURN, MAX_PER_TURN]);
   });
 });

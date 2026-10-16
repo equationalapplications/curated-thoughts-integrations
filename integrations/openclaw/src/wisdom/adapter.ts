@@ -67,16 +67,13 @@ function projectionText(msg: Record<string, unknown>): string | null {
 export interface SnapshotScan {
   /** Unique ids, newest message first. */
   all: string[];
-  /** Ids carried by user-role messages (the N2 channel — M1 live budget). */
-  live: Set<string>;
 }
 
 /** Scan a prompt-hook `messages` snapshot for ct-fact markers. Never throws. */
 export function snapshotScan(messages: unknown): SnapshotScan {
   const all: string[] = [];
   const seen = new Set<string>();
-  const live = new Set<string>();
-  if (!Array.isArray(messages)) return { all, live };
+  if (!Array.isArray(messages)) return { all };
   for (let i = messages.length - 1; i >= 0; i--) {
     const msg = messages[i];
     if (msg === null || typeof msg !== 'object') continue;
@@ -90,7 +87,6 @@ export function snapshotScan(messages: unknown): SnapshotScan {
     }
     for (const text of texts) {
       for (const id of scanIds(text)) {
-        if (role === 'user') live.add(id);
         if (!seen.has(id)) {
           seen.add(id);
           all.push(id);
@@ -98,7 +94,7 @@ export function snapshotScan(messages: unknown): SnapshotScan {
       }
     }
   }
-  return { all, live };
+  return { all };
 }
 
 /** One recall-shaped text block inside an AgentToolResult. */
@@ -190,7 +186,7 @@ export class OpenClawWisdomAdapter implements HostAdapter {
   rebuildLedger(session: SessionRef): Ledger {
     const turn = this.turns.get(session.id);
     if (turn === undefined) {
-      return { idsMostRecentFirst: [], has: () => false, liveDeliveredCount: 0, knownBootstrap: false };
+      return { idsMostRecentFirst: [], has: () => false, knownBootstrap: false };
     }
     const scan = snapshotScan(turn.messages);
     const merged: string[] = [];
@@ -204,7 +200,6 @@ export class OpenClawWisdomAdapter implements HostAdapter {
     return {
       idsMostRecentFirst: merged,
       has: (id) => set.has(id),
-      liveDeliveredCount: scan.live.size,
       knownBootstrap: turn.bootstrapIds !== null,
     };
   }

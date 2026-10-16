@@ -33,11 +33,11 @@ import ct_wisdom
 
 logger = logging.getLogger(__name__)
 
-# Frozen (spec "New module"); INTENT invariant 5: never raised to compensate
-# for weak matching.
+# Frozen (spec "New module"); INTENT invariant 6: never raised to compensate
+# for weak matching. There is no per-session cap (removed 2026-10-16): the
+# per-turn limits bound each block, and the ledger's dedup bounds the total.
 LIVE_MAX_PER_TURN = 2
 LIVE_MAX_BLOCK_CHARS = 1200
-LIVE_MAX_PER_SESSION = 12
 LIVE_TIMEOUT = 3  # seconds; on the turn path
 LIVE_QUERY_CHARS = 2000
 EXCLUDE_MAX = 256
@@ -370,9 +370,7 @@ def _pre_llm_call(session_id, user_message, history, is_first_turn):
     if not capable:
         return _skip(session_id, "probe_timeout" if capable is None else "capability_missing")
 
-    live_used = len(ct_ledger.history_ids(history, roles=("user",)))
-    max_n = 0 if live_used >= LIVE_MAX_PER_SESSION else LIVE_MAX_PER_TURN
-    result, rclass = match_wisdom(path, query, max_n, ledger_list[:EXCLUDE_MAX])
+    result, rclass = match_wisdom(path, query, LIVE_MAX_PER_TURN, ledger_list[:EXCLUDE_MAX])
     if rclass is not None:
         if rclass in ("timeout", "exit"):
             _BREAKER.record_failure()

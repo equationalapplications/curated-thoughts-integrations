@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+## 0.1.1 — 2026-10-16
+
+- Changed: Intuitive Wisdom live delivery has no per-session cap. The
+  vendored shared core drops `MAX_PER_SESSION = 12` and the `--max 0`
+  switch, and `Ledger.liveDeliveredCount` (read only by the cap) is
+  removed, with `snapshotScan`'s user-role `live` set.
+  Why: an autonomous agent is better served by more wisdom than less. The
+  cap stopped delivery after about 6 matching turns, though a fact that
+  matches late in a session is as valuable as an early one. Noise stays
+  bounded per turn (at most 2 facts in a 1200-character block, only facts
+  past CT's relevance gate), delivery never touches the system prompt, and
+  dedup keeps the session total to the distinct facts that match.
+  Unchanged: the per-turn limits, CT's score gate, dedup and exactly-once
+  delivery, the breaker, timeouts and the 256-id exclude bound.
+
 ## 0.1.0 — 2026-10-16
 
 First release: a native **OpenClaw** plugin (host pin `openclaw@2026.10.3`,
