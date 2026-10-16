@@ -57,22 +57,25 @@ Needs the standalone `ct` CLI from Curated Thoughts ≥ 3.3.0
   user turn, the plugin asks `ct wisdom match` which facts are relevant to
   the user's message (CT owns relevance), drops anything already in context,
   and appends up to 2 of them (1200 characters max, at most 12 per session;
-  corrections are exempt) as a user-role message. The agent loop persists it
+  corrections to a fact already shown still flow after the cap) as a
+  user-role message. The agent loop persists it
   verbatim in the session log. The system prompt is never touched.
 - **Exactly once.** Each fact carries a `<!-- ct-fact:<id> -->` marker. Every
   turn the plugin rebuilds the list of facts already in context from the
-  session log (`agent.session.deriveMessages()`), plus the auto-inclusion
-  block's ids, never from its own decisions. A session continued with
-  `--session-id`, or after a restart, is not re-delivered a fact it already
-  has. The agent id survives compaction, but a fact whose marker was
-  compacted out of the session log may be delivered again (Hermes
-  semantics).
+  session log (`agent.session.deriveMessages()`), plus the ids this process
+  recorded next to the auto-inclusion block (its own ids and the ones
+  delivered since). A session continued with `--session-id`, or after a
+  restart, is not re-delivered a fact it already has. The agent id survives
+  compaction, so within one process compaction repeats nothing; after a
+  restart, a fact whose marker was compacted out of the session log may be
+  delivered again.
 - **Recall dedup.** When the agent calls `curated_recall_context` itself
   (`tools/post-execute`), entries already in context become one-line stubs;
   the rest of CT's envelope is kept as is.
 - **Failure handling.** Silent and bounded: each `ct` call has a 3 s budget,
-  and three consecutive failures pause matching for five minutes (one
-  half-open probe then retries).
+  and three consecutive timeouts, non-zero exits or unparseable results
+  pause matching for five minutes (one half-open probe then retries). A `ct`
+  that cannot be started does not count.
 - **Since 0.4.1** the delivery message is an identified user message (`id`,
   `role: "user"`), so a session that received a block can be continued; in
   0.4.0 DSH rejected such a session on replay.

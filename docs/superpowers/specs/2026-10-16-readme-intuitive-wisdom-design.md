@@ -38,12 +38,15 @@ and keeps links out of column 2.
    - Plain-language summary: a short bootstrap block at session start; then, once per user
      turn, CT (`ct wisdom match`) decides which curated facts are relevant to the message.
      The not-yet-seen facts are added to that turn, never to the system prompt, and each fact
-     is in context at most once (on Hermes, DeepSeek and OpenClaw a fact whose marker was
-     compacted out may arrive again; OpenCode and Claude Code never re-deliver). Agent-run `curated_recall_context` results show
+     is in context at most once (on Hermes and OpenClaw a fact whose marker was compacted
+     out may arrive again, on DeepSeek only after a restart; OpenCode and Claude Code never
+     re-deliver). Agent-run `curated_recall_context` results show
      repeats as "already in context" stubs. Needs CT ≥ 3.3.0; older or absent CT is a
      silent no-op.
    - Shared budgets: ≤ 2 facts per turn, ≤ 1200-char block, ≤ 12 per session (corrections
-     exempt); 3 s per `ct` call; breaker = 3 consecutive failures pause matching for 5 min.
+     still flow after the cap); 3 s per `ct` call; breaker = 3 consecutive match timeouts or
+     non-zero exits (plus unparseable output on TS hosts; spawn failures don't count) pause
+     matching for 5 min.
    - Per-host table (below).
    - Known limits: CT's relevance gate needs a calibrated embedder (`gate: uncalibrated` ⇒
      no entries, corrections still flow); live matching rarely fires on real messages yet
@@ -59,7 +62,7 @@ and keeps links out of column 2.
 | Host | Trigger | Channel | Resume / restart | Compaction |
 |---|---|---|---|---|
 | Hermes | `pre_llm_call` | appended to the user turn | restored session (`/branch`, `/resume` after restart): no live delivery | continues; a fact compacted out may arrive again |
-| DeepSeek Harness | first `agent/pre-step` of a turn | identified user message, persisted in the session log | `--session-id` / restart continue, no repeats (ledger from the session log) | agent id survives; ledger = what the log carries |
+| DeepSeek Harness | first `agent/pre-step` of a turn | identified user message, persisted in the session log | `--session-id` / restart continue, no repeats (ledger from the session log) | agent id survives; no repeats within one process (delivered ids kept with the memo); after a restart, a compacted-out fact may arrive again |
 | OpenCode | `chat.message` | `synthetic: true` part on the user message | `--continue` / restart continue, no repeats | delivered ids carried forward, never re-delivered (deliberate) |
 | Claude Code | `UserPromptSubmit` | `additionalContext` | `--resume`/`--continue`/`/resume`/fork: live delivery OFF for the session's life; `/clear` = fresh session | continues, no repeats |
 | OpenClaw | `before_prompt_build` (user turns) | `prependContext` in the user message | new process: no live delivery until bootstrap is settled | session key survives; a fact compacted out may arrive again |

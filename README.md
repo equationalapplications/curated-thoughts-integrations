@@ -53,10 +53,11 @@ A fact is in the session's context **at most once**. Each delivered fact
 carries a `ct-fact:<id>` marker, and the integration skips any fact the
 session already has, whether it came from the bootstrap block, an earlier
 turn, or a recall. Compaction is the one exception, and it differs by host
-(see the table below). On Hermes, DeepSeek Harness and OpenClaw, a fact whose
-marker was compacted out of context may be delivered again. OpenCode and
-Claude Code never re-deliver it. When the agent runs `curated_recall_context` itself, entries it already has
-come back as one-line "already in context" stubs.
+(see the table below). On Hermes and OpenClaw, a fact whose marker was
+compacted out of context may be delivered again; on DeepSeek Harness that
+can happen only after a restart. OpenCode and Claude Code never re-deliver
+it. When the agent runs `curated_recall_context` itself, entries it already
+has come back as one-line "already in context" stubs.
 
 Relevance is Curated Thoughts' job: integrations never score, rank or
 threshold facts (see [INTENT.md](INTENT.md)). The same algorithm runs
@@ -65,9 +66,12 @@ TypeScript port in `packages/ct-wisdom-core` (DeepSeek Harness, OpenCode,
 OpenClaw), with the same budgets:
 
 - at most 2 facts per turn, in a block of at most 1200 characters, and at
-  most 12 per session (corrections to a fact already shown are exempt);
+  most 12 per session. Corrections to a fact already shown still flow
+  after the cap is reached (a delivered correction counts toward it);
 - each `ct` call times out after 3 s;
-- three consecutive failures pause matching for 5 minutes.
+- three consecutive timeouts or non-zero exits of `ct wisdom match` pause
+  matching for 5 minutes. A `ct` that cannot be found or started does not
+  count; on the TypeScript hosts, unparseable output also counts.
 
 **Requires Curated Thoughts ≥ 3.3.0** (the first release with
 `ct wisdom match`). With an older CT, or no CT at all, live delivery is a
@@ -78,13 +82,14 @@ silent no-op and the session runs as before.
 | Host | Trigger | Delivered as | Resume / restart | Compaction |
 |------|---------|--------------|------------------|------------|
 | [Hermes](integrations/hermes/) | `pre_llm_call` hook | appended to the user turn | a restored session (`/branch`, or `/resume` after a restart) gets no live delivery | delivery continues; a fact compacted out of context may arrive again |
-| [DeepSeek Harness](integrations/deepseek/README.md#intuitive-wisdom) | first `agent/pre-step` step of a turn | a user message persisted in the session log | `--session-id` and restarts keep delivering, with no repeats (the record is rebuilt from the session log) | delivery continues; a fact compacted out of the session log may arrive again |
+| [DeepSeek Harness](integrations/deepseek/README.md#intuitive-wisdom) | first `agent/pre-step` step of a turn | a user message persisted in the session log | `--session-id` and restarts keep delivering, with no repeats (the record is rebuilt from the session log) | delivery continues; within one process the plugin also remembers what it delivered, so no repeats; after a restart, a fact compacted out of the session log may arrive again |
 | [OpenCode](integrations/opencode/README.md#intuitive-wisdom) | `chat.message` hook | a `synthetic: true` part on the user message | `--continue` and restarts keep delivering, with no repeats | delivered facts are carried forward on purpose, so a compacted-out fact is never re-delivered |
 | [Claude Code](integrations/claude-code/README.md#intuitive-wisdom) | `UserPromptSubmit` hook | `additionalContext` | `--resume`, `--continue`, `/resume` and forks turn live delivery **off** for the life of the session; `/clear` starts a fresh session | `/compact` keeps delivering, with no repeats |
 | [OpenClaw](integrations/openclaw/README.md) | `before_prompt_build`, user turns only | `prependContext` inside the user message | a new process gets no live delivery for a session until its bootstrap is settled | the session key survives; a fact compacted out of context may arrive again |
 
-When a resume or restore turns live delivery off, the bootstrap block still
-renders. On OpenCode, Claude Code and OpenClaw, subagent sessions never
+When a resume or restore turns live delivery off, the bootstrap block stays
+in context: replayed from the session's history (Hermes restores, Claude
+Code `--resume`) or rendered again (OpenClaw, Claude Code forks). On OpenCode, Claude Code and OpenClaw, subagent sessions never
 receive live delivery. Host-specific gates:
 
 - **Claude Code**: managed deployments that set `allowManagedHooksOnly`
