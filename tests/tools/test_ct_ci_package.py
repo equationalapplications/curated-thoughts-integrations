@@ -77,6 +77,76 @@ class TestBuild(unittest.TestCase):
             self.assertIn(tarball.name, sums.read_text(encoding="utf-8"))
 
 
+class TestCacheFiltering(unittest.TestCase):
+    """Tool caches never ship, whatever the manifest says (issue #33).
+
+    release.yml runs ruff inside the integration directory before packaging,
+    and the packager walks the tree rather than reading .gitignore — so a
+    `.ruff_cache/` used to land in the release tarball. The filter is central
+    (ct_ci_package.CACHE_DIR_NAMES), so it is proven here against the real
+    manifests' package blocks AND against an empty one.
+    """
+
+    PLANTED = (
+        ".ruff_cache/0.16.9/abc",
+        "sub/.ruff_cache/0.16.9/def",
+        "__pycache__/m.cpython-313.pyc",
+        "scripts/__pycache__/x.cpython-39.pyc",
+        ".pytest_cache/v/cache/nodeids",
+        ".mypy_cache/3.13/x.json",
+        "top.pyc",
+        "scripts/legacy.pyo",
+    )
+    REAL = ("README.md", "scripts/ct_doctor.py", ".claude-plugin/plugin.json")
+
+    def _tree(self, root):
+        for rel in self.PLANTED + self.REAL:
+            path = Path(root) / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("x", encoding="utf-8")
+        return Path(root)
+
+    def test_caches_never_selected_regardless_of_manifest(self):
+        blocks = {"empty": {}}
+        for name in ("hermes", "claude-code"):
+            data = ct_ci_manifest.load_manifest(
+                REPO / "integrations" / name / "integration.yaml"
+            )
+            blocks[name] = data.get("package") or {}
+        for label, package in blocks.items():
+            with self.subTest(manifest=label), tempfile.TemporaryDirectory() as tmp:
+                chosen = sorted(
+                    rel for _path, rel in ct_ci_package._selected_files(self._tree(tmp), package)
+                )
+                self.assertEqual(chosen, sorted(self.REAL))
+
+    def test_dot_directories_that_are_not_caches_still_ship(self):
+        # .claude-plugin/ is load-bearing (the Claude Code manifest): the
+        # filter is a closed list of cache names, not "every dot-dir".
+        with tempfile.TemporaryDirectory() as tmp:
+            chosen = [rel for _p, rel in ct_ci_package._selected_files(self._tree(tmp), {})]
+        self.assertIn(".claude-plugin/plugin.json", chosen)
+
+    def test_built_tarball_has_no_cache_members(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            integration = repo / "integrations" / "demo"
+            self._tree(integration)
+            (integration / "integration.yaml").write_text(
+                "id: demo\nname: Demo\nversion: 1.2.3\nlanguage: python\n"
+                "status: implemented\n",
+                encoding="utf-8",
+            )
+            out = Path(tmp) / "dist"
+            tarball = ct_ci_package.build(repo, "demo", out)
+            with tarfile.open(tarball) as archive:
+                names = archive.getnames()
+        for cache in ct_ci_package.CACHE_DIR_NAMES:
+            self.assertFalse(any(f"/{cache}/" in n for n in names), (cache, names))
+        self.assertFalse(any(n.endswith((".pyc", ".pyo")) for n in names), names)
+        self.assertTrue(any(n.endswith("scripts/ct_doctor.py") for n in names), names)
+
+
 class TestChangelogSection(unittest.TestCase):
     def test_extracts_the_matching_section(self):
         body = ct_ci_package.changelog_section(REPO / "integrations" / "hermes", "0.2.0")

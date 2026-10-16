@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """ct_env.py — Curated Thoughts environment resolution, shared by the doctor,
-the session-start hook, and the Hermes plugin entry point.
+the session-start hooks, and the plugin entry points.
 
 Single source of truth for three things the integration kept getting wrong:
 
@@ -21,6 +21,10 @@ Single source of truth for three things the integration kept getting wrong:
    only in `/usr/bin`.
 
 Stdlib only. Every function is read-only and non-raising.
+
+Shared script: integrations/hermes/scripts and integrations/claude-code/scripts
+carry byte-identical copies. Change both together;
+tests/tools/test_shared_script_parity.py fails on any drift.
 """
 
 from __future__ import annotations
@@ -43,6 +47,47 @@ ENV_BRAIN_CONFIG = "CURATED_BRAIN_CONFIG"
 def _expand(p):
     """Expand a leading ~ the way CT's doctor does, then make it a Path."""
     return Path(os.path.expanduser(str(p)))
+
+
+def merged_env(env=None):
+    """Ambient os.environ with `env` overlaid — the spawn-time env view.
+
+    The single source of truth for "which environment does this call see"
+    (issue #32; the #14/#29 bug class was two code paths resolving different
+    views). Public entry points (ct_doctor.run_checks and its checks,
+    ct_status.snapshot) build the view here ONCE and hand it to the
+    primitives below, which consume whatever view they are given AS-IS
+    (only env=None means ambient there).
+
+    Per-key semantics of `env`:
+
+      * key missing      -> the ambient value shows through;
+      * value None       -> treated exactly like a missing key: "the caller
+                            did not specify this key", ambient shows through.
+                            Dropped rather than kept, because a None reaching
+                            subprocess.run(env=...) raises TypeError and
+                            {"PATH": None} would make shutil.which fall back
+                            to the AMBIENT PATH (GLM r3, PR #31);
+      * value ""         -> kept: the documented SUPPRESSION of the ambient
+                            value (reads as unset through a falsy .get());
+      * any other string -> wins over the ambient value.
+
+    This OVERLAYS os.environ, unlike subprocess.run(env=...) which replaces
+    it — so env={} cannot remove an ambient key; use "" for that.
+
+    Documented trade-off: a caller env WITHOUT a PATH key inherits the
+    ambient PATH, so discovery can resolve (and the doctor can spawn) the
+    real installed sidecar. That is deliberate — callers that do not pass a
+    PATH must stay unaffected. A caller that means to control which binary
+    runs must pass PATH; ct_doctor.run_checks refuses to spawn when such an
+    override fails to resolve (issue #28).
+
+    Always returns a NEW dict; neither os.environ nor `env` is mutated.
+    """
+    merged = dict(os.environ)
+    if env:
+        merged.update({k: v for k, v in env.items() if v is not None})
+    return merged
 
 
 class BrainPaths:
