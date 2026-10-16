@@ -16,6 +16,13 @@ delivered block is persisted verbatim on the turn's first step, and a
 continued session is not re-delivered the same fact (its id rides
 `--exclude`, rebuilt from the session log).
 
+Fix: **the `tools/post-execute` dedup rewrite dropped CT's other envelope
+keys.** When a `curated_recall_context` result was rewritten (repeats
+stubbed, or a `ct-fact` trailer added), only `wiki_entries` was serialized
+back and every sibling key of the inner envelope was lost. The rewrite now
+keeps the whole object in CT's key order and changes only the stubbed
+entries and the trailer, as the OpenCode leg does.
+
 e2e harness: the image's test-only `ct` is now 3.5.1. The old 2.22.0 has no
 `wisdom match` (CT ≥ 3.3.0), so the plugin's capability probe switched
 delivery off and the live path never ran. Session-log lookup now matches

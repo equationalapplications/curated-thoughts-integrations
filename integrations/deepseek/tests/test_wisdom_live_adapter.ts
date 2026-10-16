@@ -302,6 +302,41 @@ describe('recall envelope (N3, m4)', () => {
     expect(rewritten.result.endsWith('\n<!-- ct-fact:f1 -->\n<!-- ct-fact:f2 -->')).toBe(true);
   });
 
+  it('keeps every other inner-envelope key, in order, byte-faithfully', () => {
+    // CT's recall envelope carries more than wiki_entries (chunks, query
+    // metadata, …). A stub/trailer rewrite must change ONLY the stubbed
+    // entries and append the trailer — never drop or reorder sibling keys
+    // (OpenCode leg parity: its envelope parse keeps the full object).
+    const { a } = adapter();
+    const innerIn = {
+      schema: 2,
+      query: 'tire pressure',
+      chunks: [{ doc: 'n1', text: 'chunk text', score: 0.5 }],
+      wiki_entries: [
+        { id: 'f1', title: 'A', text: 'long text' },
+        { id: 'f2', title: 'B', text: 'other' },
+      ],
+      provenance: { source: 'ct', tier: 'v2.5-full' },
+      unknown_future_key: null,
+    };
+    const env = { result: JSON.stringify(innerIn) };
+    const expectedInner = {
+      ...innerIn,
+      wiki_entries: [
+        { id: 'f1', in_context: true, note: 'already in context: ct-fact:f1' },
+        { id: 'f2', title: 'B', text: 'other' },
+      ],
+    };
+    // Repeat-only rewrite: pure JSON, siblings intact, key order intact.
+    const stubbed = a.rewriteEnvelopeStub(env, ['f1'], []) as { result: string };
+    expect(stubbed.result).toBe(JSON.stringify(expectedInner));
+    // Trailer rewrite: the same JSON line, then the marker lines.
+    const trailed = a.rewriteEnvelopeStub(env, ['f1'], ['f2']) as { result: string };
+    expect(trailed.result).toBe(JSON.stringify(expectedInner) + '\n<!-- ct-fact:f2 -->');
+    // The input is never mutated.
+    expect(JSON.parse(env.result)).toEqual(innerIn);
+  });
+
   it('malformed envelope passes through untouched', () => {
     const { a } = adapter();
     expect(a.rewriteEnvelopeStub({ result: 'not json' }, ['f1'], [])).toEqual({ result: 'not json' });
