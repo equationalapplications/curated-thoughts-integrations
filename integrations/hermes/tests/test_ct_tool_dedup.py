@@ -104,5 +104,30 @@ class TestToolDedup(unittest.TestCase):
         self.assertIsNone(ct_tool_dedup.on_transform_tool_result())
 
 
+class TestToolDedupRace(unittest.TestCase):
+    """A fact claimed by another tool thread (an activity delivery) after the
+    dedup hook could have read the ledger must still be stubbed: the check
+    and the add are one atomic claim."""
+
+    def setUp(self):
+        ct_ledger.LEDGER_CACHE.clear()
+        self.addCleanup(ct_ledger.LEDGER_CACHE.clear)
+
+    def test_concurrent_claim_is_stubbed(self):
+        ct_ledger.LEDGER_CACHE.put("s1", set())
+        stale = ct_ledger.LEDGER_CACHE.get("s1")  # snapshot before the claim
+        ct_ledger.LEDGER_CACHE.claim("s1", ["f1"])  # the other thread wins f1
+        orig = ct_ledger.LEDGER_CACHE.get
+        ct_ledger.LEDGER_CACHE.get = lambda sid: set(stale)
+        self.addCleanup(setattr, ct_ledger.LEDGER_CACHE, "get", orig)
+        out = ct_tool_dedup.on_transform_tool_result(
+            tool_name=TOOL, args={}, result=envelope(["f1", "f2"]), session_id="s1")
+        _, inner, text = unwrap(out)
+        self.assertTrue(inner["wiki_entries"][0].get("in_context"))
+        trailer = text.split("\n", 1)[1]
+        self.assertNotIn(ct_ledger.marker("f1"), trailer)
+        self.assertIn(ct_ledger.marker("f2"), trailer)
+
+
 if __name__ == "__main__":
     unittest.main()
