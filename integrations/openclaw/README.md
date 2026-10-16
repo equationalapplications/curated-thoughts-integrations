@@ -26,8 +26,8 @@ re-verified before the pin moves. OpenClaw itself needs Node ≥ 24.16.
   memoized per session.
 - **Intuitive Wisdom live delivery.** On every genuine user turn the plugin asks
   CT which wisdom facts are relevant (`ct wisdom match`, CT ≥ 3.3.0 owns the
-  relevance gate) and delivers at most 2 facts per turn and 12 per session
-  (1200-character block) inside that turn's user message (`prependContext`). It
+  relevance gate) and delivers at most 2 facts per turn (1200-character block,
+  no per-session cap) inside that turn's user message (`prependContext`). It
   never repeats what the agent can already see. Agent-initiated
   `curated_recall_context` results are deduped by a tool-result middleware.
 - **Doctor.** `node lib/scripts/ct_doctor.js check` covers the sidecar, brain,

@@ -6,11 +6,13 @@
  * changes the normative algorithm for every leg at once.
  */
 
-/** Max wiki facts delivered on one user turn (N2 block). */
+/**
+ * Max wiki facts delivered on one user turn (N2 block). There is no
+ * per-session cap (removed 2026-10-16): the per-turn limits bound the noise,
+ * and the ledger's dedup bounds a session's total to the distinct facts that
+ * match its turns.
+ */
 export const MAX_PER_TURN = 2;
-
-/** Max wiki facts delivered per session over the live path (M1 budget). */
-export const MAX_PER_SESSION = 12;
 
 /** Max characters of the rendered, sanitized delivery block. */
 export const MAX_BLOCK_CHARS = 1200;

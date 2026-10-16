@@ -8,7 +8,6 @@
 import { Breaker } from './breaker.js';
 import {
   EXCLUDE_MAX,
-  MAX_PER_SESSION,
   MAX_PER_TURN,
   QUERY_CHARS,
 } from './constants.js';
@@ -58,15 +57,13 @@ export async function onUserTurn(
   const query = buildQuery(userMessage);
   if (query === '') return null;
 
-  // M1 session budget: counts only ids delivered via the LIVE path.
-  // Exhaustion does NOT stop the call — it forces corrections-only.
-  const liveUsed = ledger.liveDeliveredCount;
-  const maxN = liveUsed >= MAX_PER_SESSION ? 0 : MAX_PER_TURN;
+  // No per-session cap (removed 2026-10-16): every turn asks for a full
+  // turn's worth; the per-turn limits and the ledger dedup bound delivery.
   // m8: newest first — corrections only flow for ids actually sent, and a
   // wrong ordering silently delays or loses supersession corrections.
   const exclude = ledger.idsMostRecentFirst.slice(0, EXCLUDE_MAX);
 
-  const attempt = await host.wisdomMatch(query, maxN, exclude);
+  const attempt = await host.wisdomMatch(query, MAX_PER_TURN, exclude);
   if (attempt.outcome !== 'ok' || !attempt.result) {
     if (attempt.outcome === 'timeout_or_exit') breaker.recordFailure();
     if (attempt.outcome === 'spawn') host.resetDiscoveryAndProbeCaches(); // n3
@@ -79,7 +76,7 @@ export async function onUserTurn(
   const entries = attempt.result.entries.filter(
     (e) => !validId(e?.id) || !ledger.has(e.id),
   );
-  // Corrections are exempt from the budget and from the exclude filter —
+  // Corrections are exempt from the exclude filter —
   // superseding a fact already in context is the point of a correction.
   const corrections = attempt.result.corrections;
   const match: WisdomMatchResult = { entries, corrections };
@@ -99,7 +96,6 @@ export async function onUserTurn(
     host.cacheLedger(session, {
       idsMostRecentFirst: merged,
       has: (id) => merged.includes(id),
-      liveDeliveredCount: ledger.liveDeliveredCount + deliveredIds.length,
       knownBootstrap: ledger.knownBootstrap,
     });
   }
@@ -149,7 +145,6 @@ export function onToolResult(
   host.cacheLedger(session, {
     idsMostRecentFirst: merged,
     has: (id) => merged.includes(id),
-    liveDeliveredCount: ledger.liveDeliveredCount,
     knownBootstrap: ledger.knownBootstrap,
   });
   return result;

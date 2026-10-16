@@ -272,19 +272,18 @@ describe('exactly-once across randomized sessions (DSH binding)', () => {
     }
   });
 
-  it('saturated live budget → corrections-only turns still dedup (m1)', async () => {
-    const rand = rng(42);
+  it('no session cap: past 12 live ids a turn still asks --max 2, delivers fresh facts and dedups', async () => {
+    // 2026-10-16: the per-session cap (12) was removed; only the per-turn
+    // limits bound a delivery, and the ledger dedup bounds the total.
+    const maxes: number[] = [];
     const fake: SpawnFn = fakeCtFor((_q, max, exclude) => {
-      const r = rng(7);
+      maxes.push(max);
       const pool = UNIVERSE.filter((f) => !exclude.includes(f));
-      return {
-        entries: sample(r, pool, Math.min(pool.length, max)).map((f) => fact(f)),
-        corrections: [],
-      };
+      return { entries: pool.slice(0, max).map((f) => fact(f)), corrections: [] };
     });
     const sim = new DshSim('probe', 1, fake);
-    // Saturate: 12 distinct ids delivered on user messages, in MAX_PER_TURN
-    // chunks with distinct ids per chunk.
+    // 12 distinct ids already delivered on user messages (the old cap), in
+    // MAX_PER_TURN chunks with distinct ids per chunk.
     const { renderBlock } = await import('@equational-applications/ct-wisdom-core');
     for (let i = 0; i < 6; i++) {
       const chunk = renderBlock({
@@ -298,15 +297,24 @@ describe('exactly-once across randomized sessions (DSH binding)', () => {
     }
     sim.syncLog();
     const ledger: Ledger = sim.adapter.rebuildLedger({ id: sim.id });
-    expect(ledger.liveDeliveredCount).toBe(12);
+    expect(ledger.idsMostRecentFirst).toHaveLength(12);
 
-    const out = await onUserTurn(sim.adapter, { id: sim.id }, 'next question', sim.breaker);
-    if (out !== null) {
-      // Whatever the fake CT returned, no already-present id may appear again.
-      for (const id of UNIVERSE.slice(0, 12)) {
-        expect(out.match(new RegExp(`\\*\\*T${id}\\*\\*`))).toBeNull();
+    for (const [turn, expected] of [
+      [0, UNIVERSE.slice(12, 14)],
+      [1, UNIVERSE.slice(14, 16)],
+    ] as const) {
+      const question = `next question ${turn}`;
+      const out = await onUserTurn(sim.adapter, { id: sim.id }, question, sim.breaker);
+      expect(out, `turn ${turn}`).not.toBeNull();
+      for (const id of expected) expect(out).toContain(`**T${id}**`);
+      for (const id of UNIVERSE.slice(0, 12 + turn * 2)) {
+        expect(out!.match(new RegExp(`\\*\\*T${id}\\*\\*`))).toBeNull();
       }
+      sim.log.push({ role: 'user', content: [textBlock(question), textBlock(out!)] });
+      sim.syncLog();
+      assertNoDupes(sim, `post-12 probe turn ${turn}`);
     }
-    assertNoDupes(sim, 'saturated probe');
+    expect(maxes.filter((m) => m !== 2)).toEqual([]);
+    expect(maxes).toHaveLength(2);
   });
 });

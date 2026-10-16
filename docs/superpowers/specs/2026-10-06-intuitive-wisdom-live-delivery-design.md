@@ -8,6 +8,11 @@ CT spec `docs/superpowers/specs/2026-10-06-issue265-wisdom-match-design.md`; shi
 [curated-thoughts#266](https://github.com/equationalapplications/curated-thoughts/pull/266),
 released in CT **3.3.0** — the minimum CT version for live delivery)
 
+> **Amendment 2026-10-16:** the per-session cap (`LIVE_MAX_PER_SESSION = 12` and the `--max 0` session-budget switch) was removed on every
+> host by user decision; the per-turn limits (2 facts, 1200 chars) are unchanged.
+> See [`2026-10-16-remove-session-wisdom-cap-design.md`](2026-10-16-remove-session-wisdom-cap-design.md).
+> The text below is kept as the historical design.
+
 Investigation: [`../investigations/2026-10-06-intuitive-wisdom-live-delivery-step0-investigation.md`](../investigations/2026-10-06-intuitive-wisdom-live-delivery-step0-investigation.md)
 (pinned: Hermes `ee8dd6c8`, CT `f7d9f56`; every `[V]` below has its evidence there).
 Builds on: [`2026-09-30-wisdom-auto-inclusion-design.md`](2026-09-30-wisdom-auto-inclusion-design.md)

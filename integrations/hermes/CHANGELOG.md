@@ -6,6 +6,21 @@ format below is load-bearing: `## <version> — <date>`.
 
 ## Unreleased
 
+## 0.4.3 — 2026-10-16
+
+- Changed: Intuitive Wisdom live delivery has no per-session cap. The
+  `LIVE_MAX_PER_SESSION = 12` constant and the switch to `--max 0` once a
+  session had received 12 live facts are removed from
+  `scripts/ct_wisdom_live.py`; every turn now asks `ct wisdom match --max 2`.
+  Why: an autonomous agent is better served by more wisdom than less. The
+  cap stopped delivery after about 6 matching turns, though a fact that
+  matches late in a session is as valuable as an early one. Noise stays
+  bounded per turn (at most 2 facts in a 1200-character block, only facts
+  past CT's relevance gate), delivery never touches the system prompt, and
+  dedup keeps the session total to the distinct facts that match.
+  Unchanged: the per-turn limits, CT's score gate, dedup and exactly-once
+  delivery, the breaker, timeouts and the 256-id exclude bound.
+
 ## 0.4.2 — 2026-10-16
 
 - Changed: the spawn-time env merge moved from `ct_doctor._merged_env` into

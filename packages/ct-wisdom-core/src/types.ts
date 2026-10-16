@@ -12,7 +12,7 @@ export interface FactEntry {
   [key: string]: unknown;
 }
 
-/** A supersession correction (exempt from the per-session budget). */
+/** A supersession correction (exempt from the exclude post-filter). */
 export interface Correction {
   id: string;
   supersedes?: string[];
@@ -36,8 +36,6 @@ export interface Ledger {
   idsMostRecentFirst: string[];
   /** O(1) membership mirror of {@link idsMostRecentFirst}. */
   has(id: string): boolean;
-  /** Count of ids this session delivered via the LIVE path (M1 budget). */
-  liveDeliveredCount: number;
   /** True when this session's bootstrap block ids are in the ledger (N5). */
   knownBootstrap: boolean;
 }
@@ -45,7 +43,6 @@ export interface Ledger {
 export const EMPTY_LEDGER: Ledger = {
   idsMostRecentFirst: [],
   has: () => false,
-  liveDeliveredCount: 0,
   knownBootstrap: false,
 };
 

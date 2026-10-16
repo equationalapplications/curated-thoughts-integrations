@@ -8,6 +8,11 @@
 N5 table, AC 1–11, annex A). **Plan:** `docs/superpowers/plans/2026-10-16-claude-code-wisdom-parity-leg.md`
 (parent plan Task 4). **Env API:** `2026-10-16-shared-env-doctor-parity-design.md` ("Final API").
 
+> **Amendment 2026-10-16:** the per-session cap (annex M1, `live_delivered_count`) was removed on every
+> host by user decision; the per-turn limits (2 facts, 1200 chars) are unchanged.
+> The store's `live_ids` list stays: it is part of the ledger. See [`2026-10-16-remove-session-wisdom-cap-design.md`](2026-10-16-remove-session-wisdom-cap-design.md).
+> The text below is kept as the historical design.
+
 ## Problem
 
 The Claude Code plugin (0.1.1) emits only a status section at `SessionStart`. It has no

@@ -96,7 +96,7 @@ copies of the Hermes core (`scripts/ct_wisdom_live.py`, `ct_wisdom.py`,
 | Hook | What it does |
 |------|--------------|
 | `SessionStart` | Appends a `## Curated Thoughts — relevant memory` block (top 3 wiki entries for the project) after the status section, and records its fact ids in the plugin's data dir. |
-| `UserPromptSubmit` | On each genuine user turn, asks `ct wisdom match` for up to 2 relevant facts not yet in context (at most 12 per session; corrections to a fact already shown are exempt) and appends them as `additionalContext`. The system prompt is never touched. |
+| `UserPromptSubmit` | On each genuine user turn, asks `ct wisdom match` for up to 2 relevant facts not yet in context (no per-session cap; corrections to a fact already shown also flow) and appends them as `additionalContext`. The system prompt is never touched. |
 | `PostToolUse` (`curated_recall_context`) | A recalled wiki entry the session already has is replaced by a one-line `already in context` stub. |
 
 **Exactly once.** The record of what this session has seen lives in

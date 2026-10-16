@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import { Breaker } from '../src/breaker.js';
 import { onToolResult, onUserTurn, buildQuery } from '../src/engine.js';
+import { MAX_BLOCK_CHARS, MAX_PER_TURN } from '../src/constants.js';
 import { marker, validId } from '../src/ledger.js';
 import { EMPTY_LEDGER } from '../src/types.js';
 import type {
@@ -17,7 +18,6 @@ class FakeHost implements HostAdapter {
   enabled = true;
   restoredSession = false;
   knownBootstrap = false;
-  liveCount = 0;
   contextIds: string[] = []; // newest first
   probeAbsent = false;
   matchResponse: {
@@ -43,7 +43,6 @@ class FakeHost implements HostAdapter {
     return {
       idsMostRecentFirst: ids,
       has: (id) => set.has(id),
-      liveDeliveredCount: this.liveCount,
       knownBootstrap: known,
     };
   }
@@ -87,7 +86,6 @@ class FakeHost implements HostAdapter {
   }
   noteDelivered(session: SessionRef, ids: string[]): void {
     this.noted.push({ session: session.id, ids });
-    this.liveCount += ids.length;
     for (const id of ids) {
       if (!this.contextIds.includes(id)) this.contextIds.unshift(id);
     }
@@ -203,26 +201,57 @@ describe('onUserTurn — budgets and dedup', () => {
     expect(host.noted[0].ids).toEqual(['new']);
   });
 
-  it('budget exhaustion forces corrections-only (max=0), corrections still flow', async () => {
+  it('no session cap: a long session keeps asking for MAX_PER_TURN and receiving 2 new facts per turn', async () => {
+    // 2026-10-16: the per-session cap (12) was removed; only the per-turn
+    // limits bound a delivery, and dedup bounds the session total.
     const host = new FakeHost();
-    host.liveCount = 12; // MAX_PER_SESSION reached
+    const seen: number[] = [];
+    let next = 0;
+    host.wisdomMatch = async (_q, max, exclude) => {
+      seen.push(max);
+      const entries = [];
+      while (entries.length < max) {
+        const id = `f${next++}`;
+        if (!exclude.includes(id)) entries.push(fact(id));
+      }
+      return { outcome: 'ok', result: { entries, corrections: [] } };
+    };
+    const delivered: string[] = [];
+    for (let turn = 0; turn < 20; turn++) {
+      const block = await onUserTurn(host, { id: 's' }, `q${turn}`);
+      expect(block, `turn ${turn}`).not.toBeNull();
+      const ids = host.noted.at(-1)!.ids;
+      expect(ids, `turn ${turn}`).toHaveLength(MAX_PER_TURN);
+      for (const id of ids) expect(delivered).not.toContain(id);
+      delivered.push(...ids);
+      // FakeHost.noteDelivered puts the ids into context (newest first).
+    }
+    expect(seen).toEqual(Array(20).fill(MAX_PER_TURN));
+    expect(new Set(delivered).size).toBe(40);
+  });
+
+  it('per-turn limits still hold on a long session: at most 1200 chars per block', async () => {
+    const host = new FakeHost();
+    host.contextIds = Array.from({ length: 100 }, (_, i) => `old${i}`);
     const seen: number[] = [];
     host.wisdomMatch = async (_q, max) => {
       seen.push(max);
-      // ct honors --max 0: no entries, corrections still flow.
       return {
         outcome: 'ok',
         result: {
-          entries: max > 0 ? [fact('a')] : [],
-          corrections: [fact('c', ['old'])],
+          entries: [
+            { id: 'big1', title: 'Big 1', text: 'x'.repeat(2000) },
+            { id: 'big2', title: 'Big 2', text: 'y'.repeat(2000) },
+          ],
+          corrections: [fact('c', ['old0'])],
         },
       };
     };
     const block = await onUserTurn(host, { id: 's' }, 'q');
-    expect(seen).toEqual([0]); // corrections-only: the call still happened
-    expect(block).toContain('Correction');
-    expect(block).not.toContain('**Ta**');
-    expect(host.noted[0].ids).toEqual(['c']);
+    expect(seen).toEqual([MAX_PER_TURN]);
+    expect(block).not.toBeNull();
+    expect(block!.length).toBeLessThanOrEqual(MAX_BLOCK_CHARS);
+    expect(block).toContain('Correction'); // corrections still flow
   });
 
   it('empty block delivers nothing', async () => {
@@ -298,7 +327,6 @@ describe('EMPTY_LEDGER', () => {
   it('behaves vacuously', () => {
     expect(EMPTY_LEDGER.idsMostRecentFirst).toEqual([]);
     expect(EMPTY_LEDGER.has('x')).toBe(false);
-    expect(EMPTY_LEDGER.liveDeliveredCount).toBe(0);
     expect(EMPTY_LEDGER.knownBootstrap).toBe(false);
   });
 });
