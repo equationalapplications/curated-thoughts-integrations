@@ -22,7 +22,7 @@ import { createServer, type IncomingMessage, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { delimiter, dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { gzipSync } from 'node:zlib';
 import type { ProbeRecord } from './fixtures/probe-shared.js';
@@ -777,7 +777,7 @@ describe('OpenCode host contract', () => {
       const mcpLog = join(sb.root, 'mcp.jsonl');
       const fact = (id: string) => ({ id, title: `Fact ${id}`, text: `The body of ${id}.` });
       const extraEnv = {
-        PATH: `${stubBin}:${process.env.PATH ?? ''}`,
+        PATH: `${stubBin}${delimiter}${process.env.PATH ?? ''}`, // POSIX-only stub (ubuntu CI job)
         CURATED_BRAIN_DIR: join(sb.root, 'brain'),
         CT_STUB_LOG: ctLog,
         CT_STUB_RECALL: JSON.stringify([fact('hc-boot-1')]),

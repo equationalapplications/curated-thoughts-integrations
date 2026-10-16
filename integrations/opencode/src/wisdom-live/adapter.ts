@@ -398,6 +398,8 @@ export class OpenCodeWisdomAdapter implements HostAdapter {
   /** Whether the last rebuild saw any persisted user row (LD4 first-turn rule). */
   private readonly userHistory = new Map<string, boolean>();
   private capabilityAbsent = false;
+  /** ct path whose `wisdom match --help` already exited 0 in this process. */
+  private probedPath: string | null = null;
 
   /** v1 bootstrap memo, per session (LD4). */
   bootstrapMemo: Record<string, MemoRecord> = {};
@@ -419,6 +421,7 @@ export class OpenCodeWisdomAdapter implements HostAdapter {
     this.userHistory.clear();
     this.bootstrapMemo = {};
     this.capabilityAbsent = false;
+    this.probedPath = null;
   }
 
   // ── session kind (LD7) ────────────────────────────────────────────────
@@ -573,12 +576,17 @@ export class OpenCodeWisdomAdapter implements HostAdapter {
     if (this.capabilityAbsent) return { outcome: 'timeout_or_exit' };
     const { path } = this.discover();
     if (path === null) return { outcome: 'spawn' };
-    // Capability gate (Hermes has_match_capability parity).
-    const probe = await this.spawnFn({ command: path, args: ['wisdom', 'match', '--help'], timeoutMs: 3000 });
-    if (probe.spawnError || probe.timedOut) return { outcome: 'spawn' };
-    if (probe.code !== 0) {
-      this.capabilityAbsent = true; // deterministic absence: latch OFF for the process
-      return { outcome: 'timeout_or_exit' };
+    if (this.probedPath !== path) {
+      // Capability gate (Hermes has_match_capability parity), once per
+      // accepted path: a per-turn probe would add a spawn and up to 3 s of
+      // pre-LLM latency on top of the 3 s match budget every turn.
+      const probe = await this.spawnFn({ command: path, args: ['wisdom', 'match', '--help'], timeoutMs: 3000 });
+      if (probe.spawnError || probe.timedOut) return { outcome: 'spawn' };
+      if (probe.code !== 0) {
+        this.capabilityAbsent = true; // deterministic absence: latch OFF for the process
+        return { outcome: 'timeout_or_exit' };
+      }
+      this.probedPath = path;
     }
     return coreWisdomMatch(path, query, max, exclude, this.spawnFn);
   }
@@ -586,6 +594,7 @@ export class OpenCodeWisdomAdapter implements HostAdapter {
   /** n3: retry next turn — re-walk discovery and re-probe the capability. */
   resetDiscoveryAndProbeCaches(): void {
     this.capabilityAbsent = false;
+    this.probedPath = null;
     this.invalidateDiscovery();
   }
 

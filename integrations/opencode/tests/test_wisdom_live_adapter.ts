@@ -379,3 +379,29 @@ describe('n3: a spawn-class failure retries discovery next turn', () => {
   });
 });
 
+describe('capability probe caching (PR #42 review)', () => {
+  it('probes `wisdom match --help` once per accepted path, again only after an n3 reset', async () => {
+    let helps = 0;
+    const { a } = make({
+      fetchSession: async () => ({}),
+      spawnFn: (spec) => {
+        if (spec.args.includes('--help')) {
+          helps++;
+          return Promise.resolve(out({}));
+        }
+        return Promise.resolve(out({ stdout: matchStdout([]) }));
+      },
+    });
+    await a.sessionKind('s');
+    for (let i = 0; i < 3; i++) {
+      await a.rebuildLedgerAsync({ id: 's' });
+      await runUserTurn(a, { id: 's' }, `q${i}`, new Breaker());
+    }
+    expect(helps).toBe(1);
+    a.resetDiscoveryAndProbeCaches();
+    await a.rebuildLedgerAsync({ id: 's' });
+    await runUserTurn(a, { id: 's' }, 'again', new Breaker());
+    expect(helps).toBe(2);
+  });
+});
+
