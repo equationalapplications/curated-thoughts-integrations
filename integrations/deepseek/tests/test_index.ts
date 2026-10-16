@@ -13,6 +13,14 @@ vi.mock('../src/wisdom.js', async (importOriginal) => {
   };
 });
 import { renderWisdom } from '../src/wisdom.js';
+// The live engine is unit-tested elsewhere (test_wisdom_live_*); here only the
+// message the pre-step listener appends is under test, so the engine call is
+// stubbed to a fixed block (null = no delivery when a test does not set one).
+vi.mock('../src/wisdom-live/adapter.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/wisdom-live/adapter.js')>();
+  return { ...actual, runUserTurn: vi.fn(async () => null) };
+});
+import { runUserTurn } from '../src/wisdom-live/adapter.js';
 
 // The ctx mock encodes the real DSH 0.2.0 runtime surface: there is NO
 // `ctx.plugin(string, ...)` (cordis rejects a string plugin — the MCP client
@@ -165,6 +173,32 @@ describe('apply', () => {
     apply(m.ctx as unknown as Parameters<typeof apply>[0], {} as Parameters<typeof apply>[1]);
     expect(m.preStepListeners.length).toBe(1);
     expect(m.postExecuteListeners.length).toBe(1);
+  });
+
+  it('appends the wisdom block as an identified user-role message (DSH session replay contract)', async () => {
+    // Live e2e 2026-10-16 (DSH 0.2.0-rc.2): a pre-step message without `id`
+    // and `role` is persisted as-is, then the stored session fails replay
+    // validation ("session event at seq N lacks an identified message") and
+    // can never be continued. The replay check (dsh-session
+    // assertMessageEventShape for user/message) requires: a non-empty string
+    // id, role "user", a source with a non-empty kind, and array content.
+    const block = '**T** <!-- ct-fact:fact_0123456789abcdef01234567 -->\nbody';
+    vi.mocked(runUserTurn).mockResolvedValueOnce(block);
+    apply(m.ctx as unknown as Parameters<typeof apply>[0], {} as Parameters<typeof apply>[1]);
+    const claimed = [{ id: 'u1', role: 'user', content: [{ type: 'text', text: 'hi' }], source: { kind: 'user' } }];
+    const decision = (await m.preStepListeners[0](
+      { agent: { id: 'agent-1', session: { deriveMessages: () => [] } }, messages: claimed, turn: 1, step: 1 },
+      async () => ({ kind: 'enter', messages: [...claimed] }),
+    )) as { kind: string; messages: Array<Record<string, unknown>> };
+    expect(decision.kind).toBe('enter');
+    expect(decision.messages).toHaveLength(2);
+    const msg = decision.messages[1];
+    expect(typeof msg.id).toBe('string');
+    expect(msg.id).not.toBe('');
+    expect(msg.id).not.toBe('u1');
+    expect(msg.role).toBe('user');
+    expect(msg.source).toEqual({ kind: 'curated-thoughts-wisdom' });
+    expect(msg.content).toEqual([{ type: 'text', text: block }]);
   });
 
   it('registers three skills', () => {
