@@ -120,6 +120,25 @@ class LedgerCache:
             if current is not None:
                 current.update(ids)
 
+    def claim(self, session_id, ids):
+        """Atomically add the ids not yet in this session's set and return
+        them (input order, unique), or None when the session has no entry.
+
+        This is the single check-and-add that concurrent tool threads share:
+        a get() followed by add() lets two threads both see an id as new and
+        both show it (INTENT rule 1)."""
+        with self._lock:
+            current = self._store.get(session_id)
+            if current is None:
+                return None
+            claimed = []
+            for fact_id in ids:
+                if fact_id not in current:
+                    current.add(fact_id)
+                    claimed.append(fact_id)
+            self._store.move_to_end(session_id)
+            return claimed
+
     def clear(self):
         with self._lock:
             self._store.clear()

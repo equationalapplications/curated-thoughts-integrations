@@ -10,11 +10,11 @@ common architecture.
 
 | Harness | Directory | Status | Version |
 |---------|-----------|--------|---------|
-| [Hermes Agent](https://github.com/NousResearch/hermes-agent) | [`integrations/hermes/`](integrations/hermes/) | implemented | [0.5.0](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=hermes) |
+| [Hermes Agent](https://github.com/NousResearch/hermes-agent) | [`integrations/hermes/`](integrations/hermes/) | implemented | [0.6.0](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=hermes) |
 | DeepSeek Harness | [`integrations/deepseek/`](integrations/deepseek/) | implemented | [0.5.0](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=deepseek) |
 | OpenCode | [`integrations/opencode/`](integrations/opencode/) | implemented | [0.3.0](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=opencode) |
 | OpenClaw | [`integrations/openclaw/`](integrations/openclaw/) | implemented | [0.2.0](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=openclaw) |
-| Claude Code | [`integrations/claude-code/`](integrations/claude-code/) | implemented | [0.3.0](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=claude-code) |
+| Claude Code | [`integrations/claude-code/`](integrations/claude-code/) | implemented | [0.3.1](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=claude-code) |
 
 Each version links to that integration's releases.
 
@@ -48,6 +48,10 @@ Wisdom, every integration does two things:
   the user's message. The ones not yet in context are added *to that turn*.
   They never go into the system prompt, so the prompt and its provider cache
   stay untouched.
+- **During autonomous work** (Hermes only so far), while the agent works on
+  its own between messages, the file it reads or edits, the command it runs
+  or the pattern it searches can bring in one relevant fact. See
+  [Autonomous-work delivery](#autonomous-work-delivery-hermes).
 
 A fact is in the session's context **at most once**. Each delivered fact
 carries a `ct-fact:<id>` marker, and the integration skips any fact the
@@ -101,6 +105,35 @@ receive live delivery. Host-specific gates:
   byte-level capture on 2026-10-16) and works on the CLI runner. The Codex
   app-server and Copilot runtimes are degraded.
 
+### Autonomous-work delivery (Hermes)
+
+Since hermes 0.6.0, Hermes also delivers facts *between* user messages,
+keyed to what the agent is doing:
+
+- **Trigger:** a `read_file`, `write_file`, `patch`, `search_files` or
+  `terminal` call whose activity is new for the session. At most one
+  `ct wisdom match` per model step, only when the activity changes (a new
+  file, command or search). There is no ceiling per message or per session.
+  Curated Thoughts' own tools never trigger it.
+- **What is sent to Curated Thoughts:** only the bare target, for example
+  `src/billing/invoice.py`, `pnpm test` or a search pattern. For shell
+  commands that is the program plus the unquoted word right after it,
+  never a flag's value or the rest of the command line. The one exception
+  is `python -m <module>`, which sends the module name (`python3 pytest`). Credential-shaped search
+  patterns are not sent at all. File contents, tool output, diffs
+  and the agent's own words are never sent.
+- **Delivered as:** at most 1 fact in at most 600 characters, added to that
+  tool's result under `## Curated Thoughts — relevant to this step`, with
+  the same `ct-fact` marker and at-most-once rule as every other delivery.
+  The system prompt is never touched.
+- **Where:** main sessions, subagents and scheduled (cron) runs. A restored
+  session gets none until its next fresh turn (no record of what is in
+  context means no delivery).
+- **Cost:** the CT call starts when the tool starts, so it overlaps the
+  tool; the 3 s timeout and the breaker are shared with live delivery.
+- **Verbose mode** (below) records these deliveries with channel
+  `activity` and the activity label (`read src/x.py`).
+
 ### Verbose mode
 
 To see what Intuitive Wisdom adds to your conversation, and why it added
@@ -147,10 +180,15 @@ records. Each integration's README gives the exact path.
   superseded fact,** because `ct recall` returns neither provenance nor
   supersession status. Live delivery (`ct wisdom match`) has both. Closing
   this needs a CT change first.
-- **Wisdom is only requested on user messages.** An agent working
-  autonomously between messages gets no new facts until the next message.
-  Autonomous-work delivery is the intended end state (see
-  [INTENT.md](INTENT.md)) and is not built yet.
+- **Autonomous-work delivery is Hermes-only so far.** On the other hosts,
+  an agent working autonomously between messages gets no new facts until
+  the next message (see [INTENT.md](INTENT.md) for the end state).
+- **Concept rules reached only via paths need CT activity mode.** From a
+  bare path, CT's gate reaches facts about that file or command, but not a
+  concept-level rule the path only implies (for example a migration rule
+  from a migration file's path). That needs a CT-side activity query mode
+  ([curated-thoughts#282](https://github.com/equationalapplications/curated-thoughts/issues/282));
+  the integrations add no query expansion of their own.
 - The per-turn limits above cap how much arrives on one turn, even when
   more is relevant.
 
@@ -160,8 +198,9 @@ records. Each integration's README gives the exact path.
 sidecar in the agent's MCP config, ships the shared doctor as
 `ct_status`/`ct_preflight`, and installs the skill files directly into the
 Hermes skills tree. It is the reference implementation of Intuitive Wisdom:
-the bootstrap block is a system-prompt section memoized per session, and
-live delivery runs from the `pre_llm_call` hook. Without Curated Thoughts,
+the bootstrap block is a system-prompt section memoized per session,
+live delivery runs from the `pre_llm_call` hook, and autonomous-work
+delivery runs from `pre_tool_call` and `transform_tool_result`. Without Curated Thoughts,
 or with an unreachable brain, both blocks are simply absent. The edge cases
 of restored sessions and the 256-session memo window are listed under 0.3.0
 in its [CHANGELOG](integrations/hermes/CHANGELOG.md).

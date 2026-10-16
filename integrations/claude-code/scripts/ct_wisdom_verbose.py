@@ -195,6 +195,9 @@ def build_event(kind, event):
     query = _str_or_none(event.get("query"))
     if query is not None:
         record["query"] = query
+    activity = _str_or_none(event.get("activity"))
+    if activity is not None:  # autonomous-work label, e.g. "read src/x.py"
+        record["activity"] = activity
     if isinstance(result, dict):
         record["gate"] = gate
         record["matched"] = matched

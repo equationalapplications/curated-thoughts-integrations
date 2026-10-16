@@ -9,7 +9,9 @@ from __future__ import annotations
 import json
 import random
 import sys
+import threading
 import unittest
+import zlib
 from collections import Counter
 from pathlib import Path
 
@@ -19,6 +21,7 @@ sys.path.insert(0, str(HERE.parent / "scripts"))
 import ct_ledger  # noqa: E402
 import ct_tool_dedup  # noqa: E402
 import ct_wisdom  # noqa: E402
+import ct_wisdom_activity  # noqa: E402
 import ct_wisdom_live  # noqa: E402
 
 UNIVERSE = ["fact_%02d" % i for i in range(16)]
@@ -119,6 +122,173 @@ class TestExactlyOnce(unittest.TestCase):
                 counts = present_counts(system_block, history)
                 dupes = {f: n for f, n in counts.items() if n > 1}
                 self.assertEqual(dupes, {}, "session %s turn %d" % (sid, turn))
+
+
+def activity_counts(text):
+    """Facts visible in one tool message's activity block (JSON key or text)."""
+    counts = Counter()
+    blocks = []
+    try:
+        data = json.loads(text)
+    except ValueError:
+        data = None
+    if isinstance(data, dict):
+        if ct_wisdom_activity.ACTIVITY_RESULT_KEY in data:
+            blocks.append(data[ct_wisdom_activity.ACTIVITY_RESULT_KEY])
+    elif ct_wisdom_activity.ACTIVITY_HEADING in text:
+        blocks.append(text[text.index(ct_wisdom_activity.ACTIVITY_HEADING):])
+    for block in blocks:
+        for fid in UNIVERSE:
+            counts[fid] += block.count(ct_ledger.marker(fid) + " **")
+    return counts, len(blocks)
+
+
+def visible_counts(system_block, history):
+    counts = Counter()
+    for fid in ct_ledger.scan_ids(system_block):
+        counts[fid] += system_block.count(ct_ledger.marker(fid) + "\n")
+    for msg in history:
+        if msg["role"] == "user":
+            text = msg.get("api_content") or msg["content"]
+            for fid in UNIVERSE:
+                counts[fid] += text.count(ct_ledger.marker(fid) + " (provenance:")
+        elif msg["role"] == "tool" and msg.get("kind") == "recall":
+            outer = json.loads(msg["content"])
+            inner = json.loads(outer["result"].split("\n<!-- ct-fact:")[0])
+            for entry in inner["wiki_entries"]:
+                if not entry.get("in_context"):
+                    counts[entry["id"]] += 1
+        elif msg["role"] == "tool":
+            counts.update(activity_counts(msg["content"])[0])
+    return counts
+
+
+class TestExactlyOnceWithActivity(unittest.TestCase):
+    """INTENT rule 1 across user-turn deliveries, activity deliveries from
+    parallel tool batches on real threads, agent CT recalls, compaction and
+    restore (spec 2026-10-16-hermes-autonomous-work-wisdom-design.md)."""
+
+    SESSIONS = 120
+
+    def setUp(self):
+        ct_wisdom_live.reset_capability_cache()
+        ct_wisdom_live.reset_session_state()
+        ct_wisdom_activity.reset_state()
+        ct_ledger.LEDGER_CACHE.clear()
+        orig_breaker = ct_wisdom_live._BREAKER
+        ct_wisdom_live._BREAKER = ct_wisdom_live.Breaker(fails=10 ** 9)
+        self.addCleanup(setattr, ct_wisdom_live, "_BREAKER", orig_breaker)
+        for mod, name, value in [
+            (ct_wisdom, "discover_ct", lambda env=None: ("/fake/ct", None)),
+            (ct_wisdom_live, "has_match_capability", lambda p: True),
+        ]:
+            orig = getattr(mod, name)
+            setattr(mod, name, value)
+            self.addCleanup(setattr, mod, name, orig)
+        self.addCleanup(ct_ledger.LEDGER_CACHE.clear)
+        self.addCleanup(ct_wisdom_live.reset_session_state)
+        self.addCleanup(ct_wisdom_activity.reset_state)
+
+    def test_no_fact_twice_with_activity(self):
+        rng = random.Random(20261016)
+        restored = set()
+        for mod, name in [(ct_wisdom, "recall_wiki"), (ct_wisdom_live, "match_wisdom"),
+                          (ct_wisdom, "bootstrap_block")]:
+            self.addCleanup(setattr, mod, name, getattr(mod, name))
+        orig_bootstrap = ct_wisdom.bootstrap_block
+        ct_wisdom.bootstrap_block = lambda sid: None if sid in restored else orig_bootstrap(sid)
+
+        def fake_match(path, text, max_n, exclude):
+            # Thread-safe, reproducible per call; ignores exclude half the time.
+            r = random.Random(zlib.crc32(("%s|%d" % (text, len(exclude))).encode()))
+            pool = UNIVERSE if r.random() < 0.5 else [f for f in UNIVERSE if f not in exclude]
+            entries = [item(f) for f in r.sample(pool, min(len(pool), max_n))]
+            corrections = []
+            if exclude and r.random() < 0.3:
+                corrections.append(item(r.choice(UNIVERSE), supersedes=[r.choice(exclude)]))
+            return {"entries": entries, "corrections": corrections}, None
+
+        ct_wisdom_live.match_wisdom = fake_match
+        paths = ["src/m%d.py" % i for i in range(10)]
+        commands = ["pytest tests/t%d" % i for i in range(4)] + ["npm test", "make build"]
+        activity_blocks = 0
+
+        def tool_call(sid, req, n, kind, out):
+            call = "%s-%s-%d" % (sid, req, n)
+            if kind == "recall":
+                ids = rng_local[n]
+                raw = json.dumps({"result": json.dumps({
+                    "wiki_entries": [{"id": f, "title": "T" + f, "text": "body " + f} for f in ids],
+                    "code_chunks": [], "query": "q"})})
+                name, args = TOOL, {"query": "q"}
+            elif kind == "terminal":
+                raw, name, args = "ok\n", "terminal", {"command": rng_local[n]}
+            else:
+                raw = json.dumps({"content": "1|x", "total_lines": 1})
+                name, args = "read_file", {"path": rng_local[n]}
+            kw = dict(tool_name=name, args=args, session_id=sid, tool_call_id=call,
+                      turn_id="t", api_request_id=req, task_id="")
+            self.assertIsNone(ct_wisdom_activity.on_pre_tool_call(**kw))
+            new = ct_tool_dedup.on_transform_tool_result(result=raw, **kw)
+            if new is None:
+                new = ct_wisdom_activity.on_transform_tool_result(result=raw, **kw)
+            out[n] = {"role": "tool", "content": new or raw,
+                      "kind": "recall" if kind == "recall" else "work"}
+
+        for s in range(self.SESSIONS):
+            sid = "act-%d" % s
+            boot = rng.sample(UNIVERSE, rng.randint(0, 3))
+            ct_wisdom.recall_wiki = lambda p, q, b=boot: (
+                [("T" + f, "body " + f, f) for f in b], None)
+            system_block = ct_wisdom._render_wisdom({"session_id": sid})
+            history = []
+            for turn in range(rng.randint(1, 6)):
+                if history and rng.random() < 0.15:
+                    del history[: rng.randint(1, len(history))]
+                if turn and sid not in restored and rng.random() < 0.08:
+                    restored.add(sid)  # /resume in a new process: in-turn state gone
+                    ct_ledger.LEDGER_CACHE.clear()
+                    ct_wisdom_live.reset_session_state()
+                    ct_wisdom_activity.reset_state()
+                out = ct_wisdom_live.on_pre_llm_call(
+                    session_id=sid, user_message="question %d" % turn,
+                    conversation_history=list(history), is_first_turn=(turn == 0))
+                msg = {"role": "user", "content": "question %d" % turn}
+                if out:
+                    msg["api_content"] = msg["content"] + "\n\n" + out["context"]
+                history.append(msg)
+                for step in range(rng.randint(1, 4)):
+                    req = "t%d:api:%d" % (turn, step + 1)
+                    n_calls = rng.randint(1, 5)
+                    kinds = [rng.choice(["read", "read", "terminal", "recall"])
+                             for _ in range(n_calls)]
+                    if sid in restored:  # recall dedup without a ledger is out of scope
+                        kinds = [k if k != "recall" else "read" for k in kinds]
+                    rng_local = [
+                        rng.sample(UNIVERSE, rng.randint(0, 4)) if k == "recall"
+                        else rng.choice(commands) if k == "terminal" else rng.choice(paths)
+                        for k in kinds]
+                    results = [None] * n_calls
+                    threads = [threading.Thread(target=tool_call,
+                                                args=(sid, req, n, kinds[n], results))
+                               for n in range(n_calls)]
+                    for t in threads:
+                        t.start()
+                    for t in threads:
+                        t.join()
+                    history.append({"role": "assistant", "content": "calling tools"})
+                    history.extend(results)
+                    blocks_this_step = sum(activity_counts(m["content"])[1]
+                                           for m in results if m["kind"] == "work")
+                    self.assertLessEqual(blocks_this_step, 1, "%s %s" % (sid, req))
+                    if sid in restored:
+                        self.assertEqual(blocks_this_step, 0, "restored session %s" % sid)
+                    activity_blocks += blocks_this_step
+                    counts = visible_counts(system_block, history)
+                    dupes = {f: n for f, n in counts.items() if n > 1}
+                    self.assertEqual(dupes, {}, "session %s turn %d step %d" % (sid, turn, step))
+                history.append({"role": "assistant", "content": "done"})
+        self.assertGreater(activity_blocks, 50)  # the property was actually exercised
 
 
 if __name__ == "__main__":

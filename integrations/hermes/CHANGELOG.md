@@ -6,6 +6,72 @@ format below is load-bearing: `## <version> — <date>`.
 
 ## Unreleased
 
+## 0.6.0 — 2026-10-16
+
+- Added: Intuitive Wisdom **autonomous-work delivery**. While the agent works
+  on its own between user messages, the file it reads or edits, the command
+  it runs or the pattern it searches can bring in one relevant fact
+  (new `scripts/ct_wisdom_activity.py`; spec
+  `docs/superpowers/specs/2026-10-16-hermes-autonomous-work-wisdom-design.md`).
+  - Trigger: a new `pre_tool_call` hook starts `ct wisdom match --max 1` in
+    the background when the tool's activity is new for the session (a new
+    file, command or search), at most once per model step
+    (`api_request_id`). No ceiling per user message or per session. CT's own
+    tools never trigger it.
+  - Query: the bare target only (CT 3.5.1 real-gate results, A6): a relative
+    path, a search pattern (none if it holds a credential-shaped word), or
+    program plus the word right after it for shell commands (never a flag's
+    value or a quoted word; `python -m <module>` sends the module name;
+    env assignments, URLs and credential-shaped tokens are dropped). Never file contents, tool output,
+    diffs, the agent's text or full command lines.
+  - Delivery: `transform_tool_result` of the same call adds at most 1 fact in
+    at most 600 characters under `## Curated Thoughts — relevant to this
+    step`, marker first. JSON-object results get a `curated_thoughts_wisdom`
+    key spliced in (Hermes's own result parsers keep working); plain text
+    gets the block appended. The system prompt is never touched.
+  - Applies in subagents and scheduled runs; fails closed (no delivery)
+    without an in-turn ledger, e.g. a restored session.
+  - Budget: the 3 s timeout and the 3-failure / 300 s breaker are shared with
+    user-turn delivery; the CT call overlaps the tool's own run.
+  - Known limit: concept rules reached only via paths need CT activity mode
+    ([curated-thoughts#282](https://github.com/equationalapplications/curated-thoughts/issues/282)).
+    From a bare path the gate reaches facts about that file or command, not
+    a concept-level rule the path only implies. No query expansion is added
+    here (INTENT rule 8).
+- Added: verbose mode covers autonomous work. With `CT_WISDOM_VERBOSE=1`,
+  each activity delivery, and each activity query that delivered nothing, is
+  recorded with `channel: "activity"`, the query CT received, the activity
+  label (`read src/x.py`), CT's gate and scores, and the delivered block.
+  Per-call rate and filter skips are not recorded. The log gains an optional
+  `activity` field (`scripts/ct_wisdom_verbose.py`, byte-identical with
+  Claude Code). With verbose off the tool result bytes are unchanged.
+- Added: live e2e harness `tests/e2e/` (local only, not in CI; needs
+  `ZAI_API_KEY` and `OPENROUTER_API_KEY`). Docker, Hermes at the
+  `ee8dd6c8` pin, a scratch `HERMES_HOME` and a scratch brain, CT 3.5.1's
+  REAL relevance gate (qwen3-embedding-4b, instr1), GLM-5.3-FLASH as the
+  model, verbose mode on. Verified 2026-10-16, all checks pass. From one
+  user message the agent ran `pnpm test`, `pnpm test --silent`, wrote and
+  read `.env.local`, and called `curated_recall_context`:
+  - CT received exactly the bare targets `TASK.md`, `pnpm test` and
+    `.env.local`, once each. The second `pnpm test` step and the
+    `.env.local` read did not re-query, and no CT tool triggered a query.
+  - One fact arrived in the `terminal` result and one in the `write_file`
+    result, each with its marker and each visible exactly once. The later
+    recall showed the delivered fact as an "already in context" stub.
+  - The `write_file` result kept valid JSON with the spliced key, and
+    Hermes's own write verifier (`file_mutation_result_landed`) still
+    reported the write as landed.
+  - Verbose mode printed the `[activity]` notices on stderr and wrote
+    activity JSONL lines (query, label, gate, score, block). Neither key
+    appears in any artifact.
+  - Note: `hermes -z` sends stderr to `/dev/null`, so verbose notices show
+    only in `hermes chat` (the JSONL log is written either way).
+- Added: `ct_ledger.LedgerCache.claim()`, an atomic check-and-add used by
+  autonomous-work delivery and `ct_tool_dedup`, so parallel tool threads can
+  never both show one fact. `ct_tool_dedup`'s output is unchanged.
+- Unchanged: user-turn live delivery, the session-start block and the
+  system prompt.
+
 ## 0.5.0 — 2026-10-16
 
 - Added: Verbose mode for Intuitive Wisdom (opt-in, off by default). With

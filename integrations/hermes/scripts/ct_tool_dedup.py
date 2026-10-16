@@ -61,27 +61,30 @@ def _transform(tool_name, result, session_id):
         return None
 
     has_sid = isinstance(session_id, str) and bool(session_id)
-    ledger = ct_ledger.LEDGER_CACHE.get(session_id) if has_sid else None
+    ids = []
+    for entry in inner["wiki_entries"]:
+        fact_id = entry.get("id") if isinstance(entry, dict) else None
+        if ct_ledger.valid_id(fact_id) and fact_id not in ids:
+            ids.append(fact_id)
+    # One atomic check-and-add (LedgerCache.claim): concurrent tool threads,
+    # including activity deliveries, can never both treat an id as new.
+    claimed = ct_ledger.LEDGER_CACHE.claim(session_id, ids) if has_sid else None
     rewritten = []
-    new_ids = []
     stubbed = 0
     for entry in inner["wiki_entries"]:
         fact_id = entry.get("id") if isinstance(entry, dict) else None
         if not ct_ledger.valid_id(fact_id):
             rewritten.append(entry)
-        elif ledger is not None and fact_id in ledger:
+        elif claimed is not None and fact_id not in claimed:
             rewritten.append(_stub(fact_id))
             stubbed += 1
         else:
             rewritten.append(entry)
-            if fact_id not in new_ids:
-                new_ids.append(fact_id)
+    new_ids = ids if claimed is None else claimed
     if not stubbed and not new_ids:
         return None
 
     inner["wiki_entries"] = rewritten
-    if ledger is not None:
-        ct_ledger.LEDGER_CACHE.add(session_id, new_ids)
     trailer = "".join("\n" + ct_ledger.marker(fact_id) for fact_id in new_ids)
     outer["result"] = json.dumps(inner, ensure_ascii=False) + trailer
     # Only outer["result"] is rewritten. structuredContent/_meta pass through
