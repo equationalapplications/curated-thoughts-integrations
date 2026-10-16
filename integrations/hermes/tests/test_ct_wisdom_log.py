@@ -97,5 +97,49 @@ class TestReader(unittest.TestCase):
             ct_wisdom_log.resolve_path("claude-code", None, {"CLAUDE_CONFIG_DIR": self.tmp}), target)
 
 
+class TestFollower(unittest.TestCase):
+    """`-f` keeps working across the recorder's rotation (rename to .1, new
+    file) and across truncation, and never glues a stale partial line on."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.path = os.path.join(self.tmp, "v.jsonl")
+        Path(self.path).write_bytes(b"a\n")
+        self.f = ct_wisdom_log.Follower(self.path, 2, os.stat(self.path).st_ino)
+
+    def append(self, data):
+        with open(self.path, "ab") as handle:
+            handle.write(data)
+
+    def test_appends_and_partial_lines(self):
+        self.append(b"b\nc")
+        self.assertEqual(self.f.poll(), ["b"])
+        self.append(b"d\n")
+        self.assertEqual(self.f.poll(), ["cd"])
+        self.assertEqual(self.f.poll(), [])
+
+    def test_rotation_to_a_larger_new_file(self):
+        self.append(b"partial")
+        self.assertEqual(self.f.poll(), [])
+        os.replace(self.path, self.path + ".1")
+        Path(self.path).write_bytes(b"new-1 long enough to pass the old offset\nnew-2\n")
+        self.assertEqual(self.f.poll(), ["new-1 long enough to pass the old offset", "new-2"])
+
+    def test_rotation_to_a_smaller_new_file(self):
+        os.replace(self.path, self.path + ".1")
+        Path(self.path).write_bytes(b"x\n")
+        self.assertEqual(self.f.poll(), ["x"])
+
+    def test_truncation_in_place(self):
+        self.append(b"bbbbbbbb\n")
+        self.assertEqual(self.f.poll(), ["bbbbbbbb"])
+        Path(self.path).write_bytes(b"z\n")  # same inode, smaller
+        self.assertEqual(self.f.poll(), ["z"])
+
+    def test_missing_file_is_quiet(self):
+        os.remove(self.path)
+        self.assertEqual(self.f.poll(), [])
+
+
 if __name__ == "__main__":
     unittest.main()

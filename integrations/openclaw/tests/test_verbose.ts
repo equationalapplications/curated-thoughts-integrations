@@ -4,7 +4,7 @@
  * log), the record goes to $OPENCLAW_STATE_DIR/logs. The before_prompt_build
  * result (prependContext / prependSystemContext) is byte-identical on or off.
  */
-import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -68,7 +68,10 @@ describe('OpenClaw verbose mode', () => {
 
   it('a throwing logger never changes the result', async () => {
     const bare = await session({});
-    const failing = await session({ CT_WISDOM_VERBOSE: '1', CT_WISDOM_VERBOSE_LOG: '/dev/null/x.jsonl' }, () => {
+    // A regular file as the log's parent directory: unwritable on every OS.
+    const dir = mkdtempSync(join(tmpdir(), 'ocl-'));
+    writeFileSync(join(dir, 'file'), 'x');
+    const failing = await session({ CT_WISDOM_VERBOSE: '1', CT_WISDOM_VERBOSE_LOG: join(dir, 'file', 'x.jsonl') }, () => {
       throw new Error('logger down');
     });
     expect(failing).toEqual(bare);

@@ -4,7 +4,7 @@
  * recorder writes JSON Lines + a user-only notice. Without a recorder, or with
  * a throwing one, onUserTurn behaves exactly as before.
  */
-import { existsSync, mkdtempSync, readFileSync, statSync, writeFileSync, mkdirSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -31,7 +31,7 @@ import {
   type VerboseRecord,
   type VerboseTurn,
 } from '../src/verbose.js';
-import { main as readerMain } from '../src/cli/ct-wisdom-log.js';
+import { Follower, main as readerMain } from '../src/cli/ct-wisdom-log.js';
 
 const SECRET = 'sk-ts-SECRET-never-logged-4242';
 
@@ -342,5 +342,46 @@ describe('formatting and the reader', () => {
     expect(last.join('\n')).not.toContain('delivered 1 fact');
     expect(await readerMain(['--path', join(d, 'missing')], {}, () => {})).toBe(1);
     expect(await readerMain(['--host', 'nope'], {}, () => {})).toBe(2);
+  });
+});
+
+describe('reader --follow (rotation, truncation, partial lines)', () => {
+  const setup = () => {
+    const d = mkdtempSync(join(tmpdir(), 'ctf-'));
+    const path = join(d, 'v.jsonl');
+    writeFileSync(path, 'a\n');
+    return { path, f: new Follower(path, 2, statSync(path).ino) };
+  };
+
+  it('appends, joins a partial line, and splits multi-byte safely', () => {
+    const { path, f } = setup();
+    appendFileSync(path, 'b\nc');
+    expect(f.poll()).toEqual(['b']);
+    appendFileSync(path, Buffer.from('é\n', 'utf8').subarray(0, 1));
+    expect(f.poll()).toEqual([]);
+    appendFileSync(path, Buffer.from('é\n', 'utf8').subarray(1));
+    expect(f.poll()).toEqual(['cé']);
+  });
+
+  it('starts over on rotation to a larger or smaller file, dropping stale partials', () => {
+    const { path, f } = setup();
+    appendFileSync(path, 'partial');
+    expect(f.poll()).toEqual([]);
+    renameSync(path, `${path}.1`);
+    writeFileSync(path, 'new-1 long enough to pass the old offset\nnew-2\n');
+    expect(f.poll()).toEqual(['new-1 long enough to pass the old offset', 'new-2']);
+    renameSync(path, `${path}.1`);
+    writeFileSync(path, 'x\n');
+    expect(f.poll()).toEqual(['x']);
+  });
+
+  it('starts over on in-place truncation; a missing file is quiet', () => {
+    const { path, f } = setup();
+    appendFileSync(path, 'bbbbbbbb\n');
+    expect(f.poll()).toEqual(['bbbbbbbb']);
+    writeFileSync(path, 'z\n');
+    expect(f.poll()).toEqual(['z']);
+    rmSync(path);
+    expect(f.poll()).toEqual([]);
   });
 });

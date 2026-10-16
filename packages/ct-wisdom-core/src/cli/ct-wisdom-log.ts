@@ -97,32 +97,75 @@ export async function main(
   for (const r of args.n > 0 ? records.slice(-args.n) : []) write(render(r, args));
   if (!args.follow) return 0;
 
-  let offset = Buffer.byteLength(text, 'utf8');
-  let pending = '';
+  const bytes = Buffer.from(text, 'utf8');
+  const follower = new Follower(path, bytes.length, statIno(path));
+  follower.pending = bytes.subarray(bytes.lastIndexOf(0x0a) + 1);
   for (;;) {
     await new Promise((r) => setTimeout(r, 500));
-    let size: number;
-    try {
-      size = statSync(path).size;
-    } catch {
-      continue;
-    }
-    if (size < offset) offset = 0; // rotated
-    if (size === offset) continue;
-    const buf = Buffer.alloc(size - offset);
-    const fd = openSync(path, 'r');
-    try {
-      readSync(fd, buf, 0, buf.length, offset);
-    } finally {
-      closeSync(fd);
-    }
-    offset = size;
-    const lines = (pending + buf.toString('utf8')).split('\n');
-    pending = lines.pop() ?? '';
-    for (const line of lines) {
+    for (const line of follower.poll()) {
       const r = parse(line);
       if (r) write(render(r, args));
     }
+  }
+}
+
+function statIno(path: string): number | null {
+  try {
+    return statSync(path).ino;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * New complete lines appended to `path` since `offset`. Reopens the file on
+ * every poll and starts over when it was rotated or replaced (a new inode) or
+ * truncated (smaller than what was already read), dropping any stale partial
+ * line. Same rule as the Python reader's Follower.
+ */
+export class Follower {
+  /** Bytes after the last newline (kept as bytes: a chunk may split a UTF-8 character). */
+  pending: Buffer = Buffer.alloc(0);
+
+  constructor(
+    private readonly path: string,
+    private offset = 0,
+    private ino: number | null = null,
+  ) {}
+
+  poll(): string[] {
+    let size: number;
+    let ino: number;
+    try {
+      const st = statSync(this.path);
+      size = st.size;
+      ino = st.ino;
+    } catch {
+      return [];
+    }
+    if ((this.ino !== null && ino !== this.ino) || size < this.offset) {
+      this.offset = 0;
+      this.pending = Buffer.alloc(0);
+    }
+    this.ino = ino;
+    if (size === this.offset) return [];
+    const buf = Buffer.alloc(size - this.offset);
+    try {
+      const fd = openSync(this.path, 'r');
+      try {
+        readSync(fd, buf, 0, buf.length, this.offset);
+      } finally {
+        closeSync(fd);
+      }
+    } catch {
+      return [];
+    }
+    this.offset = size;
+    const data = Buffer.concat([this.pending, buf]);
+    const cut = data.lastIndexOf(0x0a);
+    this.pending = data.subarray(cut + 1);
+    if (cut < 0) return [];
+    return data.subarray(0, cut).toString('utf8').split('\n');
   }
 }
 
@@ -135,8 +178,13 @@ function isEntryPoint(): boolean {
 }
 
 if (isEntryPoint()) {
+  // exitCode, not exit(): let pending stdout writes drain first.
   main(process.argv.slice(2)).then(
-    (code) => process.exit(code),
-    () => process.exit(1),
+    (code) => {
+      process.exitCode = code;
+    },
+    () => {
+      process.exitCode = 1;
+    },
   );
 }

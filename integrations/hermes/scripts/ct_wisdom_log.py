@@ -81,6 +81,40 @@ def _emit(line, args):
         print(format_record(record, args.block))
 
 
+class Follower:
+    """New complete lines appended to `path` since `offset`. Reopens the file
+    on every poll and starts over when it was rotated or replaced (a new
+    inode) or truncated (smaller than what was already read), dropping any
+    stale partial line."""
+
+    def __init__(self, path, offset=0, ino=None):
+        self.path = path
+        self.offset = offset
+        self.ino = ino
+        self.pending = b""
+
+    def poll(self):
+        try:
+            st = os.stat(self.path)
+        except OSError:
+            return []
+        if (self.ino is not None and st.st_ino != self.ino) or st.st_size < self.offset:
+            self.offset, self.pending = 0, b""
+        self.ino = st.st_ino
+        if st.st_size == self.offset:
+            return []
+        try:
+            with open(self.path, "rb") as handle:
+                handle.seek(self.offset)
+                data = handle.read(st.st_size - self.offset)
+        except OSError:
+            return []
+        self.offset += len(data)
+        lines = (self.pending + data).split(b"\n")
+        self.pending = lines.pop()
+        return [line.decode("utf-8", "replace") for line in lines]
+
+
 def main(argv=None, env=None):
     parser = argparse.ArgumentParser(description="Read the Curated Thoughts wisdom verbose log.")
     parser.add_argument("--host", default=DEFAULT_HOST, choices=("hermes", "claude-code"))
@@ -97,23 +131,26 @@ def main(argv=None, env=None):
               % args.host, file=sys.stderr)
         return 2
     try:
-        handle = open(path, encoding="utf-8", errors="replace")
+        with open(path, "rb") as handle:
+            data = handle.read()
+            ino = os.fstat(handle.fileno()).st_ino
     except OSError as error:
         print("cannot read %s: %s (is CT_WISDOM_VERBOSE=1 set?)" % (path, error.strerror),
               file=sys.stderr)
         return 1
-    with handle:
-        lines = [line for line in handle.readlines() if _parse(line) is not None]
-        for line in lines[-args.n:] if args.n > 0 else []:
-            _emit(line, args)
-        sys.stdout.flush()
-        while args.follow:
-            line = handle.readline()
-            if line:
+    text = data.decode("utf-8", "replace")
+    lines = [line for line in text.splitlines() if _parse(line) is not None]
+    for line in lines[-args.n:] if args.n > 0 else []:
+        _emit(line, args)
+    sys.stdout.flush()
+    if args.follow:
+        follower = Follower(path, len(data), ino)
+        follower.pending = data[data.rfind(b"\n") + 1:]
+        while True:
+            for line in follower.poll():
                 _emit(line, args)
-                sys.stdout.flush()
-            else:
-                time.sleep(0.5)
+            sys.stdout.flush()
+            time.sleep(0.5)
     return 0
 
 

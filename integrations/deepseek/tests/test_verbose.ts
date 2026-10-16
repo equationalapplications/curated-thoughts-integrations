@@ -4,7 +4,7 @@
  * $DSH_HOME/logs. Verbose on or off, the delivered block (the pre-step user
  * message's bytes) is identical.
  */
-import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -79,8 +79,12 @@ describe('DSH verbose mode', () => {
         throw new Error('logger down');
       },
     };
-    const rec = dshVerboseRecorder(ctx, { CT_WISDOM_VERBOSE: '1', CT_WISDOM_VERBOSE_LOG: '/dev/null/nope.jsonl' });
+    // A regular file used as the log's parent directory: unwritable on every OS.
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-'));
+    writeFileSync(join(dir, 'file'), 'x');
+    const log = join(dir, 'file', 'nope.jsonl');
+    const rec = dshVerboseRecorder(ctx, { CT_WISDOM_VERBOSE: '1', CT_WISDOM_VERBOSE_LOG: log });
     expect(await turn(MATCHES[0], rec)).toEqual(await turn(MATCHES[0]));
-    expect(existsSync('/dev/null/nope.jsonl')).toBe(false);
+    expect(existsSync(log)).toBe(false);
   });
 });

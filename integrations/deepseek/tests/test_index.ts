@@ -1,4 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { apply, Config, inject } from '../src/index.js';
 
 // test_index stays UNIT-scoped: the real wisdom module's spawns/governor
@@ -208,7 +210,8 @@ describe('apply', () => {
       const before = process.env.CT_WISDOM_VERBOSE;
       const beforeLog = process.env.CT_WISDOM_VERBOSE_LOG;
       process.env.CT_WISDOM_VERBOSE = on ? '1' : '0';
-      process.env.CT_WISDOM_VERBOSE_LOG = '/dev/null/never-written.jsonl';
+      // runUserTurn is mocked here, so the recorder never runs; keep any write in tmp anyway.
+      process.env.CT_WISDOM_VERBOSE_LOG = join(tmpdir(), 'ct-dsh-index-verbose.jsonl');
       try {
         const mm = mockCtx();
         vi.mocked(runUserTurn).mockClear();
