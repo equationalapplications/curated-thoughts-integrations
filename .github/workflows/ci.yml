@@ -342,6 +342,16 @@ jobs:
     # python/node axes, so a `bun:` axis would validate and then silently
     # vanish from CI. A dedicated job keeps the contract enforced on every
     # relevant change instead.
+    #
+    # OpenClaw tier (parent spec decision 10) — WEAKER than this job, by
+    # design: integrations/openclaw/tests/host/contract.test.ts is a
+    # SHAPE-LEVEL contract. It loads the built plugin entry against a stub
+    # plugin API and checks every hook name, option, result field and
+    # manifest key against facts recorded from the pinned host
+    # (tests/host/compatibility.json, openclaw@2026.10.3); no gateway or
+    # model runs in CI. It needs no extra job: it runs inside openclaw's
+    # `checks.test` in the integration matrix above. Live behavior (incl.
+    # the AC 9 cache gate) is controller-run via tests/e2e/run.sh.
     name: host contract (opencode)
     runs-on: ubuntu-latest
     steps:
