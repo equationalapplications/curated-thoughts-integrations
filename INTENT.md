@@ -2,57 +2,44 @@
 
 **Read this file first.** It explains why this repo exists, the rules every
 integration must follow, what it deliberately does not do, and how changes are
-made. If this file and another document disagree, this file wins on *intent*
-(what we are trying to do) and the specs win on *detail* (exactly how).
+made. It is written for people first: product owners should be able to read it
+and recognize the product they want. Any agent writing a spec must check the
+spec against it. If this file and another document disagree, this file wins on
+*intent* (what we are trying to do) and the specs win on *detail* (exactly how).
 
-Each rule has a **Status** line saying how much of it the code does today:
-
-- **Built** — the code does this.
-- **Partly built** — some of it exists; the line says what is missing.
-- **Planned** — decided, but not in the code yet.
-- **Open decision** — not decided yet.
-
-Statuses were checked against the code on 2026-10-08. Update a status line in
-the same pull request that changes the behavior.
+This file says what the product should do, not how far the code has got.
+What is built today is recorded in the README, each integration's CHANGELOG,
+and the specs. Change this file only when the intent changes.
 
 ## Why this repo exists
 
 Curated Thoughts (CT) is a private, local-first "second brain" with a curated
 **wisdom layer**: short, trustworthy facts its Librarian distills from your
 files. This repo holds the **integrations**: thin plugins for agent harnesses
-(Hermes, DeepSeek Harness, and more to come) that put those facts in front of
-the agent automatically, so it doesn't have to remember to ask.
+(Hermes, DeepSeek Harness, OpenCode, Claude Code, OpenClaw, and more to come)
+that put those facts in front of the agent automatically, so it doesn't have to
+remember to ask.
 
 The goal is **Intuitive Wisdom**: the agent *knows the right fact at the moment
-it is relevant*. That is a property, not a mechanism. We reach it in three steps:
+it is relevant*. That is a property, not a mechanism. We reach it in three
+steps:
 
-- **At session start (v1).** Before the conversation begins, recall a few facts
-  and add them to the system prompt once. There is no conversation yet, so
+- **At session start.** Before the conversation begins, recall a few facts and
+  add them to the system prompt once. There is no conversation yet, so
   relevance is a guess.
-- **On each user message (live delivery).** Ask CT which facts are relevant
-  *now* and append the new ones to that turn. The Hermes design is in
-  `docs/superpowers/specs/2026-10-06-intuitive-wisdom-live-delivery-design.md`;
-  other ports copy it.
+- **On each user message.** Ask CT which facts are relevant *now* and append
+  the new ones to that turn.
 - **During autonomous work.** An agent working on its own between user
   messages (reading files, running commands, editing code) must also be able
   to trigger the inclusion of relevant facts, keyed to what it is doing at
   that moment. Without this, a long autonomous task only ever sees the facts
-  that matched the user's opening request. This is the end state. The same
-  rules apply: at most once in context, never in the system prompt,
-  relevance decided by CT, and quiet failure.
+  that matched the user's opening request. This is the end state. How to do
+  it is not decided yet: which host events trigger it, what text to send CT,
+  how often to ask, and where a fact can be added mid-task without breaking
+  the rules below.
 
-| Integration | Session-start injection | Live delivery (user message) | Autonomous-work delivery |
-|---|---|---|---|
-| Hermes | Built (0.3.0) | Built (0.4.0) | Planned |
-| DeepSeek Harness | Built (0.3.0) | Built (0.4.0) | Planned |
-| OpenCode | Built (0.2.0) | Built (0.2.0) | Planned |
-| Claude Code | Built (0.2.0) | Built (0.2.0) | Planned |
-| OpenClaw | Built (0.1.0) | Built (0.1.0) | Planned |
-
-*Autonomous-work delivery* is decided but not designed. The open questions
-are which host events can trigger it, what text to send CT as the query, how
-often to ask, and which append channel is cache-safe mid-task on each host.
-A Step-0 feasibility investigation per host comes before the spec.
+The same rules apply at every step. Every host should reach every step; where
+a host can't, its spec says why and what the user loses.
 
 ## Glossary
 
@@ -67,37 +54,31 @@ A Step-0 feasibility investigation per host comes before the spec.
 - **Autonomous-work delivery** — facts delivered between user messages,
   triggered by what the agent is doing (a step, tool call, or file it works
   on) rather than by a new user message.
-- **Ledger** — the list of fact ids already in the session's context. It is
-  rebuilt every turn from `<!-- ct-fact:<id> -->` markers in the transcript, so
-  the plugin stores nothing.
+- **Ledger** — the list of fact ids already in the session's context, read
+  from `<!-- ct-fact:<id> -->` markers.
 - **Supersession** — CT marking an old fact as replaced by a newer one.
 - **Correction** — a replacement fact delivered mid-session for one that was
   superseded after it was shown.
 - **Provenance** — where a fact came from (for example, stated by a person or
   inferred by the Librarian), from a fixed list CT owns.
 - **System One** — CT's small, fast judging models. They live in CT only.
-- **`ct recall`** / **`ct wisdom match`** — CT's read-only commands. Session-start
-  injection uses `recall`. Live delivery uses `wisdom match`, which applies CT's
-  relevance cutoff.
+- **`ct recall`** / **`ct wisdom match`** — CT's read-only commands.
+  Session-start injection uses `recall`. Live delivery uses `wisdom match`,
+  which applies CT's relevance cutoff.
 
 ## The rules
 
 ### 1. A fact appears at most once in the agent's context
 
 Every delivered fact carries a `ct-fact:<id>` marker. Before delivering
-anything, the integration rebuilds the ledger from the current context and
-skips ids already there. If the agent runs a CT search itself, facts it
-already has come back as short "already in context" stubs. "Context" means
-what the agent can see right now. A fact that was compacted away may be
-delivered again.
+anything, the integration checks which ids are already in context and skips
+them. If the agent runs a CT search itself, facts it already has come back as
+short "already in context" stubs. "Context" means what the agent can see right
+now. A fact that was compacted away may be delivered again. When an
+integration can't tell what is already in context (for example, a restored
+session), it delivers nothing rather than risk a repeat.
 
 *Why:* repeating a fact wastes the agent's attention and the user's tokens.
-
-**Status: Partly built.** Hermes 0.4.0 does all of this, with a randomized
-exactly-once test. Hermes sessions restored after a restart can't see their
-session-start ids, so live delivery stays off there (it fails closed). DeepSeek
-Harness injects only at session start, and its agent-run CT searches can repeat
-a fact.
 
 ### 2. Never edit the system prompt after it is built
 
@@ -105,15 +86,10 @@ The session-start block is computed once and frozen as one unbroken region of
 the system prompt, so the host's prompt cache keeps working. Re-renders must be
 byte-identical. Anything learned later goes in the append-only channels (the
 user turn or tool results), never back into the prompt. When a session is
-resumed, the host replays the saved prompt; the plugin doesn't persist
-anything to make that work.
+resumed, the host replays the saved prompt.
 
 *Why:* rewriting the prompt breaks prompt caching on every turn, which costs
 money and time.
-
-**Status: Built** (Hermes, DeepSeek Harness). When the first render fails, a
-later render may fill it in. Which failures retry is defined in the v1 spec and
-`ct_wisdom.py`.
 
 ### 3. No superseded fact is ever shown as current
 
@@ -124,22 +100,14 @@ is marked as replaced.
 
 *Why:* the agent must never rely on a fact CT knows is wrong.
 
-**Status: Partly built.** Hermes renders corrections, and `ct wisdom match`
-filters superseded facts. In practice no corrections arrive yet, because CT's
-Librarian doesn't apply supersessions yet (a CT-side gap). Session-start
-injection relies on `ct recall`, which doesn't filter superseded facts.
-
 ### 4. Failing quietly beats failing the session
 
 If CT isn't installed, the brain is unreachable, a call times out, or nothing
 matches, the integration does nothing: no empty block and no error in the
 session. It logs locally. Every CT call has a short timeout, so a hung backend
-can't stall the session.
+can't stall the session, and repeated failures pause CT calls for a while.
 
 *Why:* an agent session must never break because the brain is down.
-
-**Status: Built** (Hermes, DeepSeek Harness). Hermes live delivery also pauses
-for 5 minutes after 3 failures in a row.
 
 ### 5. Label where each fact came from
 
@@ -147,10 +115,6 @@ Each delivered fact shows its provenance, using CT's vocabulary. Agent-written
 facts are never presented as verified.
 
 *Why:* the agent should weigh a person's stated rule above a guess.
-
-**Status: Partly built.** Live delivery labels provenance. Session-start
-injection can't yet, because `ct recall` doesn't return provenance. Closing that
-gap needs a CT change and a parser change in each integration.
 
 ### 6. Keep it small
 
@@ -160,8 +124,6 @@ chars, with at most 12 per session). Never raise a limit to make up for weak
 matching.
 
 *Why:* a flood of loosely related facts is noise, not wisdom.
-
-**Status: Built** (Hermes, DeepSeek Harness).
 
 ### 7. Integrations only read, and only through CT's commands
 
@@ -173,18 +135,14 @@ CT's own deposit tools; that's CT's write path, not ours.
 
 *Why:* CT's Librarian is the single gatekeeper for what becomes a fact.
 
-**Status: Built.**
-
 ### 8. Relevance is CT's job
 
 Integrations don't score, rank, threshold, or judge facts, and they never call
 System One. CT decides what is relevant. The integration only delivers what CT
-returns.
+returns. If CT matches too little or too much, fix it in CT, never work around
+it here.
 
 *Why:* every harness then gets the same quality, and it improves in one place.
-
-**Status: Built.** CT's live cutoff currently rarely opens on real messages
-(curated-thoughts#271). That is CT's to fix, not something to work around here.
 
 ## Out of scope (don't build these here)
 
@@ -202,7 +160,7 @@ returns.
 
 1. **Spec first.** Write a spec under `docs/superpowers/specs/`, based on a
    Step-0 investigation that reads the pinned host source. Mark each claim with
-   `[V]` evidence. PR #22 is the model.
+   `[V]` evidence. PR #22 is the model. Check the spec against this file.
 2. **New ports copy the Hermes design** and record where they differ on
    purpose.
 3. **Test the rules, not just the code.** Any pull request that touches
