@@ -689,3 +689,139 @@ system prompt.
 | A6 | Real-gate behavior on activity lines (does `edit src/x.py` ever open at the 0.64 floor?) | extend PR #47's opt-in real-gate e2e with activity queries |
 | A7 | OpenCode MCP tool path: augmentation after the `content[]` join keeps markers on line ≥ 2 without breaking the LD2 line-1 envelope parse | unit test plus host contract |
 | A8 | Hermes: all tool calls of one model response carry the same `api_request_id` in `transform_tool_result` (per-step coalescing key) | read `agent/tool_executor.py` / `turn_api_request.py` call-id plumbing, or a stub-plugin run |
+
+## A6 results: real gate on activity lines
+
+**Run:** 2026-10-16. CT 3.5.1 `ct` CLI in the deepseek e2e image. The embedder is
+`external:qwen/qwen3-embedding-4b` via OpenRouter, under the `instr1` scheme with the
+0.64 floor. The Librarian runs on ZAI GLM-5.3-FLASH. This uses the same configuration as
+PR #47's opt-in real-gate mode. No DSH agent loop was involved: each query is a direct
+`ct wisdom match --json --max 10 -- "<line>"`, and its `wisdom_gate_decision` line was
+captured.
+
+**Brain.** Twelve deposits went in through `ct wisdom deposit`: seven coding rules
+(applied migrations, `pnpm test` timeout on the slow Mac, release-workflow job order,
+secrets in `.env.local`, OpenCode MCP tool naming, rebase-not-merge, the `src/index.ts`
+entry point) and five office or infra distractors. The Librarian turned them into 29 wiki
+entries, all `instr1`-stamped.
+
+**Scores below the floor.** CT only reports scores for entries that pass the floor, so a
+closed answer shows no score. To see how far below the floor a query landed, a shadow
+scorer embedded the same instruction-prefixed query text with the same model and took raw
+cosine against every live entry blob. On every opened query its top score matches CT's to
+three decimals (for example 0.6841 against 0.684), so the right-hand column is CT's own
+number.
+
+| Query (activity line) | Kind | Fact it targets | Gate | Entries returned (score, title) | Top score (shadow) |
+|---|---|---|---|---|---|
+| `edit src/db/migrations/0042_add_users.sql` | relevant | migration | closed | — | 0.568 Schema changes after a migration has been applie |
+| `src/db/migrations/0042_add_users.sql` | relevant-bare | migration | closed | — | 0.549 Schema changes after a migration has been applie |
+| `src/db/migrations/0042_add_users.sql migrations` | relevant-hint | migration | closed | — | 0.588 Schema changes after a migration has been applie |
+| `edit migration` | relevant-short | migration | closed | — | 0.59 Never edit a database migration that has already |
+| `run pnpm test` | relevant | pnpm-test | **open** | 0.685 pnpm's test command (`pnpm test`) supports a `-- | 0.684 pnpm's test command (`pnpm test`) supports a `-- |
+| `pnpm test` | relevant-bare | pnpm-test | **open** | 0.695 pnpm's test command (`pnpm test`) supports a `-- | 0.695 pnpm's test command (`pnpm test`) supports a `-- |
+| `run pnpm test --filter deepseek` | relevant-hint | pnpm-test | closed | — | 0.583 On the slow dev Mac, run `pnpm test` with `--tes |
+| `read .github/workflows/release.yml` | relevant | release | closed | — | 0.596 The host contract job is a stage in the release  |
+| `.github/workflows/release.yml` | relevant-bare | release | **open** | 0.644 The host contract job is a stage in the release  | 0.645 The host contract job is a stage in the release  |
+| `edit .github/workflows/release.yml workflows` | relevant-hint | release | closed | — | 0.631 The host contract job is a stage in the release  |
+| `write .env.local` | relevant | secrets | **open** | 0.713 Secrets live in .env.local.; 0.703 .env.local is gitignored.; 0.689 Secrets must never be copied from .env.local int; 0.675 .env.local is gitignored and therefore excluded  | 0.713 Secrets live in .env.local. |
+| `.env.local` | relevant-bare | secrets | **open** | 0.775 Secrets live in .env.local.; 0.771 .env.local is gitignored.; 0.749 .env.local is gitignored and therefore excluded ; 0.744 Secrets must never be copied from .env.local int; 0.71 .env.local is the designated location for secret | 0.776 Secrets live in .env.local. |
+| `git add .env.local` | relevant-hint | secrets | **open** | 0.797 .env.local is gitignored.; 0.763 .env.local is gitignored and therefore excluded ; 0.651 Secrets live in .env.local.; 0.651 Secrets must never be copied from .env.local int | 0.797 .env.local is gitignored. |
+| `search "MCP tool name"` | relevant | mcp-names | **open** | 0.664 When MCP servers are integrated with OpenCode, t; 0.661 OpenCode exposes MCP tools under the name <serve | 0.664 When MCP servers are integrated with OpenCode, t |
+| `MCP tool name` | relevant-bare | mcp-names | **open** | 0.653 OpenCode exposes MCP tools under the name <serve; 0.65 When MCP servers are integrated with OpenCode, t | 0.653 OpenCode exposes MCP tools under the name <serve |
+| `search "opencode mcp tool naming"` | relevant-hint | mcp-names | **open** | 0.751 OpenCode exposes MCP tools under the name <serve; 0.749 When MCP servers are integrated with OpenCode, t | 0.75 OpenCode exposes MCP tools under the name <serve |
+| `run git rebase` | relevant | rebase | closed | — | 0.553 Feature branches are kept current with git rebas |
+| `git rebase origin/main` | relevant-bare | rebase | **open** | 0.773 Feature branches are kept current with git rebas | 0.774 Feature branches are kept current with git rebas |
+| `run git rebase main branches` | relevant-hint | rebase | **open** | 0.748 Feature branches are kept current with git rebas | 0.746 Feature branches are kept current with git rebas |
+| `edit src/index.ts` | relevant | entry-point | **open** | 0.748 src/index.ts is the plugin entry point. | 0.748 src/index.ts is the plugin entry point. |
+| `src/index.ts` | relevant-bare | entry-point | **open** | 0.776 src/index.ts is the plugin entry point. | 0.776 src/index.ts is the plugin entry point. |
+| `read src/index.ts plugin` | relevant-hint | entry-point | **open** | 0.842 src/index.ts is the plugin entry point. | 0.842 src/index.ts is the plugin entry point. |
+| `edit src/db/schema.ts` | near-miss | migration | closed | — | 0.599 Schema changes after a migration has been applie |
+| `run pnpm build` | near-miss | pnpm-test | closed | — | 0.517 pnpm's test command (`pnpm test`) supports a `-- |
+| `read .github/workflows/ci.yml` | near-miss | release | closed | — | 0.5 The host contract job is a stage in the release  |
+| `read .env.example` | near-miss | secrets | closed | — | 0.5 Secrets live in .env.local. |
+| `run git merge` | near-miss | rebase | closed | — | 0.511 Feature branches are kept current with git rebas |
+| `edit src/format.ts` | near-miss | entry-point | closed | — | 0.601 src/index.ts is the plugin entry point. |
+| `read README.md` | negative | — | closed | — | 0.304 Secrets live in .env.local. |
+| `edit docs/CHANGELOG.md` | negative | — | closed | — | 0.407 Schema changes after a migration has been applie |
+| `run ls -la` | negative | — | closed | — | 0.289 Secrets live in .env.local. |
+| `read package.json` | negative | — | closed | — | 0.344 In .github/workflows/release.yml, package build  |
+| `search "TODO"` | negative | — | closed | — | 0.277 curated-thoughts is an MCP server whose tool cur |
+| `write tmp/notes.txt` | negative | — | closed | — | 0.303 .env is not an approved location for secrets; se |
+| `run npm view dsh version` | negative | — | closed | — | 0.314 .env.local is gitignored and therefore excluded  |
+| `edit tests/test_format.ts` | negative | — | closed | — | 0.42 src/index.ts is the plugin entry point. |
+| `Can I edit a database migration that was already applied?` | control-nl | migration | **open** | 0.898 Never edit a database migration that has already; 0.706 Schema changes after a migration has been applie | 0.898 Never edit a database migration that has already |
+| `Where do the secrets for this repo live?` | control-nl | secrets | **open** | 0.699 Secrets live in .env.local.; 0.669 Secrets must never be committed to version contr | 0.699 Secrets live in .env.local. |
+| `How are OpenCode MCP tools named?` | control-nl | mcp-names | **open** | 0.842 When MCP servers are integrated with OpenCode, t; 0.836 OpenCode exposes MCP tools under the name <serve | 0.842 When MCP servers are integrated with OpenCode, t |
+
+### What it shows
+
+- **The gate opens on activity lines, but only sometimes.** Across the 22 activity lines
+  aimed at a fact, 14 opened (64%). For the eight lines in the proposed `<verb> <target>`
+  shape, the seven aimed at a fact opened 4 times (`run pnpm test`, `write .env.local`,
+  `search "MCP tool name"`, `edit src/index.ts`) and stayed closed 3 times
+  (`edit src/db/migrations/0042_add_users.sql`, `read .github/workflows/release.yml`,
+  `run git rebase`).
+- **What decides it is shared surface text, not the verb.** The gate opens when the line
+  contains the fact's own token: `.env.local`, `src/index.ts`, `pnpm test`, `MCP tool`,
+  `git rebase origin/main`. It stays closed when the fact is a *rule about a concept* and
+  the path only implies the concept. The migration rule never opened from a migration
+  path: the best score was 0.588 with a directory hint, and 0.590 for `edit migration`.
+  Yet the natural-language question about it scored **0.897**.
+- **Shapes.** A bare target did best (6 of 7 opened). `<verb> <target>` and
+  target-plus-a-one-word-hint each opened 4 of 7. Verbs add little and can hurt:
+  `.github/workflows/release.yml` scored 0.645 (open), while
+  `read .github/workflows/release.yml` scored 0.596 (closed). Extra flags dilute the match
+  (`run pnpm test --filter deepseek` scored 0.583, closed).
+- **No false positives.** No near-miss (0 of 6) or negative (0 of 8) opened. Near-misses
+  topped out at 0.601 (`edit src/format.ts` against the entry-point fact) and negatives at
+  0.420. All three natural-language controls opened (0.698 to 0.897).
+- **The floor can't simply be lowered for activity lines.** Relevant lines that stayed
+  closed scored 0.549 to 0.631, and the best near-misses scored 0.500 to 0.601. The two
+  ranges overlap: `edit src/db/schema.ts` (near-miss, 0.599) and `edit src/format.ts`
+  (0.601) both outscore the relevant `edit src/db/migrations/0042_add_users.sql` (0.568).
+  Any floor low enough to catch the migration case would also deliver on those near-misses.
+- **Which fact wins.** For `run pnpm test`, the entry that matched was the generic "pnpm's
+  test command supports `--testTimeout`", not the more useful "on the slow dev Mac, run it
+  with `--testTimeout 60000`". Activity lines tend to pull entries that repeat the command
+  rather than the rule about it.
+
+### Verdict for the spec
+
+Activity-line queries on today's semantic gate are **usable but lossy**. They are safe:
+there were no false positives on this brain. But they miss roughly a third of the relevant
+cases, and they miss them in the way that matters most for autonomous delivery. The rule
+"never edit an applied migration" is exactly the fact an agent editing
+`src/db/migrations/…` needs, and a migration path never reached it.
+
+What this means for the integration:
+- **Send the bare target** (the path, the command, or the search pattern) rather than
+  `<verb> <target>`. That is the best shape the experiment found, and it keeps the query
+  rule simple.
+- **Don't compose prose on the plugin side** to improve recall. INTENT rule 8 keeps
+  relevance in CT.
+
+This supports the existing recommendation for a **CT activity query mode** (section
+"CT-side support that would help"). The data points to two parts that each need CT work:
+- **Path-to-fact anchoring.** Facts whose source documents name a directory or module
+  (`src/db/migrations`) should be reachable from a path in that directory without
+  embedding similarity alone. The two-stage source-chunk search of curated-thoughts#271
+  fits this.
+- **A separately calibrated activity floor and instruction.** A floor for terse action
+  text needs its own `calibrate_wisdom_gate` run on activity probes. These scores show the
+  current 0.64 floor is about right for precision, and that lowering it alone would cost
+  precision.
+
+Without CT changes, shipping autonomous delivery with bare-target queries delivers a
+useful subset: rules that mention the file or command by name.
+
+**Caveats.** This is one small brain (29 entries) and 39 queries, so treat the rates as
+directional, not calibrated. The Librarian rewrites deposits into its own entries, and
+their wording affects scores; for example, a "Migration files are stored under
+src/db/migrations" entry exists and still didn't reach 0.64 from a migration path.
+
+**Cost.** OpenRouter usage rose by $0.000104 for the whole experiment: embedding the
+deposits, 39 gate queries, and the shadow scorer's 39 query embeddings (1,004 tokens).
+The ZAI Librarian calls run on the coding plan and have no per-call cost visible here.
+Both keys were passed into the container by name at run time; a grep of every log and
+output file found neither.
