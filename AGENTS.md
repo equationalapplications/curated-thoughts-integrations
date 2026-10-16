@@ -13,5 +13,6 @@ Rules for AI agents working in this repo.
 4. **INTENT.md holds intent only.** Never add build status, status tables,
    version numbers or dated work history to it. Those belong in the README,
    CHANGELOGs and specs.
-5. **Follow "How changes are made" in INTENT.md:** spec first, then plan, then
-   tests that check the rules.
+5. **Follow "How changes are made" in
+   [CONTRIBUTING.md](CONTRIBUTING.md#how-changes-are-made):** spec first, then
+   plan, then tests that check the rules.
