@@ -364,7 +364,7 @@ jobs:
           if [ "$EVENT_NAME" = "pull_request" ]; then
             git fetch --no-tags origin "$BASE_REF"
             if git diff --name-only "origin/$BASE_REF...HEAD" \
-                -- integrations/opencode shared/ | grep -q .; then
+                -- integrations/opencode shared/ packages/ct-wisdom-core | grep -q .; then
               echo run=true >> "$GITHUB_OUTPUT"
             else
               echo run=false >> "$GITHUB_OUTPUT"
@@ -384,10 +384,11 @@ jobs:
           package_json_file: integrations/opencode/package.json
 
       - name: Build shared core
-        # opencode-specific job; the opencode leg will add the file:
-        # ct-wisdom-core dep (gitignored lib/, pnpm resolves at install
-        # time), so build it before the install below when present. No-op
-        # today — kept so the next leg cannot reintroduce the TS2307 class.
+        # opencode depends on the file: ct-wisdom-core dep (gitignored lib/;
+        # pnpm copies it at INSTALL time), so build it before the install
+        # below. The opencode build then vendors it into lib/ct-wisdom-core
+        # (scripts/vendor_core.mjs) and the wisdom host-contract test loads
+        # that real payload.
         if: steps.changes.outputs.run == 'true'
         shell: bash
         env:
@@ -442,6 +443,9 @@ jobs:
             | grep -q "lib/src/index.js"
           tar -tzf "$RUNNER_TEMP"/equational-applications-opencode-curated-thoughts-*.tgz \
             | grep -q "lib/scripts/ct_doctor.js"
+          # The payload ships no node_modules: the shared core must be vendored.
+          tar -tzf "$RUNNER_TEMP"/equational-applications-opencode-curated-thoughts-*.tgz \
+            | grep -q "lib/ct-wisdom-core/index.js"
 
       - name: Run the declared host contract
         # The command comes from integration.yaml's checks.host — the manifest

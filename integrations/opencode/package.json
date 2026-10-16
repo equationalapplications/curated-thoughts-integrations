@@ -32,7 +32,7 @@
     "@opencode-ai/plugin": "1.18.x"
   },
   "devDependencies": {
-    "@opencode-ai/plugin": "1.18.31",
+    "@opencode-ai/plugin": "1.18.35",
     "@types/better-sqlite3": "^9.6.0",
     "@types/node": "^22.19.0",
     "better-sqlite3": "^13.0.3",
