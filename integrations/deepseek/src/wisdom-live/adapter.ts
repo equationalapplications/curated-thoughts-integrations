@@ -309,7 +309,6 @@ export class DshWisdomAdapter implements HostAdapter {
     return {
       idsMostRecentFirst: merged,
       has: (id) => set.has(id),
-      liveDeliveredCount: this.liveDeliveredCount(session, set),
       knownBootstrap,
     };
   }
@@ -344,29 +343,6 @@ export class DshWisdomAdapter implements HostAdapter {
       }
     }
     return out;
-  }
-
-  /**
-   * M1 live budget: count distinct ids delivered via the LIVE path — markers
-   * on USER-role messages of the session log (the N2 channel), same rule as
-   * the Hermes reference and the core's SimHost.
-   */
-  private liveDeliveredCount(session: SessionRef, known: Set<string>): number {
-    const messages = this.sessionMessages.get(session.id);
-    if (messages === undefined) return 0;
-    const live = new Set<string>();
-    for (const msg of messages) {
-      const m = msg as { role?: unknown; content?: unknown };
-      if (m === null || typeof m !== 'object' || m.role !== 'user') continue;
-      for (const text of blockTexts(m.content)) {
-        const re = /ct-fact:([A-Za-z0-9._:-]{1,128})/g;
-        let match: RegExpExecArray | null;
-        while ((match = re.exec(text)) !== null) {
-          if (known.has(match[1])) live.add(match[1]);
-        }
-      }
-    }
-    return live.size;
   }
 
   /** Registered per-agent derived-log snapshots (set by index.ts listeners). */

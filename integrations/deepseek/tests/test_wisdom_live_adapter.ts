@@ -52,7 +52,7 @@ function adapter(over: Partial<AdapterDeps> & { spawnFn?: SpawnFn } = {}) {
 
 const LEDGER_SHAPE = (ids: string[]): Ledger => {
   const set = new Set(ids);
-  return { idsMostRecentFirst: ids, has: (id) => set.has(id), liveDeliveredCount: 0, knownBootstrap: false };
+  return { idsMostRecentFirst: ids, has: (id) => set.has(id), knownBootstrap: false };
 };
 
 describe('userMessageText', () => {
@@ -137,17 +137,10 @@ describe('ledger rebuild (m5: session-log source of truth)', () => {
     expect(ledger.knownBootstrap).toBe(true);
   });
 
-  it('unions the memo bootstrap ids and counts the live budget from user-role markers only', () => {
+  it('unions the memo bootstrap ids after the session-log scan', () => {
     const { a } = adapter();
     a.bootstrapMemo['s2'] = { block: '**B** <!-- ct-fact:boot1 -->', ids: ['boot1'] };
     a.sessionMessages.set('s2', [
-      // boot1 on a user message counts toward the live budget? NO — the M1
-      // budget counts ids delivered via the LIVE path; bootstrap ids land in
-      // the system prompt / pre-step bootstrap block. The Hermes rule (which
-      // the core's SimHost ports) counts DISTINCT user-role markers, and the
-      // bootstrap block on DSH v1 is a SECTION (system prompt) — so a
-      // bootstrap id repeated on a user message would only be there via a
-      // live block. Count every distinct user-role marker (Hermes parity).
       { role: 'user', content: [{ type: 'text', text: '<!-- ct-fact:live1 --> <!-- ct-fact:live2 -->' }] },
       { role: 'tool', content: [{ type: 'text', text: '<!-- ct-fact:toolonly -->' }] },
     ]);
@@ -155,7 +148,6 @@ describe('ledger rebuild (m5: session-log source of truth)', () => {
     // newest MESSAGE first: the tool trailer is the newest message, then the
     // user message; memo bootstrap ids append after the log scan.
     expect(ledger.idsMostRecentFirst).toEqual(['toolonly', 'live1', 'live2', 'boot1']);
-    expect(ledger.liveDeliveredCount).toBe(2);
     expect(ledger.knownBootstrap).toBe(true);
   });
 
@@ -163,7 +155,6 @@ describe('ledger rebuild (m5: session-log source of truth)', () => {
     const { a } = adapter();
     const ledger = a.rebuildLedger({ id: 'never-seen' });
     expect(ledger.idsMostRecentFirst).toEqual([]);
-    expect(ledger.liveDeliveredCount).toBe(0);
     expect(ledger.knownBootstrap).toBe(false);
     expect(a.restored({ id: 'never-seen' })).toBe(false);
     expect(a.deliveryEnabled({ id: 'never-seen' })).toBe(true);

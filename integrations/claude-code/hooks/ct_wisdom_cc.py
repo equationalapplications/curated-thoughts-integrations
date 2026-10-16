@@ -488,9 +488,9 @@ def _user_prompt_submit(payload, env):
     if not capable:
         return _skip(sid, "probe_timeout" if capable is None else "capability_missing")
 
-    live_used = len(store["live_ids"])
-    max_n = 0 if live_used >= ct_wisdom_live.LIVE_MAX_PER_SESSION else ct_wisdom_live.LIVE_MAX_PER_TURN
-    result, rclass = ct_wisdom_live.match_wisdom(path, query, max_n, exclude_of(store))
+    result, rclass = ct_wisdom_live.match_wisdom(
+        path, query, ct_wisdom_live.LIVE_MAX_PER_TURN, exclude_of(store)
+    )
     if rclass is not None:
         if rclass in ("timeout", "exit"):
             breaker.record_failure()

@@ -125,16 +125,14 @@ describe('ledger (LD5/LD6, AC 3)', () => {
     });
     const l = await a.rebuildLedgerAsync({ id: 's' });
     expect(l.idsMostRecentFirst).toEqual(['new', 't1', 'old']);
-    expect(l.liveDeliveredCount).toBe(2);
   });
 
-  it('bootstrap ids and tool trailers do not count toward the live budget', async () => {
+  it('bootstrap ids and tool trailers join the ledger', async () => {
     const { a } = make({
       rows: { s: [userRow(text('hi'), bootPart(['b1', 'b2'])), asstRow(toolPart('<!-- ct-fact:t9 -->'))] },
     });
     const l = await a.rebuildLedgerAsync({ id: 's' });
     expect(new Set(l.idsMostRecentFirst)).toEqual(new Set(['b1', 'b2', 't9']));
-    expect(l.liveDeliveredCount).toBe(0);
     expect(l.knownBootstrap).toBe(true);
   });
 
@@ -144,15 +142,13 @@ describe('ledger (LD5/LD6, AC 3)', () => {
     expect(a.bootstrapMemo['s']!.ids).toEqual(['b1', 'b2']);
     const l = await a.rebuildLedgerAsync({ id: 's' });
     expect(l.has('b1') && l.has('b2')).toBe(true);
-    expect(l.liveDeliveredCount).toBe(0);
   });
 
-  it('ids delivered by this process count even before the host persists them', async () => {
+  it('ids delivered by this process join the ledger even before the host persists them', async () => {
     const { a } = make();
     a.noteDelivered({ id: 's' }, ['d1']);
     const l = await a.rebuildLedgerAsync({ id: 's' });
     expect(l.idsMostRecentFirst[0]).toBe('d1');
-    expect(l.liveDeliveredCount).toBe(1);
     // noteDelivered never writes into the bootstrap memo
     expect(a.bootstrapMemo['s']).toBeUndefined();
   });
