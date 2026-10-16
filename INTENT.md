@@ -24,24 +24,35 @@ files. This repo holds the **integrations**: thin plugins for agent harnesses
 the agent automatically, so it doesn't have to remember to ask.
 
 The goal is **Intuitive Wisdom**: the agent *knows the right fact at the moment
-it is relevant*. That is a property, not a mechanism. We reach it in two steps:
+it is relevant*. That is a property, not a mechanism. We reach it in three steps:
 
 - **At session start (v1).** Before the conversation begins, recall a few facts
   and add them to the system prompt once. There is no conversation yet, so
   relevance is a guess.
-- **Mid-session (live delivery).** On each user message, ask CT which facts are
-  relevant *now* and append the new ones to that turn. This is the end state.
-  The Hermes design is in
+- **On each user message (live delivery).** Ask CT which facts are relevant
+  *now* and append the new ones to that turn. The Hermes design is in
   `docs/superpowers/specs/2026-10-06-intuitive-wisdom-live-delivery-design.md`;
   other ports copy it.
+- **During autonomous work.** An agent working on its own between user
+  messages (reading files, running commands, editing code) must also be able
+  to trigger the inclusion of relevant facts, keyed to what it is doing at
+  that moment. Without this, a long autonomous task only ever sees the facts
+  that matched the user's opening request. This is the end state. The same
+  rules apply: at most once in context, never in the system prompt,
+  relevance decided by CT, and quiet failure.
 
-| Integration | Session-start injection | Live delivery |
-|---|---|---|
-| Hermes | Built (0.3.0) | Built (0.4.0, draft PR #35) |
-| DeepSeek Harness | Built (0.3.0) | Planned |
-| OpenCode | Not yet (0.1.0 registers the sidecar only) | Planned |
-| Claude Code | Not yet (PR #23 open) | Planned |
-| OpenClaw | Planned | Planned |
+| Integration | Session-start injection | Live delivery (user message) | Autonomous-work delivery |
+|---|---|---|---|
+| Hermes | Built (0.3.0) | Built (0.4.0) | Planned |
+| DeepSeek Harness | Built (0.3.0) | Built (0.4.0) | Planned |
+| OpenCode | Built (0.2.0) | Built (0.2.0) | Planned |
+| Claude Code | Built (0.2.0) | Built (0.2.0) | Planned |
+| OpenClaw | Built (0.1.0) | Built (0.1.0) | Planned |
+
+*Autonomous-work delivery* is decided but not designed. The open questions
+are which host events can trigger it, what text to send CT as the query, how
+often to ask, and which append channel is cache-safe mid-task on each host.
+A Step-0 feasibility investigation per host comes before the spec.
 
 ## Glossary
 
@@ -53,6 +64,9 @@ it is relevant*. That is a property, not a mechanism. We reach it in two steps:
 - **Block** — the section of injected facts added to the system prompt at
   session start.
 - **Live delivery** — facts appended to a user turn mid-session.
+- **Autonomous-work delivery** — facts delivered between user messages,
+  triggered by what the agent is doing (a step, tool call, or file it works
+  on) rather than by a new user message.
 - **Ledger** — the list of fact ids already in the session's context. It is
   rebuilt every turn from `<!-- ct-fact:<id> -->` markers in the transcript, so
   the plugin stores nothing.
