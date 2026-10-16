@@ -111,6 +111,14 @@ receive live delivery. Host-specific gates:
   and corrections for superseded facts stay empty until CT's Librarian
   applies supersessions. Both are CT-side; the integrations are ready for
   them.
+- **The session-start block has no provenance labels and may include a
+  superseded fact,** because `ct recall` returns neither provenance nor
+  supersession status. Live delivery (`ct wisdom match`) has both. Closing
+  this needs a CT change first.
+- **Wisdom is only requested on user messages.** An agent working
+  autonomously between messages gets no new facts until the next message.
+  Autonomous-work delivery is the intended end state (see
+  [INTENT.md](INTENT.md)) and is not built yet.
 - The per-turn limits above cap how much arrives on one turn, even when
   more is relevant.
 
