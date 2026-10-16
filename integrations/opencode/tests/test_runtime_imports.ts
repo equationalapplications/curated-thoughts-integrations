@@ -55,7 +55,7 @@ describe('runtime imports', () => {
   });
 
   it('src/*.ts has only node: and relative runtime imports', () => {
-    const files = filesIn(join(PKG_ROOT, 'src'), '.ts');
+    const files = [...filesIn(join(PKG_ROOT, 'src'), '.ts'), ...filesIn(join(PKG_ROOT, 'src', 'wisdom-live'), '.ts')];
     expect(files.length).toBeGreaterThan(0);
     for (const f of files) {
       const bad = runtimeSpecifiers(readFileSync(f, 'utf8')).filter((s) => !isAllowedInSource(s));

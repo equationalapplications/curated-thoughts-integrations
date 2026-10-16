@@ -514,6 +514,27 @@ export class OpenCodeWisdomAdapter implements HostAdapter {
     return makeLedger(ordered, live.size, bootSeen || memo !== undefined);
   }
 
+  /**
+   * N3 view (m2): fresh rebuild ∪ the current turn cache (same-turn ids that
+   * may not be persisted yet, e.g. an earlier recall in the same step). Ids
+   * only ever join the cache, so a stale cache can suppress, never duplicate.
+   */
+  async refreshForToolResult(session: SessionRef): Promise<Ledger> {
+    const prior = this.turns.get(session.id);
+    const fresh = await this.rebuildLedgerAsync(session);
+    if (prior === undefined) return fresh;
+    const ids = [...fresh.idsMostRecentFirst];
+    const seen = new Set(ids);
+    for (const id of prior.idsMostRecentFirst) if (!seen.has(id)) ids.push(id);
+    const merged = makeLedger(
+      ids,
+      Math.max(fresh.liveDeliveredCount, prior.liveDeliveredCount),
+      fresh.knownBootstrap || prior.knownBootstrap,
+    );
+    lruSet(this.turns, session.id, merged);
+    return merged;
+  }
+
   /** Sync HostAdapter entry: the turn cache (every call path refreshes it first). */
   rebuildLedger(session: SessionRef): Ledger {
     return this.turns.get(session.id) ?? this.buildLedger(session.id, []);
