@@ -4,6 +4,8 @@
  * all policy (budgets, breaker, rendering, sanitize, corrections rule).
  */
 
+import type { VerboseTurn } from './verbose.js';
+
 /** A wiki fact as returned by `ct wisdom match` (subset the core needs). */
 export interface FactEntry {
   id: string;
@@ -25,6 +27,11 @@ export interface Correction {
 export interface WisdomMatchResult {
   entries: FactEntry[];
   corrections: Correction[];
+  /**
+   * CT's `gate` field (`semantic-v1:<model>` or `uncalibrated`), kept for
+   * verbose mode only. Rendering never reads it (INTENT rule 8).
+   */
+  gate?: string;
 }
 
 /** Outcome class of a subprocess attempt — drives breaker vs cache reset. */
@@ -111,6 +118,14 @@ export interface HostAdapter {
 
   /** Per-host delivered-id bookkeeping (A.1); called after a live delivery. */
   noteDelivered(session: SessionRef, ids: string[]): void;
+
+  /**
+   * Verbose mode (spec 2026-10-16-wisdom-verbose-mode-design.md): when set,
+   * the engine reports every exit of onUserTurn here. Adapters set it only
+   * when CT_WISDOM_VERBOSE is on (createVerboseRecorder). It must never feed
+   * back into delivery; the engine swallows anything it throws.
+   */
+  recordVerbose?(turn: VerboseTurn): void;
 }
 
 /** Minimal session handle the host supplies on every hook. */

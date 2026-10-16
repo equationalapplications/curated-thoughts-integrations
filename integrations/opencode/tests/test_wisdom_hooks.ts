@@ -41,7 +41,7 @@ function fact(id: string, extra: Record<string, unknown> = {}) {
   return { id, title: `Title ${id}`, text: `Body of ${id}`, ...extra };
 }
 
-async function makeHost(env: Record<string, string> = {}): Promise<Host> {
+async function makeHost(env: Record<string, string> = {}, extraClient: Record<string, unknown> = {}): Promise<Host> {
   const rows: Record<string, Row[]> = {};
   const sessions: Record<string, { parentID?: string } | null> = {};
   const log = join(tmp, `ct-log-${Math.random().toString(36).slice(2)}.jsonl`);
@@ -58,6 +58,7 @@ async function makeHost(env: Record<string, string> = {}): Promise<Host> {
           ? { error: { name: 'NotFound' }, data: undefined }
           : { data: { id: path.id, ...(sessions[path.id] ?? {}) } },
     },
+    ...extraClient,
   };
   const hooks = await CuratedThoughts({ directory: '/work', client } as unknown as PluginInput, undefined);
   const host: Host = {
@@ -327,5 +328,66 @@ describe.skipIf(!posix)('tool.execute.after — N3 on the MCP CallToolResult (LD
       output as unknown as Parameters<NonNullable<Hooks['tool.execute.after']>>[1],
     );
     expect(JSON.parse(output.content[0]!.text.split('\n')[0]!).wiki_entries[0].in_context).toBe(true);
+  });
+});
+
+describe.skipIf(!posix)('verbose mode (spec 2026-10-16-wisdom-verbose-mode-design.md)', () => {
+  const SECRET = 'sk-oc-SECRET-never-logged-3131';
+  // Part and message ids are random/sequential per run; every other byte must match.
+  const strip = (parts: Array<Record<string, unknown>>) => parts.map(({ id: _id, messageID: _m, ...rest }) => rest);
+
+  async function session(env: Record<string, string>, toasts: unknown[] | null) {
+    const tui = toasts === null ? {} : {
+      tui: { showToast: async (o: unknown) => { toasts.push(o); return { data: true }; } },
+    };
+    // CT ignores --exclude here, so the second turn's matches are all in context.
+    const h = await makeHost({ CT_STUB_MATCH: JSON.stringify([fact('l1'), fact('l2')]), CT_STUB_IGNORE_EXCLUDE: '1', ...env }, tui);
+    const first = await h.turn('ses_v', 'how do I deploy?');
+    const second = await h.turn('ses_v', 'and again?'); // l1/l2 now in context -> deduped
+    return [strip(first), strip(second)];
+  }
+
+  it('off: parts identical to a host without the feature, no toast, no log', async () => {
+    const toasts: unknown[] = [];
+    const xdg = join(tmp, 'xdg');
+    const off = await session({ CT_WISDOM_VERBOSE: '0', XDG_DATA_HOME: xdg }, toasts);
+    _resetWisdomStateForTests();
+    const bare = await session({ XDG_DATA_HOME: xdg }, null);
+    expect(off).toEqual(bare);
+    expect(toasts).toEqual([]);
+    expect(existsSync(join(xdg, 'opencode', 'log', 'ct-wisdom-verbose.jsonl'))).toBe(false);
+  });
+
+  it('on: parts identical, a toast per turn, records under $XDG_DATA_HOME/opencode/log', async () => {
+    const xdg = join(tmp, 'xdg');
+    const off = await session({ XDG_DATA_HOME: xdg }, null);
+    _resetWisdomStateForTests();
+    const toasts: Array<{ body: { message: string; variant: string } }> = [];
+    const on = await session({ CT_WISDOM_VERBOSE: '1', XDG_DATA_HOME: xdg, OPENAI_API_KEY: SECRET }, toasts as unknown[]);
+    expect(on).toEqual(off);
+    expect(toasts).toHaveLength(2);
+    expect(toasts[0]!.body.message).toMatch(/^delivered 2 facts \(\d+ chars\): Title l1; Title l2$/);
+    expect(toasts[1]!.body.message).toBe('nothing delivered (deduped)');
+    const path = join(xdg, 'opencode', 'log', 'ct-wisdom-verbose.jsonl');
+    const raw = readFileSync(path, 'utf8');
+    const lines = raw.trim().split('\n').map((l) => JSON.parse(l) as Record<string, unknown>);
+    expect(lines.map((l) => [l.host, l.channel, l.event, l.reason])).toEqual([
+      ['opencode', 'chat.message', 'delivery', null],
+      ['opencode', 'chat.message', 'skip', 'deduped'],
+    ]);
+    expect(raw).not.toContain(SECRET);
+  });
+
+  it('a rejecting toast never changes the parts', async () => {
+    const xdg = join(tmp, 'xdg');
+    const off = await session({ XDG_DATA_HOME: xdg }, null);
+    _resetWisdomStateForTests();
+    const h = await makeHost(
+      { CT_STUB_MATCH: JSON.stringify([fact('l1'), fact('l2')]), CT_STUB_IGNORE_EXCLUDE: '1', CT_WISDOM_VERBOSE: '1', CT_WISDOM_VERBOSE_LOG: join(tmp, 'f', 'x') },
+      { tui: { showToast: async () => { throw new Error('no tui'); } } },
+    );
+    const first = await h.turn('ses_v', 'how do I deploy?');
+    const second = await h.turn('ses_v', 'and again?');
+    expect([strip(first), strip(second)]).toEqual(off);
   });
 });

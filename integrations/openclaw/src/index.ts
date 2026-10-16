@@ -42,6 +42,7 @@ import { OpenClawWisdomAdapter, isRecallToolName } from './wisdom/adapter.js';
 import { BootstrapMemo } from './wisdom/bootstrap.js';
 import { CtLocator } from './wisdom/discover.js';
 import { nodeSpawnFn } from './wisdom/spawn.js';
+import { openclawVerboseRecorder } from './wisdom/verbose.js';
 
 export const PLUGIN_ID = 'curated-thoughts';
 /** First-turn worst case is ~14 s (spec "Budgets"); the default is 15 s. */
@@ -108,7 +109,11 @@ export function createPlugin(deps: PluginDeps = {}) {
         usable: deps.usable,
         now: deps.now,
       });
-      const adapter = new OpenClawWisdomAdapter({ spawnFn, locator });
+      const adapter = new OpenClawWisdomAdapter({
+        spawnFn,
+        locator,
+        recordVerbose: openclawVerboseRecorder(api, deps.env ?? process.env),
+      });
       const breaker = new Breaker(undefined, undefined, deps.now);
       const bootstrap = new BootstrapMemo({
         locate: () => locator.locate(),

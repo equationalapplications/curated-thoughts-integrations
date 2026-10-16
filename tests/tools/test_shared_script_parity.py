@@ -49,6 +49,10 @@ IDENTICAL = (
     "ct_ledger.py",
     "ct_wisdom.py",
     "ct_wisdom_live.py",
+    # Verbose mode: the recorder and its log reader (spec 2026-10-16-wisdom-
+    # verbose-mode-design.md, D6/D7).
+    "ct_wisdom_verbose.py",
+    "ct_wisdom_log.py",
 )
 REGIONED = {
     "ct_doctor.py": ("module-docstring", "harness-config", "registration-check"),

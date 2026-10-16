@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+## 0.2.0 — 2026-10-16
+
+- Added: Verbose mode for Intuitive Wisdom (opt-in, off by default). With
+  `CT_WISDOM_VERBOSE=1`, every live-delivery decision is recorded: the
+  delivered block with its fact ids, titles, provenance and CT's scores, or
+  the reason nothing was delivered (`deduped`, `no_match`,
+  `gate_uncalibrated`, `budget`, `breaker_open`, a timeout, ...). It goes to a
+  local JSON Lines log (`CT_WISDOM_VERBOSE_LOG` overrides the path) and to a
+  channel the user sees and the model does not. Verbose output never changes
+  the system prompt, the delivered block or any tool result; with verbose off
+  the hooks behave and return exactly as before (tests compare both).
+  Spec: `docs/superpowers/specs/2026-10-16-wisdom-verbose-mode-design.md`.
+  On OpenClaw the notice goes to the plugin logger (`api.logger.info`, so
+  `openclaw logs --follow` shows it). No in-chat surface is used, because
+  each one would reach the model. The log is
+  `$OPENCLAW_STATE_DIR/logs/ct-wisdom-verbose.jsonl` (default
+  `~/.openclaw/logs/`). Reader:
+  `node lib/ct-wisdom-core/cli/ct-wisdom-log.js --host openclaw` from the
+  installed plugin directory.
+
 ## 0.1.1 — 2026-10-16
 
 - Changed: Intuitive Wisdom live delivery has no per-session cap. The

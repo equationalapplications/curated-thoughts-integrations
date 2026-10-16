@@ -30,6 +30,7 @@ from collections import OrderedDict
 
 import ct_ledger
 import ct_wisdom
+import ct_wisdom_verbose
 
 logger = logging.getLogger(__name__)
 
@@ -99,7 +100,7 @@ def _normalize_item(item):
     text = item.get("text")
     supersedes = item.get("supersedes")
     provenance = item.get("provenance")
-    return {
+    out = {
         "id": fact_id,
         "title": title if isinstance(title, str) else "",
         "text": text if isinstance(text, str) else "",
@@ -108,6 +109,9 @@ def _normalize_item(item):
         "provenance": provenance
         if isinstance(provenance, str) and provenance.strip() else None,
     }
+    if isinstance(item.get("score"), (int, float)):  # kept for verbose mode only;
+        out["score"] = item["score"]  # render never reads it (INTENT rule 8)
+    return out
 
 
 def match_wisdom(ct_path, text, max_n, exclude):
@@ -147,6 +151,8 @@ def match_wisdom(ct_path, text, max_n, exclude):
         if not isinstance(raw, list):
             return None, "parse_error"
         result[key] = [n for n in (_normalize_item(i) for i in raw) if n is not None]
+    if isinstance(data.get("gate"), str):  # verbose mode only; never rendered
+        result["gate"] = data["gate"]
     return result, None
 
 
@@ -323,9 +329,10 @@ def render_live_block(entries, corrections, ledger):
 # ---------------------------------------------------------------------------
 
 
-def _skip(session_id, failure_class):
+def _skip(session_id, failure_class, **detail):
     logger.debug("wisdom-live: skip session=%s class=%s",
                  session_id or "<empty>", failure_class)
+    ct_wisdom_verbose.record_non_delivery(dict(detail, host="hermes", channel="pre_llm_call", session_id=session_id, reason=failure_class))
     return None
 
 
@@ -382,7 +389,8 @@ def _pre_llm_call(session_id, user_message, history, is_first_turn):
 
     block, delivered = render_live_block(result["entries"], result["corrections"], ledger)
     if not block:
-        return _skip(session_id, "zero_hits")
+        return _skip(session_id, "zero_hits", query=query, result=result, ledger=ledger)
     ct_ledger.LEDGER_CACHE.add(session_id, delivered)
     logger.debug("wisdom-live: deliver session=%s ids=%s", session_id, ",".join(delivered))
+    ct_wisdom_verbose.record_delivery({"host": "hermes", "channel": "pre_llm_call", "session_id": session_id, "query": query, "result": result, "ledger": ledger, "delivered": list(delivered), "block": block})
     return {"context": block}

@@ -114,6 +114,17 @@ user message. Re-run it when the pin moves:
 ZAI_API_KEY=… tests/e2e/run.sh        # needs node >= 24.16 and python3
 ```
 
+## Verbose mode
+
+Set `CT_WISDOM_VERBOSE=1` in the gateway's environment to log each turn's
+delivery decision through the plugin logger, so `openclaw logs --follow`
+shows what was delivered or why nothing was. No chat surface is used: each
+one would reach the model. Each decision is also appended to
+`$OPENCLAW_STATE_DIR/logs/ct-wisdom-verbose.jsonl` (default
+`~/.openclaw/logs/`; override: `CT_WISDOM_VERBOSE_LOG`). Read it with
+`node lib/ct-wisdom-core/cli/ct-wisdom-log.js --host openclaw [-n 20] [-f] [--block]`
+from the installed plugin directory. See the [spec](../../docs/superpowers/specs/2026-10-16-wisdom-verbose-mode-design.md).
+
 ## Development
 
 ```bash

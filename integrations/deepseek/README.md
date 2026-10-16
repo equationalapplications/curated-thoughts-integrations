@@ -80,6 +80,16 @@ Needs the standalone `ct` CLI from Curated Thoughts ≥ 3.3.0
   `role: "user"`), so a session that received a block can be continued; in
   0.4.0 DSH rejected such a session on replay.
 
+### Verbose mode
+
+Set `CT_WISDOM_VERBOSE=1` before starting `dsh` to see each turn's delivery
+decision on the plugin's `curated-thoughts` logger (never in the session),
+with the delivered block or the reason nothing was delivered. Each decision
+is also appended to `$DSH_HOME/logs/ct-wisdom-verbose.jsonl` (default
+`~/.dsh/logs/`; override: `CT_WISDOM_VERBOSE_LOG`). Read it with
+`node node_modules/@equational-applications/ct-wisdom-core/cli/ct-wisdom-log.js --host deepseek [-n 20] [-f] [--block]`
+from the installed plugin directory. See the [spec](../../docs/superpowers/specs/2026-10-16-wisdom-verbose-mode-design.md).
+
 ## Install
 
 From the release tarball (what `scripts/install.sh` automates):

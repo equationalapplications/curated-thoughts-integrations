@@ -47,6 +47,7 @@ import ct_env  # noqa: E402
 import ct_ledger  # noqa: E402
 import ct_wisdom  # noqa: E402
 import ct_wisdom_live  # noqa: E402
+import ct_wisdom_verbose  # noqa: E402
 
 try:  # POSIX
     import fcntl
@@ -330,8 +331,9 @@ def is_genuine_user_turn(payload):
     return _ENVELOPE_RE.match(prompt.lstrip()) is None
 
 
-def _skip(session_id, failure_class):
+def _skip(session_id, failure_class, env=None, **detail):
     logger.debug("wisdom-cc: skip session=%s class=%s", session_id or "<empty>", failure_class)
+    ct_wisdom_verbose.record_non_delivery(dict(detail, host="claude-code", channel="UserPromptSubmit", session_id=session_id, reason=failure_class), env=ct_env.merged_env(env))
     return None
 
 
@@ -463,30 +465,29 @@ def user_prompt_submit(payload, env=None):
 
 def _user_prompt_submit(payload, env):
     if not is_genuine_user_turn(payload):
-        return _skip(payload.get("session_id") if isinstance(payload, dict) else None,
-                     "provenance")
+        return _skip(payload.get("session_id") if isinstance(payload, dict) else None, "provenance", env)
     sid = payload["session_id"]
     view = ct_env.merged_env(env)
     ddir = data_dir(view)
     if ddir is None:
-        return _skip(sid, "no_data_dir")
+        return _skip(sid, "no_data_dir", env)
     store = load_store(ddir, sid)
     if store is None:
-        return _skip(sid, "no_store")
+        return _skip(sid, "no_store", env)
     if store["state"] != "on":  # latching OFF switch, before anything else
-        return _skip(sid, "delivery_off")
+        return _skip(sid, "delivery_off", env)
     breaker = PersistedBreaker(breaker_path(ddir))
     if breaker.is_open():
-        return _skip(sid, "breaker_open")
+        return _skip(sid, "breaker_open", env)
     query = ct_wisdom_live.user_text(payload["prompt"])
     if not query:
-        return _skip(sid, "empty_query")
+        return _skip(sid, "empty_query", env)
     path, dclass = ct_wisdom.discover_ct(env=view)
     if path is None:
-        return _skip(sid, dclass or "discovery_miss")
+        return _skip(sid, dclass or "discovery_miss", env)
     capable = ct_wisdom_live.has_match_capability(path)
     if not capable:
-        return _skip(sid, "probe_timeout" if capable is None else "capability_missing")
+        return _skip(sid, "probe_timeout" if capable is None else "capability_missing", env)
 
     result, rclass = ct_wisdom_live.match_wisdom(
         path, query, ct_wisdom_live.LIVE_MAX_PER_TURN, exclude_of(store)
@@ -497,7 +498,7 @@ def _user_prompt_submit(payload, env):
         elif rclass == "spawn":
             ct_wisdom.reset_discovery_cache()
             ct_wisdom_live.reset_capability_cache()
-        return _skip(sid, rclass)
+        return _skip(sid, rclass, env)
     breaker.record_success()
 
     # Re-read under the lock: a parallel PostToolUse may have noted ids while
@@ -506,14 +507,15 @@ def _user_prompt_submit(payload, env):
     with locked(session_path(ddir, sid)):
         current = load_store(ddir, sid)
         if current is None or current["state"] != "on":
-            return _skip(sid, "store_changed")
+            return _skip(sid, "store_changed", env)
         block, delivered = ct_wisdom_live.render_live_block(
             result["entries"], result["corrections"], ledger_of(current)
         )
         if not block:
-            return _skip(sid, "zero_hits")
+            return _skip(sid, "zero_hits", env, query=query, result=result, ledger=ledger_of(current))
         save_store(ddir, sid, note_ids(current, "live_ids", delivered))
     logger.debug("wisdom-cc: deliver session=%s ids=%s", sid, ",".join(delivered))
+    ct_wisdom_verbose.record_delivery({"host": "claude-code", "channel": "UserPromptSubmit", "session_id": sid, "query": query, "result": result, "ledger": ledger_of(current) - set(delivered), "delivered": list(delivered), "block": block}, env=view)
     return {"hookSpecificOutput": {"hookEventName": "UserPromptSubmit",
                                    "additionalContext": block}}
 
@@ -633,13 +635,32 @@ def handle(payload, env=None):
     return None
 
 
+def respond(payload, env=None):
+    """handle() plus verbose mode: with CT_WISDOM_VERBOSE on, the notices the
+    recorder produced become the top-level `systemMessage`, which Claude Code
+    shows to the user and never sends to the model (verbose-mode spec D3).
+    The directive's `hookSpecificOutput` is never touched. Never raises."""
+    notices = []
+    previous = ct_wisdom_verbose.set_sink(notices.append)
+    try:
+        directive = handle(payload, env)
+    finally:
+        ct_wisdom_verbose.set_sink(previous)
+    if not notices:
+        return directive
+    try:
+        return dict(directive or {}, systemMessage="\n\n".join(notices))
+    except Exception:
+        return directive
+
+
 def main():
     try:
         raw = sys.stdin.read() if not sys.stdin.isatty() else ""
         payload = json.loads(raw) if raw.strip() else None
     except Exception:
         return
-    directive = handle(payload)
+    directive = respond(payload)
     if directive:
         try:
             sys.stdout.write(json.dumps(directive, ensure_ascii=False) + "\n")
