@@ -9,7 +9,11 @@
 #   4. `opencode mcp list` shows the sidecar connected;
 #   5. (only with ZAI_API_KEY) a live model calls a Curated Thoughts tool
 #      through OpenCode and gets a real sidecar result;
-#   6. re-running the installer is a no-op.
+#   6. (only with ZAI_API_KEY) Intuitive Wisdom live delivery over
+#      chat.message with a test-only ct stub: bootstrap + live fact reach the
+#      live model, persist as synthetic parts, and are never redelivered by a
+#      second (--continue) process;
+#   7. re-running the installer is a no-op.
 #
 # No embedding backend runs here (no Ollama, no fastembed download): the live
 # call uses curated_proposals_list, which needs neither.
@@ -115,6 +119,72 @@ else
   check 'model called curated_proposals_list via OpenCode' called
   check 'the tool call completed' completed
   if [ "$run_rc" -ne 0 ]; then tail -20 "$OUT/run.err" | sed 's/^/      /'; fi
+fi
+
+# ---------------------------------------------------------------------------
+section "live Intuitive Wisdom via chat.message ($MODEL)"
+# Parent spec AC 10 / leg spec LD12. A test-only `ct` stub (never shipped;
+# tests/fixtures/ct-stub.mjs) stands in for the CT CLI, so no embedding
+# backend is needed: `recall` returns one bootstrap fact, `wisdom match` one
+# live fact — and it IGNORES --exclude, so only the plugin's own ledger can
+# keep turn 2 from redelivering. Turn 2 runs in a NEW process (--continue):
+# the model must still know both facts (persisted parts reached it), and the
+# session must hold exactly one copy of each.
+if [ -z "${ZAI_API_KEY:-}" ]; then
+  echo 'SKIP  ZAI_API_KEY not set (AC 10 pending)'
+else
+  mkdir -p "$HOME/.local/bin"
+  cp "$HOME/dist/ct-stub.mjs" "$HOME/.local/bin/ct"
+  chmod 755 "$HOME/.local/bin/ct"
+  export PATH="$HOME/.local/bin:$PATH"
+  export CT_STUB_LOG="$OUT/ct-stub.jsonl"
+  export CT_STUB_RECALL='[{"id":"e2e-boot-depot","title":"E2E depot city","text":"The e2e fleet depot is in Lisbon."}]'
+  export CT_STUB_MATCH='[{"id":"e2e-fact-tire","title":"E2E fleet tire pressure","text":"The e2e fleet tire pressure is 42 psi."}]'
+  export CT_STUB_IGNORE_EXCLUDE=1
+  : >"$CT_STUB_LOG"
+  check 'ct stub answers the identity probe' sh -c "ct --help | grep -q 'Curated Thoughts'"
+
+  OPENCODE_CONFIG_CONTENT=$(cat "$HOME/dist/zai-provider.json") \
+    timeout 300 opencode run --format json -m "$MODEL" \
+    'What is the e2e fleet tire pressure? Answer from the curated memory attached to this message, in one short line.' \
+    >"$OUT/wisdom1.jsonl" 2>"$OUT/wisdom1.err"
+  w1_rc=$?
+  check "turn 1 exits 0 (rc=$w1_rc)" test "$w1_rc" -eq 0
+  answer1=$(jq -r 'select(.type == "text") | .part.text' "$OUT/wisdom1.jsonl" 2>/dev/null | tr '\n' ' ')
+  echo "      turn 1 answer: ${answer1:0:200}"
+  check 'turn 1: the model answers from the delivered fact (42)' grep -q '42' <<<"$answer1"
+  SID=$(jq -r '.part.sessionID // .sessionID // empty' "$OUT/wisdom1.jsonl" 2>/dev/null | head -n 1)
+  check 'turn 1: session id captured' test -n "$SID"
+
+  OPENCODE_CONFIG_CONTENT=$(cat "$HOME/dist/zai-provider.json") \
+    timeout 300 opencode run --continue --format json -m "$MODEL" \
+    'Which city is the e2e fleet depot in, and what is the tire pressure? One short line.' \
+    >"$OUT/wisdom2.jsonl" 2>"$OUT/wisdom2.err"
+  w2_rc=$?
+  check "turn 2 (new process, --continue) exits 0 (rc=$w2_rc)" test "$w2_rc" -eq 0
+  answer2=$(jq -r 'select(.type == "text") | .part.text' "$OUT/wisdom2.jsonl" 2>/dev/null | tr '\n' ' ')
+  echo "      turn 2 answer: ${answer2:0:200}"
+  check 'turn 2: bootstrap fact reached the model from persisted history (Lisbon)' grep -qi 'lisbon' <<<"$answer2"
+  check 'turn 2: live fact still known without redelivery (42)' grep -q '42' <<<"$answer2"
+
+  opencode export "$SID" >"$OUT/wisdom-export.json" 2>"$OUT/wisdom-export.err"
+  wisdom_parts() { # wisdom_parts <marker line> → count of our persisted parts
+    jq --arg m "$1" '[.messages[] | select(.info.role == "user") | .parts[]
+      | select(.type == "text" and .synthetic == true and ((.text // "") | split("\n") | index($m)))] | length' \
+      "$OUT/wisdom-export.json"
+  }
+  live_n=$(wisdom_parts 'source.kind: curated-thoughts/wisdom')
+  boot_n=$(wisdom_parts 'source.kind: curated-thoughts/wisdom-bootstrap')
+  echo "      persisted parts: live=$live_n bootstrap=$boot_n"
+  check 'exactly one live delivery part persisted (no redelivery on turn 2)' test "$live_n" = 1
+  check 'exactly one bootstrap part persisted (first turn only)' test "$boot_n" = 1
+  tire_n=$(jq '[.messages[] | select(.info.role == "user") | .parts[] | select(.synthetic == true) | .text // "" | scan("ct-fact:e2e-fact-tire")] | length' "$OUT/wisdom-export.json")
+  check "the live fact id appears once in persisted user parts (n=$tire_n)" test "$tire_n" = 1
+  check 'our parts carry host-format prt_ ids' sh -c "jq -e '[.messages[].parts[] | select(.synthetic == true and ((.text // \"\") | test(\"source.kind: curated-thoughts/wisdom\"))) | .id | test(\"^prt_[0-9a-f]{12}[0-9A-Za-z]{14}\$\")] | all' '$OUT/wisdom-export.json' >/dev/null"
+  match_n=$(grep -c '"wisdom","match","--json"' "$CT_STUB_LOG")
+  check "ct wisdom match called once per turn (n=$match_n)" test "$match_n" = 2
+  check 'turn 2 excluded the delivered ids' sh -c "grep '\"wisdom\",\"match\",\"--json\"' '$CT_STUB_LOG' | tail -n 1 | grep -q 'exclude=e2e-fact-tire' && grep '\"wisdom\",\"match\",\"--json\"' '$CT_STUB_LOG' | tail -n 1 | grep -q 'exclude=e2e-boot-depot'"
+  if [ "$w1_rc" -ne 0 ] || [ "$w2_rc" -ne 0 ]; then tail -20 "$OUT/wisdom1.err" "$OUT/wisdom2.err" | sed 's/^/      /'; fi
 fi
 
 # ---------------------------------------------------------------------------
