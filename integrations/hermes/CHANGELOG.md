@@ -6,6 +6,26 @@ format below is load-bearing: `## <version> — <date>`.
 
 ## Unreleased
 
+## 0.4.2 — 2026-10-16
+
+- Changed: the spawn-time env merge moved from `ct_doctor._merged_env` into
+  `ct_env.merged_env(env=None)`, the single source of truth (issue #32).
+  Semantics are unchanged: `os.environ` overlaid with `env`; a `None` value
+  means "not specified" (ambient shows through); `""` suppresses the ambient
+  value. `ct_doctor._merged_env` is now a thin delegate.
+- Changed: `ct_status.snapshot(env=...)` (and `context_section(env=...)`)
+  now MERGE `env` over `os.environ` instead of replacing the view, matching
+  the doctor (issue #32). No shipped caller passes `env`, so live behavior
+  is unchanged; an env-passing caller now keeps the ambient HOME/PATH.
+- Changed: `ct_doctor.run_checks` accepts an optional `cwd=` (registration
+  context, unused by Hermes's check 7), and check 7 is reached through a
+  `_check_registration` adapter. Harness-specific doctor code is now
+  delimited by `# >>> harness-specific: <name>` markers so the shared-script
+  parity gate (`tests/tools/test_shared_script_parity.py`, issue #33) can
+  hold the Claude Code copy to the rest verbatim.
+- Fixed (packaging): release tarballs no longer pick up `.ruff_cache/` and
+  other tool caches — the packager now filters them centrally (issue #33).
+
 ## 0.4.1 — YYYY-MM-DD
 
 - Fixed: `scripts/install.sh` honors a pre-set `HERMES_HOME` instead of

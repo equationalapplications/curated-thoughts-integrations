@@ -60,6 +60,10 @@ scope; they are counted separately as `null_ref_count` for visibility only.
 
 Read-only by construction: the database is opened through a `mode=ro` URI and
 no statement other than SELECT is ever issued. Stdlib only.
+
+Shared script: integrations/hermes/scripts and integrations/claude-code/scripts
+carry byte-identical copies. Change both together;
+tests/tools/test_shared_script_parity.py fails on any drift.
 """
 
 from __future__ import annotations

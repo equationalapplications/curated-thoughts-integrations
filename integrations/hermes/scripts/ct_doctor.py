@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# >>> harness-specific: module-docstring
 """ct_doctor.py — install/health doctor for the Curated Thoughts Hermes plugin.
 
 Part of curated-thoughts-integrations (MIT). Python 3 standard library only.
@@ -14,10 +15,16 @@ Usage:
 
 Exit codes: 0 = all PASS, 1 = any FAIL, 2 = no FAIL but at least one WARN.
 
+Shared script: integrations/claude-code/scripts/ct_doctor.py carries the
+same code outside the `harness-specific` marker regions (this docstring, the
+harness config block, and check 7 — registration). Change both copies
+together; tests/tools/test_shared_script_parity.py fails on any drift.
+
 Spec: docs/spec-hermes-plugin-v0.md §5. Tier matrix: shared/compat.yaml.
 Environment contract and platform discovery: scripts/ct_env.py.
 Import pre-flight (curated-thoughts PR #188): scripts/ct_preflight.py.
 """
+# <<< harness-specific: module-docstring
 
 from __future__ import annotations
 
@@ -36,6 +43,9 @@ import ct_env  # noqa: E402
 import ct_preflight  # noqa: E402
 
 SIDECAR_NAME = ct_env.SIDECAR_NAME
+
+# >>> harness-specific: harness-config
+HARNESS_LABEL = "Hermes"
 
 # Where the Hermes plugin registers the MCP server.
 # Ambient env enters here ONCE, at import, and that is deliberate (issue #29
@@ -68,6 +78,8 @@ def _plugin_version(manifest=None):
     except OSError:
         pass
     return "0.0.0-unknown"
+# <<< harness-specific: harness-config
+
 
 # Embedding backends: cloud keys OR a local Ollama. WARN-only check.
 EMBED_ENV_KEYS = (
@@ -180,21 +192,11 @@ def find_sidecar(env=None):
 def _merged_env(env=None):
     """Ambient os.environ with `env` overlaid — the spawn-time view.
 
-    Tests set CURATED_BRAIN_DIR by patching ambient os.environ while passing
-    an `env` that only overrides PATH; resolving through the merge keeps both
-    visible with `env` winning collisions. Note this OVERLAYS os.environ,
-    unlike `subprocess.run(env=...)` which replaces it.
+    Thin delegate to ct_env.merged_env, which owns the None / "" / missing
+    contract (issue #32). Kept as a doctor-local seam: tests patch it to pin
+    that each check resolves through the merged view.
     """
-    merged = dict(os.environ)
-    if env:
-        # GLM r3 (PR #31): drop None-valued keys. A None surviving into
-        # subprocess.run(env=...) raises TypeError, and {"PATH": None} would
-        # make shutil.which fall back to the AMBIENT PATH — a literal-None
-        # override must never do that. Semantics: None means "the caller did
-        # not specify this key" (ambient shows through), distinct from the
-        # documented "" suppression which HIDES the ambient value.
-        merged.update({k: v for k, v in env.items() if v is not None})
-    return merged
+    return ct_env.merged_env(env)
 
 
 def check_sidecar_binary(found=None, gated=False):
@@ -284,8 +286,8 @@ def mcp_tools_list(path, timeout=MCP_TIMEOUT, env=None):
                 "params": {
                     "protocolVersion": "2024-11-05",
                     "capabilities": {},
-                    # Derived from plugin.yaml so it cannot drift (GLM r1
-                    # review of PR #30).
+                    # Derived from the plugin manifest (_plugin_version) so
+                    # it cannot drift (GLM r1 review of PR #30).
                     "clientInfo": {"name": "ct_doctor", "version": _plugin_version()},
                 },
             }
@@ -606,6 +608,7 @@ def check_embedding(env=None):
         )
 
 
+# >>> harness-specific: registration-check
 def _plugin_listed_under_enabled(text):
     """True if PLUGIN_NAME appears under `plugins.enabled` specifically.
 
@@ -716,6 +719,16 @@ def check_hermes_registration():
         f"mcp_servers.{MCP_SERVER_KEY} registered with --mcp, and plugin "
         f"'{PLUGIN_NAME}' enabled, in {HERMES_CONFIG}",
     )
+
+
+def _check_registration(cwd=None):
+    """(7) adapter: the shared runner's entry into this harness's check 7.
+
+    `cwd` is the registration context run_checks forwards. The Hermes config
+    is a single host file, so it is unused here.
+    """
+    return check_hermes_registration()
+# <<< harness-specific: registration-check
 
 
 def check_import_preflight(path=None, brain_paths=None, env=None):
@@ -981,8 +994,15 @@ def check_version_compat(path, tool_count=None, gated=False):
 # runner
 # --------------------------------------------------------------------------
 
-def run_checks(timeout=MCP_TIMEOUT, env=None):
+def run_checks(timeout=MCP_TIMEOUT, env=None, cwd=None):
     """Run all checks; returns list of CheckResult.
+
+    `env` (a mapping) is merged over os.environ (ct_env.merged_env) for
+    every check except check 7, whose harness config belongs to the host
+    install and is resolved at import time. `cwd` is the registration
+    context handed to check 7 through `_check_registration` — a harness with
+    project-scope registrations (Claude Code's .mcp.json) resolves them
+    against it, defaulting to os.getcwd(); a harness without them ignores it.
 
     Issue #28 guard: when the CALLER's raw env overrides PATH but discovery
     resolved the sidecar from the ambient install locations (`source` is
@@ -1058,7 +1078,7 @@ def run_checks(timeout=MCP_TIMEOUT, env=None):
     results.append(check_brain_dir(brain_paths, env=merged))
     results.append(check_vault(brain_paths, env=merged))
     results.append(check_embedding(env=merged))
-    results.append(check_hermes_registration())
+    results.append(_check_registration(cwd=cwd))
     results.append(
         check_import_preflight(
             path=None if gated else path, brain_paths=brain_paths, env=merged
@@ -1118,7 +1138,7 @@ def cmd_check(json_output=False):
 
 def _self_test_suite():
     # tests/ lives inside this integration:
-    # integrations/hermes/{scripts/ct_doctor.py, tests/test_ct_doctor.py}.
+    # integrations/<id>/{scripts/ct_doctor.py, tests/test_ct_doctor.py}.
     # Resolve relative to __file__ so the self-test works from any cwd.
     import importlib.util
 
@@ -1152,7 +1172,7 @@ def cmd_self_test():
 def main(argv=None):
     parser = argparse.ArgumentParser(
         prog="ct_doctor.py",
-        description="Curated Thoughts Hermes plugin doctor (read-only).",
+        description=f"Curated Thoughts {HARNESS_LABEL} plugin doctor (read-only).",
     )
     sub = parser.add_subparsers(dest="command")
     p_check = sub.add_parser("check", help="run all checks against the live system")
