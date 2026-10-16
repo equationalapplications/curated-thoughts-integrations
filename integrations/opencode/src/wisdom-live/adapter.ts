@@ -43,7 +43,7 @@ import {
 } from '@equational-applications/ct-wisdom-core';
 import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { discoverCt } from '../wisdom.js';
+import { discoverCt, invalidateAcceptedPath } from '../wisdom.js';
 
 /** Exact marker LINE of a live delivery part (identity + provenance). */
 export const LIVE_MARKER = 'source.kind: curated-thoughts/wisdom';
@@ -354,6 +354,8 @@ export interface AdapterDeps {
   fetchHistory?: (sessionId: string) => Promise<HistoryRow[] | null>;
   /** Session info (`parentID`), null/throw ⇒ unknown ⇒ treated as child. */
   fetchSession?: (sessionId: string) => Promise<{ parentID?: unknown } | null>;
+  /** n3 discovery reset (tests); defaults to dropping the accepted ct path. */
+  invalidateDiscovery?: () => void;
 }
 
 const LRU_MAX = 256;
@@ -384,6 +386,7 @@ export class OpenCodeWisdomAdapter implements HostAdapter {
   private readonly discover: () => { path: string | null; failure: string | null };
   private readonly fetchHistory: (sessionId: string) => Promise<HistoryRow[] | null>;
   private readonly fetchSession: (sessionId: string) => Promise<{ parentID?: unknown } | null>;
+  private readonly invalidateDiscovery: () => void;
   /** m1 turn cache: the N1 rebuild, read by N3 within the turn. */
   private readonly turns = new Map<string, Ledger>();
   /** Definitive session kinds (lookup failures are not cached). */
@@ -404,6 +407,7 @@ export class OpenCodeWisdomAdapter implements HostAdapter {
     this.discover = deps.discover ?? (() => discoverCt(deps.env));
     this.fetchHistory = deps.fetchHistory ?? (async () => null);
     this.fetchSession = deps.fetchSession ?? (async () => null);
+    this.invalidateDiscovery = deps.invalidateDiscovery ?? invalidateAcceptedPath;
   }
 
   /** TEST-ONLY: drop all process state. */
@@ -579,8 +583,10 @@ export class OpenCodeWisdomAdapter implements HostAdapter {
     return coreWisdomMatch(path, query, max, exclude, this.spawnFn);
   }
 
+  /** n3: retry next turn — re-walk discovery and re-probe the capability. */
   resetDiscoveryAndProbeCaches(): void {
     this.capabilityAbsent = false;
+    this.invalidateDiscovery();
   }
 
   wisdomMatchAbsent(): boolean {

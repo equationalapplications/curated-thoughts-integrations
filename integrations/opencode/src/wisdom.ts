@@ -226,11 +226,14 @@ export function discoverCt(
   return { path: null, failure: null };
 }
 
-/** PRIVATE production invalidation (Task 5 spawn path); the reset below is TEST-ONLY. */
-function invalidateAcceptedPath(): void {
+/**
+ * Production invalidation (Task 5 spawn path; also the live adapter's n3
+ * retry-next-turn reset): drops the accepted ct path ONLY — never the miss
+ * cache or the governor. The reset below is TEST-ONLY.
+ */
+export function invalidateAcceptedPath(): void {
   acceptedCtPath = null;
 }
-void invalidateAcceptedPath;
 
 // ── Task 4: retry budget + circuit breaker ─────────────────────────────────
 // ≤2 attempts per agent id, ≥60 s cooldown between them; process-wide breaker

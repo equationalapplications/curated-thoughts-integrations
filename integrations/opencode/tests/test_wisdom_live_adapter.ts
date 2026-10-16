@@ -359,3 +359,23 @@ describe('capability probe + breaker (AC 4)', () => {
     expect(matches).toBe(4); // half-open probe after the pause
   });
 });
+
+describe('n3: a spawn-class failure retries discovery next turn', () => {
+  it('resetDiscoveryAndProbeCaches drops the accepted ct path, not just the probe latch', async () => {
+    let invalidations = 0;
+    const a = new OpenCodeWisdomAdapter({
+      env: {},
+      discover: () => ({ path: '/gone/ct', failure: null }),
+      invalidateDiscovery: () => {
+        invalidations++;
+      },
+      fetchSession: async () => ({}),
+      spawnFn: () => Promise.resolve(out({ spawnError: true, code: null })),
+    });
+    await a.sessionKind('s');
+    await a.rebuildLedgerAsync({ id: 's' });
+    expect(await runUserTurn(a, { id: 's' }, 'q', new Breaker())).toBeNull();
+    expect(invalidations).toBe(1);
+  });
+});
+
