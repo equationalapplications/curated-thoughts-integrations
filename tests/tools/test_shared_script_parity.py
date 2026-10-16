@@ -37,7 +37,19 @@ REPO = Path(__file__).resolve().parents[2]
 REFERENCE = REPO / "integrations" / "hermes" / "scripts"
 COPIES = (REPO / "integrations" / "claude-code" / "scripts",)
 
-IDENTICAL = ("ct_env.py", "ct_status.py", "ct_preflight.py")
+IDENTICAL = (
+    "ct_env.py",
+    "ct_status.py",
+    "ct_preflight.py",
+    # The Intuitive Wisdom core (ledger markers, bootstrap render, live
+    # match/render/breaker). Claude Code's hooks/ct_wisdom_cc.py adapter runs
+    # this exact algorithm; an installed plugin cannot reach ../hermes, so it
+    # ships a byte-identical copy (spec 2026-10-16-claude-code-wisdom-parity-
+    # leg-design.md, D1).
+    "ct_ledger.py",
+    "ct_wisdom.py",
+    "ct_wisdom_live.py",
+)
 REGIONED = {
     "ct_doctor.py": ("module-docstring", "harness-config", "registration-check"),
 }

@@ -6,6 +6,43 @@ heading format below is load-bearing: `## <version> — <date>`.
 
 ## Unreleased
 
+## 0.2.0 — 2026-10-16
+
+- Added: **Intuitive Wisdom** for Claude Code, a port of the Hermes 0.4.x
+  live-delivery algorithm (cross-harness parity spec, decision 4; leg spec
+  `2026-10-16-claude-code-wisdom-parity-leg-design.md`). CT ≥ 3.3.0
+  (`ct wisdom match`) is required for live delivery. On older CT, or with no
+  CT at all, it is a silent no-op.
+  - **Bootstrap block** at `SessionStart`: after the status section comes a
+    `## Curated Thoughts — relevant memory` block (Hermes v1 render, with
+    `ct-fact:<id>` markers). Its ids seed a per-session store in
+    `${CLAUDE_PLUGIN_DATA}/wisdom/sessions/`.
+  - **Live delivery** at `UserPromptSubmit`: at most 2 facts per turn and 12
+    per session (corrections exempt), in a 1,200-char block, appended as
+    `additionalContext`. The system prompt is never touched. Delivery happens
+    only on genuine main-thread user turns: a background-agent report
+    (`<agent-message …>`), any prompt that opens with a harness envelope tag,
+    a missing `prompt_id`, or a subagent (`agent_id`) is skipped.
+  - **Dedup stubs** at `PostToolUse`, on `mcp__*__curated_recall_context`
+    only (never `curated_get_wiki_entry`). A wiki entry whose id is already
+    in this session's context is replaced by a one-line stub through
+    `updatedToolOutput`, in the same MCP content-block shape.
+  - **Exactly-once ledger** = the plugin-data store, never the transcript.
+    `/compact` continues, with no re-delivery, and the stored bootstrap block
+    is replayed. `--resume`/`/resume`/`--continue` and forked sessions turn
+    live delivery OFF for the life of the session (the bootstrap is
+    untouched). `/clear` starts a new session id on Claude Code 2.1.301, so it
+    is a fresh session. A `/clear` that kept its id would latch OFF too.
+  - A persisted circuit breaker (3 timeouts/exits ⇒ 300 s pause). The `ct`
+    calls are bounded at 3 s each.
+- Added: `scripts/ct_ledger.py`, `scripts/ct_wisdom.py`,
+  `scripts/ct_wisdom_live.py`, byte-identical copies of the Hermes core,
+  held identical by `tests/tools/test_shared_script_parity.py`. The adapter
+  is `hooks/ct_wisdom_cc.py`.
+- Changed: `hooks/hooks.json` registers `UserPromptSubmit` (15 s) and
+  `PostToolUse` (10 s). The `SessionStart` matcher gains `fork`, and its
+  timeout goes from 10 s to 15 s for the bootstrap recall.
+
 ## 0.1.2 — 2026-10-16
 
 - Fixed: `scripts/ct_doctor.py` re-synced with the Hermes doctor post-#14
