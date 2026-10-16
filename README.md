@@ -11,10 +11,10 @@ common architecture.
 | Harness | Directory | Status | Version |
 |---------|-----------|--------|---------|
 | [Hermes Agent](https://github.com/NousResearch/hermes-agent) | [`integrations/hermes/`](integrations/hermes/) | implemented | [0.4.2](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=hermes) |
-| DeepSeek Harness | [`integrations/deepseek/`](integrations/deepseek/) | implemented | [0.4.0](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=deepseek) |
+| DeepSeek Harness | [`integrations/deepseek/`](integrations/deepseek/) | implemented | [0.4.1](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=deepseek) |
 | OpenCode | [`integrations/opencode/`](integrations/opencode/) | implemented | [0.2.0](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=opencode) |
 | OpenClaw | `integrations/openclaw/` | planned | — |
-| Claude Code | [`integrations/claude-code/`](integrations/claude-code/) | implemented | [0.1.2](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=claude-code) |
+| Claude Code | [`integrations/claude-code/`](integrations/claude-code/) | implemented | [0.2.0](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=claude-code) |
 
 Rows marked *planned* are placeholders — no installable artifact exists yet
 for that harness. Implemented rows link to that integration's releases.
@@ -74,8 +74,11 @@ relevant and the not-yet-in-context ones ride into the persisted session log
 (each exactly once, via the shared `ct-wisdom-core` algorithm); the plugin
 rewrites repeats in agent-initiated `curated_recall_context` results to
 "already in context" stubs. The pinned host is 0.2.0-rc.2
-(`tests/host/compatibility.json`); its live e2e re-verification is pending
-(spec m6). The doctor is
+(`tests/host/compatibility.json`), live-verified in the container e2e on
+2026-10-16 (spec m6). That run found that 0.4.0's delivery message lacked
+the `id`/`role` DSH needs to replay a session, so a session that received a
+block could not be continued (`--session-id`, restart); fixed in
+deepseek 0.4.1. The doctor is
 `node lib/scripts/ct_doctor.js check` (nine deep checks, `--json` for
 machine-readable output). DeepSeek Harness ships on Windows as well as macOS
 and Linux, so CI verifies the integration on all three — install is

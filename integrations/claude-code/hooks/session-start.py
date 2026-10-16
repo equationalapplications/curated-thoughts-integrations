@@ -18,8 +18,16 @@ Adapted from integrations/hermes/hooks/session-start.py; the structure
 (stdin drain, single-line emit, fail-open, exit 0) is deliberately identical
 and only the plugin-root variable and the output envelope differ.
 
-Fast (<200ms target), read-only, fail-open: any unexpected error exits 0
-silently rather than delaying or blocking session start.
+Since 0.2.0 the payload is parsed (not just drained): after the status
+section comes the Intuitive Wisdom bootstrap block, whose per-`source` rules
+live in hooks/ct_wisdom_cc.py (spec
+docs/superpowers/specs/2026-10-16-claude-code-wisdom-parity-leg-design.md, D7).
+
+Read-only toward the brain, fail-open: any unexpected error exits 0
+silently rather than blocking session start. The status section stays
+<200ms; the bootstrap adds at most one `ct` identity probe (3 s) and one
+`ct recall` (5 s), inside the 15 s hooks.json timeout. Its only write is the
+plugin's own ${CLAUDE_PLUGIN_DATA} store.
 """
 
 from __future__ import annotations
@@ -47,14 +55,35 @@ def _emit(payload):
         pass
 
 
-def main():
-    # Drain stdin: Claude Code sends the hook payload there. We do not need
-    # any of its fields, but leaving it unread can leave the writer blocked.
+def _read_payload():
+    """Drain stdin (leaving it unread can block the writer) and parse it."""
     try:
-        if not sys.stdin.isatty():
-            sys.stdin.read()
+        if sys.stdin.isatty():
+            return None
+        raw = sys.stdin.read()
+        return json.loads(raw) if raw.strip() else None
     except Exception:
-        pass
+        return None
+
+
+def _bootstrap(payload):
+    """The wisdom bootstrap block for this SessionStart source, or "".
+
+    hooks/ct_wisdom_cc.py owns the per-source rules (startup seeds the
+    ${CLAUDE_PLUGIN_DATA} store, resume/fork latch live delivery OFF, compact
+    replays the stored block). Fail-open: any error means no block.
+    """
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import ct_wisdom_cc
+
+        return ct_wisdom_cc.session_start(payload) or ""
+    except Exception:
+        return ""
+
+
+def main():
+    payload = _read_payload()
 
     try:
         import ct_status
@@ -62,14 +91,15 @@ def main():
         section = ct_status.context_section()
     except Exception:
         # Fail-open: never block or delay a session for an advisory check.
-        return
+        section = None
 
-    if section:
+    parts = [part for part in (section, _bootstrap(payload)) if part]
+    if parts:
         _emit(
             {
                 "hookSpecificOutput": {
                     "hookEventName": "SessionStart",
-                    "additionalContext": section,
+                    "additionalContext": "\n\n".join(parts),
                 }
             }
         )

@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -386,12 +387,20 @@ export function apply(ctx: Context, config: Config): void {
             breaker,
           );
           if (block !== null && decision.messages !== undefined) {
+            // An identified user-role message, the shape the first-party
+            // pre-step plugins build with dsh-llm createUserMessage. The loop
+            // persists it as-is, and on replay (--session-id, restart)
+            // dsh-session rejects a user/message without a non-empty string
+            // `id` and role "user" — the whole stored session is then
+            // "corrupt" and cannot be continued (live e2e, 2026-10-16).
             decision.messages = [
               ...decision.messages,
-              {
+              Object.freeze({
+                id: randomUUID(),
+                role: 'user',
                 content: [{ type: 'text', text: block }],
                 source: { kind: 'curated-thoughts-wisdom' },
-              },
+              }),
             ];
           }
         }

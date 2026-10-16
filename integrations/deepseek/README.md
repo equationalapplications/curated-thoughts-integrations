@@ -82,8 +82,13 @@ node lib/scripts/ct_doctor.js check --json   # machine-readable
 artifact, installs it inside a Docker container against a real `dsh` CLI and
 the real sidecar, and runs the full check list: installer preview/apply
 semantics, `--dump-config` row activation, the doctor, a live-model MCP tool
-call, the degraded-health prompt block, literal-`~` handling in
-`CURATED_BRAIN_DIR`, and installer idempotency. The verified DSH version is
+call, the degraded-health prompt block, live wisdom delivery on the real
+`agent/pre-step` loop (delivery persisted verbatim in the session log, no
+re-delivery when the session is continued with `--session-id`, CT ≥ 3.3.0
+capability gate), literal-`~` handling in `CURATED_BRAIN_DIR`, and installer
+idempotency. With no embedding backend in the container, CT's relevance gate
+is replaced by a fixture that returns one fact; everything else is real. The
+verified DSH version is
 pinned in `tests/host/compatibility.json`. It shares its base image
 (Node 24, sidecar `.deb`, non-root user) with the OpenCode harness — see
 `tests/e2e/base.Dockerfile` at the repo root. Requires Docker and, for the
@@ -92,7 +97,7 @@ live-model steps, `ZAI_API_KEY` in the environment.
 ## Compatibility
 
 - **Sidecar:** `curated-thoughts-mcp` ≥ 2.5 (compat tier `v2.5-full`).
-- **DeepSeek Harness:** 0.1.5-rc.2 is the pinned, container-verified version
+- **DeepSeek Harness:** 0.2.0-rc.2 is the pinned, container-verified version
   (`tests/host/compatibility.json`; every published release so far is a
   pre-release). Requires Node ≥ 22.19 or ≥ 24.
 - **Platforms:** macOS, Linux, Windows (verified by the CI matrix; the e2e

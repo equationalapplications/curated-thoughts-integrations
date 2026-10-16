@@ -26,6 +26,14 @@ class TestCrossIntegrationImports(unittest.TestCase):
     def test_sibling_module_import_passes(self):
         self.assertEqual(scan("import ct_env\n"), [])
 
+    def test_claude_code_wisdom_adapter_is_a_known_sibling(self):
+        # hooks/session-start.py imports hooks/ct_wisdom_cc.py (claude-code
+        # wisdom parity leg, spec D2); the adapter keeps the ct_ prefix so the
+        # allowlist never names a bare, collision-prone module like "wisdom".
+        self.assertEqual(scan("import ct_wisdom_cc\n"), [])
+        problems = scan("import wisdom\n")
+        self.assertTrue(any("wisdom" in p and "stdlib" in p for p in problems), problems)
+
 
 class TestThirdPartyImports(unittest.TestCase):
     def test_third_party_import_fails(self):
