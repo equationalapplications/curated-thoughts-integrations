@@ -40,6 +40,23 @@ def _manifest(repo_root, integration_id):
     )
 
 
+# Tool caches that must never ship, applied before any manifest rule. They
+# are produced by tooling run in the integration directory (release.yml runs
+# ruff there right before packaging, and this walker does not read
+# .gitignore), not by integration content. So the filter belongs here,
+# once, rather than in every manifest's package.exclude (issue #33). It is a
+# closed list of cache names, not "every dot-directory": .claude-plugin/ is
+# a shipped manifest.
+CACHE_DIR_NAMES = frozenset({"__pycache__", ".ruff_cache", ".pytest_cache", ".mypy_cache"})
+CACHE_SUFFIXES = (".pyc", ".pyo")
+
+
+def _is_tool_cache(rel_parts):
+    return rel_parts[-1].endswith(CACHE_SUFFIXES) or any(
+        part in CACHE_DIR_NAMES for part in rel_parts[:-1]
+    )
+
+
 def _selected_files(directory, package):
     include = package.get("include") or ["**"]
     exclude = package.get("exclude") or []
@@ -47,7 +64,10 @@ def _selected_files(directory, package):
     for path in sorted(directory.rglob("*")):
         if not path.is_file():
             continue
-        rel = path.relative_to(directory).as_posix()
+        rel_path = path.relative_to(directory)
+        if _is_tool_cache(rel_path.parts):
+            continue
+        rel = rel_path.as_posix()
         if not any(fnmatch.fnmatch(rel, pattern) or pattern == "**" for pattern in include):
             continue
         if any(fnmatch.fnmatch(rel, pattern) or f"/{rel}".find(pattern.strip("*")) >= 0
