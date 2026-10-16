@@ -182,7 +182,7 @@ trigger). The map is for the tool names at the pin (`tools/file_tools.py:1153-12
 | `read_file` | `read` | `path` |
 | `write_file` | `write` | `path` (never `content`) |
 | `patch` | `edit` | `path` (never `old_string`/`new_string`/`patch`); patch mode without `path` → no line |
-| `search_files` | `search` | `pattern`, plus ` in <path>` when `path` is given |
+| `search_files` | `search` | `pattern` (no line if any word of it is credential-shaped), plus ` in <path>` when `path` is given |
 | `terminal` | `run` | program + subcommand (below); never the rest of `command` |
 
 **Paths.** Normalized with `posixpath.normpath` on `/`-converted text. A relative path is
@@ -203,7 +203,12 @@ copied out of one of our blocks into a tool argument can never become a query.
    operator (`&&`, `||`, `|`, `;`, `&`, `>`, `<`, …) or contains one of `;|&<>`.
 3. Skip leading `NAME=value` environment assignments (a common place for secrets).
 4. The program is the basename of the first remaining token.
-5. The subcommand is the next token that does not start with `-`, but only if it is
+5. The subcommand is the token **right after** the program, and only if it does not start
+   with `-`. A token that follows a flag is that flag's value (`psql -W secretpw`,
+   `deploy --token x`), not a subcommand, so a flag right after the program ends the
+   target at the program. This is the strict reading of "the first two non-flag tokens"
+   (CodeRabbit, PR #52). The one supported exception is `python[N.M] -m <module>`, which
+   gives `python3 pytest`. The subcommand must also be
    "word-shaped": `^[A-Za-z0-9][A-Za-z0-9._/-]{0,39}$` and not credential-shaped (16+
    chars containing 3+ digits, or a known key prefix such as `sk-`, `ghp_`, `xox`,
    `AKIA`). URLs, `user:pass@host`, `$VARS`, quoted strings and assignments all fail the
@@ -214,6 +219,7 @@ copied out of one of our blocks into a tool argument can never become a query.
 
 Examples: `npm test` → `run npm test`; `npm run build` → `run npm run`;
 `pytest tests/billing -q` → `run pytest tests/billing`;
+`python3 -m pytest -q` → `run python3 pytest`; `mysql -uroot -pX db` → `run mysql`;
 `API_KEY=sk-123 python deploy.py --token x` → `run python deploy.py`;
 `curl -H 'Authorization: Bearer x' https://…` → `run curl`.
 

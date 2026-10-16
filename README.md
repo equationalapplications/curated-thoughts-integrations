@@ -117,8 +117,9 @@ keyed to what the agent is doing:
   Curated Thoughts' own tools never trigger it.
 - **What is sent to Curated Thoughts:** only the bare target, for example
   `src/billing/invoice.py`, `pnpm test` or a search pattern. For shell
-  commands that is the program plus subcommand (the first two non-flag
-  tokens), never the full command line. File contents, tool output, diffs
+  commands that is the program plus the word right after it (never a
+  flag's value), never the full command line. Credential-shaped search
+  patterns are not sent at all. File contents, tool output, diffs
   and the agent's own words are never sent.
 - **Delivered as:** at most 1 fact in at most 600 characters, added to that
   tool's result under `## Curated Thoughts — relevant to this step`, with

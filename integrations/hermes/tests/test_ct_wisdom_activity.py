@@ -55,7 +55,13 @@ CASES = [
     ("terminal", {"command": "cat .env.local | grep KEY"}, "run cat .env.local", "cat .env.local"),
     ("terminal", {"command": "echo sk-live-abcdef"}, "run echo", "echo"),
     ("terminal", {"command": "export TOKEN=abc && make"}, "run export", "export"),
-    ("terminal", {"command": "mysql -uroot -pS3cr3t db"}, "run mysql db", "mysql db"),
+    ("terminal", {"command": "mysql -uroot -pS3cr3t db"}, "run mysql", "mysql"),
+    ("terminal", {"command": "psql -W secretpw"}, "run psql", "psql"),
+    ("terminal", {"command": "deploy --token abcsecret"}, "run deploy", "deploy"),
+    ("terminal", {"command": "git -C somedir status"}, "run git", "git"),
+    ("terminal", {"command": "python -m mypkg.cli --key v"}, "run python mypkg.cli", "python mypkg.cli"),
+    ("terminal", {"command": "python3.11 -m pytest -q"}, "run python3.11 pytest", "python3.11 pytest"),
+    ("terminal", {"command": "node -m x"}, "run node", "node"),
     ("terminal", {"command": "git push https://user:pw@host/r.git"}, "run git push", "git push"),
     ("terminal", {"command": "deploy ghp_abcdefghijklmnop1234"}, "run deploy", "deploy"),
     ("terminal", {"command": "tool a1b2c3d4e5f6g7h8i9"}, "run tool", "tool"),
@@ -156,6 +162,21 @@ class TestActivityLine(unittest.TestCase):
             basenames = [os.path.basename(t) for t in raw]
             for token in tokens:
                 self.assertIn(token, raw + basenames, command)
+            # The second token is the word right after the program (or the
+            # module after `python -m`), never a value that follows a flag.
+            if len(tokens) == 2:
+                i = basenames.index(tokens[0])
+                after = raw[i + 1:]
+                self.assertTrue(after[:1] == [tokens[1]] or after[:2] == ["-m", tokens[1]],
+                                command)
+
+
+    def test_credential_shaped_search_pattern_rejected(self):
+        for pattern in ("sk-live-abcdef", "find ghp_abcdefghijklmnop1234 here",
+                        "AKIAABCDEFGHIJKLMNOP", "token a1b2c3d4e5f6g7h8i9"):
+            self.assertIsNone(act.activity_for("search_files", {"pattern": pattern}, cwd="/w"),
+                              pattern)
+        self.assertIsNotNone(act.activity_for("search_files", {"pattern": "error 404"}, cwd="/w"))
 
     def test_own_marker_or_heading_is_never_a_target(self):
         for pattern in ("ct-fact:evil", "## Curated Thoughts \u2014 relevant now", "a\nb"):

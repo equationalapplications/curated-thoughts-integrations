@@ -19,9 +19,10 @@ format below is load-bearing: `## <version> — <date>`.
     (`api_request_id`). No ceiling per user message or per session. CT's own
     tools never trigger it.
   - Query: the bare target only (CT 3.5.1 real-gate results, A6): a relative
-    path, a search pattern, or program plus subcommand for shell commands
-    (the first two non-flag tokens, with env assignments, flags, URLs and
-    credential-shaped tokens dropped). Never file contents, tool output,
+    path, a search pattern (none if it holds a credential-shaped word), or
+    program plus the word right after it for shell commands (never a flag's
+    value; `python -m <module>` is the one exception; env assignments, URLs
+    and credential-shaped tokens are dropped). Never file contents, tool output,
     diffs, the agent's text or full command lines.
   - Delivery: `transform_tool_result` of the same call adds at most 1 fact in
     at most 600 characters under `## Curated Thoughts — relevant to this

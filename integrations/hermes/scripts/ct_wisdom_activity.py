@@ -86,6 +86,7 @@ _FREE_TEXT_PROGRAMS = {"echo", "printf", "export", "set", "unset", "alias", "eva
                        "http", "https", "nc", "telnet", "openssl", "gpg", "pass",
                        "security", "op", "vault"}
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
+_PYTHON_RE = re.compile(r"^python[0-9.]*$")
 
 
 def is_ct_tool(name):
@@ -164,8 +165,9 @@ def _tokens(command):
 
 
 def command_target(command):
-    """Program plus subcommand: the first two non-flag tokens of the first
-    simple command (user decision 2), or None. Everything else is dropped."""
+    """Program plus subcommand of the first simple command (user decision 2),
+    or None. The subcommand is the word right after the program, never a
+    flag's value. Everything else is dropped."""
     command = _clean_target(command) if isinstance(command, str) else None
     if command is None:
         return None
@@ -183,10 +185,16 @@ def command_target(command):
         return None
     if program.lower() in _FREE_TEXT_PROGRAMS:
         return program
-    for token in words[1:]:
-        if token.startswith("-"):
-            continue
-        return program + " " + token if _safe_word(token) else program
+    # The subcommand is the word right after the program. A word that follows
+    # a flag is the flag's VALUE (`psql -W secretpw`), never a subcommand, so
+    # it is never sent. One supported form: `python -m <module>`.
+    rest = words[1:]
+    if _PYTHON_RE.match(program) and rest[:1] == ["-m"]:
+        rest = rest[1:]
+    elif rest[:1] and rest[0].startswith("-"):
+        return program
+    if rest and _safe_word(rest[0]):
+        return program + " " + rest[0]
     return program
 
 
@@ -208,7 +216,7 @@ def activity_for(tool_name, args, cwd=None):
         return Activity(verb, target, (_VERB_CLASS[verb], target), line, target)
     if tool_name == "search_files":
         pattern = _clean_target(args.get("pattern"))
-        if pattern is None:
+        if pattern is None or any(_credential_shaped(w) for w in pattern.split()):
             return None
         pattern = pattern[:TARGET_CHARS]
         where = normalize_path(args.get("path"), cwd) if args.get("path") else None
