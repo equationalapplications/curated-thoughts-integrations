@@ -191,6 +191,10 @@ relative to it; any other absolute path is reduced to its last two components
 (`parent/name`), so a home directory or user name never leaves the machine. Leading `..`
 components are dropped. Targets are capped at 200 chars.
 
+**Self-trigger guard on targets.** A target containing a control character (newline,
+tab), a `ct-fact:` token or a `## Curated Thoughts —` heading gives no activity, so text
+copied out of one of our blocks into a tool argument can never become a query.
+
 **Shell commands** (decision 2: only the first two non-flag tokens):
 
 1. Tokenize with `shlex.split(command, posix=True)`; on a parse error fall back to
@@ -424,8 +428,9 @@ in this design depends on verbose mode.
 1. **Concept rules are out of reach from a path alone (A6).** The gate never reached a
    concept-level rule from a path: migration paths stayed closed at ≤ 0.59 while the
    plain question scored 0.897, and lowering the floor would admit near-misses (up to
-   0.601). Fixing this needs a CT-side activity query mode (recommended in the
-   investigation, not in this PR). Per rule 8 we add no query expansion or hints.
+   0.601). Concept rules reached only via paths need CT activity mode
+   ([curated-thoughts#282](https://github.com/equationalapplications/curated-thoughts/issues/282)),
+   not in this PR. Per rule 8 we add no query expansion or hints.
 2. **One line per step:** only the first call with a new key in a step triggers; the
    other calls' new keys stay unseen and can trigger in a later step.
 3. **First-string-wins:** if another plugin's `transform_tool_result` returns a string

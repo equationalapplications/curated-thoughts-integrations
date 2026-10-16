@@ -15,6 +15,9 @@ What it wires up:
     user turn (ct_wisdom_live), and a `transform_tool_result` hook that keeps
     agent-initiated CT recall from repeating a fact already in context
     (ct_tool_dedup) — the Intuitive Wisdom live path;
+  * a `pre_tool_call` hook plus the same `transform_tool_result` hook that
+    deliver one fact per model step during autonomous work, keyed to the
+    file, command or search the agent is busy with (ct_wisdom_activity);
 
 The tool surface itself is NOT registered here — it is served by the
 `curated-thoughts-mcp` sidecar over MCP, registered under `mcp_servers` in
@@ -146,14 +149,38 @@ def _pre_llm_call(**kwargs):
         return None
 
 
+def _pre_tool_call(**kwargs):
+    """Start an autonomous-work wisdom prefetch (ct_wisdom_activity).
+
+    Always returns None: Hermes treats a raising or blocking pre_tool_call
+    callback as a veto and blocks the tool, so nothing here may escape."""
+    try:
+        import ct_wisdom_activity
+
+        ct_wisdom_activity.on_pre_tool_call(**kwargs)
+    except Exception:  # pragma: no cover - defensive
+        logger.debug("curated-thoughts: activity pre hook failed", exc_info=True)
+    return None
+
+
 def _transform_tool_result(**kwargs):
-    """Stub CT recall entries already in context (ct_tool_dedup)."""
+    """Stub CT recall entries already in context (ct_tool_dedup); for any
+    other tool, deliver the step's activity fact (ct_wisdom_activity). One
+    callback, because Hermes keeps only the first string a plugin returns."""
     try:
         import ct_tool_dedup
 
-        return ct_tool_dedup.on_transform_tool_result(**kwargs)
+        deduped = ct_tool_dedup.on_transform_tool_result(**kwargs)
+        if deduped is not None:
+            return deduped
     except Exception:  # pragma: no cover - defensive
         logger.debug("curated-thoughts: tool dedup hook failed", exc_info=True)
+    try:
+        import ct_wisdom_activity
+
+        return ct_wisdom_activity.on_transform_tool_result(**kwargs)
+    except Exception:  # pragma: no cover - defensive
+        logger.debug("curated-thoughts: activity transform failed", exc_info=True)
         return None
 
 
@@ -178,6 +205,7 @@ def register(ctx):
 
     for hook_name, callback in (
         ("pre_llm_call", _pre_llm_call),
+        ("pre_tool_call", _pre_tool_call),
         ("transform_tool_result", _transform_tool_result),
     ):
         try:
