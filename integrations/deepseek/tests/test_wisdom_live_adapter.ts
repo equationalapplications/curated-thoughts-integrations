@@ -256,15 +256,17 @@ describe('nodeSpawnFn abort (real process tree)', { timeout: 30_000 }, () => {
 
   it('an abort after the child already exited reports the real result, not aborted (PR #71 review)', async () => {
     if (process.platform === 'win32') return;
-    const { mkdtempSync, writeFileSync, chmodSync, rmSync, existsSync } = await import('node:fs');
+    const { mkdtempSync, writeFileSync, chmodSync, rmSync, existsSync, readFileSync } = await import('node:fs');
     const { tmpdir } = await import('node:os');
     const { join } = await import('node:path');
     const dir = mkdtempSync(join(tmpdir(), 'ct-spawn-exited-'));
+    let stray = 0;
     const script = join(dir, 'ct');
     // Exits 0 at once, but a background grandchild keeps stdout open, so
     // 'close' has not fired yet when the abort lands.
     const exiting = join(dir, 'exiting');
-    writeFileSync(script, `#!/bin/sh\nprintf '{"entries": []}'\nsleep 30 &\ntouch '${exiting}'\nexit 0\n`);
+    const strayPid = join(dir, 'stray.pid');
+    writeFileSync(script, `#!/bin/sh\nprintf '{"entries": []}'\nsleep 30 &\necho $! > '${strayPid}'\ntouch '${exiting}'\nexit 0\n`);
     chmodSync(script, 0o755);
     try {
       const abort = new AbortController();
@@ -278,8 +280,13 @@ describe('nodeSpawnFn abort (real process tree)', { timeout: 30_000 }, () => {
       expect(out.aborted).toBeUndefined();
       expect(out.code).toBe(0);
       expect(out.stdout).toBe('{"entries": []}');
-      expect(Date.now() - started).toBeLessThan(20_000); // the straggler was still killed
+      expect(Date.now() - started).toBeLessThan(20_000); // settled by the grace, not the straggler
+      // The leader was already reaped: nothing is signalled (no -pid of a
+      // reaped leader), so the straggler is still alive.
+      stray = Number(readFileSync(strayPid, 'utf8').trim());
+      expect(alive(stray)).toBe(true);
     } finally {
+      try { if (stray > 0) process.kill(stray, 'SIGKILL'); } catch { /* gone */ }
       rmSync(dir, { recursive: true, force: true });
     }
   });
@@ -546,6 +553,45 @@ describe('capability probe + wisdomMatch', () => {
     const n = seen.length;
     await a.wisdomMatch('q', 1, []);
     expect(seen.length).toBe(n); // latched: no spawn at all
+  });
+
+  it('slow probes are charged to the breaker and never re-walk discovery (PR #71 third review)', async () => {
+    const { Breaker, BREAKER_FAILS, buildActivity, runActivityMatch } = await import('@equational-applications/ct-wisdom-core');
+    let invalidations = 0;
+    let probes = 0;
+    const spawnFn: SpawnFn = (spec) => {
+      if (spec.args[2] === '--help') probes++;
+      return Promise.resolve(spawnOutcome({ code: null, timedOut: true }));
+    };
+    // Discovery's accepted path stays cached unless it is invalidated; an
+    // invalidation makes the next call re-run the blocking spawnSync walk.
+    const { a } = adapter({ spawnFn, invalidateDiscovery: () => { invalidations++; } });
+    const breaker = new Breaker();
+    const activity = buildActivity({ verb: 'run', command: 'pnpm test' }, null, {})!;
+    for (let i = 0; i < 20; i++) {
+      if (breaker.isOpen()) continue;
+      await runActivityMatch(a, activity, [], breaker);
+    }
+    expect(probes).toBe(BREAKER_FAILS); // then the breaker pauses everything
+    expect(invalidations).toBe(0); // no blocking discovery re-walk
+    expect(breaker.isOpen()).toBe(true);
+  });
+
+  it('a probe that passed is cached even when the abort lands right after it (PR #71 third review)', async () => {
+    const abort = new AbortController();
+    let helps = 0;
+    const spawnFn: SpawnFn = (spec) => {
+      if (spec.args[2] === '--help') {
+        helps++;
+        abort.abort(); // lands after the probe answered
+        return Promise.resolve(spawnOutcome({}));
+      }
+      return Promise.resolve(spawnOutcome({ stdout: '{"entries": [], "corrections": []}' }));
+    };
+    const { a } = adapter({ spawnFn });
+    expect((await a.wisdomMatch('q', 1, [], abort.signal)).outcome).toBe('aborted');
+    await a.wisdomMatch('q', 1, []);
+    expect(helps).toBe(1);
   });
 
   it('a probe spawn error with an aborted signal is class spawn, not aborted', async () => {

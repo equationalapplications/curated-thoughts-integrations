@@ -168,7 +168,13 @@ export function nodeSpawnFn(env: NodeJS.ProcessEnv = process.env): SpawnFn {
         const pid = child.pid;
         if (typeof pid !== 'number' || pid <= 0) return;
         killed = true;
-        if (exited) armGrace();
+        // Already exited: never signal (the leader is reaped, so -pid could
+        // hit a reused group); only bound the wait for pipes others hold,
+        // keeping the output read so far.
+        if (exited) {
+          armGrace();
+          return;
+        }
         if (process.platform !== 'win32') {
           try {
             process.kill(-pid, 'SIGKILL');
@@ -201,10 +207,9 @@ export function nodeSpawnFn(env: NodeJS.ProcessEnv = process.env): SpawnFn {
       // The caller's budget ran out (activity delivery, `spec.signal`): kill
       // the tree now and report `aborted`, which the core classifies as its
       // own outcome (OpenCode / OpenClaw parity). A child that already
-      // exited keeps its real result; stragglers still holding its pipes
-      // are killed so 'close' fires.
+      // exited keeps its real result (killTree then only bounds the wait).
       function onAbort(): void {
-        if (child.exitCode === null && child.signalCode === null) aborted = true;
+        if (!exited) aborted = true;
         killTree();
       }
       spec.signal?.addEventListener('abort', onAbort, { once: true });
@@ -495,19 +500,28 @@ export class DshWisdomAdapter implements HostAdapter {
         ...(signal ? { signal } : {}),
       });
       if (probe.spawnError) return { outcome: 'spawn' };
+      // A probe that passed is cached even if an abort lands right after it.
+      const passed = probe.aborted !== true && !probe.timedOut && probe.code === 0;
+      if (passed) this.probedPath = path;
       // Aborted mid-probe (the activity budget ran out, or the plan was
       // cancelled): decide nothing about the capability.
       if (probe.aborted === true || signal?.aborted) return { outcome: 'aborted' };
-      if (probe.timedOut) return { outcome: 'spawn' };
-      if (probe.code !== 0) {
+      // A slow probe is a CT failure the breaker counts, never `spawn`: a
+      // spawn-class reset re-runs discovery's blocking walk, so a slow ct
+      // would stall every step without ever pausing.
+      if (probe.timedOut) return { outcome: 'timeout_or_exit' };
+      if (!passed) {
         // Deterministic absence of the subcommand: latch OFF for the process
         // (n3 retry-next-turn does not apply — the binary answered).
         this.capabilityAbsent = true;
         return { outcome: 'timeout_or_exit' };
       }
-      this.probedPath = path;
     }
     const res = await coreWisdomMatch(path, query, max, exclude, this.spawnFn, signal);
+    // Cancelled (the host charged the budget miss itself at expiry): a kill
+    // that surfaces as a timeout or exit is that same miss, not a second
+    // CT failure.
+    if (signal?.aborted && res.outcome === 'timeout_or_exit') return { outcome: 'aborted' };
     // A failed match re-probes on the next call: a ct that lost `wisdom
     // match` in place (a downgrade at the same path) then latches quietly
     // instead of charging the breaker on every query. This failure itself

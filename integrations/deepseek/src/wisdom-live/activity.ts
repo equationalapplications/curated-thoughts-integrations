@@ -282,6 +282,7 @@ export class DshActivity {
     plan.consumed = true;
     plan.cancel.abort();
     this.release(agentId, plan);
+    reportActivity(this.adapter, { id: agentId }, plan.activity, { kind: 'skip', reason: 'abandoned' });
   }
 
   /** Store a slot; a replaced slot or the LRU-evicted one is abandoned. */
@@ -436,16 +437,14 @@ export class DshActivity {
         this.release(agentId, plan);
         return null;
       }
-      // On expiry: kill the abandoned `ct` child. If the kill really stopped
-      // the query (outcome `budget`), the miss counts as ONE breaker failure
-      // (recordActivityBudgetMiss, the shared rule). A child that had
-      // already answered keeps its result (the binding reports it, not
-      // `aborted`), so a query that made it in time is never charged.
+      // On expiry: charge the miss as ONE breaker failure now, before the
+      // next step's gate runs (recordActivityBudgetMiss, the shared rule),
+      // then kill the `ct` child. A child that had already answered keeps
+      // its result (the binding reports it, not `aborted`) and the core's
+      // recordSuccess then clears the charge.
       const match = await settleWithin(plan.promise, Math.max(0, plan.deadline - this.now()), () => {
+        recordActivityBudgetMiss(this.breaker);
         plan.cancel.abort();
-        void plan.promise.then((late) => {
-          if (late.failure === 'budget') recordActivityBudgetMiss(this.breaker);
-        });
       });
       // The core re-checks every gate against the log the model sees now
       // (tool results of the step included), selects and reports.
