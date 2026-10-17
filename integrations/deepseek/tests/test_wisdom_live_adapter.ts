@@ -193,18 +193,30 @@ describe('nodeSpawnFn abort (real process tree)', () => {
     }
   });
 
-  it('a run that ends normally is not aborted, and a later abort is a no-op', async () => {
+  it('a run that ends normally is not aborted and leaves no abort listener behind', async () => {
     if (process.platform === 'win32') return;
+    const { getEventListeners } = await import('node:events');
     const ct = await hangingCt();
     try {
       const abort = new AbortController();
-      const out = await nodeSpawnFn()({ command: ct.script, args: ['--help'], timeoutMs: 3000, signal: abort.signal });
+      const pending = nodeSpawnFn()({ command: ct.script, args: ['--help'], timeoutMs: 3000, signal: abort.signal });
+      expect(getEventListeners(abort.signal, 'abort')).toHaveLength(1);
+      const out = await pending;
       expect(out.code).toBe(0);
       expect(out.aborted).toBeUndefined();
-      abort.abort();
+      expect(getEventListeners(abort.signal, 'abort')).toHaveLength(0); // removed on 'close'
+      abort.abort(); // a later abort is a no-op
     } finally {
       ct.cleanup();
     }
+  });
+
+  it('a binary that cannot start ends on the error path with no abort listener left', async () => {
+    const { getEventListeners } = await import('node:events');
+    const abort = new AbortController();
+    const out = await nodeSpawnFn()({ command: '/nonexistent/ct-binary', args: [], timeoutMs: 3000, signal: abort.signal });
+    expect(out.spawnError).toBe(true);
+    expect(getEventListeners(abort.signal, 'abort')).toHaveLength(0);
   });
 
   it('DshWisdomAdapter.wisdomMatch passes the signal: abort → outcome aborted, capability not latched', async () => {
