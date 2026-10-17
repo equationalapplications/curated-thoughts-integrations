@@ -88,7 +88,7 @@ CASES = [
     ("terminal", {"command": "psql -W secretpw"}, "run psql", "psql"),
     ("terminal", {"command": "deploy --token abcsecret"}, "run deploy", "deploy"),
     ("terminal", {"command": "git -C somedir status"}, "run git", "git"),
-    ("terminal", {"command": "python -m mypkg.cli --key v"}, "run python mypkg.cli", "python mypkg.cli"),
+    ("terminal", {"command": "python -m mypkg.cli --key v"}, "run python mypkg", "python mypkg"),
     ("terminal", {"command": "python3.11 -m pytest -q"}, "run python3.11 pytest", "python3.11 pytest"),
     ("terminal", {"command": "node -m x"}, "run node", "node"),
     ("terminal", {"command": 'grep "SecretPassword" app.log'}, "run grep", "grep"),
@@ -673,6 +673,55 @@ class TestActivityLine(unittest.TestCase):
         self.assertGreater(first, 0)
         act._homes(env)
         self.assertEqual(len(calls), first, "a homes cache hit resolves nothing")
+
+    def test_sandbox_home_rule(self):
+        """Privacy amendment 6: a HOME inside a candidate root does not block
+        it only as a sandbox: a dot-dir directly under the root, or
+        `.cache/home` / `tmp/home`, and never a real user home."""
+        root = os.path.join(os.sep, "w", "repo")
+        j = lambda *parts: os.path.join(root, *parts)  # noqa: E731
+        for home in (j(".home"), j(".nix-home"), j(".cache", "home"), j("tmp", "home")):
+            self.assertTrue(act._sandbox_home(home, root, []), home)
+        for home in (j("home"), j("sub", ".home"), j("build", "home"), j(".cache", "x"),
+                     os.path.join(os.sep, "elsewhere", ".home"), root):
+            self.assertFalse(act._sandbox_home(home, root, []), home)
+        self.assertFalse(act._sandbox_home(j(".home"), root, [j(".home")]))
+
+    def test_userprofile_is_the_real_home_without_pwd(self):
+        base = temp_base()
+        work = os.path.join(base, "d", "work")
+        make_tree(work, [".git/", ".winhome/Documents/"])
+        env = {"USERPROFILE": os.path.join(work, ".winhome")}
+        act._system_identity = lambda: ([], [], [])  # no pwd (Windows)
+        self.assertIsNone(act.project_root(os.path.join(work, "tools"), env))
+        act.reset_state()
+        act._system_identity = lambda: ([], [], ["/elsewhere/me"])  # pwd exists
+        self.assertEqual(act.project_root(os.path.join(work, "tools"), env),
+                         os.path.realpath(work))
+
+    def test_python_flags_and_exe_suffix(self):
+        for cmd, q in (("python -u -m pytest", "python pytest"),
+                       ("python -X dev -W ignore -m pip", "python pip"),
+                       ("python -X", "python"), ("python -m", "python"),
+                       ("git.exe status", "git status"), ("GIT.EXE status", "GIT status"),
+                       ("python3.exe -m pytest", "python3 pytest"),
+                       ("python3.11.2 -m pytest", None), ("run.ps1", None)):
+            self.assertEqual(act.command_target(cmd, {}, frozenset()), q, cmd)
+        self.assertIsNone(act._PYTHON_RE.match("python3.11.2"))
+        self.assertIsNotNone(act._PYTHON_RE.match("python3.11"))
+
+    def test_project_package_cached_and_top_only(self):
+        base = temp_base()
+        make_tree(base, ["tests/__init__.py"])
+        calls = []
+        orig = os.path.isdir
+        os.path.isdir = lambda p: calls.append(p) or orig(p)
+        self.addCleanup(setattr, os.path, "isdir", orig)
+        self.assertEqual(act._project_package("tests.acme_merger_due_diligence", base), "tests")
+        first = len(calls)
+        self.assertEqual(act._project_package("tests.other", base), "tests")
+        self.assertEqual(len(calls), first, "cached per (root, top)")
+        self.assertIsNone(act._project_package("nothere.x", base))
 
     def test_ttl_cache(self):
         now = [0.0]

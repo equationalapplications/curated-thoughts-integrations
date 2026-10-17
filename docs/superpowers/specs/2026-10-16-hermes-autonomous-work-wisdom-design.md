@@ -717,6 +717,43 @@ P3 of amendment 4 is replaced by:
     give the same key.
   - `test_exactly_once` patches the process identity with a fixed fake.
 
+## Privacy amendment 6 (2026-10-17, hermes 0.6.7)
+
+A post-merge review of 0.6.6 found two leaks and some cleanups.
+
+- **`python -m` sends only the top package.** 0.6.6 checked only the top package of a
+  project module but sent the whole dotted name, so
+  `python -m tests.acme_merger_due_diligence` sent the submodule name. Now:
+  - a module in the known set (`pytest`, `pip`, `venv`, `http.server`, `unittest`,
+    `black`, `ruff`, `mypy`, `build`, `twine`) is sent as listed;
+  - any other module sends only its top-level package (`python tests`), and only if
+    that package (a directory or a `.py` file) exists at the root or under `src/`;
+  - this lookup is cached per (root, top).
+- **Every home blocks its ancestors again, with one narrow sandbox exception.**
+  - **The 0.6.6 leak:** 0.6.6 let only real user homes block their ancestors. So a
+    custom Windows `HOME=D:\work\home` with `D:\work\.git` made `D:\work` the root, and
+    `D:\work\home\Documents\taxes.pdf` was sent as `home/Documents/taxes.pdf`.
+  - **The rule now:** `HOME`, `USERPROFILE`, `expanduser("~")` and `pw_dir` all block
+    their ancestors.
+  - **The exception:** a home strictly inside the candidate root does not block it
+    only when it is a sandbox. That means it is not a real user home (a homes-location
+    child, or `pw_dir`; where there is no `pwd`, Windows, `USERPROFILE`), and it sits at
+    a dot-directory directly under the root (`.home`, `.nix-home`, `.sandbox`) or at
+    `.cache/home` or `tmp/home`.
+  - **The tension, resolved:** `D:\work\home` is inside the root and is not a homes
+    child, but `home` is not a sandbox path, so it still blocks `D:\work`, while
+    `repo/.home` does not block `repo`.
+- **Windows executables.** A trailing `.exe`, `.cmd`, `.bat` or `.com` is dropped from
+  the program before the dot check, so `git.exe status` → `git status`. A `.ps1` stays a
+  script, so it sends no query.
+- **Interpreter names and flags.** The interpreter pattern is now
+  `^python(\d+(\.\d+)?)?$`, so `python3.11.2` is not an interpreter name. Interpreter
+  flags before `-m` are skipped: `-u`, `-B`, `-O`, `-OO`, `-E`, `-s`, `-S`, `-I`, `-q`,
+  `-b`, `-bb`, `-d`, `-v` and `-P`, plus `-X <opt>` and `-W <opt>`. So
+  `python -u -m pytest` → `python pytest`.
+- **Cleanups.** The dead `_FREE_TEXT_PROGRAMS` table is deleted, and the interpreter
+  check runs once (`is_python`).
+
 ## Alignment with INTENT.md
 
 - **Goal "During autonomous work":** this is that step for Hermes. Host events
@@ -742,7 +779,7 @@ P3 of amendment 4 is replaced by:
 - **User decisions 1–7:** decision 1 → "Rate rule"; 2 → "Activity line builder" and the
   secret-safety tests; 3 and 4 → "Subagents and scheduled runs"; 5 → constants; 6 → this
   spec; 7 → `ct_tool` class.
-- **Privacy amendments 1-5:** serve "Why this repo exists" (CT is private and local-first):
+- **Privacy amendments 1-6:** serve "Why this repo exists" (CT is private and local-first):
   the query names the work, never the person or their directory layout. They only remove
   what is sent. Relevance stays CT's (rule 8): skipping files outside a project is a
   privacy rule, not a relevance judgment. Limits are unchanged (rule 6), and an activity
