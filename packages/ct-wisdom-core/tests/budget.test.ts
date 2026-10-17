@@ -221,6 +221,33 @@ describe('the aborted outcome (opencode 0.4.1 review)', () => {
   });
 });
 
+describe('a spawn outcome after a cancel still resets the discovery caches', () => {
+  for (const [reason, failure, charges] of [['budget', 'budget', 1], ['abandoned', 'cancelled', 0]] as const) {
+    it(`cancel('${reason}') then outcome spawn: ${failure}, ${charges} charge(s), one reset`, async () => {
+      const breaker = new Breaker();
+      let failures = 0;
+      const orig = breaker.recordFailure.bind(breaker);
+      breaker.recordFailure = () => { failures++; orig(); };
+      let resets = 0;
+      let release: () => void = () => {};
+      const h = host({
+        resetDiscoveryAndProbeCaches: () => { resets++; },
+        wisdomMatch: (_q, _m, _e, signal) =>
+          new Promise((resolve) => {
+            release = () => resolve({ outcome: 'spawn' });
+            signal?.addEventListener('abort', () => release(), { once: true });
+          }),
+      });
+      const start = startActivity(h, { id: 's' }, activity, breaker);
+      if (start.failure !== null) throw new Error('refused');
+      start.cancel(reason);
+      expect(await start.match).toEqual({ failure });
+      expect(failures).toBe(charges);
+      expect(resets).toBe(1);
+    });
+  }
+});
+
 describe('finishActivityOutcome with a cancelled match', () => {
   it('delivers nothing and lets the key retry in a later step', () => {
     const outcome = finishActivityOutcome(host(), { id: 's' }, activity, { failure: 'cancelled' });

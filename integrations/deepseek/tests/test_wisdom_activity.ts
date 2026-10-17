@@ -676,7 +676,7 @@ describe('budget expiry aborts the query (core recordActivityBudgetMiss)', () =>
     expect(turns.map((t) => [t.kind, t.reason])).toEqual([['skip', 'budget']]);
   });
 
-  it('a ct that cannot start when the budget runs out counts only the one budget miss (the core classifies by cancel reason)', async () => {
+  it('a ct that cannot start when the budget runs out is class budget, counts only the one miss, and still resets the caches', async () => {
     let now = 1000;
     const breaker = new CountingBreaker();
     const s = setup(undefined, { now: () => now, breaker });
@@ -697,7 +697,7 @@ describe('budget expiry aborts the query (core recordActivityBudgetMiss)', () =>
     expect(await s.pre()).toBeNull();
     await flush();
     expect(breaker.failuresRecorded).toBe(1); // the expired budget, charged once at expiry
-    expect(resets).toBe(0); // classified as budget, not spawn: the caches are not reset
+    expect(resets).toBe(1); // a spawn outcome resets the caches whatever the cancel reason
   });
 
   it('the budget miss is charged before deliver returns, even if the query never settles (PR #71 third review)', async () => {

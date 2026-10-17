@@ -1265,6 +1265,11 @@ export async function runActivityMatch(
       breaker.recordSuccess();
       return { failure: null, result: attempt.result };
     }
+    // A `spawn` outcome means ct genuinely could not start (the binding never
+    // reports that as `aborted`): reset the discovery and probe caches
+    // whatever the cancel reason. The reason only decides the failure class
+    // and the charge below.
+    if (attempt.outcome === 'spawn') host.resetDiscoveryAndProbeCaches();
     const reason = control?.reason() ?? null;
     // 2. The budget ran out: already charged ONCE, at cancel time.
     if (reason === 'budget') return { failure: 'budget' };
@@ -1274,10 +1279,7 @@ export async function runActivityMatch(
     // 4. No core cancel: the existing mapping. An abort from the host's own
     //    spawn is not CT's failure and never counts against the breaker.
     if (attempt.outcome === 'aborted') return { failure: 'budget' };
-    if (attempt.outcome === 'spawn') {
-      host.resetDiscoveryAndProbeCaches();
-      return { failure: 'spawn' };
-    }
+    if (attempt.outcome === 'spawn') return { failure: 'spawn' }; // caches already reset above
     if (attempt.outcome === 'timeout_or_exit') {
       breaker.recordFailure();
       // The adapter latches a missing subcommand as timeout_or_exit too.
