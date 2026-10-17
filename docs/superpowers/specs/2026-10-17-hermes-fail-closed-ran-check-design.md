@@ -211,9 +211,10 @@ All in `integrations/hermes/tests/test_ct_wisdom_activity.py` (stdlib `unittest`
 4. **Pin guard.** A test reads `HERMES_COMMIT` from `tests/e2e/Dockerfile` and asserts it equals the
    `PIN_RESULTS_COMMIT` constant recorded next to the fixtures. A pin bump then fails CI until someone re-checks the
    shapes and updates the constant.
-5. **Copies stay identical.** No test checks this today. Add one (in the Hermes suite) that asserts the claude-code
-   and docker-agent copies of `ct_wisdom_activity.py` are byte-identical to the Hermes copy. The claude-code and
-   docker-agent suites run unchanged.
+5. **Copies stay identical.** The existing gate `tests/tools/test_shared_script_parity.py` (PR #41, issue #33)
+   already lists `ct_wisdom_activity.py` for both docker-agent and claude-code (`IDENTICAL_EXTRA`) and runs on every
+   PR, so no new test is needed. It must pass after all three copies are updated. The claude-code and docker-agent
+   suites run unchanged.
 6. **e2e (scratch profile, isolated HOME and brain).** Re-run the Hermes e2e harness. Its checks (a delivery on a
    real `read_file`/`terminal`, nothing for the blocked `secrets.env`) must still pass. Update the check-6 comment in
    `e2e.sh`, which names `is_refusal`.
