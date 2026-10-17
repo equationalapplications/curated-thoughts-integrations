@@ -1,4 +1,4 @@
-"""Shared-script parity gate: Hermes vs Claude Code (issue #33).
+"""Shared-script parity gate: Hermes vs Claude Code and Docker Agent (issue #33).
 
 `integrations/hermes/scripts/` and `integrations/claude-code/scripts/` carry
 copies of the same stdlib scripts. Each integration ships standalone (no
@@ -35,7 +35,10 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
 REFERENCE = REPO / "integrations" / "hermes" / "scripts"
-COPIES = (REPO / "integrations" / "claude-code" / "scripts",)
+COPIES = (
+    REPO / "integrations" / "claude-code" / "scripts",
+    REPO / "integrations" / "docker-agent" / "scripts",
+)
 
 IDENTICAL = (
     "ct_env.py",
@@ -54,6 +57,13 @@ IDENTICAL = (
     "ct_wisdom_verbose.py",
     "ct_wisdom_log.py",
 )
+# Shared scripts only some copies vendor: {copy integration: (names,)}.
+# Docker Agent reuses the Hermes activity builder (privacy amendment R1-R4,
+# command targets, block render and splice) through a byte-identical copy
+# (spec 2026-10-16-docker-agent-integration-design.md, D1, D7).
+IDENTICAL_EXTRA = {
+    "docker-agent": ("ct_wisdom_activity.py",),
+}
 REGIONED = {
     "ct_doctor.py": ("module-docstring", "harness-config", "registration-check"),
 }
@@ -119,7 +129,7 @@ def drift_report(reference, copy, ref_label, copy_label):
 class SharedScriptParityTests(unittest.TestCase):
     def test_identical_scripts_are_byte_identical(self):
         for copy_dir in COPIES:
-            for name in IDENTICAL:
+            for name in IDENTICAL + IDENTICAL_EXTRA.get(copy_dir.parent.name, ()):
                 with self.subTest(copy=copy_dir.parent.name, script=name):
                     ref, copy = read(REFERENCE / name), read(copy_dir / name)
                     # normalize() with no allowed regions also rejects a

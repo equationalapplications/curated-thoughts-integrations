@@ -212,6 +212,8 @@ STDLIB_ALLOWLIST = frozenset(sys.stdlib_module_names) | {
     "ct_wisdom_activity",  # hermes autonomous-work delivery
     "ct_wisdom_verbose",  # opt-in verbose recorder (shared Hermes/Claude Code)
     "ct_wisdom_cc",  # claude-code hooks/ adapter over the vendored wisdom core
+    "ct_wisdom_da",  # docker-agent hooks/ adapter over the vendored wisdom core
+    "ct_wisdom_da_activity",  # docker-agent tool map onto the vendored activity builder
 }
 
 # CONTRIBUTING rule 3 / the environment contract: these three and nothing else.

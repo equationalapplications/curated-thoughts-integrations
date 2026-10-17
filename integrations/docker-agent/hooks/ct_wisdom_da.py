@@ -1,0 +1,1012 @@
+#!/usr/bin/env python3
+"""ct_wisdom_da.py — Intuitive Wisdom for Docker Agent (`docker agent run`).
+
+Spec: docs/superpowers/specs/2026-10-16-docker-agent-integration-design.md.
+
+One command hook, registered by the hooks.d drop-in scripts/install.sh
+writes, dispatching on `hook_event_name`:
+
+  * before_llm_call     -> first-call scan of an unseen session (D5), the
+                           bootstrap block inserted on every model call at a
+                           fixed position (D4), the per-session step counter
+                           (D7)
+  * user_prompt_submit /
+    user_followup_submit -> `ct wisdom match` on the user's message, stored
+                           as pending for the turn's first eligible tool
+                           result (D6); opt-in transient mode
+                           (CT_WISDOM_DA_LIVE=prompt)
+  * tool_response_transform -> deferred per-message delivery (D6),
+                           autonomous-work delivery (D7) and recall dedup (D8)
+
+The algorithm comes from the byte-identical Hermes core in ../scripts/
+(ct_ledger, ct_wisdom, ct_wisdom_live, ct_wisdom_activity, ct_wisdom_verbose;
+tests/tools/test_shared_script_parity.py). This module is only the Docker
+Agent adapter: the store, the lock, the persisted breaker and ct cache, and
+the I/O envelopes.
+
+Every unclear state fails closed (no delivery, never a repeat). Inside a
+sandbox VM (SANDBOX_VM_ID) every event is a silent no-op (D2). Read-only
+toward the brain: `ct recall` and `ct wisdom match` only; Docker Agent's own
+session.db is never opened. Stdlib only; every entry point is non-raising;
+the process always exits 0 (exit 2 on user_prompt_submit would refuse the
+user's message).
+"""
+
+from __future__ import annotations
+
+import contextlib
+import hashlib
+import json
+import logging
+import os
+import re
+import sys
+import time
+from pathlib import Path
+
+_HERE = Path(__file__).resolve().parent
+_SCRIPTS = _HERE.parent / "scripts"
+for _p in (str(_SCRIPTS), str(_HERE)):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
+import ct_ledger  # noqa: E402
+import ct_wisdom  # noqa: E402
+import ct_wisdom_activity  # noqa: E402
+import ct_wisdom_da_activity as da_activity  # noqa: E402
+import ct_wisdom_live  # noqa: E402
+import ct_wisdom_verbose  # noqa: E402
+
+try:  # POSIX
+    import fcntl
+except ImportError:  # pragma: no cover - Windows
+    fcntl = None
+try:  # Windows
+    import msvcrt
+except ImportError:
+    msvcrt = None
+
+logger = logging.getLogger(__name__)
+
+HOST = "docker-agent"
+STORE_VERSION = 1
+DATA_ENV = "DOCKER_AGENT_DATA_DIR"
+SANDBOX_ENV = "SANDBOX_VM_ID"
+LIVE_MODE_ENV = "CT_WISDOM_DA_LIVE"
+LOCK_WAIT = 2.0
+STORE_MAX_AGE = 30 * 86400
+CT_CACHE_MAX_AGE = 86400
+RECENT_KEYS_MAX = ct_wisdom_activity.RECENT_KEYS_MAX
+# The size limiter (limit_large_tool_results) cuts results over 51 200 bytes
+# or 2 000 lines AFTER our transform. Stay well under it so it can never cut
+# a block (spec D6, P11).
+RESULT_MAX_BYTES = 49152
+RESULT_MAX_LINES = 1990
+PRECHECK_MARGIN_BYTES = 8192
+PRECHECK_MARGIN_LINES = 64
+
+LIVE_HEADING = ct_wisdom_live.LIVE_HEADING
+_ELLIPSIS = "…"
+_KEY_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+_ENVELOPE_RE = re.compile(r"^<[A-Za-z][A-Za-z0-9_-]*(?=[\s>/])")
+_LIST_FIELDS = ("bootstrap_ids", "seen_ids", "delivered_ids", "tool_ids", "order", "recent_keys")
+_STATES = ("pending", "on", "off")
+
+
+class LockTimeout(Exception):
+    """The store lock could not be taken within its bounded wait."""
+
+
+# ---------------------------------------------------------------------------
+# environment, paths
+# ---------------------------------------------------------------------------
+
+
+def env_view(env=None):
+    """A copy of the environment the hook sees (os.environ by default)."""
+    return dict(os.environ if env is None else env)
+
+
+def wisdom_dir(view):
+    """<data>/curated-thoughts/wisdom, <data> = $DOCKER_AGENT_DATA_DIR or
+    ~/.cagent (Docker Agent's own rule, pkg/paths)."""
+    data = view.get(DATA_ENV)
+    if isinstance(data, str) and data.strip():
+        root = os.path.expanduser(data.strip())
+    else:
+        root = os.path.join(os.path.expanduser("~"), ".cagent")
+    return os.path.join(root, "curated-thoughts", "wisdom")
+
+
+def verbose_env(view):
+    """The env view the verbose recorder gets: CT_WISDOM_VERBOSE_LOG defaults
+    to the log next to our store (ct_wisdom_verbose knows no docker-agent
+    default, and the shared file is not edited)."""
+    out = dict(view)
+    if not (out.get(ct_wisdom_verbose.LOG_ENV) or "").strip():
+        out[ct_wisdom_verbose.LOG_ENV] = os.path.join(
+            wisdom_dir(view), ct_wisdom_verbose.LOG_NAME)
+    return out
+
+
+def in_sandbox(view):
+    value = view.get(SANDBOX_ENV)
+    return isinstance(value, str) and bool(value.strip())
+
+
+def transient_mode(view):
+    value = view.get(LIVE_MODE_ENV)
+    return isinstance(value, str) and value.strip().lower() == "prompt"
+
+
+# ---------------------------------------------------------------------------
+# store (spec D9)
+# ---------------------------------------------------------------------------
+
+
+def session_key(session_id):
+    if _KEY_RE.match(session_id):
+        return session_id
+    return hashlib.sha256(session_id.encode("utf-8")).hexdigest()
+
+
+def _sessions_dir(wdir):
+    return os.path.join(wdir, "sessions")
+
+
+def session_path(wdir, session_id):
+    return os.path.join(_sessions_dir(wdir), session_key(session_id) + ".json")
+
+
+def new_store(session_id, state="pending"):
+    return {
+        "v": STORE_VERSION,
+        "session_id": session_id,
+        "state": state,
+        "off_reason": None,
+        "bootstrap_block": "",
+        "bootstrap_ids": [],
+        "seen_ids": [],
+        "delivered_ids": [],
+        "tool_ids": [],
+        "order": [],
+        "step": 0,
+        "activity_step": -1,
+        "recent_keys": [],
+        "pending_live": None,
+        "turns": 0,
+        "updated": time.time(),
+    }
+
+
+def note_ids(store, field, ids):
+    """Append valid, not-yet-listed ids to store[field] and store['order']."""
+    for fid in ids:
+        if ct_ledger.valid_id(fid) and fid not in store[field]:
+            store[field].append(fid)
+            store["order"].append(fid)
+    return store
+
+
+def ledger_of(store):
+    return (set(store["bootstrap_ids"]) | set(store["seen_ids"])
+            | set(store["delivered_ids"]) | set(store["tool_ids"]))
+
+
+def exclude_of(store):
+    """Ledger ids, most recently noted first, capped at EXCLUDE_MAX."""
+    out, seen = [], set()
+    for fid in reversed(store["order"]):
+        if fid not in seen:
+            seen.add(fid)
+            out.append(fid)
+    return out[: ct_wisdom_live.EXCLUDE_MAX]
+
+
+def _valid_store(data, session_id):
+    if not isinstance(data, dict) or data.get("v") != STORE_VERSION:
+        return False
+    if data.get("session_id") != session_id or data.get("state") not in _STATES:
+        return False
+    if not isinstance(data.get("bootstrap_block"), str):
+        return False
+    for field in ("step", "activity_step", "turns"):
+        if not isinstance(data.get(field), int) or isinstance(data.get(field), bool):
+            return False
+    pending = data.get("pending_live")
+    if pending is not None and not isinstance(pending, dict):
+        return False
+    return all(
+        isinstance(data.get(f), list) and all(isinstance(i, str) for i in data[f])
+        for f in _LIST_FIELDS
+    )
+
+
+def load_store(wdir, session_id):
+    """The session's store, or None when missing, unreadable or invalid."""
+    try:
+        with open(session_path(wdir, session_id), encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        return None
+    return data if _valid_store(data, session_id) else None
+
+
+def _atomic_write(path, data):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = "%s.%d.tmp" % (path, os.getpid())
+    with open(tmp, "w", encoding="utf-8") as handle:
+        json.dump(data, handle, ensure_ascii=False)
+    os.replace(tmp, path)
+
+
+def save_store(wdir, session_id, store):
+    store["updated"] = time.time()
+    _atomic_write(session_path(wdir, session_id), store)
+
+
+def forget(wdir, session_id):
+    try:
+        os.remove(session_path(wdir, session_id))
+    except OSError:
+        pass
+
+
+@contextlib.contextmanager
+def locked(path, wait=LOCK_WAIT):
+    """Exclusive advisory lock on `<path>.lock`, waiting at most `wait` s."""
+    lock_path = path + ".lock"
+    os.makedirs(os.path.dirname(lock_path), exist_ok=True)
+    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    deadline = time.monotonic() + wait
+    try:
+        while True:
+            try:
+                if fcntl is not None:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                elif msvcrt is not None:  # pragma: no cover - Windows
+                    os.lseek(fd, 0, 0)
+                    msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+                break
+            except OSError:
+                if time.monotonic() >= deadline:
+                    raise LockTimeout(lock_path)
+                time.sleep(0.01)
+        try:
+            yield
+        finally:
+            try:
+                if fcntl is not None:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+                elif msvcrt is not None:  # pragma: no cover - Windows
+                    os.lseek(fd, 0, 0)
+                    msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+            except OSError:
+                pass
+    finally:
+        os.close(fd)
+
+
+def prune(wdir, now=None, max_age=STORE_MAX_AGE):
+    """Remove session files (and lock files) not touched in max_age."""
+    now = time.time() if now is None else now
+    directory = _sessions_dir(wdir)
+    try:
+        names = os.listdir(directory)
+    except OSError:
+        return
+    for name in names:
+        if not name.endswith((".json", ".lock")):
+            continue
+        path = os.path.join(directory, name)
+        try:
+            if now - os.path.getmtime(path) > max_age:
+                os.remove(path)
+        except OSError:
+            pass
+
+
+# ---------------------------------------------------------------------------
+# persisted breaker and ct cache (spec D9) — each hook is its own process
+# ---------------------------------------------------------------------------
+
+
+class PersistedBreaker:
+    """ct_wisdom_live.Breaker semantics over a JSON file (the Claude Code
+    leg's D8): after BREAKER_FAILS consecutive timeout/exit failures, CT
+    calls pause BREAKER_PAUSE s. Unreadable reads as closed."""
+
+    def __init__(self, path, fails=ct_wisdom_live.BREAKER_FAILS,
+                 pause=ct_wisdom_live.BREAKER_PAUSE, clock=time.time):
+        self._path = path
+        self._fails = fails
+        self._pause = pause
+        self._clock = clock
+
+    def _read(self):
+        try:
+            with open(self._path, encoding="utf-8") as handle:
+                data = json.load(handle)
+        except (OSError, ValueError):
+            return {"count": 0, "open_until": None}
+        count = data.get("count") if isinstance(data, dict) else None
+        until = data.get("open_until") if isinstance(data, dict) else None
+        return {
+            "count": count if isinstance(count, int) else 0,
+            "open_until": until if isinstance(until, (int, float)) else None,
+        }
+
+    def _write(self, state):
+        try:
+            _atomic_write(self._path, state)
+        except OSError:
+            logger.debug("wisdom-da: breaker write failed", exc_info=True)
+
+    def is_open(self):
+        state = self._read()
+        if state["open_until"] is None:
+            return False
+        if self._clock() >= state["open_until"]:
+            self._write({"count": 0, "open_until": None})
+            return False
+        return True
+
+    def record_failure(self):
+        state = self._read()
+        state["count"] += 1
+        if state["count"] >= self._fails:
+            state["open_until"] = self._clock() + self._pause
+        self._write(state)
+
+    def record_success(self):
+        state = self._read()
+        if state["count"] or state["open_until"] is not None:
+            self._write({"count": 0, "open_until": None})
+
+
+def breaker_for(wdir):
+    return PersistedBreaker(os.path.join(wdir, "breaker.json"))
+
+
+def _ct_cache_path(wdir):
+    return os.path.join(wdir, "ct.json")
+
+
+def _file_sig(path):
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return [st.st_size, int(st.st_mtime)]
+
+
+def read_ct_cache(wdir, now=None):
+    """(path, capable) from a fresh cache whose binary is unchanged, else None."""
+    now = time.time() if now is None else now
+    try:
+        with open(_ct_cache_path(wdir), encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    path, sig, capable, at = data.get("path"), data.get("sig"), data.get("capable"), data.get("at")
+    if not isinstance(path, str) or not isinstance(capable, bool) or not isinstance(at, (int, float)):
+        return None
+    if now - at > CT_CACHE_MAX_AGE or sig != _file_sig(path):
+        return None
+    return path, capable
+
+
+def write_ct_cache(wdir, path, capable):
+    try:
+        _atomic_write(_ct_cache_path(wdir), {
+            "path": path, "sig": _file_sig(path), "capable": bool(capable), "at": time.time()})
+    except OSError:
+        pass
+
+
+def drop_ct_cache(wdir):
+    try:
+        os.remove(_ct_cache_path(wdir))
+    except OSError:
+        pass
+
+
+def find_ct(wdir, view, need_match):
+    """(path, failure_class). With need_match, `ct wisdom match` must exist."""
+    cached = read_ct_cache(wdir)
+    if cached is not None:
+        path, capable = cached
+        if not need_match or capable:
+            return path, None
+        return None, "capability_missing"
+    path, dclass = ct_wisdom.discover_ct(env=view)
+    if path is None:
+        return None, dclass or "discovery_miss"
+    capable = ct_wisdom_live.has_match_capability(path)
+    if capable is not None:
+        write_ct_cache(wdir, path, capable)
+    if not need_match:
+        return path, None
+    if not capable:
+        return None, "probe_timeout" if capable is None else "capability_missing"
+    return path, None
+
+
+def _after_ct_failure(wdir, rclass, breaker):
+    if rclass in ("timeout", "exit"):
+        breaker.record_failure()
+    elif rclass == "spawn":
+        drop_ct_cache(wdir)
+        ct_wisdom.reset_discovery_cache()
+        ct_wisdom_live.reset_capability_cache()
+
+
+# ---------------------------------------------------------------------------
+# verbose seams
+# ---------------------------------------------------------------------------
+
+
+def _record(kind, view, event):
+    try:
+        event = dict(event, host=HOST)
+        if kind == "delivery":
+            ct_wisdom_verbose.record_delivery(event, env=verbose_env(view))
+        else:
+            ct_wisdom_verbose.record_non_delivery(event, env=verbose_env(view))
+    except Exception:  # pragma: no cover - the recorder never raises
+        pass
+
+
+def _skip(view, session_id, failure_class, channel=None, record=False, **detail):
+    logger.debug("wisdom-da: skip session=%s class=%s", session_id or "<empty>", failure_class)
+    if record:
+        _record("skip", view, dict(detail, channel=channel, session_id=session_id,
+                                   reason=failure_class))
+    return None
+
+
+def _nonempty(value):
+    return isinstance(value, str) and bool(value.strip())
+
+
+# ---------------------------------------------------------------------------
+# rendering
+# ---------------------------------------------------------------------------
+
+
+def _one_line(value):
+    return ct_wisdom._sanitize(value).strip().replace("\n", " ").replace("\r", " ")
+
+
+def render_deferred_block(entries, corrections, ledger):
+    """The per-message block for a tool result: the live renderer's budget
+    and fit / truncate-one / stop rule, with the marker FIRST on each fact
+    line (so a cut can never show a fact without its marker).
+    Returns (block, delivered_ids); ("", []) when nothing survives."""
+    parts, delivered = [], []
+    used = len(LIVE_HEADING) + 2
+    for item, superseded in ct_wisdom_activity.render_candidates(entries, corrections, ledger):
+        text = ct_wisdom._sanitize(item["text"])
+        if not item["title"].strip() and not text.strip():
+            continue
+        title_line = "%s **%s** (provenance: %s)" % (
+            ct_ledger.marker(item["id"]), _one_line(item["title"]),
+            _one_line(item["provenance"] or "unlabeled"))
+        if superseded:
+            title_line += " — supersedes " + ", ".join("ct-fact:%s" % s for s in superseded)
+        body = title_line + "\n" + text
+        sep = 2 if parts else 0
+        remaining = ct_wisdom_live.LIVE_MAX_BLOCK_CHARS - used - sep
+        if remaining <= len(title_line) + 1:
+            continue
+        if len(body) <= remaining:
+            parts.append(body)
+            used += sep + len(body)
+            delivered.append(item["id"])
+            if len(delivered) >= ct_wisdom_live.LIVE_MAX_PER_TURN:
+                break
+            continue
+        budget = remaining - len(title_line) - 1 - len(_ELLIPSIS)
+        if budget > 0:
+            parts.append(title_line + "\n" + text[:budget] + _ELLIPSIS)
+            delivered.append(item["id"])
+        break
+    if not parts:
+        return "", []
+    return LIVE_HEADING + "\n\n" + "\n\n".join(parts), delivered
+
+
+def render_bootstrap(view, wdir, cwd, exclude):
+    """The v1 bootstrap block (Hermes render_block) or "" on any failure;
+    entries already in context (the scan) are dropped first."""
+    try:
+        path, _dclass = find_ct(wdir, view, need_match=False)
+        if path is None:
+            return ""
+        entries, rclass = ct_wisdom.recall_wiki(
+            path, ct_wisdom.query_for({"cwd": cwd if isinstance(cwd, str) else ""}))
+        if rclass == "spawn":
+            drop_ct_cache(wdir)
+            ct_wisdom.reset_discovery_cache()
+        if rclass is not None or not entries:
+            return ""
+        entries = [e for e in entries if e[2] not in exclude]
+        return ct_wisdom.render_block(entries) if entries else ""
+    except Exception:
+        logger.debug("wisdom-da: bootstrap render failed", exc_info=True)
+        return ""
+
+
+def _line_count(text):
+    if not text:
+        return 0
+    return text.count("\n") + (0 if text.endswith("\n") else 1)
+
+
+def _fits(text):
+    return (len(text.encode("utf-8")) <= RESULT_MAX_BYTES
+            and _line_count(text) <= RESULT_MAX_LINES)
+
+
+def _precheck(text):
+    return (len(text.encode("utf-8")) <= RESULT_MAX_BYTES - PRECHECK_MARGIN_BYTES
+            and _line_count(text) <= RESULT_MAX_LINES - PRECHECK_MARGIN_LINES)
+
+
+# ---------------------------------------------------------------------------
+# before_llm_call (spec D4, D5, D7)
+# ---------------------------------------------------------------------------
+
+
+def _messages_ok(messages):
+    return isinstance(messages, list) and all(isinstance(m, dict) for m in messages)
+
+
+def scan_messages(messages):
+    """Every ct-fact id visible in the request the model is about to get."""
+    out = []
+    for msg in messages:
+        texts = []
+        if isinstance(msg.get("content"), str):
+            texts.append(msg["content"])
+        parts = msg.get("multi_content")
+        if isinstance(parts, list):
+            texts += [p["text"] for p in parts if isinstance(p, dict) and isinstance(p.get("text"), str)]
+        for text in texts:
+            for fid in ct_ledger.scan_ids(text) + recall_ids(text):
+                if fid not in out:
+                    out.append(fid)
+    return out
+
+
+def recall_ids(text):
+    """Ids of a CT recall result the agent can see (a `curated_recall_context`
+    result carries entries, not markers). Stubs are already counted by their
+    note's marker."""
+    if "wiki_entries" not in text or not text.lstrip().startswith("{"):
+        return []
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return []
+    entries = data.get("wiki_entries") if isinstance(data, dict) else None
+    if not isinstance(entries, list):
+        return []
+    return [e["id"] for e in entries
+            if isinstance(e, dict) and ct_ledger.valid_id(e.get("id"))]
+
+
+def insert_block(messages, block):
+    """`messages` with the bootstrap inserted at the first extras slot (spec
+    D4), or None when it is already present."""
+    for msg in messages:
+        if msg.get("content") == block:
+            return None
+    k = 0
+    while k < len(messages) and messages[k].get("role") == "system":
+        k += 1
+    scoped = [i for i in range(k) if messages[i].get("turn_scoped")]
+    if scoped:
+        pos, mark = scoped[0], False
+    else:
+        marked = [i for i in range(k) if messages[i].get("cache_control")]
+        pos, mark = (marked[-1] + 1 if marked else k), True
+    msg = {"role": "system", "content": block, "turn_scoped": True}
+    if mark:
+        msg["cache_control"] = True
+    return messages[:pos] + [msg] + messages[pos:]
+
+
+def before_llm_call(payload, view):
+    sid = payload.get("session_id")
+    if not _nonempty(sid):
+        return _skip(view, sid, "no_payload")
+    wdir = wisdom_dir(view)
+    messages = payload.get("messages")
+    store = load_store(wdir, sid)
+    if store is not None and store["state"] == "off":
+        return _skip(view, sid, "delivery_off")
+    if store is None or store["state"] == "pending":
+        if not _messages_ok(messages):
+            with locked(session_path(wdir, sid)):
+                cur = load_store(wdir, sid) or new_store(sid)
+                cur["state"], cur["off_reason"] = "off", "unreadable"
+                save_store(wdir, sid, cur)
+            return _skip(view, sid, "unreadable")
+        seen = scan_messages(messages)
+        prune(wdir)
+        block = render_bootstrap(view, wdir, payload.get("cwd"), set(seen))
+        try:
+            with locked(session_path(wdir, sid)):
+                cur = load_store(wdir, sid) or new_store(sid)
+                if cur["state"] == "off":
+                    return _skip(view, sid, "delivery_off")
+                if cur["state"] == "pending":
+                    cur["state"] = "on"
+                    note_ids(cur, "seen_ids", seen)
+                    cur["bootstrap_block"] = block
+                    note_ids(cur, "bootstrap_ids", ct_ledger.scan_ids(block))
+                cur["step"] += 1
+                save_store(wdir, sid, cur)
+        except LockTimeout:
+            return _skip(view, sid, "lock_timeout")
+        except Exception:
+            forget(wdir, sid)
+            return _skip(view, sid, "store_failed")
+        store = cur
+    else:
+        with locked(session_path(wdir, sid)):
+            cur = load_store(wdir, sid)
+            if cur is None or cur["state"] != "on":
+                return _skip(view, sid, "store_changed")
+            cur["step"] += 1
+            save_store(wdir, sid, cur)
+        store = cur
+    block = store["bootstrap_block"]
+    if not block or not _messages_ok(messages):
+        return None
+    updated = insert_block(messages, block)
+    if updated is None:
+        return None
+    return {"hook_specific_output": {"hook_event_name": "before_llm_call",
+                                     "updated_messages": updated}}
+
+
+# ---------------------------------------------------------------------------
+# user_prompt_submit / user_followup_submit (spec D6)
+# ---------------------------------------------------------------------------
+
+
+def _expire_pending(view, sid, store, channel):
+    pending = store.get("pending_live")
+    if isinstance(pending, dict):
+        _skip(view, sid, "no_tool_call", channel="deferred", record=True,
+              query=pending.get("query"), result=pending.get("result"),
+              ledger=sorted(ledger_of(store)))
+    store["pending_live"] = None
+
+
+def user_prompt_submit(payload, view):
+    event = payload.get("hook_event_name")
+    sid = payload.get("session_id")
+    prompt = payload.get("prompt")
+    channel = event or "user_prompt_submit"
+    if not _nonempty(sid) or not _nonempty(prompt) or _ENVELOPE_RE.match(prompt.lstrip()):
+        return _skip(view, sid, "provenance", channel=channel, record=_nonempty(sid))
+    wdir = wisdom_dir(view)
+    with locked(session_path(wdir, sid)):
+        store = load_store(wdir, sid)
+        if store is None:
+            store = new_store(sid)
+        if store["state"] == "off":
+            return _skip(view, sid, "delivery_off", channel=channel, record=True)
+        _expire_pending(view, sid, store, channel)
+        store["turns"] += 1
+        save_store(wdir, sid, store)
+    breaker = breaker_for(wdir)
+    if breaker.is_open():
+        return _skip(view, sid, "breaker_open", channel=channel, record=True)
+    query = ct_wisdom_live.user_text(prompt)
+    if not query:
+        return _skip(view, sid, "empty_query", channel=channel, record=True)
+    path, fclass = find_ct(wdir, view, need_match=True)
+    if path is None:
+        return _skip(view, sid, fclass, channel=channel, record=True)
+    result, rclass = ct_wisdom_live.match_wisdom(
+        path, query, ct_wisdom_live.LIVE_MAX_PER_TURN, exclude_of(store))
+    if rclass is not None:
+        _after_ct_failure(wdir, rclass, breaker)
+        return _skip(view, sid, rclass, channel=channel, record=True, query=query)
+    breaker.record_success()
+    transient = transient_mode(view)
+    with locked(session_path(wdir, sid)):
+        cur = load_store(wdir, sid)
+        if cur is None or cur["state"] == "off":
+            return _skip(view, sid, "store_changed", channel=channel, record=True)
+        ledger = ledger_of(cur)
+        if transient and cur["state"] == "on":
+            block, delivered = ct_wisdom_live.render_live_block(
+                result["entries"], result["corrections"], ledger)
+            if not block:
+                return _skip(view, sid, "zero_hits", channel=channel, record=True,
+                             query=query, result=result, ledger=sorted(ledger))
+            save_store(wdir, sid, note_ids(cur, "delivered_ids", delivered))
+            _record("delivery", view, {
+                "channel": channel, "session_id": sid, "query": query, "result": result,
+                "ledger": sorted(ledger), "delivered": list(delivered), "block": block})
+            return {"hook_specific_output": {"hook_event_name": event,
+                                             "additional_context": block}}
+        if not ct_wisdom_activity.render_candidates(result["entries"], result["corrections"], ledger):
+            return _skip(view, sid, "zero_hits", channel="deferred", record=True,
+                         query=query, result=result, ledger=sorted(ledger))
+        cur["pending_live"] = {"turn": cur["turns"], "query": query, "result": result}
+        save_store(wdir, sid, cur)
+    return None
+
+
+# ---------------------------------------------------------------------------
+# tool_response_transform (spec D6, D7, D8)
+# ---------------------------------------------------------------------------
+
+
+def _stub(fact_id):
+    # Same stub as Hermes ct_tool_dedup (the agent still sees the hit).
+    return {"id": fact_id, "in_context": True,
+            "note": "already in context: ct-fact:%s" % fact_id}
+
+
+def rewrite_recall(text, ledger):
+    """(new_text | None, new_ids) for one CT recall JSON envelope."""
+    new_ids = []
+    try:
+        inner = json.loads(text)
+    except (ValueError, TypeError):
+        return None, new_ids
+    if not isinstance(inner, dict) or not isinstance(inner.get("wiki_entries"), list):
+        return None, new_ids
+    rewritten, stubbed = [], 0
+    for entry in inner["wiki_entries"]:
+        fact_id = entry.get("id") if isinstance(entry, dict) else None
+        if not ct_ledger.valid_id(fact_id):
+            rewritten.append(entry)
+        elif fact_id in ledger:
+            rewritten.append(_stub(fact_id))
+            stubbed += 1
+        else:
+            rewritten.append(entry)
+            if fact_id not in new_ids:
+                new_ids.append(fact_id)
+    if not stubbed:
+        return None, new_ids
+    inner["wiki_entries"] = rewritten
+    return json.dumps(inner, ensure_ascii=False), new_ids
+
+
+def _recall_dedup(payload, view, sid, wdir):
+    response = payload.get("tool_response")
+    if not isinstance(response, str) or payload.get("tool_error"):
+        return None
+    with locked(session_path(wdir, sid)):
+        store = load_store(wdir, sid)
+        if store is None or store["state"] != "on":
+            return None
+        updated, new_ids = rewrite_recall(response, ledger_of(store))
+        if new_ids:
+            save_store(wdir, sid, note_ids(store, "tool_ids", new_ids))
+    if updated is None or not updated:
+        return None
+    return {"hook_specific_output": {"hook_event_name": "tool_response_transform",
+                                     "updated_tool_response": updated}}
+
+
+def tool_response_transform(payload, view):
+    sid = payload.get("session_id")
+    if not _nonempty(sid):
+        return _skip(view, sid, "no_payload")
+    wdir = wisdom_dir(view)
+    name, category = payload.get("tool_name"), payload.get("tool_category")
+    if da_activity.is_ct_tool(name, category):
+        if da_activity.is_recall_tool(name, category):
+            return _recall_dedup(payload, view, sid, wdir)
+        return _skip(view, sid, "ct_tool")
+    response = payload.get("tool_response")
+    if payload.get("tool_error"):
+        return _skip(view, sid, "tool_error")
+    if not isinstance(response, str) or ct_wisdom_activity._splice_mode(response) is None:
+        return _skip(view, sid, "unsupported_result")
+    store = load_store(wdir, sid)
+    if store is None or store["state"] != "on":
+        return _skip(view, sid, "no_store" if store is None else store["state"])
+    if not _precheck(response):
+        return _skip(view, sid, "near_limit")
+    args = payload.get("tool_input")
+    activity = da_activity.activity_for(name, args if isinstance(args, dict) else None,
+                                        payload.get("cwd"), view)
+    if activity is not None and not da_activity.query_for(activity):
+        activity = None
+    breaker = breaker_for(wdir)
+
+    # Phase A (locked): claim the pending per-message result and this step's
+    # activity slot. The lock is never held across a ct call.
+    live = None
+    run_activity = False
+    with locked(session_path(wdir, sid)):
+        cur = load_store(wdir, sid)
+        if cur is None or cur["state"] != "on":
+            return _skip(view, sid, "store_changed")
+        changed = False
+        if isinstance(cur.get("pending_live"), dict):
+            live = cur["pending_live"]
+            cur["pending_live"] = None
+            changed = True
+        if activity is not None:
+            key = json.dumps(list(activity.key))
+            if cur["activity_step"] == cur["step"]:
+                _skip(view, sid, "step_used")
+            elif key in cur["recent_keys"]:
+                _skip(view, sid, "seen_key")
+            elif breaker.is_open():
+                _skip(view, sid, "breaker_open", channel="activity", record=True,
+                      query=da_activity.query_for(activity), activity=activity.line)
+            else:
+                cur["activity_step"] = cur["step"]
+                cur["recent_keys"] = (cur["recent_keys"] + [key])[-RECENT_KEYS_MAX:]
+                run_activity = changed = True
+        if changed:
+            save_store(wdir, sid, cur)
+        exclude = exclude_of(cur)
+
+    # Phase B: the activity's CT call, outside the lock.
+    act_result = None
+    query = da_activity.query_for(activity) if run_activity else None
+    act_base = {"query": query, "activity": activity.line} if run_activity else {}
+    if run_activity:
+        path, fclass = find_ct(wdir, view, need_match=True)
+        if path is None:
+            _skip(view, sid, fclass, channel="activity", record=True, **act_base)
+        else:
+            act_result, rclass = ct_wisdom_live.match_wisdom(
+                path, query, ct_wisdom_activity.ACTIVITY_MAX_PER_STEP, exclude)
+            if rclass is not None:
+                _after_ct_failure(wdir, rclass, breaker)
+                _skip(view, sid, rclass, channel="activity", record=True, **act_base)
+                act_result = None
+            else:
+                breaker.record_success()
+    if live is None and act_result is None:
+        return None
+
+    # Phase C (locked): render against the ledger as it is NOW, record the
+    # ids, write, and only then emit (at-most-once).
+    with locked(session_path(wdir, sid)):
+        cur = load_store(wdir, sid)
+        if cur is None or cur["state"] != "on":
+            return _skip(view, sid, "store_changed")
+        ledger = ledger_of(cur)
+        blocks, events = [], []
+        if live is not None:
+            result = live.get("result") if isinstance(live.get("result"), dict) else {}
+            block, delivered = render_deferred_block(
+                result.get("entries") or [], result.get("corrections") or [], ledger)
+            if block:
+                blocks.append(block)
+                events.append(("delivery", {"channel": "deferred", "session_id": sid,
+                                            "query": live.get("query"), "result": result,
+                                            "ledger": sorted(ledger), "delivered": delivered,
+                                            "block": block, "tool_name": name}))
+                ledger = ledger | set(delivered)
+                note_ids(cur, "delivered_ids", delivered)
+            else:
+                events.append(("skip", {"channel": "deferred", "session_id": sid,
+                                        "query": live.get("query"), "result": result,
+                                        "ledger": sorted(ledger), "reason": "zero_hits"}))
+        if act_result is not None:
+            chosen = None
+            for item, superseded in ct_wisdom_activity.render_candidates(
+                    act_result["entries"], act_result["corrections"], ledger):
+                block = ct_wisdom_activity.render_activity_block(item, superseded, activity)
+                if block:
+                    chosen = (item, block)
+                    break
+            if chosen is not None:
+                blocks.append(chosen[1])
+                events.append(("delivery", dict(act_base, channel="activity", session_id=sid,
+                                                result=act_result, ledger=sorted(ledger),
+                                                delivered=[chosen[0]["id"]], block=chosen[1],
+                                                tool_name=name)))
+                note_ids(cur, "delivered_ids", [chosen[0]["id"]])
+            else:
+                events.append(("skip", dict(act_base, channel="activity", session_id=sid,
+                                            result=act_result, ledger=sorted(ledger),
+                                            reason="zero_hits")))
+        out = ct_wisdom_activity.splice(response, "\n\n".join(blocks)) if blocks else None
+        if out is not None and not _fits(out):
+            out = None
+            events = [("skip", dict(e[1], reason="near_limit")) if e[0] == "delivery" else e
+                      for e in events]
+        if out is not None:
+            save_store(wdir, sid, cur)
+        else:
+            # Nothing is emitted: the claimed ids are NOT recorded, but the
+            # claimed pending result and step slot stay spent (at-most-once).
+            pass
+    for kind, event in events:
+        _record(kind, view, event)
+    if not out:
+        return None
+    return {"hook_specific_output": {"hook_event_name": "tool_response_transform",
+                                     "updated_tool_response": out}}
+
+
+# ---------------------------------------------------------------------------
+# entry point
+# ---------------------------------------------------------------------------
+
+_HANDLERS = {
+    "before_llm_call": before_llm_call,
+    "user_prompt_submit": user_prompt_submit,
+    "user_followup_submit": user_prompt_submit,
+    "tool_response_transform": tool_response_transform,
+}
+
+
+def handle(payload, env=None):
+    """Dispatch one hook payload; returns the output dict or None. Never raises."""
+    try:
+        view = env_view(env)
+        if in_sandbox(view) or not isinstance(payload, dict):
+            return None
+        handler = _HANDLERS.get(payload.get("hook_event_name"))
+        if handler is None:
+            return None
+        return handler(payload, view)
+    except Exception:
+        logger.debug("wisdom-da: hook failed", exc_info=True)
+        return None
+
+
+def respond(payload, env=None):
+    """handle() plus verbose mode: the notices the recorder produced become
+    the top-level `system_message`, which Docker Agent shows as a warning and
+    never adds to the session (spec D10). `hook_specific_output` is never
+    touched. Never raises."""
+    notices = []
+    previous = ct_wisdom_verbose.set_sink(notices.append)
+    try:
+        directive = handle(payload, env)
+    finally:
+        ct_wisdom_verbose.set_sink(previous)
+    if not notices:
+        return directive
+    try:
+        return dict(directive or {}, system_message="\n\n".join(notices))
+    except Exception:
+        return directive
+
+
+def main():
+    try:
+        raw = sys.stdin.read()
+    except Exception:
+        return
+    try:
+        payload = json.loads(raw) if raw.strip() else None
+    except Exception:
+        return
+    directive = respond(payload)
+    if directive:
+        try:
+            sys.stdout.write(json.dumps(directive, ensure_ascii=False))
+            sys.stdout.flush()
+        except Exception:
+            pass
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except BaseException:
+        pass
+    os._exit(0)

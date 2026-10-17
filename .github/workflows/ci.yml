@@ -486,6 +486,76 @@ jobs:
           OPENCODE_BIN="$OPENCODE_BIN" \
             "$BUN_BIN" ${HOST_CMD#bun }
 
+  host-contract-docker-agent:
+    # Docker Agent is pinned by real-binary verification: the release asset
+    # of the pinned version, checked against its published sha256, driven
+    # against a scripted local OpenAI-compatible endpoint
+    # (integrations/docker-agent/tests/host/mock_openai.py) with a stdlib
+    # fake `ct` on PATH. The assertions are on the request bodies the model
+    # would receive. Spec: 2026-10-16-docker-agent-integration-design.md,
+    # "CI host contract". No model, key or network beyond the download.
+    name: host contract (docker-agent)
+    runs-on: ubuntu-latest
+    env:
+      DOCKER_AGENT_VERSION: v1.150.0
+      DOCKER_AGENT_SHA256: 791fa6bac9f829847f00ab948f838bf54d11e0830988a5e5bce88d65ea65f2d1
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - id: changes
+        # Same scoping rule as the opencode contract: always on main and
+        # tags, on PRs only when the integration or a shared asset changed.
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            git fetch --no-tags origin "$BASE_REF"
+            if git diff --name-only "origin/$BASE_REF...HEAD" \
+                -- integrations/docker-agent integrations/hermes/scripts shared/ tests/fixtures | grep -q .; then
+              echo run=true >> "$GITHUB_OUTPUT"
+            else
+              echo run=false >> "$GITHUB_OUTPUT"
+            fi
+          else
+            echo run=true >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        if: steps.changes.outputs.run == 'true'
+        with:
+          python-version: "3.13"
+
+      - name: Download the pinned docker-agent binary and verify its sha256
+        if: steps.changes.outputs.run == 'true'
+        run: |
+          url="https://github.com/docker/docker-agent/releases/download/${DOCKER_AGENT_VERSION}/docker-agent-linux-amd64"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/docker-agent" "$url"
+          echo "${DOCKER_AGENT_SHA256}  $RUNNER_TEMP/docker-agent" | sha256sum -c -
+          chmod +x "$RUNNER_TEMP/docker-agent"
+          "$RUNNER_TEMP/docker-agent" version
+          echo "DOCKER_AGENT_BIN=$RUNNER_TEMP/docker-agent" >> "$GITHUB_ENV"
+
+      - name: Run the declared host contract
+        # The command comes from integration.yaml's checks.host. A throwaway
+        # HOME keeps any runner state out of the run.
+        if: steps.changes.outputs.run == 'true'
+        working-directory: integrations/docker-agent
+        env:
+          HOST_HOME: ${{ runner.temp }}/ct-da-host-home
+        run: |
+          pip install --disable-pip-version-check -r ../../tools/requirements-ci.txt
+          HOST_CMD=$(python3 -c "import yaml; print(yaml.safe_load(open('integration.yaml'))['checks']['host'])")
+          case "$HOST_CMD" in
+            "python "*) ;;
+            *) echo "checks.host must start with 'python ' (got: $HOST_CMD)"; exit 1 ;;
+          esac
+          mkdir -p "$HOST_HOME"
+          HOME="$HOST_HOME" bash -c "$HOST_CMD"
+
   ci-ok:
     # The single required status check. Branch protection names this job and
     # nothing else, so adding an integration never means editing protection
@@ -493,7 +563,7 @@ jobs:
     # cancelled dependency is not.
     name: ci-ok
     if: always()
-    needs: [discover, core, integration, policy, host-contract]
+    needs: [discover, core, integration, policy, host-contract, host-contract-docker-agent]
     runs-on: ubuntu-latest
     steps:
       - name: Check dependency results
@@ -503,6 +573,7 @@ jobs:
           echo "integration=${{ needs.integration.result }}"
           echo "policy=${{ needs.policy.result }}"
           echo "host-contract=${{ needs.host-contract.result }}"
+          echo "host-contract-docker-agent=${{ needs.host-contract-docker-agent.result }}"
           for result in "${{ needs.discover.result }}" "${{ needs.core.result }}" "${{ needs.policy.result }}"; do
             [ "$result" = "success" ] || { echo "a required job did not succeed"; exit 1; }
           done
@@ -511,6 +582,10 @@ jobs:
           case "${{ needs.host-contract.result }}" in
             success|skipped) ;;
             *) echo "host contract did not succeed"; exit 1 ;;
+          esac
+          case "${{ needs.host-contract-docker-agent.result }}" in
+            success|skipped) ;;
+            *) echo "docker-agent host contract did not succeed"; exit 1 ;;
           esac
           case "${{ needs.integration.result }}" in
             success|skipped) ;;

@@ -103,7 +103,7 @@ class TestRealManifests(unittest.TestCase):
     def test_all_shipped_integrations_are_declared(self):
         ids = [i for i, _, _ in ct_ci_manifest.discover_manifests(REPO)]
         self.assertEqual(
-            ids, ["claude-code", "deepseek", "hermes", "openclaw", "opencode"]
+            ids, ["claude-code", "deepseek", "docker-agent", "hermes", "openclaw", "opencode"]
         )
 
     def test_manifest_with_host_check_validates(self):

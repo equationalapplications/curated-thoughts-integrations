@@ -15,6 +15,7 @@ common architecture.
 | OpenCode | [`integrations/opencode/`](integrations/opencode/) | implemented | [0.3.0](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=opencode) |
 | OpenClaw | [`integrations/openclaw/`](integrations/openclaw/) | implemented | [0.2.1](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=openclaw) |
 | Claude Code | [`integrations/claude-code/`](integrations/claude-code/) | implemented | [0.3.2](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=claude-code) |
+| [Docker Agent](https://github.com/docker/docker-agent) | [`integrations/docker-agent/`](integrations/docker-agent/) | implemented | [0.1.0](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=docker-agent) |
 
 Each version links to that integration's releases.
 
@@ -48,7 +49,7 @@ Wisdom, every integration does two things:
   the user's message. The ones not yet in context are added *to that turn*.
   They never go into the system prompt, so the prompt and its provider cache
   stay untouched.
-- **During autonomous work** (Hermes only so far), while the agent works on
+- **During autonomous work** (Hermes and Docker Agent so far), while the agent works on
   its own between messages, the file it reads or edits, the command it runs
   or the pattern it searches can bring in one relevant fact. See
   [Autonomous-work delivery](#autonomous-work-delivery-hermes).
@@ -91,12 +92,15 @@ silent no-op and the session runs as before.
 | [OpenCode](integrations/opencode/README.md#intuitive-wisdom) | `chat.message` hook | a `synthetic: true` part on the user message | `--continue` and restarts keep delivering, with no repeats | delivered facts are carried forward on purpose, so a compacted-out fact is never re-delivered |
 | [Claude Code](integrations/claude-code/README.md#intuitive-wisdom) | `UserPromptSubmit` hook | `additionalContext` | `--resume`, `--continue`, `/resume` and forks turn live delivery **off** for the life of the session; `/clear` starts a fresh session | `/compact` keeps delivering, with no repeats |
 | [OpenClaw](integrations/openclaw/README.md) | `before_prompt_build`, user turns only | `prependContext` inside the user message | a new process gets no live delivery for a session until its bootstrap is settled | the session key survives; a fact compacted out of context may arrive again |
+| [Docker Agent](integrations/docker-agent/README.md#intuitive-wisdom) | `user_prompt_submit` match, delivered by `tool_response_transform` | appended to the turn's **first tool result** (a reply with no tool call gets none; opt-in `CT_WISDOM_DA_LIVE=prompt` for Anthropic `cache_preserving_updates`) | `--session` resumes keep delivering, with no repeats; a branch or pre-install session is scanned on its first model call | delivery continues; a compacted-out fact is never re-delivered |
 
 When a resume or restore turns live delivery off, the bootstrap block stays
 in context: replayed from the session's history (Hermes restores, Claude
 Code `--resume`) or rendered again (OpenClaw, Claude Code forks). On OpenCode, Claude Code and OpenClaw, subagent sessions never
 receive live delivery. Host-specific gates:
 
+- **Docker Agent**: only `docker agent run` on the host loads the hooks
+  drop-in; sandbox, cloud, ACP/editor and API-server runs get nothing.
 - **Claude Code**: managed deployments that set `allowManagedHooksOnly`
   disable plugin hooks, and Intuitive Wisdom with them.
 - **OpenClaw**: needs `hooks.allowConversationAccess: true` and a 20 s
@@ -158,6 +162,7 @@ keys are logged. Set `CT_WISDOM_VERBOSE_LOG=<file>` to choose the log path.
 | DeepSeek Harness | the plugin's `curated-thoughts` logger | `$DSH_HOME/logs/ct-wisdom-verbose.jsonl` |
 | OpenCode | a TUI toast | `$XDG_DATA_HOME/opencode/log/ct-wisdom-verbose.jsonl` |
 | OpenClaw | the gateway log (`openclaw logs --follow`) | `$OPENCLAW_STATE_DIR/logs/ct-wisdom-verbose.jsonl` |
+| Docker Agent | a warning line (TUI notification, or `⚠️` in a non-interactive run), from the hook's `system_message` | `~/.cagent/curated-thoughts/wisdom/ct-wisdom-verbose.jsonl` (`$DOCKER_AGENT_DATA_DIR` moves it) |
 
 To read the log, run `python3 scripts/ct_wisdom_log.py --host hermes` (or
 `--host claude-code`) from the Hermes or Claude Code plugin directory, or
@@ -180,7 +185,7 @@ records. Each integration's README gives the exact path.
   superseded fact,** because `ct recall` returns neither provenance nor
   supersession status. Live delivery (`ct wisdom match`) has both. Closing
   this needs a CT change first.
-- **Autonomous-work delivery is Hermes-only so far.** On the other hosts,
+- **Autonomous-work delivery is Hermes and Docker Agent only so far.** On the other hosts,
   an agent working autonomously between messages gets no new facts until
   the next message (see [INTENT.md](INTENT.md) for the end state).
 - **Concept rules reached only via paths need CT activity mode.** From a
@@ -235,6 +240,14 @@ plugin (pinned to openclaw 2026.10.3) that mounts the sidecar from its
 manifest, ships the three skills, and puts the bootstrap block in OpenClaw's
 cacheable system space. Its installer runs OpenClaw's own
 `openclaw plugins install` and grants the permission and timeout above.
+
+**[Docker Agent](integrations/docker-agent/)** (Python) is a hooks.d drop-in
+for `docker agent run` (pinned to docker-agent v1.150.0). Its installer
+writes one file and never edits agent files; it prints the MCP toolset
+snippet to paste. It reaches all three Intuitive Wisdom steps: the bootstrap
+rides every model call at a fixed position, per-message facts ride the
+turn's first tool result, and autonomous work uses the Hermes rules. CI runs
+the real pinned binary against a scripted model endpoint.
 
 See each integration's README for full install and verify instructions.
 
