@@ -1,5 +1,5 @@
 """ct_hook_store (shared with Claude Code): lock exclusivity survives prune,
-bounded waits, atomic writes, the persisted breaker."""
+safe lock / tmp housekeeping, bounded waits, the persisted breaker."""
 
 from __future__ import annotations
 
@@ -20,6 +20,8 @@ for _p in (str(SCRIPTS), str(HOOKS)):
 
 import ct_hook_store as hs  # noqa: E402
 
+POSIX = hs.fcntl is not None
+
 
 class HookStoreTests(unittest.TestCase):
     def setUp(self):
@@ -33,28 +35,72 @@ class HookStoreTests(unittest.TestCase):
         past = time.time() - days * 86400
         os.utime(path, (past, past))
 
-    def test_prune_removes_old_stores_and_never_lock_files(self):
+    def make(self, path, days=0):
+        with open(path, "w") as handle:
+            handle.write("{}")
+        if days:
+            self.age(path, days)
+
+    def test_prune_removes_old_stores_and_their_free_lock_files(self):
         hs.atomic_write(self.store, {"x": 1})
         with hs.locked(self.store):
             pass
         fresh = os.path.join(self.dir, "s2.json")
         hs.atomic_write(fresh, {"x": 2})
+        with hs.locked(fresh):
+            pass
         self.age(self.store, 40)
-        self.age(self.store + ".lock", 40)
         hs.prune(self.dir)
         self.assertFalse(os.path.exists(self.store))
-        self.assertTrue(os.path.exists(self.store + ".lock"))
+        self.assertFalse(os.path.exists(self.store + ".lock"))
         self.assertTrue(os.path.exists(fresh))
+        self.assertTrue(os.path.exists(fresh + ".lock"))  # its store is still there
 
-    def test_lock_stays_exclusive_across_a_prune(self):
-        # The race the old prune allowed: A holds the lock, the lock file is
-        # old, prune runs; B must still be excluded.
+    @unittest.skipUnless(POSIX, "flock semantics")
+    def test_a_held_lock_is_never_pruned_and_stays_exclusive(self):
         with hs.locked(self.store):
-            self.age(self.store + ".lock", 40)
-            hs.prune(self.dir)
+            hs.prune(self.dir, force=True)  # store absent, but the lock is held
+            self.assertTrue(os.path.exists(self.store + ".lock"))
             with self.assertRaises(hs.LockTimeout):
                 with hs.locked(self.store, wait=0.1):
                     pass
+
+    @unittest.skipUnless(POSIX, "flock semantics")
+    def test_lock_retries_when_its_file_was_unlinked_under_it(self):
+        # A opens the lock file, the file is unlinked (old prune race), a
+        # new file appears: the next locker must lock the file AT the path.
+        lock_path = self.store + ".lock"
+        with hs.locked(self.store):
+            pass
+        stale = os.open(lock_path, os.O_RDWR)
+        os.remove(lock_path)
+        try:
+            hs.fcntl.flock(stale, hs.fcntl.LOCK_EX)  # holder of the orphan inode
+            with hs.locked(self.store, wait=0.5):
+                self.assertTrue(os.path.exists(lock_path))
+                with self.assertRaises(hs.LockTimeout):
+                    with hs.locked(self.store, wait=0.1):
+                        pass
+        finally:
+            os.close(stale)
+
+    def test_prune_removes_stale_tmp_files_only(self):
+        old_tmp = os.path.join(self.dir, "s9.json.123.tmp")
+        new_tmp = os.path.join(self.dir, "s8.json.124.tmp")
+        self.make(old_tmp, days=2)
+        self.make(new_tmp)
+        hs.prune(self.dir)
+        self.assertFalse(os.path.exists(old_tmp))
+        self.assertTrue(os.path.exists(new_tmp))
+
+    def test_prune_runs_at_most_once_a_day(self):
+        hs.prune(self.dir)
+        self.make(self.store, days=40)
+        hs.prune(self.dir)
+        self.assertTrue(os.path.exists(self.store))
+        self.age(os.path.join(self.dir, hs.PRUNE_STAMP), 2)
+        hs.prune(self.dir)
+        self.assertFalse(os.path.exists(self.store))
 
     def test_lock_wait_is_bounded(self):
         with hs.locked(self.store):

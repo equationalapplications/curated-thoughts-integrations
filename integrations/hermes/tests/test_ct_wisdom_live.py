@@ -244,6 +244,16 @@ class TestRenderLiveBlock(unittest.TestCase):
         self.assertIn("**Deploy** <!-- ct-fact:e1 --> (provenance: human-verified)\nuse make deploy", block)
         self.assertEqual(ids, ["e1"])
 
+    def test_marker_first_layout_keeps_the_budget_and_ids(self):
+        entries = [_item("e1", "Deploy", "use make deploy"), _item("e2", "Big", "z" * 3000)]
+        default, ids = ct_wisdom_live.render_live_block(entries, [], set())
+        first, ids_first = ct_wisdom_live.render_live_block(entries, [], set(), marker_first=True)
+        self.assertEqual(ids, ids_first)
+        self.assertIn("<!-- ct-fact:e1 --> **Deploy** (provenance: human-verified)\nuse make deploy",
+                      first)
+        self.assertEqual(len(first), len(default))
+        self.assertLessEqual(len(first), ct_wisdom_live.LIVE_MAX_BLOCK_CHARS)
+
     def test_null_provenance_is_unlabeled(self):
         block, _ = ct_wisdom_live.render_live_block([_item("e1", provenance=None)], [], set())
         self.assertIn("(provenance: unlabeled)", block)

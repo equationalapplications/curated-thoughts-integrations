@@ -58,12 +58,26 @@ HARNESS_LABEL = "Docker Agent"
 # not consulted here either. Ambient env enters here once, at import, for the
 # same reason Hermes documents for HERMES_CONFIG: this is a property of the
 # host Docker Agent install, not of the brain/sidecar env being probed.
-def _docker_agent_config_dir():
+#
+# The rule is identical in scripts/install.sh (tests/test_install.py checks
+# they agree): each variable is trimmed of surrounding whitespace and used
+# only when non-empty; then a leading "~" or "~/" becomes $HOME (any other
+# "~name" form is left as it is).
+def _docker_agent_config_dir(env=None):
+    env = os.environ if env is None else env
+    home = env.get("HOME") or str(Path.home())
+    value = ""
     for key in ("DOCKER_AGENT_CONFIG_DIR", "CAGENT_CONFIG_DIR"):
-        value = os.environ.get(key)
-        if value and value.strip():
-            return Path(os.path.expanduser(value.strip()))
-    return Path.home() / ".config" / "cagent"
+        value = (env.get(key) or "").strip()
+        if value:
+            break
+    if not value:
+        return Path(home) / ".config" / "cagent"
+    if value == "~":
+        return Path(home)
+    if value.startswith("~/"):
+        return Path(home) / value[2:]
+    return Path(value)
 
 
 DROPIN_NAME = "50-curated-thoughts.yaml"

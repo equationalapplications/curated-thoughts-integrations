@@ -8,14 +8,19 @@ heading format below is load-bearing: `## <version> — <date>`.
 
 ## 0.3.3 — 2026-10-17
 
-- Fixed: the session-store prune no longer deletes `.lock` files. A lock
-  file removed while another hook process held or was about to take its
-  `flock` let two processes each hold an "exclusive" lock (on different
-  inodes), so parallel `PostToolUse` hooks could interleave store writes.
-  Old session stores are still pruned after 30 days; their empty lock files
-  are kept. The store, lock, prune and persisted-breaker primitives moved to
-  `hooks/ct_hook_store.py`, shared byte-identically with the Docker Agent
-  integration (parity-gated). No other behavior change.
+- Fixed: the session-store prune deleted `.lock` files by age while
+  another hook process could hold (or be about to take) their `flock`, so
+  two processes could each hold an "exclusive" lock on different inodes and
+  parallel `PostToolUse` hooks could interleave store writes. Now a lock
+  file is removed only when its session store is gone and a non-blocking
+  lock on it succeeds (it is unlinked while held), and `locked()` re-checks
+  after locking that its file is still the one at the path, retrying if
+  not. Prune also removes stale `*.tmp` files older than a day, and runs at
+  most once a day. The store, lock, prune and persisted-breaker primitives
+  moved to `hooks/ct_hook_store.py`, shared byte-identically with the
+  Docker Agent integration (parity-gated). `scripts/ct_wisdom_live.py`
+  gains an optional marker-first layout (shared with Hermes; unused here).
+  No other behavior change.
 
 ## 0.3.2 — 2026-10-16
 

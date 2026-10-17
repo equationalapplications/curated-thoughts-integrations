@@ -54,16 +54,27 @@ esac
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 HOOK="${ROOT}/hooks/ct_wisdom_da.py"
 
-if [ -n "${DOCKER_AGENT_CONFIG_DIR:-}" ]; then
-  CONFIG_DIR="${DOCKER_AGENT_CONFIG_DIR}"
-elif [ -n "${CAGENT_CONFIG_DIR:-}" ]; then
-  CONFIG_DIR="${CAGENT_CONFIG_DIR}"
-else
+# The config-dir rule, identical in scripts/ct_doctor.py
+# (_docker_agent_config_dir; tests/test_install.py checks they agree):
+# DOCKER_AGENT_CONFIG_DIR, else CAGENT_CONFIG_DIR, each trimmed of
+# surrounding whitespace and used only when non-empty, else
+# $HOME/.config/cagent; then a leading "~" or "~/" becomes $HOME. Any other
+# "~name" form is left as it is.
+trim() {
+  local s="$1"
+  s="${s#"${s%%[![:space:]]*}"}"
+  s="${s%"${s##*[![:space:]]}"}"
+  printf '%s' "$s"
+}
+CONFIG_DIR="$(trim "${DOCKER_AGENT_CONFIG_DIR:-}")"
+[ -n "$CONFIG_DIR" ] || CONFIG_DIR="$(trim "${CAGENT_CONFIG_DIR:-}")"
+if [ -z "$CONFIG_DIR" ]; then
   [ -n "${HOME:-}" ] || die "HOME is not set"
   CONFIG_DIR="${HOME}/.config/cagent"
 fi
 case "$CONFIG_DIR" in
-  "~"*) CONFIG_DIR="${HOME}${CONFIG_DIR#\~}" ;;
+  \~) CONFIG_DIR="${HOME}" ;;
+  \~/*) CONFIG_DIR="${HOME}/${CONFIG_DIR#\~/}" ;;
 esac
 DROPIN_DIR="${CONFIG_DIR}/hooks.d"
 DROPIN="${DROPIN_DIR}/${DROPIN_NAME}"
@@ -92,6 +103,11 @@ esac
 if ! "$PY" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)' >/dev/null 2>&1; then
   die "${PY} is not a working Python 3.9+ (on macOS, /usr/bin/python3 can be the Xcode Command Line Tools stub). Install Python 3.9+ or set CT_PYTHON."
 fi
+# Absolute, as the drop-in needs (a relative CT_PYTHON like ./venv/bin/python
+# would resolve against whatever directory Docker Agent runs in). abspath,
+# not realpath: a versioned symlink target (python3 -> python3.13) would
+# break the hook on the next Python upgrade, while the link keeps working.
+PY="$("$PY" -c 'import os, sys; print(os.path.abspath(sys.argv[1]))' "$PY")"
 
 # --- paths must be quotable in the drop-in ----------------------------------
 for p in "$PY" "$HOOK"; do

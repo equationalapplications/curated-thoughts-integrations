@@ -70,6 +70,8 @@ STORE_MAX_AGE = ct_hook_store.STORE_MAX_AGE
 CT_CACHE_MAX_AGE = 86400
 RECENT_KEYS_MAX = ct_wisdom_activity.RECENT_KEYS_MAX
 CLAIMS_MAX = 64
+PROMPT_BUDGET = 8.0  # seconds of ct time per user_prompt_submit (hook timeout 10 s)
+_clock = time.monotonic
 # The size limiter (limit_large_tool_results) cuts results over 51 200 bytes
 # or 2 000 lines AFTER our transform. Stay well under it so it can never cut
 # a block (spec D6, P11).
@@ -84,7 +86,7 @@ _ELLIPSIS = "…"
 # message (instruction updates, pkg/session/session.go:1113). A prompt that
 # merely starts with a tag (`<div> is not centered`) is still the user's.
 _ENVELOPE_RE = re.compile(r"^<system-update>")
-_ATTACHED_RE = re.compile(r'<attached_file path="(?:[^"\\]|\\.)*">\n.*?\n</attached_file>', re.S)
+_ATTACHED_TAG = "<attached_file"
 _LIST_FIELDS = ("bootstrap_ids", "seen_ids", "delivered_ids", "tool_ids", "order", "recent_keys")
 _STATES = ("pending", "on", "off")
 
@@ -222,7 +224,9 @@ def _valid_store(data, session_id):
         return False
     claims = data.get("claims")
     if not isinstance(claims, dict) or not all(
-            isinstance(k, str) and isinstance(v, str) for k, v in claims.items()):
+            isinstance(k, str) and isinstance(v, dict) and isinstance(v.get("block"), str)
+            and isinstance(v.get("ids"), list) and all(isinstance(i, str) for i in v["ids"])
+            for k, v in claims.items()):
         return False
     entries = data.get("boot_entries")
     if entries is not None and not (isinstance(entries, list) and all(
@@ -251,13 +255,6 @@ _atomic_write = ct_hook_store.atomic_write
 def save_store(wdir, session_id, store):
     store["updated"] = time.time()
     _atomic_write(session_path(wdir, session_id), store)
-
-
-def forget(wdir, session_id):
-    try:
-        os.remove(session_path(wdir, session_id))
-    except OSError:
-        pass
 
 
 locked = ct_hook_store.locked
@@ -406,41 +403,11 @@ def _one_line(value):
 
 
 def render_deferred_block(entries, corrections, ledger):
-    """The per-message block for a tool result: the live renderer's budget
-    and fit / truncate-one / stop rule, with the marker FIRST on each fact
-    line (so a cut can never show a fact without its marker).
-    Returns (block, delivered_ids); ("", []) when nothing survives."""
-    parts, delivered = [], []
-    used = len(LIVE_HEADING) + 2
-    for item, superseded in ct_wisdom_activity.render_candidates(entries, corrections, ledger):
-        text = ct_wisdom._sanitize(item["text"])
-        if not item["title"].strip() and not text.strip():
-            continue
-        title_line = "%s **%s** (provenance: %s)" % (
-            ct_ledger.marker(item["id"]), _one_line(item["title"]),
-            _one_line(item["provenance"] or "unlabeled"))
-        if superseded:
-            title_line += " — supersedes " + ", ".join("ct-fact:%s" % s for s in superseded)
-        body = title_line + "\n" + text
-        sep = 2 if parts else 0
-        remaining = ct_wisdom_live.LIVE_MAX_BLOCK_CHARS - used - sep
-        if remaining <= len(title_line) + 1:
-            continue
-        if len(body) <= remaining:
-            parts.append(body)
-            used += sep + len(body)
-            delivered.append(item["id"])
-            if len(delivered) >= ct_wisdom_live.LIVE_MAX_PER_TURN:
-                break
-            continue
-        budget = remaining - len(title_line) - 1 - len(_ELLIPSIS)
-        if budget > 0:
-            parts.append(title_line + "\n" + text[:budget] + _ELLIPSIS)
-            delivered.append(item["id"])
-        break
-    if not parts:
-        return "", []
-    return LIVE_HEADING + "\n\n" + "\n\n".join(parts), delivered
+    """The per-message block for a tool result: the shared live renderer
+    (ct_wisdom_live.render_live_block, one budget rule for every host) with
+    the marker FIRST on each fact line, so a cut can never show a fact
+    without its marker. Returns (block, delivered_ids)."""
+    return ct_wisdom_live.render_live_block(entries, corrections, ledger, marker_first=True)
 
 
 BOOTSTRAP_TRIES = 3  # model calls a pending session retries a transient recall failure
@@ -619,7 +586,9 @@ def before_llm_call(payload, view):
         except LockTimeout:
             return _skip(view, sid, "lock_timeout")
         except Exception:
-            forget(wdir, sid)
+            # Leave the store as it is (another process may own newer state):
+            # fail closed for this call only; the next call retries.
+            logger.debug("wisdom-da: confirm failed", exc_info=True)
             return _skip(view, sid, "store_failed")
         store = cur
     else:
@@ -659,11 +628,14 @@ def _expire_pending(view, sid, store):
 
 
 def prompt_query(prompt):
-    """The user's own text: attached-file blocks (Docker Agent appends
-    `<attached_file path="…">…</attached_file>` for pasted or attached
-    content, pkg/app/app.go:974, pkg/chat/chat.go:335 at v1.150.0) are
-    removed, so file contents never reach CT; "" when nothing is left."""
-    return ct_wisdom_live.user_text(_ATTACHED_RE.sub("", prompt))
+    """The user's own text. Docker Agent appends pasted or attached content
+    as `<attached_file path="…">…</attached_file>` after the typed text
+    (pkg/app/app.go:974, pkg/chat/chat.go:335 at v1.150.0). Parsing those
+    blocks out is fragile (content can contain the closing tag), so this
+    fails closed: only the text BEFORE the first `<attached_file` is kept,
+    and "" (no query) when nothing is left."""
+    head = prompt.split(_ATTACHED_TAG, 1)[0]
+    return ct_wisdom_live.user_text(head)
 
 
 def user_prompt_submit(payload, view):
@@ -688,17 +660,27 @@ def user_prompt_submit(payload, view):
     query = prompt_query(prompt)
     if not query:
         return _skip(view, sid, "empty_query", channel=channel, record=True)
-    exclude = exclude_of(store)
-    if store["state"] == "pending":
-        # The first message of a session runs before its first model call:
-        # recall the bootstrap now (cached for that call) so its facts are
-        # excluded and the message's 2 slots go to new facts.
-        entries, store = ensure_boot_entries(view, wdir, sid, payload.get("cwd"))
-        boot = [e[2] for e in entries or [] if e[2] not in exclude]
-        exclude = (boot + exclude)[: ct_wisdom_live.EXCLUDE_MAX]
+    # One wall budget for every ct call this hook makes, under the 10 s hook
+    # timeout: a step that could not finish inside it is not started.
+    deadline = _clock() + PROMPT_BUDGET
     path, fclass = find_ct(wdir, view, need_match=True)
     if path is None:
         return _skip(view, sid, fclass, channel=channel, record=True)
+    exclude = exclude_of(store)
+    if store["state"] == "pending":
+        # The first message of a session runs before its first model call:
+        # recall the bootstrap now (cached for that call) and exclude the
+        # ids its block will carry, so the message's 2 slots go to new facts.
+        entries = store["boot_entries"]
+        # Started only when it can end in time; the match below then runs
+        # only if its own timeout still fits, so the total stays <= budget.
+        if entries is None and deadline - _clock() >= ct_wisdom.RECALL_TIMEOUT:
+            entries, store = ensure_boot_entries(view, wdir, sid, payload.get("cwd"))
+        boot = ct_ledger.scan_ids(render_bootstrap(entries or [], set(exclude)))
+        exclude = (boot + exclude)[: ct_wisdom_live.EXCLUDE_MAX]
+    if deadline - _clock() < ct_wisdom_live.LIVE_TIMEOUT:
+        breaker.record_failure()
+        return _skip(view, sid, "budget", channel=channel, record=True, query=query)
     result, rclass = ct_wisdom_live.match_wisdom(
         path, query, ct_wisdom_live.LIVE_MAX_PER_TURN, exclude)
     if rclass is not None:
@@ -786,6 +768,26 @@ def _recall_dedup(payload, sid, wdir):
                                      "updated_tool_response": updated}}
 
 
+def release_claim(view, wdir, sid, use_id):
+    """The block a tool call claimed did not fit a later call of that call
+    (the final result, typically): the model will not see it, so its ids
+    leave the ledger again (never shown means never delivered) and the claim
+    is dropped. Later calls of this tool call get nothing."""
+    try:
+        with locked(session_path(wdir, sid)):
+            cur = load_store(wdir, sid)
+            claim = cur["claims"].pop(use_id, None) if cur is not None else None
+            if claim is not None:
+                gone = set(claim["ids"])
+                cur["delivered_ids"] = [i for i in cur["delivered_ids"] if i not in gone]
+                still = ledger_of(cur)
+                cur["order"] = [i for i in cur["order"] if i in still]
+                save_store(wdir, sid, cur)
+    except LockTimeout:
+        pass
+    return _skip(view, sid, "near_limit")
+
+
 def tool_response_transform(payload, view):
     sid = payload.get("session_id")
     if not _nonempty(sid):
@@ -809,9 +811,10 @@ def tool_response_transform(payload, view):
     if use_id is not None and use_id in store["claims"]:
         # A later call for the same tool call (a streamed shell chunk, then
         # the final result): the same block again, no new claim (P16).
-        replay = ct_wisdom_activity.splice(response, store["claims"][use_id])
+        claim = store["claims"][use_id]
+        replay = ct_wisdom_activity.splice(response, claim["block"])
         if replay is None or not _fits(replay):
-            return _skip(view, sid, "near_limit")
+            return release_claim(view, wdir, sid, use_id)
         return {"hook_specific_output": {"hook_event_name": "tool_response_transform",
                                          "updated_tool_response": replay}}
     if not _precheck(response):
@@ -931,7 +934,9 @@ def tool_response_transform(payload, view):
         # result and step slot stay spent (at-most-once).
         if out is not None:
             if use_id is not None:
-                cur["claims"][use_id] = "\n\n".join(p[1] for p in used)
+                cur["claims"][use_id] = {
+                    "block": "\n\n".join(p[1] for p in used),
+                    "ids": [i for p in used for i in p[0]]}
                 while len(cur["claims"]) > CLAIMS_MAX:
                     cur["claims"].pop(next(iter(cur["claims"])))
             save_store(wdir, sid, cur)

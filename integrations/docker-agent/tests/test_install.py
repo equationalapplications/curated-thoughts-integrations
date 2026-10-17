@@ -127,6 +127,38 @@ class InstallerTests(unittest.TestCase):
         self.assertNotIn("SECRET", self.dropin.read_text(encoding="utf-8"))
         self.assertIn('args: ["--mcp"]', proc.stdout)
 
+    def test_relative_ct_python_is_written_absolute(self):
+        venv = self.home / "venv" / "bin"
+        venv.mkdir(parents=True)
+        link = venv / "python"
+        os.symlink(sys.executable, link)
+        proc = self.run_install(CT_PYTHON="./venv/bin/python")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        command = re.findall(r"(?m)^\s*command: '\"([^\"]+)\"", self.dropin.read_text())[0]
+        self.assertTrue(os.path.isabs(command), command)
+        # Absolute, and the symlink itself is kept (it survives upgrades).
+        self.assertTrue(command.endswith("/venv/bin/python"), command)
+        self.assertEqual(os.path.realpath(os.path.dirname(command)), os.path.realpath(venv))
+
+    def test_config_dir_rule_matches_the_doctor(self):
+        sys.path.insert(0, str(INTEGRATION / "scripts"))
+        import ct_doctor
+        cases = [
+            {"DOCKER_AGENT_CONFIG_DIR": "  ~/cfg-a  "},
+            {"DOCKER_AGENT_CONFIG_DIR": "   ", "CAGENT_CONFIG_DIR": "~/cfg-b"},
+            {"CAGENT_CONFIG_DIR": str(self.home / "abs-c") + " "},
+            {"DOCKER_AGENT_CONFIG_DIR": "~"},
+            {},
+        ]
+        for extra in cases:
+            with self.subTest(extra=extra):
+                proc = self.run_install("--print-only", **extra)
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                printed = re.search(r"== drop-in \((.*)\) ==", proc.stdout).group(1)
+                env = dict(extra, HOME=str(self.home))
+                want = ct_doctor._docker_agent_config_dir(env) / "hooks.d" / "50-curated-thoughts.yaml"
+                self.assertEqual(printed, str(want))
+
     def test_snippet_without_readable_brain_is_commented(self):
         proc = self.run_install()
         self.assertIn("#   OPENROUTER_API_KEY: ${env.OPENROUTER_API_KEY}", proc.stdout)

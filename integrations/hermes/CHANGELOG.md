@@ -6,6 +6,16 @@ format below is load-bearing: `## <version> — <date>`.
 
 ## Unreleased
 
+## 0.6.9 — 2026-10-17
+
+- Shared-core change, no behavior change for Hermes:
+  `ct_wisdom_live.render_live_block` gains an optional `marker_first`
+  argument (default off, so Hermes's user-turn block bytes are unchanged)
+  that puts each fact's `ct-fact` marker before its title. The Docker Agent
+  integration uses it for blocks it appends to tool results, so the budget
+  rule stays in one place. The file is byte-identical in the Claude Code and
+  Docker Agent copies.
+
 ## 0.6.8 — 2026-10-17
 
 - **Privacy fix.** What 0.6.7 could still send to CT and its embedding

@@ -8,11 +8,21 @@ lives on disk here: an atomically written JSON file per session, guarded by
 an exclusive advisory lock on a sibling `.lock` file, plus a persisted
 circuit breaker.
 
-Lock files are NEVER deleted. A process may open a lock file and block on
-it while another unlinks it; the next process then creates a fresh file and
-both hold an "exclusive" lock on different inodes. No unlink protocol avoids
-that race without a second lock, so prune() removes old session stores and
-leaves their (empty) lock files alone.
+Lock files and pruning. Unlinking a lock file that another process has
+open (or is about to lock) lets two processes each hold an "exclusive" lock
+on different inodes. Two rules close that:
+
+  * locked() re-checks, after taking the lock, that its descriptor is still
+    the file at the lock path (same device and inode); if the file was
+    unlinked or replaced meanwhile, it lets go and starts over;
+  * prune() removes a lock file only when its session store is gone and a
+    non-blocking lock on it succeeds (nobody holds it), and unlinks it while
+    holding that lock. On Windows an open file cannot be unlinked, so the
+    remove simply fails and the file stays.
+
+prune() also removes session stores older than 30 days and stale `*.tmp`
+files (a writer killed mid-write) older than a day, and runs at most once a
+day (a stamp file in the directory).
 
 Byte-identical in integrations/claude-code/hooks and
 integrations/docker-agent/hooks (tests/tools/test_shared_script_parity.py).
@@ -45,6 +55,9 @@ logger = logging.getLogger(__name__)
 
 LOCK_WAIT = 2.0  # seconds; a hook never blocks longer than this on a store
 STORE_MAX_AGE = 30 * 86400  # prune() removes session stores older than this
+TMP_MAX_AGE = 86400  # and leftover *.tmp files older than this
+PRUNE_EVERY = 86400  # prune() does its work at most this often
+PRUNE_STAMP = ".pruned"
 _KEY_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 
 
@@ -71,6 +84,39 @@ def atomic_write(path, data):
     os.replace(tmp, path)
 
 
+def _try_lock(fd):
+    """Take an exclusive lock without blocking; False when it is held."""
+    try:
+        if fcntl is not None:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        elif msvcrt is not None:  # pragma: no cover - Windows
+            os.lseek(fd, 0, 0)
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+        return True
+    except OSError:
+        return False
+
+
+def _unlock(fd):
+    try:
+        if fcntl is not None:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        elif msvcrt is not None:  # pragma: no cover - Windows
+            os.lseek(fd, 0, 0)
+            msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+    except OSError:
+        pass
+
+
+def _same_file(fd, path):
+    """True while `path` still names the file open as `fd`."""
+    try:
+        a, b = os.fstat(fd), os.stat(path)
+    except OSError:
+        return False
+    return (a.st_dev, a.st_ino) == (b.st_dev, b.st_ino)
+
+
 @contextlib.contextmanager
 def locked(path, wait=None):
     """Exclusive advisory lock on `<path>.lock`, waiting at most `wait` s
@@ -78,53 +124,84 @@ def locked(path, wait=None):
     wait = LOCK_WAIT if wait is None else wait
     lock_path = path + ".lock"
     os.makedirs(os.path.dirname(lock_path), exist_ok=True)
-    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
     deadline = time.monotonic() + wait
-    try:
-        while True:
-            try:
-                if fcntl is not None:
-                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                elif msvcrt is not None:  # pragma: no cover - Windows
-                    os.lseek(fd, 0, 0)
-                    msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+    while True:
+        fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+        if _try_lock(fd):
+            if fcntl is None or _same_file(fd, lock_path):
                 break
-            except OSError:
-                if time.monotonic() >= deadline:
-                    raise LockTimeout(lock_path)
-                time.sleep(0.01)
-        try:
-            yield
-        finally:
+            _unlock(fd)  # pruned under us: retry on the file now at the path
+        os.close(fd)
+        if time.monotonic() >= deadline:
+            raise LockTimeout(lock_path)
+        time.sleep(0.01)
+    try:
+        yield
+    finally:
+        _unlock(fd)
+        os.close(fd)
+
+
+def _old(path, now, max_age):
+    try:
+        return now - os.path.getmtime(path) > max_age
+    except OSError:
+        return False
+
+
+def _remove_free_lock(lock_path):
+    """Unlink a lock file nobody holds, while holding it ourselves."""
+    try:
+        fd = os.open(lock_path, os.O_RDWR)
+    except OSError:
+        return
+    try:
+        if _try_lock(fd):
             try:
-                if fcntl is not None:
-                    fcntl.flock(fd, fcntl.LOCK_UN)
-                elif msvcrt is not None:  # pragma: no cover - Windows
-                    os.lseek(fd, 0, 0)
-                    msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+                if _same_file(fd, lock_path):
+                    os.remove(lock_path)
             except OSError:
                 pass
+            finally:
+                _unlock(fd)
     finally:
         os.close(fd)
 
 
-def prune(directory, now=None, max_age=STORE_MAX_AGE):
-    """Remove session stores (`*.json`) in `directory` not touched in
-    max_age seconds. Lock files are never removed (see the module doc)."""
+def prune(directory, now=None, max_age=STORE_MAX_AGE, force=False):
+    """Housekeeping for a sessions directory, at most once per PRUNE_EVERY
+    (unless `force`): session stores (`*.json`) older than max_age, lock
+    files whose store is gone and that nobody holds, and `*.tmp` files older
+    than TMP_MAX_AGE."""
     now = time.time() if now is None else now
+    stamp = os.path.join(directory, PRUNE_STAMP)
+    if not force and os.path.exists(stamp) and not _old(stamp, now, PRUNE_EVERY):
+        return
     try:
         names = os.listdir(directory)
     except OSError:
         return
+    try:
+        with open(stamp, "w", encoding="utf-8"):
+            pass
+        os.utime(stamp, (now, now))
+    except OSError:
+        pass
     for name in names:
-        if not name.endswith(".json"):
-            continue
         path = os.path.join(directory, name)
         try:
-            if now - os.path.getmtime(path) > max_age:
-                os.remove(path)
+            if name.endswith(".json"):
+                if _old(path, now, max_age):
+                    os.remove(path)
+            elif name.endswith(".tmp"):
+                if _old(path, now, TMP_MAX_AGE):
+                    os.remove(path)
         except OSError:
             pass
+    for name in names:
+        if name.endswith(".json.lock") and not os.path.exists(
+                os.path.join(directory, name[: -len(".lock")])):
+            _remove_free_lock(os.path.join(directory, name))
 
 
 class PersistedBreaker:

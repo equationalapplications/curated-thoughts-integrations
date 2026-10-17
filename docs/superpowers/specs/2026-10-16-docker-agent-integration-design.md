@@ -186,8 +186,9 @@ The store (D9) has `state` ∈ `pending` (created by `user_prompt_submit` before
    **never re-rendered**: a later first block would change the system region) and
    `bootstrap_ids`. Write the store (D4 of the Claude Code leg: store before emit), set
    `state = on`, then insert the block (D4).
-4. Any exception, or a store write that fails, removes the store and inserts nothing: every
-   later trigger then rescans, which is the fail-closed path.
+4. Any exception, or a store write that fails, leaves the store exactly as it was (another
+   process may own newer state) and inserts nothing for this call; the next call retries. The
+   store is never deleted on an error (second PR #59 review).
 
 For a session already `on`, the stored block is immutable, so it is inserted from an unlocked
 read: a store-lock timeout costs that call's step tick, never the block (PR #59 review).
@@ -203,14 +204,20 @@ A session id that already has a store in `on` is never rescanned. Branching crea
   `<system-update>`, the one host envelope Docker Agent puts at the start of a user message at the
   pin (`pkg/session/session.go:1113`). A prompt that merely starts with a tag (`<div> is not
   centered`) is the user's. Docker Agent fires this event only for real user messages (P6).
-- The query is the prompt with every `<attached_file path="…">…</attached_file>` block removed
-  (pasted and attached content, `pkg/app/app.go:974`, `pkg/chat/chat.go:335`), so file contents
-  never reach CT; nothing left → no query.
+- The query is the text **before the first `<attached_file`** in the prompt (Docker Agent appends
+  pasted and attached content as `<attached_file path="…">…</attached_file>` after the typed
+  text, `pkg/app/app.go:974`, `pkg/chat/chat.go:335`). Parsing the blocks out would be fragile
+  (content may contain the closing tag), so this fails closed; nothing left → no query.
 - Load the store, or create it in `pending`. `off` → skip. Breaker open → skip.
 - A `pending` session (its first message runs before its first model call) recalls the bootstrap
   now and caches it (D5 step 3), so the match excludes the bootstrap's ids and the message's two
   slots go to new facts.
-- `match_wisdom(path, query, 2, exclude = bootstrap recall ids + ledger newest-first ≤ 256)`.
+- The excluded bootstrap ids are those the rendered block will actually carry
+  (`scan_ids(render_block(entries))`), not every recalled id.
+- **Budget:** every `ct` call of this hook shares one 8 s wall deadline, under the 10 s hook
+  timeout. The bootstrap recall starts only if its 5 s timeout still fits, and the match only if
+  its 3 s timeout fits; a match that cannot start counts as a breaker failure (`budget`).
+- `match_wisdom(path, query, 2, exclude = bootstrap block ids + ledger newest-first ≤ 256)`.
 - Write `pending_live = {"query": q, "result": <match result>}`, **replacing** any unclaimed
   pending result (it expired with its turn; verbose records it as `no_tool_call`). Emit nothing.
 
@@ -301,7 +308,9 @@ activity block follows it.
 **One tool call, one claim (P16).** The block a tool call claims is stored under its
 `tool_use_id` (the last 64 calls). Every later transform with that id (a streamed shell chunk, then
 the final result) gets the same block spliced in, with no new claim, query or record, so the
-model-facing final result carries it exactly once. The UI may show the block on streamed chunks
+model-facing final result carries it exactly once. If a later call cannot carry the block (it
+would not fit under the limiter margin; typically the full final output), the claim is
+**released**: its ids leave the ledger again, because the model never saw them. The UI may show the block on streamed chunks
 too; the model never sees chunks.
 
 Subagents get activity delivery like any session (P6); so do scheduled and non-interactive runs:
@@ -346,9 +355,11 @@ is harmless (named limit 8).
 - `ct.json`: the accepted `ct` path with its size and mtime, and whether `wisdom match` exists,
   valid for 24 h, and only under the discovery view it was written in (a digest of `PATH`,
   `HOME`, `USERPROFILE`, `LOCALAPPDATA`). A hit skips the two probe subprocesses; a `spawn` failure deletes it.
-- Housekeeping: a session's first `before_llm_call` prunes session stores older than 30 days.
-  **Lock files are never deleted:** unlinking a lock file another process has open (or is about
-  to lock) lets two processes each hold an "exclusive" lock on different inodes. The store, lock,
+- Housekeeping (at most once a day, a stamp file): session stores older than 30 days, `*.tmp`
+  files older than a day, and lock files whose store is gone **and** that nobody holds (a
+  non-blocking lock succeeds; the file is unlinked while held). `locked()` re-checks after locking
+  that its descriptor is still the file at the lock path, and retries if not, so an unlink can
+  never leave two processes each holding an "exclusive" lock on different inodes. The store, lock,
   prune and breaker primitives live in `hooks/ct_hook_store.py`, byte-identical with Claude
   Code's copy (which had this prune bug; fixed in claude-code 0.3.3) and parity-gated.
 
@@ -408,7 +419,8 @@ the doctor.
 
 `scripts/ct_doctor.py` is the shared doctor. Its harness regions:
 
-- `harness-config`: `HARNESS_LABEL = "Docker Agent"`, config/data dir resolution (P14),
+- `harness-config`: `HARNESS_LABEL = "Docker Agent"`, config/data dir resolution (P14, the same
+  trimming and `~` rule as `install.sh`, tested against it),
   `_plugin_version` from `plugin.json`.
 - `registration-check` (check 7): the drop-in exists, parses as ours (marker line and version),
   names an existing `ct_wisdom_da.py` and a Python that runs, and every hook line carries
