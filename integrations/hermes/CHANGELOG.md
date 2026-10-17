@@ -25,7 +25,8 @@ format below is load-bearing: `## <version> — <date>`.
   and `cancelled`, `"approved": false` and `"approval_pending": true`, an
   error or message starting `BLOCKED`, `Refusing`, `Denied` or `Command
   denied`, and wording like "not approved", "denied by", "user denied" and
-  "was not run", "rejected", "cancelled by user" and "operation cancelled",
+  "was not run", "rejected", "cancelled by user", "operation cancelled",
+  "declined", "approval timed out" and "not allowed",
   also in nested or JSON-string errors and in the status and error details
   Hermes passes to the hook. Output fields are never read. A refused call
   leaves the step free for the next call.
@@ -52,8 +53,11 @@ format below is load-bearing: `## <version> — <date>`.
   parsed like `python -m pytest`.
 - If `ct` is missing, is not Curated Thoughts, lacks `wisdom match`, or its
   `--help` probe hangs, the autonomous-work path remembers that for 5
-  minutes (or until PATH changes) and skips at once instead of waiting on
-  every step. A hung probe also counts as a breaker failure.
+  minutes (or until PATH changes, which also makes it look for `ct` again)
+  and skips at once instead of waiting on every step. A hung probe also
+  counts as a breaker failure; a `ct` that was moved or uninstalled does
+  not, and is looked up again on the next step. Only one first-time probe
+  runs at a time.
 - After a query runs past the 3 s wait, the same activity is not queried
   again until that query has finished.
 - Internal: project packages are `stat`ed before any directory listing; the

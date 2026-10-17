@@ -19,7 +19,8 @@ All notable changes to this integration. Versions follow SemVer; tags are
   behavior change). The Hermes-only hook changes (the query starts after
   Hermes's approval decision, the step is claimed in
   `transform_tool_result`, a broader refusal check, the cold-start budget
-  rule, remembering an unusable `ct`) do not run here.
+  rule, remembering an unusable `ct`, one first-time probe at a time) do
+  not run here.
 
 ## 0.1.0 — 2026-10-16
 

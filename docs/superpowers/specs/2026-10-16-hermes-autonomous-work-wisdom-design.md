@@ -916,8 +916,21 @@ A worker that ends `discovery_miss` (no Curated Thoughts `ct`, e.g. chart-testin
 `ct` first on PATH), `capability_missing` (no `wisdom match`) or `probe_timeout` marks ct
 unusable for `CT_UNUSABLE_PAUSE` (= `BREAKER_PAUSE`, 300 s) while `PATH` is unchanged.
 Until then the transform skips with `ct_unavailable` before claiming anything, so a
-broken or absent ct costs at most one wait (≤ 3 s) per pause, then goes quiet. A `PATH`
-change retries at once. The key of the failed query is still freed: during the pause
+broken or absent ct costs at most one wait (≤ 3 s) per pause, then goes quiet for the
+user. (Verbose mode, which is opt-in, still logs one `ct_unavailable` record per
+new-activity step during the pause.) A `PATH` change retries at once, and also resets
+`discover_ct`'s accepted path and the capability cache, since both are kept per
+process regardless of `PATH`.
+
+`has_match_capability` returns `None` both on a timeout and on an `OSError` at spawn. A
+`None` that comes back before `PROBE_TIMEOUT` could have fired is the spawn error (ct
+moved or uninstalled): class `spawn`, as on the match path. It resets the discovery
+and capability caches, charges no breaker failure and is not remembered, so the next
+step re-discovers.
+
+At most one cold query (discovery plus the capability probe) is in flight per process.
+While one runs, a cold step for another activity skips with `probing` (once-per-step
+verbose record) instead of starting a parallel probe; warm steps are not affected. The key of the failed query is still freed: during the pause
 nothing queries, and after it the activity may be tried again. `ct_wisdom.discover_ct`
 itself does not memoize a miss (its docstring said it did; fixed); the memo lives in the
 activity module so the shared live path is unchanged.
@@ -971,6 +984,10 @@ this"; sending its target anyway is the worse failure.
 - A used step skips before the activity is built; the result is parsed once.
 - `python -m pytest` with a name that appears only in `python pytest` sends `python`.
 - No test uses a `pre_tool_call` stand-in any more.
+- A probe spawn error (instant `None`) is spawn-class; a `PATH` change resets both
+  caches; a second cold step skips while a cold probe runs; an exception after the
+  claim (constructor, warm check, render, ledger claim) frees the key; declined /
+  approval timed out / not allowed are refusals in envelope fields only.
 - Key release: `budget`/`timeout`/`exit`/`parse_error`/`spawn` free the key (a later
   step re-queries the same activity), `zero_hits` keeps it; the step stays used.
 - Breaker: a budget miss counts once even when the worker later times out; a late
@@ -1047,6 +1064,30 @@ Same version. Each change and why:
 7. **Name check on the sent string restored** (see the correction under privacy
    amendment 7).
 
+### Amendment 8 update 3 (PR #72 third review, 2026-10-17)
+
+Same version; the smallest change per scenario, no new mechanism beyond the probe slot:
+
+1. A capability probe's `None` from a spawn `OSError` is spawn-class (caches reset, no
+   breaker charge, not remembered), told apart from a timeout by its elapsed time. A
+   moved or uninstalled ct no longer keeps a stale accepted path, and repeated pauses
+   no longer open the shared breaker.
+2. The unusable memo clearing on a `PATH` change also resets the discovery and
+   capability caches, so the retry really re-discovers.
+3. Refusal wording: declined, approval timed out / timed out waiting for approval, not
+   allowed (envelope fields only).
+4. Any exception after the step and key are claimed frees them: before the worker
+   starts, the step, the key and the probe slot; after it, the key (the step stays
+   used: the query ran).
+5. One cold probe in flight per process (`probing`).
+6. e2e check 6 matches the refused target precisely (a query starting `git push`),
+   not any query containing `git`.
+7. CI's stub-host check calls `transform_tool_result` with full ids and read_file args
+   and no ct on PATH, and accepts `None` or a string.
+8. The comment above the `python -m` name checks describes both checks.
+9. `_blocked_report` lists `ct_unavailable` and `probing`; the verbose behavior during
+   a pause is stated above.
+
 Not changed: splitting the Hermes hooks out of the shared builder module, so that
 claude-code and docker-agent stop shipping a byte-identical copy of the hook code
 they never run. That is a separate refactor.
@@ -1060,9 +1101,13 @@ Matched case-insensitively on the result envelope, never on tool output fields
 - `"approved": false` or `"approval_pending": true`;
 - `error`, `message`, `reason`, `detail` or `error_message` starting `blocked`,
   `refusing`, `denied`, `command denied`, `access denied`, `not approved`, `rejected`,
-  `cancelled`/`canceled`, or containing "not approved", "did not approve", "denied by",
-  "user denied", "was not run", "not executed", "rejected", "cancelled by"/"canceled
-  by", "user cancelled" or "operation cancelled" (and the `canceled` spellings). These
+  `cancelled`/`canceled`, `declined`, `not allowed`, `approval timed out`, or containing
+  "not approved", "did not approve", "denied by", "user denied", "was not run", "not
+  executed", "rejected", "cancelled by"/"canceled by", "user cancelled", "operation
+  cancelled" (and the `canceled` spellings), "declined", "approval timed out", "timed
+  out waiting for approval" or "not allowed". This wording list is a stopgap; a
+  fail-closed check (send only when the result shows the tool ran) is an open question
+  for the user. These
   fields are also read when nested (`{"error": {"message": …}}`, up to 3 levels) or
   when they hold a JSON-object string; the same envelope rules apply inside;
 - Hermes's transform kwargs: `status` in the list above, `error_message` with the
