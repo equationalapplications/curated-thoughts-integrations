@@ -6,6 +6,32 @@ format below is load-bearing: `## <version> — <date>`.
 
 ## Unreleased
 
+## 0.6.2 — 2026-10-16
+
+- **Privacy fix (autonomous-work delivery).** Since 0.6.0, the activity query
+  built from a tool call's arguments could carry private data. CT sends that
+  query to the brain's embedding provider (OpenRouter, for an external
+  embedder), and the same text appeared in the visible `_for:` label and the
+  verbose log. Upgrade if you run 0.6.0 or 0.6.1. What could have leaked:
+  - **Whole paths when the cwd was `/`** (Docker `WORKDIR /`, launchd or
+    systemd services): `/Users/alice/clients/acme/contract.md` was sent as
+    `Users/alice/clients/acme/contract.md`.
+  - **Your user name**: a file directly in your home directory was sent with
+    it (`/Users/alice/notes.txt` → `alice/notes.txt`), and a search path such
+    as `/home/bob` showed as `home/bob`.
+  - **Search patterns with values**: a search for `API_KEY="hunter2pass"` or
+    `password=letmein` was sent as typed; only key-shaped words were blocked.
+
+  Now (spec "Privacy amendment", shared test vectors in
+  `tests/fixtures/activity_targets.json`): a cwd that is empty, `/`, a drive
+  root, of depth < 2 (`/Users`, `/home`) or your home's parent does not count;
+  a path outside a valid cwd is reduced to its file name; your user name
+  (`USER`, `LOGNAME`, `USERNAME`, `HOME`'s basename) is dropped from every
+  path, with a `Users`/`home` just before it; a search pattern with `=`, a
+  quote, a key-shaped word, an absolute or `~` path, a `..` or your user name
+  sends nothing; the label and the verbose log use the same sanitized text as
+  the query. Nothing else changes; the filters only got stricter.
+
 ## 0.6.1 — 2026-10-16
 
 - Fixed: a brain with an external embedder lost its API key at the sidecar.
