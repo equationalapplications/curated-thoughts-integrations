@@ -16,6 +16,13 @@
  *                  tool results, spec F9), ∪ ids drained into THIS turn from
  *                  our own next-turn injections, ∪ the settled bootstrap ids.
  *                  Never from the adapter's own decision (m5).
+ *                  Within a run there is no prompt hook between tool calls,
+ *                  so the adapter also keeps a RUN LEDGER: every id that
+ *                  entered context during the current run (the live block,
+ *                  every tool result's markers, recall envelopes, activity
+ *                  deliveries). It is reset by the next run's snapshot, which
+ *                  then carries those tool results itself (spec 2026-10-17
+ *                  OpenClaw autonomous work, A3).
  *   Session id   — OpenClaw `sessionKey` (stable across compaction).
  */
 
@@ -140,6 +147,8 @@ function stubEntry(factId: string): Record<string, unknown> {
 
 /** Per-turn inputs captured by the hook before the core runs. */
 export interface TurnInput {
+  /** The run this snapshot was taken for (`ctx.runId`); absent on legacy callers. */
+  runId?: string;
   messages: unknown[];
   drained: string[];
   /** Settled bootstrap ids, or null while the bootstrap is unsettled. */
@@ -166,9 +175,21 @@ function lruSet<K, V>(map: Map<K, V>, key: K, value: V, max = LRU_MAX): void {
   }
 }
 
+interface RunLedger {
+  runId: string | undefined;
+  /** Newest first. */
+  ids: string[];
+}
+
+interface CachedLedger {
+  runId: string | undefined;
+  ledger: Ledger;
+}
+
 export class OpenClawWisdomAdapter implements HostAdapter {
   private readonly turns = new Map<string, TurnInput>();
-  private readonly cache = new Map<string, Ledger>();
+  private readonly cache = new Map<string, CachedLedger>();
+  private readonly runs = new Map<string, RunLedger>();
   /** null = not probed yet; true = `ct wisdom match` present; false = absent (latched). */
   private capable: boolean | null = null;
 
@@ -179,8 +200,35 @@ export class OpenClawWisdomAdapter implements HostAdapter {
     if (deps.recordVerbose) this.recordVerbose = deps.recordVerbose;
   }
 
+  /**
+   * Store a run's prompt-hook snapshot. A NEW runId starts a fresh run
+   * ledger (the snapshot now carries the previous run's tool results); a
+   * second attempt of the same run keeps it.
+   */
   setTurn(sessionId: string, input: TurnInput): void {
     lruSet(this.turns, sessionId, input);
+    const run = this.runs.get(sessionId);
+    if (run === undefined || run.runId !== input.runId) {
+      lruSet(this.runs, sessionId, { runId: input.runId, ids: [] });
+    }
+  }
+
+  /** True when this process holds a snapshot of `runId` for the session. */
+  hasRun(sessionId: string, runId: string): boolean {
+    const turn = this.turns.get(sessionId);
+    return turn !== undefined && runId !== '' && turn.runId === runId;
+  }
+
+  /** Ids that entered context during `runId` (ignored for any other run). */
+  noteRunIds(sessionId: string, runId: string | undefined, ids: readonly string[]): void {
+    const run = this.runs.get(sessionId);
+    if (run === undefined || run.runId !== runId) return;
+    for (const id of ids) {
+      if (!validId(id)) continue;
+      const at = run.ids.indexOf(id);
+      if (at >= 0) run.ids.splice(at, 1);
+      run.ids.unshift(id);
+    }
   }
 
   deliveryEnabled(_session: SessionRef): boolean {
@@ -201,7 +249,10 @@ export class OpenClawWisdomAdapter implements HostAdapter {
     const push = (id: string) => {
       if (validId(id) && !merged.includes(id)) merged.push(id);
     };
-    turn.drained.forEach(push); // newest: drained into this very request
+    // newest: entered context during this run (after the snapshot)
+    const run = this.runs.get(session.id);
+    if (run !== undefined && run.runId === turn.runId) run.ids.forEach(push);
+    turn.drained.forEach(push); // drained into this run's request
     scan.all.forEach(push);
     (turn.bootstrapIds ?? []).forEach(push); // oldest: system space
     const set = new Set(merged);
@@ -212,12 +263,18 @@ export class OpenClawWisdomAdapter implements HostAdapter {
     };
   }
 
+  /** The N3 cache, scoped to the current run; its ids also join the run ledger. */
   cacheLedger(session: SessionRef, ledger: Ledger): void {
-    lruSet(this.cache, session.id, ledger);
+    const runId = this.turns.get(session.id)?.runId;
+    lruSet(this.cache, session.id, { runId, ledger });
+    this.noteRunIds(session.id, runId, [...ledger.idsMostRecentFirst].reverse());
   }
 
+  /** null when the cache belongs to an earlier run (never a stale view). */
   cachedLedger(session: SessionRef): Ledger | null {
-    return this.cache.get(session.id) ?? null;
+    const cached = this.cache.get(session.id);
+    if (cached === undefined) return null;
+    return cached.runId === this.turns.get(session.id)?.runId ? cached.ledger : null;
   }
 
   async wisdomMatch(

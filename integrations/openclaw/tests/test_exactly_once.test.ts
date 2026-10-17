@@ -8,7 +8,10 @@
  *   2. durable salvage         — enqueueNextTurnInjection when the handler's
  *      result is no longer accepted; the host drains it into the NEXT turn's
  *      prependContext and reports it to agent_turn_prepare (F10, F11);
- *   3. tool-result middleware  — CT recall results stubbed / marker-trailed.
+ *   3. tool-result middleware  — CT recall results stubbed / marker-trailed;
+ *   4. activity delivery       — one marker-first block appended to an
+ *      executed tool result (autonomous-work spec 2026-10-17), over runs of
+ *      several model steps with parallel tool batches,
  *
  * plus prompt rebuilds of one admission (AC 11), compaction (oldest messages
  * leave the model-visible window) and gateway restarts (fresh plugin
@@ -18,8 +21,11 @@
  * transcript) no fact id is ever delivered twice.
  */
 
+import { mkdirSync, mkdtempSync, realpathSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, it, expect } from 'vitest';
-import { MAX_PER_TURN } from '@equational-applications/ct-wisdom-core';
+import { ACTIVITY_HEADING, MAX_PER_TURN } from '@equational-applications/ct-wisdom-core';
 import { createPlugin } from '../src/index.js';
 import { FakeApi, FakeCt, type Fact, userCtx } from './fake_host.js';
 
@@ -37,7 +43,20 @@ function mulberry32(seed: number): () => number {
 const POOL: Fact[] = Array.from({ length: 40 }, (_, i) => ({ id: `f${i}`, title: `Fact ${i}`, text: `body ${i}` }));
 const BOOT: Fact[] = [{ id: 'f0', title: 'Boot 0', text: 'b0' }, { id: 'f1', title: 'Boot 1', text: 'b1' }];
 const MARKER_RE = /<!-- ct-fact:([A-Za-z0-9._:-]+) -->/g;
+/** A user-turn correction names the ids it replaces with markers too; those are not deliveries. */
+const delivered = (text: string) => text.replace(/\(supersedes [^)]*\)/g, '').matchAll(MARKER_RE);
 const RECALL_TOOL = 'curated-thoughts__curated_recall_context';
+const PROJECT = realpathSync(mkdtempSync(join(tmpdir(), 'ocl-eo-')));
+mkdirSync(join(PROJECT, '.git'));
+const TOOLS: Array<[string, Record<string, unknown>]> = [
+  ...['a', 'b', 'c', 'd', 'e', 'f'].map((n): [string, Record<string, unknown>] => ['read', { path: `src/${n}.ts` }]),
+  ['edit', { path: 'src/a.ts', edits: [] }],
+  ['write', { path: 'docs/notes.md', content: 'x' }],
+  ['exec', { command: 'pnpm test' }],
+  ['exec', { command: 'git status' }],
+  ['grep', { pattern: 'invoice', path: 'src' }],
+  ['find', { pattern: 'release' }],
+];
 
 type Msg = Record<string, unknown>;
 
@@ -50,17 +69,25 @@ function deliveries(transcript: Msg[], bootIds: string[]): Map<string, number> {
   for (const m of transcript) {
     if (m.role === 'user') {
       const proj = ((m.__openclaw as { modelPromptProjection?: { text?: string } } | undefined)?.modelPromptProjection?.text) ?? '';
-      for (const match of proj.matchAll(MARKER_RE)) bump(match[1]);
+      for (const match of delivered(proj)) bump(match[1]);
     } else if (m.role === 'toolResult') {
-      const text = ((m.content as Array<{ text: string }>)[0]?.text ?? '').split('\n')[0];
-      const inner = JSON.parse(text) as { wiki_entries: Array<{ id: string; in_context?: boolean }> };
-      for (const e of inner.wiki_entries) if (!e.in_context) bump(e.id);
+      const content = m.content as Array<{ text: string }>;
+      if (m.toolName === RECALL_TOOL) {
+        const inner = JSON.parse((content[0]?.text ?? '').split('\n')[0]) as { wiki_entries: Array<{ id: string; in_context?: boolean }> };
+        for (const e of inner.wiki_entries) if (!e.in_context) bump(e.id);
+      }
+      // activity blocks: the title-line marker is the delivered fact
+      for (const block of content) {
+        if (!block.text.startsWith(ACTIVITY_HEADING)) continue;
+        const first = [...block.text.matchAll(MARKER_RE)][0];
+        if (first) bump(first[1]);
+      }
     }
   }
   return counts;
 }
 
-interface Stats { live: number; salvaged: number; drained: number; stubs: number; compactions: number; restarts: number }
+interface Stats { live: number; salvaged: number; drained: number; stubs: number; compactions: number; restarts: number; activity: number; midRunRestarts: number; corrections: number }
 
 async function runSession(seed: number, turns: number, stats: Stats): Promise<{ violations: string[]; maxLive: number }> {
   const rnd = mulberry32(seed);
@@ -68,6 +95,13 @@ async function runSession(seed: number, turns: number, stats: Stats): Promise<{ 
   const ct = new FakeCt();
   ct.bootstrap = BOOT;
   ct.pool = () => [...POOL].sort(() => rnd() - 0.5);
+  // activity answers (`--max 1`) and user-turn answers (`--max 2`) differ;
+  // a CT that disagrees with the ledger ignores --exclude in half the sessions
+  ct.poolFor = (_q, max) => (max === 1 ? [...POOL].sort(() => rnd() - 0.5).slice(0, 3) : [...POOL].sort(() => rnd() - 0.5));
+  ct.ignoreExclude = rnd() < 0.5;
+  ct.corrections = rnd() < 0.5
+    ? [{ id: `c${seed}a`, supersedes: [pick(POOL).id], title: 'Newer', text: 'replaces' }, { id: `c${seed}b`, supersedes: [pick(POOL).id], title: 'Newer 2', text: 'replaces' }]
+    : [];
 
   let api = new FakeApi();
   const boot = () => {
@@ -128,8 +162,10 @@ async function runSession(seed: number, turns: number, stats: Stats): Promise<{ 
     enqueuedSeen = api.enqueued.length;
     if (result?.prependContext) stats.live++;
     // Per-turn limit still holds: one in-turn block carries at most
-    // MAX_PER_TURN facts (FakeCt emits no corrections).
-    const inTurn = [...(result?.prependContext ?? '').matchAll(MARKER_RE)].length;
+    // MAX_PER_TURN entries (corrections ride on top, within the char cap).
+    const inTurn = (result?.prependContext ?? '').split('\n')
+      .filter((line) => !line.startsWith('**Correction:'))
+      .reduce((n, line) => n + [...delivered(line)].length, 0);
     if (inTurn > MAX_PER_TURN) violations.push(`seed ${seed} turn ${t}: ${inTurn} facts in one block`);
 
     // (3) the projection the model sees for this user turn
@@ -137,16 +173,49 @@ async function runSession(seed: number, turns: number, stats: Stats): Promise<{ 
     const projection = prepend ? `${prepend}\n\n${userText}` : userText;
     transcript.push({ role: 'user', content: userText, __openclaw: { modelPromptProjection: { version: 1, text: projection } } });
 
-    // (4) the agent sometimes calls CT recall through the middleware
-    if (rnd() < 0.5) {
-      const ids = Array.from({ length: 1 + Math.floor(rnd() * 3) }, () => pick(POOL).id);
-      const raw = { content: [{ type: 'text', text: JSON.stringify({ wiki_entries: [...new Set(ids)].map((id) => ({ id, title: id, text: `t-${id}` })) }) }], details: {} };
-      const out = (await api.middleware[0].handler(
-        { toolCallId: `tc${t}`, toolName: RECALL_TOOL, args: {}, result: raw },
-        { runtime: 'openclaw', sessionKey: ctx.sessionKey, runId },
-      )) as { result: typeof raw } | undefined;
-      if (out && out.result.content[0].text.includes('"in_context":true')) stats.stubs++;
-      transcript.push({ role: 'toolResult', content: (out?.result ?? raw).content });
+    // (4) the run: several model steps, each a parallel batch of tool calls
+    //     (activity) and sometimes a CT recall (N3); a gateway restart can
+    //     happen between steps (the new process has no snapshot of this run)
+    const steps = Math.floor(rnd() * 4);
+    let restartedMidRun = false;
+    for (let s = 1; s <= steps; s++) {
+      if (rnd() < 0.05) {
+        boot();
+        enqueuedSeen = 0;
+        stats.midRunRestarts++;
+        restartedMidRun = true;
+      }
+      api.hook('model_call_started')({ runId, callId: `${runId}:model:${s}` }, { runId, sessionKey: ctx.sessionKey });
+      transcript.push({ role: 'assistant', content: [{ type: 'toolCall', name: 'batch' }] });
+      const batch = Array.from({ length: 1 + Math.floor(rnd() * 3) }, () => pick(TOOLS));
+      const calls = batch.map(async ([toolName, args], i) => {
+        const raw = { content: [{ type: 'text', text: `output ${toolName} ${t}.${s}.${i}` }], details: { status: 'completed' } };
+        const out = (await api.middleware[0].handler(
+          { toolCallId: `tc${t}.${s}.${i}`, toolName, args, cwd: PROJECT, isError: false, result: raw },
+          { runtime: 'openclaw', sessionKey: ctx.sessionKey, runId },
+        )) as { result: typeof raw } | undefined;
+        const content = (out?.result ?? raw).content;
+        if (content.some((b) => b.text.startsWith(ACTIVITY_HEADING))) stats.activity++;
+        if (content.some((b) => b.text.includes('supersedes ct-fact:'))) stats.corrections++;
+        return { role: 'toolResult', toolName, content };
+      });
+      // A recall in a process that never saw this run's snapshot has no
+      // ledger to stub against (the pre-existing N3 limit, out of this
+      // spec's scope); activity delivery fails closed there (no_ledger),
+      // which the batch above still exercises.
+      if (!restartedMidRun && rnd() < 0.3) {
+        const ids = Array.from({ length: 1 + Math.floor(rnd() * 3) }, () => pick(POOL).id);
+        const raw = { content: [{ type: 'text', text: JSON.stringify({ wiki_entries: [...new Set(ids)].map((id) => ({ id, title: id, text: `t-${id}` })) }) }], details: {} };
+        calls.push((async () => {
+          const out = (await api.middleware[0].handler(
+            { toolCallId: `tc${t}.${s}.r`, toolName: RECALL_TOOL, args: {}, isError: false, result: raw },
+            { runtime: 'openclaw', sessionKey: ctx.sessionKey, runId },
+          )) as { result: typeof raw } | undefined;
+          if (out && out.result.content[0].text.includes('"in_context":true')) stats.stubs++;
+          return { role: 'toolResult', toolName: RECALL_TOOL, content: (out?.result ?? raw).content };
+        })());
+      }
+      transcript.push(...(await Promise.all(calls)));
     }
     transcript.push({ role: 'assistant', content: [{ type: 'text', text: `answer ${t}` }] });
 
@@ -159,28 +228,31 @@ async function runSession(seed: number, turns: number, stats: Stats): Promise<{ 
     const bootIds = (result?.prependSystemContext ?? '').match(MARKER_RE) ? BOOT.map((b) => b.id) : [];
     for (const [id, n] of deliveries(transcript, bootIds)) {
       if (n > 1) violations.push(`seed ${seed} turn ${t}: ${id} delivered ${n}x in the visible window`);
+      if (n > 1 && process.env.CT_EO_DEBUG === String(seed)) {
+        console.log(id, JSON.stringify(transcript.map((m) => [m.role, m.toolName, JSON.stringify(m.role === 'user' ? (m.__openclaw as { modelPromptProjection: { text: string } }).modelPromptProjection.text : m.content).includes(`ct-fact:${id}`)])), JSON.stringify(transcript.filter((m) => JSON.stringify(m).includes(`ct-fact:${id}`) || JSON.stringify(m).includes(`"id":"${id}"`))).slice(0, 3000));
+      }
     }
     const live = new Set<string>();
     for (const m of transcript) {
       if (m.role !== 'user') continue;
       const proj = (m.__openclaw as { modelPromptProjection: { text: string } }).modelPromptProjection.text;
-      for (const match of proj.matchAll(MARKER_RE)) live.add(match[1]);
+      for (const match of delivered(proj)) live.add(match[1]);
     }
     maxLive = Math.max(maxLive, live.size);
   }
   // No session cap (removed 2026-10-16): every match call asks for a full turn.
   for (const call of ct.matchCalls()) {
     const max = call.args[call.args.indexOf('--max') + 1];
-    if (max !== String(MAX_PER_TURN)) violations.push(`seed ${seed}: match call with --max ${max}`);
+    if (max !== String(MAX_PER_TURN) && max !== '1') violations.push(`seed ${seed}: match call with --max ${max}`);
   }
   return { violations, maxLive };
 }
 
-describe('exactly-once across prependContext, salvage injections and the middleware', () => {
+describe('exactly-once across prependContext, salvage injections, the N3 middleware and activity delivery', () => {
   it('holds over 150 randomized sessions with retries, compaction and restarts', async () => {
     const all: string[] = [];
     let maxLive = 0;
-    const stats: Stats = { live: 0, salvaged: 0, drained: 0, stubs: 0, compactions: 0, restarts: 0 };
+    const stats: Stats = { live: 0, salvaged: 0, drained: 0, stubs: 0, compactions: 0, restarts: 0, activity: 0, midRunRestarts: 0, corrections: 0 };
     for (let seed = 1; seed <= 150; seed++) {
       const r = await runSession(seed, 14, stats);
       all.push(...r.violations);
@@ -197,6 +269,9 @@ describe('exactly-once across prependContext, salvage injections and the middlew
     expect(stats.stubs).toBeGreaterThan(20);
     expect(stats.compactions).toBeGreaterThan(20);
     expect(stats.restarts).toBeGreaterThan(20);
+    expect(stats.activity).toBeGreaterThan(100);
+    expect(stats.midRunRestarts).toBeGreaterThan(5);
+    expect(stats.corrections).toBeGreaterThan(5);
     if (process.env.CT_EO_STATS) console.log(JSON.stringify({ ...stats, maxLive }));
   }, 120_000);
 });

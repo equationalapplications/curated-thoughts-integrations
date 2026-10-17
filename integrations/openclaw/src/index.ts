@@ -12,7 +12,13 @@
  *                          session), N1+N2 live wisdom → prependContext; a
  *                          result the host no longer accepts is salvaged
  *                          through api.session.workflow.enqueueNextTurnInjection.
- *   tool-result middleware (runtime "openclaw") — N3 dedup stub on CT recall.
+ *   model_call_started   — observe-only: the model step id for the activity
+ *                          rate rule (one CT call per step).
+ *   tool-result middleware (runtime "openclaw") — N3 dedup stub on CT recall,
+ *                          then autonomous-work ("activity") delivery: one
+ *                          marker-first block appended to the result of an
+ *                          executed call whose activity is new (spec
+ *                          2026-10-17-openclaw-autonomous-work-wisdom-design.md).
  *
  * Every handler is fail-open for the host: an exception is logged and the
  * handler returns nothing, so the turn proceeds without our contribution.
@@ -31,6 +37,8 @@ import { expandHome } from '../scripts/ct_env.js';
 import {
   str,
   type AgentCtx,
+  type ModelCallCtx,
+  type ModelCallEvent,
   type OpenClawApiLike,
   type PromptBuildEvent,
   type PromptBuildResult,
@@ -38,6 +46,7 @@ import {
   type ToolResultEvent,
   type TurnPrepareEvent,
 } from './host.js';
+import { OpenClawActivity } from './wisdom/activity.js';
 import { OpenClawWisdomAdapter, isRecallToolName } from './wisdom/adapter.js';
 import { BootstrapMemo } from './wisdom/bootstrap.js';
 import { CtLocator } from './wisdom/discover.js';
@@ -58,6 +67,8 @@ export interface PluginDeps {
   candidates?: () => string[];
   usable?: (path: string) => boolean;
   now?: () => number;
+  /** TEST-ONLY: the activity query budget (default the core's 3 s). */
+  activityBudgetMs?: number;
 }
 
 function lruSet<K, V>(map: Map<K, V>, key: K, value: V): void {
@@ -88,7 +99,77 @@ function brainEnv(base: NodeJS.ProcessEnv, configured: unknown): NodeJS.ProcessE
   return raw ? { ...base, CURATED_BRAIN_DIR: expandHome(raw, base) } : base;
 }
 
-export function createPlugin(deps: PluginDeps = {}) {
+/** Everything the hooks and the middleware must share within one process. */
+interface PluginState {
+  current: OpenClawApiLike;
+  adapter: OpenClawWisdomAdapter;
+  breaker: Breaker;
+  activity: OpenClawActivity;
+  bootstrap: BootstrapMemo;
+  /** sessionKey → restored? (decided at this process's first sighting). */
+  sightings: Map<string, boolean>;
+  /** `${sessionKey}#${runId}` → ids drained into that run from our injections. */
+  drained: Map<string, string[]>;
+  /** `${sessionKey}#${admission}` → the one result for that admitted request. */
+  admissions: Map<string, Promise<PromptBuildResult | undefined>>;
+}
+
+/** Where a plugin object keeps its state; the default export uses a process-wide one. */
+export interface StateHolder {
+  state?: PluginState;
+}
+
+/** Bump when PluginState changes shape (a reload of new code never reuses old state). */
+const STATE_KEY = Symbol.for('curated-thoughts.openclaw.plugin-state.v1');
+
+/** The process-wide holder shared by every module instance of this plugin. */
+export function processStateHolder(): StateHolder {
+  const g = globalThis as unknown as Record<symbol, StateHolder | undefined>;
+  return (g[STATE_KEY] ??= {});
+}
+
+function makeState(api: OpenClawApiLike, deps: PluginDeps): PluginState {
+  const env = brainEnv(deps.env ?? process.env, api.pluginConfig?.brainDir);
+  const spawnFn = deps.spawnFn ?? nodeSpawnFn(env);
+  const locator = new CtLocator({
+    env: deps.env ?? process.env, // discovery reads the host PATH as-is
+    spawnFn,
+    candidates: deps.candidates,
+    usable: deps.usable,
+    now: deps.now,
+  });
+  // `logger` resolves to the newest registration's logger at call time.
+  const logger = { get logger() { return state.current.logger; } };
+  const adapter = new OpenClawWisdomAdapter({
+    spawnFn,
+    locator,
+    recordVerbose: openclawVerboseRecorder(logger, deps.env ?? process.env),
+  });
+  const breaker = new Breaker(undefined, undefined, deps.now);
+  const state: PluginState = {
+    current: api,
+    adapter,
+    breaker,
+    activity: new OpenClawActivity({
+      adapter,
+      breaker, // shared with the user-turn path (rule 4)
+      env: deps.env ?? process.env,
+      ...(deps.activityBudgetMs !== undefined ? { budgetMs: deps.activityBudgetMs } : {}),
+      log: (line) => state.current.logger?.debug?.(`curated-thoughts: ${line}`),
+    }),
+    bootstrap: new BootstrapMemo({
+      locate: () => locator.locate(),
+      spawnFn,
+      onSpawnFailure: () => locator.invalidate(),
+    }),
+    sightings: new Map(),
+    drained: new Map(),
+    admissions: new Map(),
+  };
+  return state;
+}
+
+export function createPlugin(deps: PluginDeps = {}, holder: StateHolder = {}) {
   return {
     id: PLUGIN_ID,
     name: 'Curated Thoughts',
@@ -100,26 +181,14 @@ export function createPlugin(deps: PluginDeps = {}) {
       properties: { brainDir: { type: 'string' } },
     },
     register(api: OpenClawApiLike): void {
-      const env = brainEnv(deps.env ?? process.env, api.pluginConfig?.brainDir);
-      const spawnFn = deps.spawnFn ?? nodeSpawnFn(env);
-      const locator = new CtLocator({
-        env: deps.env ?? process.env, // discovery reads the host PATH as-is
-        spawnFn,
-        candidates: deps.candidates,
-        usable: deps.usable,
-        now: deps.now,
-      });
-      const adapter = new OpenClawWisdomAdapter({
-        spawnFn,
-        locator,
-        recordVerbose: openclawVerboseRecorder(api, deps.env ?? process.env),
-      });
-      const breaker = new Breaker(undefined, undefined, deps.now);
-      const bootstrap = new BootstrapMemo({
-        locate: () => locator.locate(),
-        spawnFn,
-        onSpawnFailure: () => locator.invalidate(),
-      });
+      // One state per process, whichever registration a hook came from: the
+      // host loads the plugin module several times (live-verified: 3 module
+      // instances per process; the prompt hooks and the tool-result
+      // middleware are served by DIFFERENT instances), so per-registration
+      // state would leave the middleware without the prompt hook's ledger.
+      const state = (holder.state ??= makeState(api, deps));
+      state.current = api; // the logger the shared parts report through
+      const { adapter, breaker, activity, bootstrap, sightings, drained, admissions } = state;
       const warn = (what: string, error: unknown): void => {
         try {
           api.logger?.warn?.(`curated-thoughts: ${what}: ${String(error)}`);
@@ -127,13 +196,6 @@ export function createPlugin(deps: PluginDeps = {}) {
           /* a throwing logger must not escalate */
         }
       };
-
-      /** sessionKey → restored? (decided at this process's first sighting). */
-      const sightings = new Map<string, boolean>();
-      /** `${sessionKey}#${runId}` → ids drained into that run from our injections. */
-      const drained = new Map<string, string[]>();
-      /** `${sessionKey}#${admission}` → the one result for that admitted request. */
-      const admissions = new Map<string, Promise<PromptBuildResult | undefined>>();
 
       // ── agent_turn_prepare: observe our own drained injections ──────────
       api.on('agent_turn_prepare', ((event: TurnPrepareEvent, ctx: AgentCtx) => {
@@ -183,7 +245,7 @@ export function createPlugin(deps: PluginDeps = {}) {
         if (boot?.block) result.prependSystemContext = boot.block;
 
         const messages = event?.messages;
-        if (admissionKey !== null && Array.isArray(messages) && isLiveEligible(ctx, sessionKey)) {
+        if (Array.isArray(messages)) {
           let restored = sightings.get(sessionKey);
           if (restored === undefined) {
             // The session predates this process when its snapshot already
@@ -191,12 +253,17 @@ export function createPlugin(deps: PluginDeps = {}) {
             restored = messages.some((m) => (m as { role?: unknown } | null)?.role === 'assistant');
             lruSet(sightings, sessionKey, restored);
           }
+          // Every run's snapshot is stored (any trigger, subagents too): it is
+          // the ledger source for this run's activity deliveries.
           adapter.setTurn(sessionKey, {
+            runId: str(ctx.runId),
             messages,
             drained: drained.get(`${sessionKey}#${str(ctx.runId)}`) ?? [],
             bootstrapIds: boot ? boot.ids : null,
             restored,
           });
+        }
+        if (admissionKey !== null && Array.isArray(messages) && isLiveEligible(ctx, sessionKey)) {
           const query = typeof event.currentUserMessage === 'string'
             ? event.currentUserMessage
             : str(event.prompt); // legacy hosts: prompt may carry history (degraded)
@@ -242,15 +309,26 @@ export function createPlugin(deps: PluginDeps = {}) {
         }
       }) as never, { timeoutMs: PROMPT_HOOK_TIMEOUT_MS });
 
-      // ── N3: tool-result middleware on CT recall results only ─────────────
+      // ── model_call_started: the step id of the activity rate rule ───────
+      api.on('model_call_started', ((event: ModelCallEvent, ctx: ModelCallCtx) => {
+        activity.noteModelCall(event, ctx);
+        return undefined;
+      }) as never);
+
+      // ── tool-result middleware: N3 recall dedup, then activity delivery ──
+      // Never throws: a throwing middleware makes OpenClaw replace the tool
+      // output with an error text.
       if (typeof api.registerAgentToolResultMiddleware === 'function') {
-        api.registerAgentToolResultMiddleware(((event: ToolResultEvent, ctx: ToolResultCtx) => {
+        api.registerAgentToolResultMiddleware((async (event: ToolResultEvent, ctx: ToolResultCtx) => {
           try {
-            if (!isRecallToolName(event?.toolName) || event.isError === true) return undefined;
             const sessionKey = str(ctx?.sessionKey);
-            if (sessionKey === '') return undefined;
-            const rewritten = onToolResult(adapter, { id: sessionKey }, event.result);
-            return rewritten === event.result ? undefined : { result: rewritten };
+            if (sessionKey === '' || event === null || typeof event !== 'object') return undefined;
+            let result = event.result;
+            if (isRecallToolName(event.toolName) && event.isError !== true) {
+              result = onToolResult(adapter, { id: sessionKey }, result);
+            }
+            result = await activity.process(event, ctx, result);
+            return result === event.result ? undefined : { result };
           } catch (error) {
             warn('tool-result middleware failed', error);
             return undefined;
@@ -261,5 +339,6 @@ export function createPlugin(deps: PluginDeps = {}) {
   };
 }
 
-const plugin = createPlugin();
+// The process-wide holder: every module instance the host loads shares one state.
+const plugin = createPlugin({}, processStateHolder());
 export default plugin;

@@ -30,6 +30,10 @@ re-verified before the pin moves. OpenClaw itself needs Node ≥ 24.16.
   no per-session cap) inside that turn's user message (`prependContext`). It
   never repeats what the agent can already see. Agent-initiated
   `curated_recall_context` results are deduped by a tool-result middleware.
+- **Autonomous-work delivery** (since 0.3.0). While the agent works on its
+  own between messages, the file it reads or edits, the command it runs or
+  the pattern it searches can bring in one relevant fact, appended to that
+  tool's result. See [Autonomous-work delivery](#autonomous-work-delivery).
 - **Doctor.** `node lib/scripts/ct_doctor.js check` covers the sidecar, brain,
   vault, embeddings, OpenClaw registration (the plugin entry and its
   conversation-access grant) and the import pre-flight.
@@ -57,8 +61,8 @@ local, non-ClawHub source. You give that consent by opting in with
 `CT_INSTALL_EDIT=1` after reading the preview. `OPENCLAW_BIN`,
 `OPENCLAW_CONFIG_PATH` and `OPENCLAW_STATE_DIR` are honored. Verify the running
 gateway with `openclaw plugins inspect curated-thoughts --runtime --json` (expect
-`status: loaded` and the typed hooks `agent_turn_prepare` and
-`before_prompt_build`).
+`status: loaded` and the typed hooks `agent_turn_prepare`,
+`before_prompt_build` and `model_call_started`).
 
 ### External embedder
 
@@ -125,7 +129,44 @@ be delivered again, which matches Hermes.
 
 Subagent sessions (`subagent:` session keys or subagent provenance), heartbeat
 and cron turns, and inter-session deliveries never receive live wisdom. The
-bootstrap block still renders for them.
+bootstrap block still renders for them, and they do receive autonomous-work
+delivery.
+
+## Autonomous-work delivery
+
+Since 0.3.0, on the embedded runtime (spec:
+[`2026-10-17-openclaw-autonomous-work-wisdom-design.md`](../../docs/superpowers/specs/2026-10-17-openclaw-autonomous-work-wisdom-design.md)):
+
+- **Trigger:** the result of a `read`, `write`, `edit`, `grep`, `find`,
+  `exec` (or `bash`) call whose activity is new for the session, seen by the
+  plugin's tool-result middleware. At most one `ct wisdom match` per model
+  step (the step comes from OpenClaw's `model_call_started` hook), only when
+  the activity changes. No ceiling per message or session. Curated Thoughts'
+  own tools never trigger it, and neither does a call the host did not run:
+  OpenClaw's `before_tool_call` runs before approvals, so the query starts
+  only after the call executed (an exec waiting for or denied approval sends
+  nothing).
+- **What is sent:** only the bare target, built by the shared core with the
+  same privacy rules as Hermes and DeepSeek Harness (a path relative to the
+  project around the agent's workspace, a bare program name or a known
+  subcommand, a plain-word search pattern; nothing naming you, never file
+  contents, output, flags or the agent's words).
+- **Delivered as:** at most 1 fact in at most 600 characters, as an extra text
+  block at the end of that tool's result, under
+  `## Curated Thoughts — relevant to this step`, marker first. OpenClaw
+  persists and replays it (verified live at 2026.10.3); the system prompt is
+  never touched.
+- **Exactly once:** the ledger is the run's prompt-hook snapshot plus every
+  fact that entered context during the run (the live block, earlier tool
+  results, recalls). A process that never saw the run's snapshot (a gateway
+  restart mid-run) delivers nothing until the next run.
+- **Cost:** the CT call starts after the tool ran, so a triggering result can
+  wait up to 3 s. The breaker is shared with live delivery.
+- **Where:** main sessions, subagents, cron and heartbeat runs. Not on the
+  Codex app-server or Copilot runtimes.
+- **Known limit:** a `curated_recall_context` call the model makes through
+  OpenClaw's `tool_call` meta tool is not seen by the recall dedup (a recall
+  can then show a fact the agent already has).
 
 ## Cache safety
 
@@ -139,6 +180,7 @@ user message. Re-run it when the pin moves:
 
 ```bash
 ZAI_API_KEY=… tests/e2e/run.sh        # needs node >= 24.16 and python3
+ZAI_API_KEY=… tests/e2e/run_activity.sh   # autonomous-work delivery (stub CT)
 ```
 
 ## Verbose mode

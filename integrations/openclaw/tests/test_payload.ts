@@ -55,7 +55,7 @@ describe.skipIf(!built)('self-contained payload (vendored ct-wisdom-core)', () =
         on: (name: string) => hooks.push(name),
         registerAgentToolResultMiddleware: () => {},
       });
-      expect(hooks).toEqual(['agent_turn_prepare', 'before_prompt_build']);
+      expect(hooks).toEqual(['agent_turn_prepare', 'before_prompt_build', 'model_call_started']);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

@@ -2,6 +2,43 @@
 
 ## Unreleased
 
+## 0.3.0 — 2026-10-17
+
+- Added: **autonomous-work delivery** (spec
+  `docs/superpowers/specs/2026-10-17-openclaw-autonomous-work-wisdom-design.md`).
+  On the embedded runtime, the tool-result middleware sees the result of
+  every executed `read`, `write`, `edit`, `grep`, `find`, `exec` or `bash`
+  call. The first result of a model step whose activity key is new starts
+  `ct wisdom match --max 1 -- <bare target>` (the shared core builder, the 290
+  shared vectors and the golden blocks), waits at most 3 s, and appends one
+  marker-first block (1 fact, ≤ 600 chars) as its own text block. At most one
+  CT call per model step (step = `model_call_started.callId`, a new
+  observe-only hook registration); no ceilings. Subagents, cron and heartbeat
+  runs are included; the user-turn path is unchanged.
+  - The query starts only after the host ran the call: OpenClaw's
+    `before_tool_call` runs before plugin and exec approvals (and a throwing
+    one blocks the tool), so the plugin registers none. Exec results that are
+    approval-pending, unavailable or denied send nothing.
+  - A started query that got no answer (budget, CT failure, a gate that
+    closed) releases its key; CT's "nothing relevant" keeps it.
+  - The ledger is the run's prompt-hook snapshot plus a run ledger of every
+    id that entered context during the run (the live block, salvaged blocks,
+    tool-result markers, recalls, activity deliveries). No snapshot of the
+    run in this process → no delivery.
+  - Verified live (stub CT, ZAI GLM-5.3-FLASH): the rewritten tool result is
+    in the next model request, in the transcript, replayed byte-identically
+    by a fresh process and in the next `before_prompt_build` snapshot (A3).
+  - Verbose mode records activity outcomes with channel `activity`.
+- Fixed: OpenClaw loads the plugin module several times per process and
+  serves the prompt hooks and the tool-result middleware from different
+  instances (found live). All wisdom state now lives in one process-wide
+  holder. Before this, the recall dedup ran with an empty ledger in the
+  middleware instance and never stubbed a repeated fact.
+- Known limit: a recall the model makes through OpenClaw's `tool_call` meta
+  tool is not seen by the recall dedup.
+- e2e: `tests/e2e/run_activity.sh` (isolated `HOME`, state and brain; stub CT
+  and stub MCP sidecar; `activity_verdict.py`).
+
 ## 0.2.2 — 2026-10-16
 
 - Fixed (shared `ct-wisdom-core`): a live delivery could show a fact twice
