@@ -10,7 +10,7 @@ common architecture.
 
 | Harness | Directory | Status | Version |
 |---------|-----------|--------|---------|
-| [Hermes Agent](https://github.com/NousResearch/hermes-agent) | [`integrations/hermes/`](integrations/hermes/) | implemented | [0.6.7](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=hermes) |
+| [Hermes Agent](https://github.com/NousResearch/hermes-agent) | [`integrations/hermes/`](integrations/hermes/) | implemented | [0.6.8](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=hermes) |
 | DeepSeek Harness | [`integrations/deepseek/`](integrations/deepseek/) | implemented | [0.5.1](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=deepseek) |
 | OpenCode | [`integrations/opencode/`](integrations/opencode/) | implemented | [0.3.0](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=opencode) |
 | OpenClaw | [`integrations/openclaw/`](integrations/openclaw/) | implemented | [0.2.1](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=openclaw) |
@@ -126,9 +126,12 @@ keyed to what the agent is doing:
   `pytest tests/billing` sends `pytest`. `python -m <module>` sends the
   module only for well-known modules (`pytest`, `pip`, `http.server`, …;
   `python3 -m pytest` sends `python3 pytest`) or a package inside the
-  project, and then only its top package (`python -m mypkg.cli` sends
-  `python mypkg`). `git.exe status` counts as `git status`. Nothing naming
-  you is sent.
+  project (a `.py` file, or a folder with `__init__.py`), and then only its
+  top package (`python -m mypkg.cli` sends `python mypkg`). `git.exe status`
+  counts as `git status`, but `.bat`, `.cmd` and other dotted programs send
+  nothing. Nothing naming you is sent (`python -m tests.alice_notes` sends
+  `python`), and neither is anything inside a home folder that sits in the
+  project (a sandbox `.home`).
   File contents, tool output, diffs and the agent's own words are never sent.
 - **Privacy (since hermes 0.6.5):** a file path is sent only when it is
   inside a project (the nearest folder above the session's working
