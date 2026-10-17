@@ -95,7 +95,9 @@ class TestActivityLine(unittest.TestCase):
         # Privacy amendment R2: outside cwd, the basename only.
         self.assertEqual(act.normalize_path("/Users/alice/other/proj/y.py", cwd, env), "y.py")
         self.assertEqual(act.normalize_path("~/notes/z.md", cwd, env), "z.md")
-        self.assertEqual(act.normalize_path("~/notes/z.md", "/Users/alice", env), "notes/z.md")
+        # 0.6.3 R1: HOME itself is not a valid cwd; a project inside it is.
+        self.assertEqual(act.normalize_path("~/notes/z.md", "/Users/alice", env), "z.md")
+        self.assertEqual(act.normalize_path("~/proj/z.md", "/Users/alice/proj", env), "z.md")
         self.assertEqual(act.normalize_path("../../etc/passwd", cwd, env), "etc/passwd")
         self.assertEqual(act.normalize_path("a\\b\\c.py", cwd, env), "a/b/c.py")
         self.assertEqual(act.normalize_path("./", cwd, env), None)
@@ -107,11 +109,15 @@ class TestActivityLine(unittest.TestCase):
     def test_cwd_validity(self):
         env = {"USER": "alice", "HOME": "/Users/alice"}
         for cwd in ("", "/", "/Users", "/home", "/work", "C:/", "C:\\", "C:\\Users", "c:",
-                    "relative/dir", None):
+                    "relative/dir", None, "/Users/alice", "~", "/home/bob", "C:foo",
+                    "C:\\Users\\bob"):
             with self.subTest(cwd=cwd):
                 self.assertIsNone(act.valid_cwd(cwd, env))
         self.assertIsNone(act.valid_cwd("/var/lib", {"HOME": "/var/lib/alice"}))
-        self.assertEqual(act.valid_cwd("/Users/alice", env), "/Users/alice")
+        self.assertIsNone(act.valid_cwd("/data/home", {"HOME": "/data/home/alice"}))
+        self.assertEqual(act.valid_cwd("/Users/alice/proj", env), "/Users/alice/proj")
+        self.assertEqual(act.valid_cwd("~/proj", env), "/Users/alice/proj")
+        self.assertEqual(act.valid_cwd("/root/app", {"HOME": "/root"}), "/root/app")
         self.assertEqual(act.valid_cwd("/work/repo/", env), "/work/repo")
         self.assertEqual(act.valid_cwd("C:\\Users\\carol\\proj", {}), "c:/Users/carol/proj")
 
@@ -196,15 +202,18 @@ class TestActivityLine(unittest.TestCase):
         paths and user names never reach a search query."""
         rng = random.Random(20261017)
         env = {"USER": "zelda", "HOME": "/home/zelda"}
-        safe = ["TODO", "error", "404", "MCP", "tool", "name", "src/billing", "def", "\\w+",
-                "a\u00f1o", "fix", "tests/unit"]
+        safe = ["TODO", "error", "404", "MCP", "tool", "name", "ct_wisdom.py", "def",
+                "a\u00f1o", "fix", "fail-closed", "v1.2"]
         nasty = ["password=letmein", 'API_KEY="hunter2pass"', "'q'", "`x`", "a=b", "==",
                  "sk-ABCDEF1234567890xyz", "ghp_0123456789abcdefABCD", "AKIAABCDEFGHIJKLMNOP",
                  "a1b2c3d4e5f6g7h8i9j0", "/home/zelda/x", "~/notes", "zelda", "Zelda/notes",
                  "home/zelda", "C:\\Users\\zelda", "../up", "\\\\srv\\share", "/etc/passwd",
-                 "\u201csmart\u201d"]
+                 "\u201csmart\u201d", "password:letmein", "token:", "--password", "-v",
+                 "Bearer", "alice@example.com", "\\ProgramData\\corp", "src/billing",
+                 "\\w+", "foo(bar)", "zelda_notes", "my-Zelda.md", "C:foo", "x;y", "a,b",
+                 "#hash", "100%", "$HOME", "auth", "APIKEY", "Secret"]
         for _ in range(500):
-            parts = [rng.choice(safe + nasty) for _ in range(rng.randint(1, 5))]
+            parts = [rng.choice(safe + nasty) for _ in range(rng.randint(1, 6))]
             pattern = " ".join(parts)
             for cwd in ("/", "/work/repo", "/home/zelda"):
                 a = act.activity_for("search_files", {"pattern": pattern}, cwd=cwd, env=env)
@@ -214,9 +223,12 @@ class TestActivityLine(unittest.TestCase):
                 self.assertIsNotNone(a, pattern)
                 query = act.query_for(a)
                 self.assertEqual(query, pattern)
-                for bad in ("=", "'", '"', "`", "zelda", "Zelda", "~", "sk-", "ghp_", "AKIA"):
+                for bad in ("=", "'", '"', "`", "zelda", "Zelda", "~", "sk-", "ghp_", "AKIA",
+                            ":", "@", "/", "\\", "(", "$", "%"):
                     self.assertNotIn(bad, query, pattern)
-                self.assertFalse(query.startswith("/"), pattern)
+                self.assertLessEqual(len(query), 80)
+                self.assertLessEqual(len(query.split()), 6)
+                self.assertFalse(any(w.startswith("-") for w in query.split()), pattern)
 
     def test_randomized_paths_privacy(self):
         """Privacy amendment R1/R2: every tool path, under any cwd, drops the
@@ -224,11 +236,13 @@ class TestActivityLine(unittest.TestCase):
         rng = random.Random(20261018)
         env = {"USER": "zelda", "LOGNAME": "zelda", "HOME": "/Users/zelda"}
         heads = ["/Users/zelda", "/home/zelda", "~", "/", "/work/repo", "C:\\Users\\zelda",
-                 "/srv", "..", "", "Users/zelda", "zelda", "./"]
+                 "/srv", "..", "", "Users/zelda", "zelda", "./", "C:", "C:..", "\\etc",
+                 "/Users/zelda/proj", "/home/runner"]
         mids = ["clients", "acme", "zelda", "Zelda", "src", "..", ".", "home", "Users",
-                "secret-plans", "d\u00e9j\u00e0"]
+                "secret-plans", "d\u00e9j\u00e0", "zelda.txt", "my-zelda", "ZELDA@corp",
+                "root", "node"]
         cwds = ["", "/", "/Users", "/home", "/work", "/work/repo", "/Users/zelda", "C:/",
-                "C:\\Users\\zelda"]
+                "C:\\Users\\zelda", "/Users/zelda/proj", "~"]
         for _ in range(1000):
             segs = [rng.choice(mids) for _ in range(rng.randint(0, 4))]
             head = rng.choice(heads)
@@ -241,14 +255,14 @@ class TestActivityLine(unittest.TestCase):
                 continue
             query = act.query_for(a)
             comps = query.split("/")
-            for comp in comps:
-                self.assertNotEqual(comp.casefold(), "zelda", (raw, cwd, query))
+            self.assertNotIn("zelda", query.casefold(), (raw, cwd, query))
+            self.assertNotIn("\\", query, (raw, cwd))
             self.assertNotIn("~", query, (raw, cwd))
             self.assertFalse(query.startswith("/"), (raw, cwd))
             self.assertNotIn(":", query, (raw, cwd))
             self.assertTrue(a.line.endswith(" " + query), (raw, cwd))
             under = act.valid_cwd(cwd, env)
-            absolute = raw.startswith(("/", "~", "C:"))
+            absolute = raw.startswith(("/", "~", "C:", "\\"))
             if absolute and under is None:
                 self.assertEqual(len(comps), 1, (raw, cwd, query))
 
@@ -264,9 +278,74 @@ class TestActivityLine(unittest.TestCase):
             self.assertIsNone(act.activity_for("search_files", {"pattern": pattern}, cwd="/w"))
 
     def test_query_caps(self):
-        a = act.activity_for("search_files", {"pattern": "x" * 600, "path": "y" * 600}, cwd="/w")
+        a = act.activity_for("search_files", {"pattern": "x" * 80, "path": "y" * 600}, cwd="/w")
         self.assertLessEqual(len(act.query_for(a)), act.ACTIVITY_QUERY_CHARS)
         self.assertLessEqual(len(a.query), act.TARGET_CHARS)
+        # 0.6.3 allowlist: over 80 chars is refused, never truncated.
+        self.assertIsNone(act.activity_for("search_files", {"pattern": "x" * 81}, cwd="/w"))
+
+    def test_keys_use_full_local_path(self):
+        env = {"USER": "alice", "HOME": "/Users/alice"}
+        a = act.activity_for("read_file", {"path": "/srv/a/README.md"}, cwd="/", env=env)
+        b = act.activity_for("read_file", {"path": "/srv/b/README.md"}, cwd="/", env=env)
+        self.assertEqual((a.query, b.query), ("README.md", "README.md"))
+        self.assertNotEqual(a.key, b.key)
+        # The same file by two spellings is one key; read/write/edit fold.
+        c = act.activity_for("patch", {"path": "README.md"}, cwd="/srv/a", env=env)
+        self.assertEqual(a.key, c.key)
+        # The key never holds the raw path.
+        self.assertNotIn("/srv/a", repr(a.key))
+
+    def test_user_names_once_per_call(self):
+        calls = []
+        orig = act.user_names
+
+        def counting(env=None):
+            calls.append(1)
+            return orig(env)
+
+        act.user_names = counting
+        self.addCleanup(setattr, act, "user_names", orig)
+        act.activity_for("search_files", {"pattern": "TODO", "path": "a/b"}, cwd="/w/r", env={})
+        act.activity_for("terminal", {"command": "make all"}, cwd="/w/r", env={})
+        self.assertEqual(len(calls), 2)
+
+    def test_service_accounts_and_short_names_not_private(self):
+        for user in ("root", "node", "app", "user", "admin", "test", "ubuntu", "runner",
+                     "docker", "www-data", "nobody", "daemon", "ec2-user", "vscode",
+                     "codespace", "al"):
+            self.assertEqual(act.user_names({"USER": user, "HOME": "/home/" + user}),
+                             frozenset(), user)
+        self.assertEqual(act.user_names({"USER": "Alice", "HOME": "/home/bob"}),
+                         frozenset({"alice", "bob"}))
+
+    def test_session_cwd_prefers_hermes_session_record(self):
+        fake = type(sys)("tools.terminal_tool")
+        fake.resolve_task_overrides = lambda task_id: {}
+        fake.get_session_cwd = lambda task_id: "/srv/proj" if task_id == "t1" else None
+        self.addCleanup(sys.modules.pop, "tools.terminal_tool", None)
+        sys.modules["tools.terminal_tool"] = fake
+        self.assertEqual(act.session_cwd("t1"), "/srv/proj")
+        fake.resolve_task_overrides = lambda task_id: {"cwd": "/srv/override"}
+        self.assertEqual(act.session_cwd("t1"), "/srv/override")
+
+        def boom(task_id):
+            raise RuntimeError("x")
+
+        fake.resolve_task_overrides = boom
+        fake.get_session_cwd = boom
+        old = os.environ.get("TERMINAL_CWD")
+        self.addCleanup(lambda: os.environ.__setitem__("TERMINAL_CWD", old)
+                        if old is not None else os.environ.pop("TERMINAL_CWD", None))
+        os.environ["TERMINAL_CWD"] = "/srv/term"
+        self.assertEqual(act.session_cwd("t1"), "/srv/term")
+        os.environ.pop("TERMINAL_CWD")
+        self.assertEqual(act.session_cwd(""), os.getcwd())
+
+    def test_session_cwd_never_imports_hermes(self):
+        sys.modules.pop("tools.terminal_tool", None)
+        act.session_cwd("t1")
+        self.assertNotIn("tools.terminal_tool", sys.modules)
 
 
 # ---------------------------------------------------------------------------

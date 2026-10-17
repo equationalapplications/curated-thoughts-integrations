@@ -6,6 +6,51 @@ format below is load-bearing: `## <version> — <date>`.
 
 ## Unreleased
 
+## 0.6.3 — 2026-10-16
+
+- **Privacy fix, part 2: the 0.6.2 fix was incomplete.** After 0.6.2 shipped, a
+  review that ran cases through the real code found that the autonomous-work
+  activity query (which CT sends to the brain's embedding provider, e.g.
+  OpenRouter, and which also appears in the `_for:` label and the verbose log)
+  could still carry private data. Upgrade from 0.6.0, 0.6.1 or 0.6.2. What
+  could still leak in 0.6.2:
+  - **Search patterns with a value after a colon, a flag or a bearer word**:
+    `password:letmein`, `token: hunter2`, `--password hunter2` and
+    `Bearer abc123xyz` were sent as typed.
+  - **Emails and other punctuation in search patterns**: `alice@example.com`,
+    and rooted Windows paths such as `\ProgramData\corp\secrets.txt`.
+  - **Folder layout when the cwd was your home directory**:
+    `/Users/alice/clients/acme/contract.md` was sent as
+    `clients/acme/contract.md`.
+  - **Windows drive-relative paths**: `C:..\Users\alice\x.md` was sent as
+    `C:../x.md`, and `C:foo.md` as `C:foo.md`.
+  - **Your user name inside a file or folder name**: `notes/alice.txt`,
+    `alice-notes.md`, `alice@corp.com.eml`.
+
+  Now:
+  - A search pattern is sent only if it passes an **allowlist**: letters (including
+    non-ASCII letters), digits, `_`, `.`, `-` and spaces; at most 80 chars and 6 words;
+    no word starting with `-`, key-shaped or containing your user name; and none of
+    `bearer`, `token`, `password`, `passwd`, `secret`, `apikey`, `api_key` or `auth`
+    anywhere. Anything else sends nothing.
+  - A cwd counts only when it is inside your home directory or is a non-home
+    directory at depth 2 or more. Your home directory itself and its ancestors do
+    not count.
+  - Drive-relative and rooted backslash paths are cut to their file name.
+  - Any path component that contains your user name is dropped.
+  - The cwd is now the session's working directory as Hermes tracks it (task
+    override, recorded session cwd, `TERMINAL_CWD`), not just the gateway process's.
+- Fixed: the user-name filter no longer treats service accounts as private
+  (`root`, `node`, `app`, `user`, `admin`, `test`, `ubuntu`, `runner`,
+  `docker`, `www-data`, `nobody`, `daemon`, `ec2-user`, `vscode`, `codespace`)
+  or names under 3 chars. In 0.6.2, `node server.js` with `USER=node` gave no
+  activity and `npm test` with `USER=test` lost `test`. The 0.6.2 entry also
+  left out that `USERPROFILE`'s basename counts as a user name. It does, in
+  0.6.2 and now.
+- Fixed: two files that reduce to the same file name (`/srv/a/README.md`,
+  `/srv/b/README.md`) no longer share a de-duplication key. The key is built from
+  the full local path, which is never sent.
+
 ## 0.6.2 — 2026-10-16
 
 - **Privacy fix (autonomous-work delivery).** Since 0.6.0, the activity query
