@@ -6,6 +6,69 @@ format below is load-bearing: `## <version> — <date>`.
 
 ## Unreleased
 
+## 0.7.0 — 2026-10-17
+
+- **Privacy: nothing is sent for a call you refuse.** Until now the
+  autonomous-work query started in `pre_tool_call`, before Hermes asked you
+  to approve the call or let other plugins block it. Hermes resolves those
+  decisions only after every plugin's `pre_tool_call` has returned, so a
+  call you then refused (or another plugin blocked) had already sent its
+  target (for example `secrets.env` or `git push`) to Curated Thoughts and
+  its embedding provider. Now the plugin registers no `pre_tool_call` hook
+  at all. Everything happens in `transform_tool_result`, which Hermes runs
+  only for a call it let run: the model step is claimed there, just before
+  the query starts, so a call Hermes blocks before it runs never uses the
+  step. No query starts when the result is Hermes's own refusal: a denied,
+  unanswered or required approval, an `approvals.deny` rule, a blocked
+  write. The check is case-insensitive. It matches the statuses `blocked`,
+  `pending_approval`, `approval_required`, `denied`, `rejected`, `refused`
+  and `cancelled`, `"approved": false` and `"approval_pending": true`, an
+  error or message starting `BLOCKED`, `Refusing`, `Denied` or `Command
+  denied`, and wording like "not approved", "denied by", "user denied" and
+  "was not run", "rejected", "cancelled by user", "operation cancelled",
+  "declined", "approval timed out" and "not allowed",
+  also in nested or JSON-string errors and in the status and error details
+  Hermes passes to the hook. Output fields are never read. A refused call
+  leaves the step free for the next call.
+- **Timing change:** the query no longer overlaps the tool's run, so a step
+  whose first activity is new waits for Curated Thoughts after the tool
+  finishes (typically 0.4–2 s, never more than 3 s), at most once per model
+  step. Other calls pass through at once. OpenCode and OpenClaw work the
+  same way.
+- The query now uses the arguments that actually ran (after another
+  plugin's `modify`).
+- A started query that ends without an answer (the 3 s budget, a CT
+  timeout, exit, parse error, spawn failure, discovery or capability miss)
+  frees its activity, so a later step can try it again; the step stays
+  used. "Nothing relevant" (CT answered) still counts as seen.
+- A budget miss now counts as exactly one failure of the shared breaker
+  (three pause both wisdom paths for 5 minutes), as on every other host. A
+  late success no longer resets it and a late CT timeout is not counted
+  twice. A refused or blocked call counts zero. A miss on a cold process
+  (finding `ct` and probing `ct wisdom match --help` ran inside the same
+  3 s) is not counted: the query's own outcome counts when it finishes, so
+  a slow first start cannot pause wisdom while CT is healthy. A result that
+  arrives just as the wait runs out is delivered, not dropped.
+- `python -mpytest` and `python -umpytest` (the module attached to `-m`) are
+  parsed like `python -m pytest`.
+- If `ct` is missing, is not Curated Thoughts, lacks `wisdom match`, or its
+  `--help` probe hangs, the autonomous-work path remembers that for 5
+  minutes (or until PATH changes, which also makes it look for `ct` again)
+  and skips at once instead of waiting on every step. A hung probe also
+  counts as a breaker failure; a `ct` that was moved or uninstalled does
+  not, and is looked up again on the next step. Only one first-time probe
+  runs at a time.
+- After a query runs past the 3 s wait, the same activity is not queried
+  again until that query has finished.
+- Internal: project packages are `stat`ed before any directory listing; the
+  homes inside a project are computed once per project root; the result is
+  parsed once per call, and the other calls of a step are passed through
+  before any parsing.
+- **Correction to 0.6.8:** its entry said `python -m tests.alice_notes` "now
+  sends `python` alone, not `python tests`". 0.6.7 already sent `python`
+  alone there (its check on the full module caught the name); 0.6.8 changed
+  nothing for that command.
+
 ## 0.6.9 — 2026-10-17
 
 - Shared-core change, no behavior change for Hermes:

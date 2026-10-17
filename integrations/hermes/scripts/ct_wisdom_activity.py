@@ -7,29 +7,41 @@ While the agent works on its own between user messages, what it is doing
 (the file it reads or edits, the command it runs, the pattern it searches)
 can trigger one relevant CT fact:
 
-  * `pre_tool_call`: build an activity from the tool's ARGS only (never
-    contents, output, diffs, reasoning or full command lines). If its key is
-    new for the session and no query has started yet for this model step
-    (`api_request_id`), start `ct wisdom match --max 1` on a thread. The query
-    is the bare target (A6 real-gate results): a relative path, a search
-    pattern, or program plus subcommand.
-  * `transform_tool_result` of the same call: join the prefetch within the
-    3 s budget, claim one fact atomically in the in-turn ledger, and splice a
-    marker-first block into the tool result.
+  * No `pre_tool_call` hook (amendment 8): Hermes resolves approvals and
+    other plugins' blocks only after every pre_tool_call callback has
+    returned, and a call it blocks there never reaches the transform.
+  * `transform_tool_result` (Hermes let the call run): unless the result is
+    Hermes's refusal (`is_refusal`), build the activity from the tool's ARGS
+    that ran (never contents, output, diffs, reasoning or full command
+    lines), claim the model step (`api_request_id`) and the activity key in
+    one atomic step, start `ct wisdom match --max 1` and wait for it within
+    the 3 s budget, claim one fact atomically in the in-turn ledger, and
+    splice a marker-first block into the tool result. The query is the bare
+    target (A6 real-gate results): a relative path, a search pattern, or
+    program plus subcommand.
+  * A started query that delivers nothing for any reason but zero_hits
+    frees its key for a later step (after a budget miss, only once its
+    worker has finished, so one activity never has two queries in flight).
+    A budget miss is one breaker failure when discovery and the capability
+    probe were already cached (the match had the whole budget); on a cold
+    process the worker's own outcome settles the breaker instead.
+  * A ct that cannot be used (no Curated Thoughts `ct` found, no `wisdom
+    match`, or a `--help` probe that timed out) is remembered for
+    CT_UNUSABLE_PAUSE while PATH is unchanged: later steps skip at once
+    instead of waiting. A probe timeout is also one breaker failure.
 
 Fail-closed classes (no CT call or no delivery, one debug line):
-  empty_id, ct_tool, no_activity, no_ledger, breaker_open, seen_key,
-  step_used, discovery_miss, probe_timeout, capability_missing, timeout,
-  spawn, exit, parse_error, budget, zero_hits, unsupported_result,
-  hook_failed.
+  empty_id, ct_tool, no_activity, no_ledger, breaker_open, ct_unavailable,
+  probing, seen_key, step_used, refused, discovery_miss, probe_timeout,
+  capability_missing, timeout, spawn, spawn_failed, exit, parse_error,
+  budget, zero_hits, unsupported_result, hook_failed.
 
 Verbose mode (CT_WISDOM_VERBOSE=1, ct_wisdom_verbose) records each delivery
 and each query that delivered nothing with channel "activity"; per-call rate
 and filter skips are not recorded.
 
 Read-only: `ct` subprocess only (via ct_wisdom_live.match_wisdom). Stdlib
-only. Neither hook ever raises; the pre-hook always returns None (Hermes
-blocks a tool whose pre_tool_call callback raises).
+only. The hook never raises.
 """
 
 from __future__ import annotations
@@ -65,7 +77,6 @@ LABEL_CHARS = 120
 RECENT_KEYS_MAX = 32
 STEP_IDS_MAX = 16
 SESSIONS_MAX = 256
-PENDING_MAX = 256
 
 ACTIVITY_HEADING = "## Curated Thoughts — relevant to this step"
 ACTIVITY_RESULT_KEY = "curated_thoughts_wisdom"
@@ -634,13 +645,19 @@ def project_root(cwd, env=None, start=None):
     `_abs_cwd(cwd, env)` when the caller already has it. Cached (LRU; 30 s,
     or 2 s for "no root") on the raw cwd and HOME / USERPROFILE strings, so
     a hit does no filesystem work; os.path checks only, never a subprocess."""
-    env = _environ(env)
+    return _root_entry(cwd, _environ(env), start)[0]
+
+
+def _root_entry(cwd, env, start=None):
+    """(root, inner): the project root (see project_root) and the homes that
+    lie inside it (computed once per root and cached with it, same key and
+    TTL; `_resolve` never sends a path inside one)."""
     key = (cwd, _env_str(env, "HOME"), _env_str(env, "USERPROFILE"))
-    fresh, root = _root_cache.get(
-        key, lambda r: _ROOT_CACHE_TTL if r else _ROOT_NEGATIVE_TTL)
+    fresh, entry = _root_cache.get(
+        key, lambda e: _ROOT_CACHE_TTL if e[0] else _ROOT_NEGATIVE_TTL)
     if fresh:
-        return root
-    root = None
+        return entry
+    root, inner = None, ()
     start = _abs_cwd(cwd, env) if start is None else start
     if start is not None:
         homes = _homes(env)
@@ -654,8 +671,11 @@ def project_root(cwd, env=None, start=None):
         # real root, against real homes. Failing any, there is no root.
         if root is not None and _blocked(root, homes.real, homes.blocking, homes.user):
             root = None
-    _root_cache.put(key, root)
-    return root
+        if root is not None:
+            inner = tuple(h for h in homes.all if _below(h, root) is not None)
+    entry = (root, inner)
+    _root_cache.put(key, entry)
+    return entry
 
 
 def _digest(text):
@@ -676,7 +696,7 @@ def _resolve(raw, cwd, env, names):
     if path is None or (base is None and not os.path.isabs(path)):
         return None, False, _digest(raw)
     joined = os.path.join(base, path) if base else path
-    root = project_root(cwd, env, start=base) if base else None
+    root, inner = _root_entry(cwd, env, start=base) if base else (None, ())
     if root is None:
         # No realpath needed: nothing is sent, the key only has to differ.
         return None, False, _digest(os.path.normpath(joined))
@@ -687,8 +707,6 @@ def _resolve(raw, cwd, env, names):
         return None, False, local
     # A path inside ANY home that is itself inside the project root (a
     # sandbox HOME included) is never sent: that is someone's home content.
-    homes = _homes(env)
-    inner = [h for h in homes.all if _below(h, root) is not None]
     if any(_same(x, h) or _below(x, h) is not None
            for h in inner for x in (full, os.path.normpath(joined))):
         return None, False, local
@@ -787,12 +805,12 @@ def _listing(directory):
 def _project_package(module, root):
     """The top package of `module` when it is a real package inside the
     project root, else None: a `<top>.py` file, or a `<top>/` directory
-    holding `__init__.py`, at the root or under `src/`. Names are matched
-    case-SENSITIVELY by directory listing, even on case-insensitive
-    filesystems. (Namespace packages, without `__init__.py`, do not count:
-    any folder would qualify and nothing marks them.) Only the top package is
-    ever sent, never a submodule path. Cached per (root, top); "not found"
-    only briefly."""
+    holding `__init__.py`, at the root or under `src/`. Each candidate is
+    `stat`ed first; only on a hit is the exact name confirmed by directory
+    listing (case-SENSITIVE, even on case-insensitive filesystems). (Namespace
+    packages, without `__init__.py`, do not count: any folder would qualify
+    and nothing marks them.) Only the top package is ever sent, never a
+    submodule path. Cached per (root, top); "not found" only briefly."""
     if not root:
         return None
     top = module.split(".", 1)[0]
@@ -801,11 +819,11 @@ def _project_package(module, root):
     if not fresh:
         found = False
         for base in (root, os.path.join(root, "src")):
-            names = _listing(base)
-            if top + ".py" in names and os.path.isfile(os.path.join(base, top + ".py")):
-                found = True
-            elif top in names and "__init__.py" in _listing(os.path.join(base, top)):
-                found = True
+            found = ((os.path.isfile(os.path.join(base, top + ".py"))
+                      and top + ".py" in _listing(base))
+                     or (os.path.isfile(os.path.join(base, top, "__init__.py"))
+                         and top in _listing(base)
+                         and "__init__.py" in _listing(os.path.join(base, top))))
             if found:
                 break
         _module_cache.put((root, top), found)
@@ -815,8 +833,9 @@ def _project_package(module, root):
 def _python_module(rest):
     """The module of `python [flags] -m <module> ...`, or None. Flags are
     parsed alone or combined (`-uB`, `-OO`, `-um`), X/W values attached or
-    separate; any unknown flag, a long option or a non-flag word stops the
-    scan."""
+    separate; `m` takes the rest of its word as the module when there is one
+    (`-mpytest`, `-umpytest`), else the next word. Any unknown flag, a long
+    option or a non-flag word stops the scan."""
     i = 0
     while i < len(rest):
         word = rest[i]
@@ -827,9 +846,9 @@ def _python_module(rest):
         while j < len(chars):
             c = chars[j]
             if c == "m":
-                if j != len(chars) - 1 or i + 1 >= len(rest):
-                    return None
-                return rest[i + 1]
+                if j != len(chars) - 1:
+                    return chars[j + 1:]
+                return rest[i + 1] if i + 1 < len(rest) else None
             if c in _PYTHON_VALUE_CHARS:
                 if j == len(chars) - 1:  # the value is the next word
                     if i + 1 >= len(rest):
@@ -859,7 +878,9 @@ def command_target(command, env=None, names=None, root=None):
     - `python [flags] -m <module>` (`_python_module` parses the flags) sends
       a known module as listed, or only the TOP package of a real package
       inside the project root (`root()`, called only then). The full module
-      and the sent string must both pass the name check.
+      must pass the name check, and so must the exact sent string
+      (`python <module>`): a multi-word name can show up only once the
+      program and the module are joined.
     A name in a subcommand or module sends the program alone."""
     command = _clean_target(command) if isinstance(command, str) else None
     if command is None:
@@ -888,8 +909,10 @@ def command_target(command, env=None, names=None, root=None):
     rest = words[1:]
     if is_python:
         module = _python_module(rest)
-        # The name check runs on the full module AND on the exact string
-        # sent: `python -m tests.alice_notes` sends `python` alone.
+        # Name checks: first the full module (the program passed already;
+        # `python -m tests.alice_notes` sends `python` alone), and
+        # then on the exact joined string that is sent, which also catches a
+        # multi-word name spanning the program and the module.
         if (module and _MODULE_RE.match(module) and not _credential_shaped(module)
                 and not name_hit(module, names)):
             sent = module if module in _PYTHON_MODULES else _project_package(
@@ -966,8 +989,13 @@ def query_for(activity):
 
 
 class ActivityState:
-    """Per session: recent activity keys (LRU) and model steps that already
-    started a query. One lock; admit() is the whole rate rule."""
+    """Per session: recent activity keys (LRU), the model steps that started
+    a query and the steps already reported. One lock.
+
+    Amendment 8: everything happens in `transform_tool_result`, after Hermes
+    decided the call may run. `start` claims the step and the key together,
+    just before the query starts, so a call Hermes blocks earlier never holds
+    the step."""
 
     def __init__(self):
         self._lock = threading.Lock()
@@ -983,9 +1011,10 @@ class ActivityState:
         self._sessions.move_to_end(session_id)
         return state
 
-    def admit(self, session_id, api_request_id, key):
-        """None when this call may start the step's query (and records it);
-        else the failure class. A rejected call changes nothing."""
+    def start(self, session_id, api_request_id, key):
+        """None when this call may start the step's query (the step and the
+        key are both recorded); else "step_used" or "seen_key". A rejected
+        call changes nothing but the key's recency."""
         with self._lock:
             keys, steps, _ = self._state(session_id)
             if api_request_id in steps:
@@ -993,18 +1022,38 @@ class ActivityState:
             if key in keys:
                 keys.move_to_end(key)
                 return "seen_key"
-            keys[key] = True
-            while len(keys) > RECENT_KEYS_MAX:
-                keys.popitem(last=False)
             steps[api_request_id] = True
             while len(steps) > STEP_IDS_MAX:
                 steps.popitem(last=False)
+            keys[key] = True
+            while len(keys) > RECENT_KEYS_MAX:
+                keys.popitem(last=False)
             return None
 
-    def peek(self, session_id, api_request_id, key):
-        """What admit() would answer, without recording anything."""
+    def release(self, session_id, api_request_id, key):
+        """Undo start(): free the step and the key (the query never started)."""
         with self._lock:
-            keys, steps, _ = self._state(session_id)
+            state = self._sessions.get(session_id)
+            if state is not None:
+                state[0].pop(key, None)
+                state[1].pop(api_request_id, None)
+
+    def release_key(self, session_id, key):
+        """Forget a key whose query never got a genuine answer, so a LATER
+        step can retry it (the step stays used)."""
+        with self._lock:
+            state = self._sessions.get(session_id)
+            if state is not None:
+                state[0].pop(key, None)
+
+    def peek(self, session_id, api_request_id, key):
+        """What start() would answer. Pure: records nothing, not even the
+        session's or the key's recency."""
+        with self._lock:
+            state = self._sessions.get(session_id)
+            if state is None:
+                return None
+            keys, steps, _ = state
             if api_request_id in steps:
                 return "step_used"
             return "seen_key" if key in keys else None
@@ -1028,7 +1077,7 @@ class ActivityState:
 _STATE = ActivityState()
 
 # ---------------------------------------------------------------------------
-# prefetch
+# the query (started and joined in transform_tool_result)
 # ---------------------------------------------------------------------------
 
 _clock = time.monotonic
@@ -1038,11 +1087,75 @@ def _spawn(target):
     threading.Thread(target=target, name="ct-wisdom-activity", daemon=True).start()
 
 
+# A ct that cannot be used is remembered this long (while PATH is unchanged),
+# so a broken or absent ct costs at most one wait per pause, then goes quiet.
+CT_UNUSABLE_PAUSE = ct_wisdom_live.BREAKER_PAUSE
+_UNUSABLE_CLASSES = frozenset({"discovery_miss", "probe_timeout", "capability_missing"})
+_unusable = {}
+_unusable_lock = threading.Lock()
+
+
+def _ct_unusable():
+    """The remembered reason ct cannot be used, or None (expired, or PATH
+    changed: a new ct may be reachable)."""
+    with _unusable_lock:
+        if not _unusable:
+            return None
+        moved = _unusable["path"] != os.environ.get("PATH")
+        if not moved and _clock() < _unusable["until"]:
+            return _unusable["reason"]
+        _unusable.clear()
+    if moved:
+        # discover_ct keeps one accepted path per process and the probe
+        # caches per path: without a reset the retry would not re-discover.
+        ct_wisdom.reset_discovery_cache()
+        ct_wisdom_live.reset_capability_cache()
+    return None
+
+
+def _mark_unusable(reason):
+    with _unusable_lock:
+        _unusable.update(until=_clock() + CT_UNUSABLE_PAUSE,
+                         path=os.environ.get("PATH"), reason=reason)
+
+
+# At most one cold query (discovery plus capability probe) in flight per
+# process: a hung ct must not collect parallel probes, one per new activity.
+_probe_busy = []
+_probe_lock = threading.Lock()
+
+
+def _take_probe():
+    with _probe_lock:
+        if _probe_busy:
+            return False
+        _probe_busy.append(True)
+        return True
+
+
+def _release_probe():
+    with _probe_lock:
+        _probe_busy.clear()
+
+
+def _ct_warm():
+    """True when discovery and the capability probe are both cached, so the
+    whole budget goes to `ct wisdom match` (finding 1: on a cold process the
+    3 s wait also covers `ct --help` and `ct wisdom match --help`). Reads the
+    two caches only; runs nothing."""
+    path = ct_wisdom._accepted_ct_path
+    if path is None:
+        return False
+    with ct_wisdom_live._capability_lock:
+        return ct_wisdom_live._capability.get(path) is True
+
+
 class _Prefetch:
     __slots__ = ("session_id", "api_request_id", "tool_name", "activity", "query",
-                 "exclude", "deadline", "done", "result", "failure")
+                 "exclude", "deadline", "warm", "done", "result", "failure", "lock",
+                 "settled", "abandoned")
 
-    def __init__(self, session_id, api_request_id, tool_name, activity, exclude):
+    def __init__(self, session_id, api_request_id, tool_name, activity, exclude, warm):
         self.session_id = session_id
         self.api_request_id = api_request_id
         self.tool_name = tool_name
@@ -1050,60 +1163,122 @@ class _Prefetch:
         self.query = query_for(activity)
         self.exclude = exclude
         self.deadline = _clock() + ct_wisdom_live.LIVE_TIMEOUT
+        self.warm = warm
         self.done = threading.Event()
         self.result = None
         self.failure = None
-
-
-_pending = OrderedDict()
-_pending_lock = threading.Lock()
-
-
-def pending_count():
-    with _pending_lock:
-        return len(_pending)
+        self.lock = threading.Lock()
+        self.settled = False
+        self.abandoned = False
 
 
 def reset_state():
-    """TEST-ONLY: forget keys, steps, pending prefetches, the root, *.sln and
-    homes caches and the pwd lookup."""
+    """TEST-ONLY: forget keys, steps, the root, *.sln, homes and module
+    caches and the pwd lookup."""
     _STATE.reset()
     for cache in (_root_cache, _sln_cache, _homes_cache, _module_cache):
         cache.clear()
     _pwd_identity.cache_clear()
-    with _pending_lock:
-        _pending.clear()
+    with _unusable_lock:
+        _unusable.clear()
+    _release_probe()
+
+
+def _record_breaker(outcome):
+    if outcome == "failure":
+        ct_wisdom_live._BREAKER.record_failure()
+    elif outcome == "success":
+        ct_wisdom_live._BREAKER.record_success()
+
+
+def _finish(p, result, failure, outcome):
+    """The worker's end, under the query lock: publish the result, mark the
+    query done and settle the breaker unless the transform already did. The
+    shared breaker hears of each query EXACTLY once."""
+    with p.lock:
+        p.result, p.failure = result, failure
+        p.done.set()
+        record = None if p.settled else outcome
+        p.settled = True
+        abandoned = p.abandoned
+    _record_breaker(record)
+    if not p.warm:
+        _release_probe()
+    if failure in _UNUSABLE_CLASSES:
+        _mark_unusable(failure)
+    if abandoned:
+        # The transform gave up on this query and delivered nothing: the key
+        # is free again only now, so the activity never has two in flight.
+        _STATE.release_key(p.session_id, p.activity.key)
 
 
 def _run_prefetch(p):
-    """Discovery, probe and match for one prefetch (worker thread). Records
-    the outcome on the shared breaker exactly as the user-turn path does."""
+    """Discovery, probe and match for one query (worker thread). Outcome for
+    the breaker: a probe timeout (`ct --help` or `ct wisdom match --help`)
+    or a match timeout/exit is a failure, an answer a success, anything else
+    nothing (a spawn error resets the discovery and capability caches)."""
+    result, failure, outcome = None, None, None
     try:
         path, dclass = ct_wisdom.discover_ct()
         if path is None:
-            p.failure = dclass or "discovery_miss"
+            failure = dclass or "discovery_miss"
+            outcome = "failure" if failure == "probe_timeout" else None
             return
+        started = _clock()
         capable = ct_wisdom_live.has_match_capability(path)
-        if not capable:
-            p.failure = "probe_timeout" if capable is None else "capability_missing"
+        if capable is None and _clock() - started < ct_wisdom.PROBE_TIMEOUT:
+            # None before the timeout can fire is an OSError at spawn (ct
+            # moved or uninstalled): spawn-class, as on the match path.
+            ct_wisdom.reset_discovery_cache()
+            ct_wisdom_live.reset_capability_cache()
+            failure = "spawn"
             return
-        result, rclass = ct_wisdom_live.match_wisdom(
+        if not capable:
+            failure = "probe_timeout" if capable is None else "capability_missing"
+            outcome = "failure" if capable is None else None
+            return
+        answer, rclass = ct_wisdom_live.match_wisdom(
             path, p.query, ACTIVITY_MAX_PER_STEP, p.exclude)
         if rclass is not None:
             if rclass in ("timeout", "exit"):
-                ct_wisdom_live._BREAKER.record_failure()
+                outcome = "failure"
             elif rclass == "spawn":
                 ct_wisdom.reset_discovery_cache()
                 ct_wisdom_live.reset_capability_cache()
-            p.failure = rclass
+            failure = rclass
             return
-        ct_wisdom_live._BREAKER.record_success()
-        p.result = result
+        result, outcome = answer, "success"
     except Exception:
         logger.debug("wisdom-activity: prefetch failed", exc_info=True)
-        p.failure = "hook_failed"
+        result, failure, outcome = None, "hook_failed", None
     finally:
-        p.done.set()
+        _finish(p, result, failure, outcome)
+
+
+def _wait(p):
+    """Wait for the query within what is left of its budget; True when done."""
+    return p.done.wait(max(0.0, p.deadline - _clock()))
+
+
+def _budget_ran_out(p):
+    """The transform's wait ran out. Under the query lock: False when the
+    worker finished meanwhile (its result is used and it settled the
+    breaker). Else True; a warm query then records ONE budget failure (the
+    core's recordActivityBudgetMiss) and the worker's later outcome is
+    ignored. A cold query (discovery or probe ran in this budget) records
+    nothing here: the worker's own outcome settles the breaker later. Either
+    way the query is marked abandoned: its worker frees the key when it
+    finishes."""
+    with p.lock:
+        if p.done.is_set():
+            return False
+        p.abandoned = True
+        record = None
+        if p.warm and not p.settled:
+            p.settled = True
+            record = "failure"
+    _record_breaker(record)
+    return True
 
 
 def _skip(session_id, failure_class, record=False, **detail):
@@ -1122,47 +1297,24 @@ def _nonempty(value):
     return isinstance(value, str) and bool(value)
 
 
-def on_pre_tool_call(**kwargs):
-    """Hermes `pre_tool_call` callback. Always returns None (never blocks,
-    never modifies args); never raises."""
-    try:
-        _pre_tool_call(kwargs.get("tool_name"), kwargs.get("args"),
-                       kwargs.get("session_id"), kwargs.get("tool_call_id"),
-                       kwargs.get("api_request_id"), kwargs.get("task_id"))
-    except Exception:
-        logger.debug("wisdom-activity: pre hook failed", exc_info=True)
-    return None
+def _blocked_report(session_id, api_request_id, activity, blocked):
+    """A would-be trigger that cannot run (no_ledger, breaker_open,
+    ct_unavailable, probing): verbose mode hears of it once per step, so
+    while ct is remembered as unusable it logs one ct_unavailable record per
+    new-activity step (the user sees nothing). Nothing is recorded in the
+    key tracker."""
+    report = (_STATE.peek(session_id, api_request_id, activity.key) is None
+              and _STATE.first_report(session_id, api_request_id))
+    return _skip(session_id, blocked, record=report, query=query_for(activity),
+                 activity=activity.line)
 
 
-def _pre_tool_call(tool_name, args, session_id, tool_call_id, api_request_id, task_id=None):
-    if not (_nonempty(session_id) and _nonempty(tool_call_id) and _nonempty(api_request_id)):
-        return _skip(session_id, "empty_id")
-    if is_ct_tool(tool_name):
-        return _skip(session_id, "ct_tool")
-    activity = activity_for(tool_name, args, task_id=task_id)
-    if activity is None or not query_for(activity):
-        return _skip(session_id, "no_activity")
+def _gate_blocked(session_id):
+    """"no_ledger" | "breaker_open" | None, and the ledger."""
     ledger = ct_ledger.LEDGER_CACHE.get(session_id)
-    blocked = "no_ledger" if ledger is None else (
-        "breaker_open" if ct_wisdom_live._BREAKER.is_open() else None)
-    if blocked is not None:
-        # A would-be trigger that cannot run: verbose mode hears of it once
-        # per step; nothing is recorded in the key tracker.
-        report = (_STATE.peek(session_id, api_request_id, activity.key) is None
-                  and _STATE.first_report(session_id, api_request_id))
-        return _skip(session_id, blocked, record=report, query=query_for(activity),
-                     activity=activity.line)
-    refused = _STATE.admit(session_id, api_request_id, activity.key)
-    if refused is not None:
-        return _skip(session_id, refused)
-    p = _Prefetch(session_id, api_request_id, tool_name, activity,
-                  sorted(ledger)[:ct_wisdom_live.EXCLUDE_MAX])
-    with _pending_lock:
-        _pending[tool_call_id] = p
-        while len(_pending) > PENDING_MAX:
-            _pending.popitem(last=False)
-    _spawn(lambda: _run_prefetch(p))
-    return None
+    if ledger is None:
+        return "no_ledger", None
+    return ("breaker_open" if ct_wisdom_live._BREAKER.is_open() else None), ledger
 
 
 # ---------------------------------------------------------------------------
@@ -1218,25 +1370,40 @@ def render_activity_block(item, superseded, activity):
     return head + body
 
 
-def _splice_mode(result):
-    """'object' | 'text' | None (unsupported: no delivery)."""
+_NOT_JSON = object()
+_UNPARSED = object()
+
+
+def _parse(result):
+    """The tool result parsed once: its JSON value, or _NOT_JSON."""
+    if not isinstance(result, str):
+        return _NOT_JSON
+    try:
+        return json.loads(result)
+    except ValueError:
+        return _NOT_JSON
+
+
+def _splice_mode(result, data=_UNPARSED):
+    """'object' | 'text' | None (unsupported: no delivery). `data` is the
+    already parsed result, when the caller has it."""
     if not isinstance(result, str):
         return None
-    try:
-        data = json.loads(result)
-    except ValueError:
+    if data is _UNPARSED:
+        data = _parse(result)
+    if data is _NOT_JSON:
         return "text"
     if isinstance(data, dict) and ACTIVITY_RESULT_KEY not in data:
         return "object"
     return None
 
 
-def splice(result, block):
+def splice(result, block, mode=None):
     """The tool result with `block` added, or None. A JSON object gets one
     key spliced in before its closing brace (original bytes kept, so Hermes's
     own parsers, e.g. the write verifier, still work); plain text gets the
-    block appended."""
-    mode = _splice_mode(result)
+    block appended. `mode` is _splice_mode(result) when already known."""
+    mode = mode or _splice_mode(result)
     if mode == "text":
         return result + "\n\n" + block
     if mode != "object":
@@ -1285,41 +1452,191 @@ def on_transform_tool_result(**kwargs):
     None keeps it. Never raises."""
     try:
         return _transform(kwargs.get("result"), kwargs.get("session_id"),
-                          kwargs.get("tool_call_id"))
+                          kwargs.get("tool_call_id"), kwargs.get("tool_name"),
+                          kwargs.get("args"), kwargs.get("task_id"),
+                          kwargs.get("api_request_id"), kwargs.get("status"),
+                          kwargs.get("error_type"), kwargs.get("error_message"))
     except Exception:
         logger.debug("wisdom-activity: transform failed", exc_info=True)
         return None
 
 
-def _transform(result, session_id, tool_call_id):
-    if not _nonempty(tool_call_id):
-        return None
-    with _pending_lock:
-        p = _pending.get(tool_call_id)
-        if p is None or p.session_id != session_id:
-            return None
-        del _pending[tool_call_id]
+# Hermes's own refusal envelopes (pin ee8dd6c8), matched case-insensitively:
+#   - terminal_tool.py `_error_json(..., status="blocked" | "pending_approval")`
+#     for a denied or unanswered approval, an `approvals.deny` rule or a
+#     hardline floor (message "BLOCKED: ..." or the fallback "Command denied:
+#     ..."); approval.py's action gate `"status": "approval_required"`,
+#     `"approved": false`, and its "denied by user" / "was not approved"
+#     reasons;
+#   - the file tools' `tool_error("BLOCKED: ...")` / `tool_error("Refusing to
+#     write ...")` (write guards, protected and SSH-config writes);
+#   - other tools' "Blocked: ..." and "did not approve ... was NOT run", and
+#     the generic statuses / wording denied, rejected, refused, cancelled;
+#   - the `status` / `error_type` / `error_message` kwargs Hermes passes to
+#     transform_tool_result (derived from the result's `error` at the pin).
+# Only envelope fields are read: `status`, `approved`, `approval_pending`,
+# and `error` / `message` / `reason` / `detail` / `error_message`, also when
+# nested or holding a JSON-object string. Tool OUTPUT fields are never read
+# (a command that ran may print "Permission denied"); a plain-text result is
+# matched on its prefix only.
+_REFUSED_STATUSES = frozenset({
+    "blocked", "pending_approval", "approval_required", "denied", "rejected",
+    "refused", "cancelled", "canceled", "not_approved"})
+_REFUSED_PREFIXES = ("blocked", "refusing", "denied", "command denied", "access denied",
+                     "not approved", "rejected", "cancelled", "canceled", "declined",
+                     "not allowed", "approval timed out")
+_REFUSED_PHRASES = ("not approved", "did not approve", "denied by", "user denied",
+                    "was not run", "not executed", "rejected", "cancelled by",
+                    "canceled by", "user cancelled", "user canceled",
+                    "operation cancelled", "operation canceled", "declined",
+                    "approval timed out", "timed out waiting for approval",
+                    "not allowed")
+_REFUSED_ERROR_TYPE_WORDS = ("block", "denied", "deny", "reject", "refus", "approval",
+                             "cancel")
+_ENVELOPE_TEXT_KEYS = ("error", "message", "reason", "detail", "error_message")
+_REFUSAL_DEPTH = 3
+
+
+def _refusal_text(text):
+    if not isinstance(text, str):
+        return False
+    low = text.lstrip().lower()
+    return low.startswith(_REFUSED_PREFIXES) or any(p in low for p in _REFUSED_PHRASES)
+
+
+def _refused_status(status):
+    return isinstance(status, str) and status.strip().lower() in _REFUSED_STATUSES
+
+
+def _refusal_value(value, depth=0):
+    """An envelope value (dict, or error text that may hold a JSON object)."""
+    if depth > _REFUSAL_DEPTH:
+        return False
+    if isinstance(value, str):
+        if _refusal_text(value):
+            return True
+        text = value.strip()
+        if not text.startswith("{"):
+            return False
+        try:
+            value = json.loads(text)
+        except ValueError:
+            return False
+    if not isinstance(value, dict):
+        return False
+    if _refused_status(value.get("status")):
+        return True
+    if value.get("approved") is False or value.get("approval_pending") is True:
+        return True
+    return any(_refusal_value(value.get(k), depth + 1) for k in _ENVELOPE_TEXT_KEYS
+               if k in value)
+
+
+def _refused(result, data, status=None, error_type=None, error_message=None):
+    if _refused_status(status) or _refusal_text(error_message):
+        return True
+    if isinstance(error_type, str) and any(
+            w in error_type.lower() for w in _REFUSED_ERROR_TYPE_WORDS):
+        return True
+    if not isinstance(result, str):
+        return False
+    if data is _NOT_JSON:  # plain text: its own leading wording only
+        return result.lstrip().lower().startswith(_REFUSED_PREFIXES)
+    return isinstance(data, dict) and _refusal_value(data)
+
+
+def is_refusal(result, status=None, error_type=None, error_message=None):
+    """True when the tool result (or Hermes's status / error kwargs for it)
+    is Hermes refusing the call (the call did not run, or ran nothing the
+    user approved): nothing may be sent. Leans closed: a false positive only
+    skips one delivery."""
+    return _refused(result, _parse(result), status, error_type, error_message)
+
+
+def _transform(result, session_id, tool_call_id, tool_name=None, args=None, task_id=None,
+               api_request_id=None, status=None, error_type=None, error_message=None):
+    if not (_nonempty(session_id) and _nonempty(tool_call_id) and _nonempty(api_request_id)):
+        return _skip(session_id, "empty_id")
+    if is_ct_tool(tool_name):
+        return _skip(session_id, "ct_tool")
+    # Cheapest first: most calls of a step pass through here.
+    if _STATE.peek(session_id, api_request_id, None) == "step_used":
+        return _skip(session_id, "step_used")
+    data = _parse(result)
+    # Hermes decided by now (approvals, other plugins' blocks, guardrails):
+    # a refusal sends nothing (amendment 8). Nothing is recorded, so the step
+    # stays free for a later call of the same step.
+    if _refused(result, data, status, error_type, error_message):
+        return _skip(session_id, "refused")
+    mode = _splice_mode(result, data)
+    if mode is None:
+        return _skip(session_id, "unsupported_result")
+    # The args that actually ran (after any plugin `modify`).
+    activity = activity_for(tool_name, args, task_id=task_id)
+    if activity is None or not query_for(activity):
+        return _skip(session_id, "no_activity")
+    blocked, ledger = _gate_blocked(session_id)
+    if blocked is None and _ct_unusable() is not None:
+        blocked = "ct_unavailable"
+    warm = _ct_warm() if blocked is None else True
+    if blocked is None and not warm and not _take_probe():
+        blocked = "probing"  # another cold query is discovering / probing
+    if blocked is not None:
+        return _blocked_report(session_id, api_request_id, activity, blocked)
+    refused = _STATE.start(session_id, api_request_id, activity.key)
+    if refused is not None:
+        if not warm:
+            _release_probe()
+        return _skip(session_id, refused)
+    try:
+        p = _Prefetch(session_id, api_request_id, tool_name, activity,
+                      sorted(ledger)[:ct_wisdom_live.EXCLUDE_MAX], warm)
+        _spawn(lambda: _run_prefetch(p))
+    except Exception:
+        # No thread, no query: nothing was sent, so free the step, the key
+        # and the probe slot.
+        logger.debug("wisdom-activity: could not start the query", exc_info=True)
+        _STATE.release(session_id, api_request_id, activity.key)
+        if not warm:
+            _release_probe()
+        return _skip(session_id, "spawn_failed")
+    try:
+        return _deliver(p, result, mode)
+    except Exception:
+        # The query ran (the step stays used) but nothing was delivered.
+        _STATE.release_key(session_id, activity.key)
+        raise
+
+
+def _deliver(p, result, mode=None):
+    """Join the started query and deliver one fact, or skip. Any non-delivery
+    other than zero_hits releases the key (the step stays used); after a
+    budget miss the worker releases it when it finishes."""
+    session_id = p.session_id
     base = {"query": p.query, "activity": p.activity.line}
-    if _splice_mode(result) is None:
-        return _skip(session_id, "unsupported_result", record=True, **base)
-    if not p.done.wait(max(0.0, p.deadline - _clock())):
+
+    def miss(failure_class):
+        _STATE.release_key(session_id, p.activity.key)
+        return _skip(session_id, failure_class, record=True, **base)
+
+    if not _wait(p) and _budget_ran_out(p):
         return _skip(session_id, "budget", record=True, **base)
     if p.failure is not None:
-        return _skip(session_id, p.failure, record=True, **base)
+        return miss(p.failure)
     ledger = ct_ledger.LEDGER_CACHE.get(session_id)
     if ledger is None:
-        return _skip(session_id, "no_ledger", record=True, **base)
+        return miss("no_ledger")
     for item, superseded in render_candidates(
             p.result["entries"], p.result["corrections"], ledger):
         block = render_activity_block(item, superseded, p.activity)
         if not block:
             continue
-        out = splice(result, block)
+        out = splice(result, block, mode)
         if out is None:
-            return _skip(session_id, "unsupported_result", record=True, **base)
+            return miss("unsupported_result")
         claimed = ct_ledger.LEDGER_CACHE.claim(session_id, [item["id"]])
         if claimed is None:
-            return _skip(session_id, "no_ledger", record=True, **base)
+            return miss("no_ledger")
         if not claimed:
             continue  # another tool thread delivered it first
         logger.debug("wisdom-activity: deliver session=%s ids=%s", session_id, item["id"])
@@ -1330,8 +1647,9 @@ def _transform(result, session_id, tool_call_id):
             "tool_name": p.tool_name, "api_request_id": p.api_request_id,
         })
         return out
-    # Nothing new survived: report against the ledger as it is now, including
-    # anything a concurrent tool thread just claimed.
+    # Nothing new survived (CT answered): the key stays seen. Report against
+    # the ledger as it is now, including anything a concurrent tool thread
+    # just claimed.
     after = ct_ledger.LEDGER_CACHE.get(session_id) or ledger
     return _skip(session_id, "zero_hits", record=True, result=p.result,
                  ledger=sorted(after), **base)

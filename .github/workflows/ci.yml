@@ -298,8 +298,9 @@ jobs:
         # The Hermes contract is verified against a stub ctx rather than a live
         # host (Hermes is not installable in CI): three skills, the
         # on_session_start hook plus the live- and autonomous-work-delivery
-        # hooks (pre_tool_call never blocks: it returns None), and graceful
-        # degradation when the optional system-prompt API is absent.
+        # hooks (no pre_tool_call: the activity query waits for a call Hermes
+        # let run), and graceful degradation when the optional system-prompt
+        # API is absent.
         run: |
           python - <<'PY'
           import importlib.util, sys
@@ -318,12 +319,21 @@ jobs:
           ctx = Ctx(); m.register(ctx)
           assert len(ctx.skills) == 3, ctx.skills
           assert [e for e, _ in ctx.hooks] == [
-              "on_session_start", "pre_llm_call", "pre_tool_call", "transform_tool_result",
+              "on_session_start", "pre_llm_call", "transform_tool_result",
           ], ctx.hooks
           assert len(ctx.sections) == 2, ctx.sections
           assert ctx.sections[1][2] == {"max_chars": 2500}, ctx.sections
           ctx.hooks[0][1](session_id="ci", cwd=".")
-          assert dict(ctx.hooks)["pre_tool_call"](tool_name="read_file", args={"path": "a"}) is None
+          # Full ids, so the call reaches past the id checks (no ct on PATH:
+          # it may skip, never raise or return anything but None or a str).
+          import os
+          os.environ["PATH"] = "/nonexistent"
+          out = dict(ctx.hooks)["transform_tool_result"](
+              tool_name="read_file", args={"path": "a.py"}, result='{"content": "x"}',
+              session_id="ci", tool_call_id="ci-call-1", api_request_id="ci-req-1",
+              task_id="", turn_id="t", duration_ms=1, status="ok",
+              error_type=None, error_message=None)
+          assert out is None or isinstance(out, str), out
           assert ctx.sections[0][1](), "system prompt section rendered empty"
 
           class Minimal(Ctx):
@@ -331,7 +341,7 @@ jobs:
           mc = Minimal(); mc.register_system_prompt_section = None
           m.register(mc)
           assert [e for e, _ in mc.hooks] == [
-              "on_session_start", "pre_llm_call", "pre_tool_call", "transform_tool_result",
+              "on_session_start", "pre_llm_call", "transform_tool_result",
           ]
           print("plugin entry point OK")
           PY

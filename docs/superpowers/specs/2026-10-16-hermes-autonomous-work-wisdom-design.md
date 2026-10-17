@@ -156,6 +156,10 @@ its public pieces: `match_wisdom`, `has_match_capability`, the shared `_BREAKER`
 
 ### Trigger: prefetch on `pre_tool_call`, deliver in `transform_tool_result`
 
+> Superseded in hermes 0.7.0 by "Amendment 8: approval-gated query": the step is
+> claimed and the query starts in `transform_tool_result`; the plugin registers no
+> `pre_tool_call` hook.
+
 - `on_pre_tool_call(**kw)` decides, under one module lock, whether this call starts a CT
   query. It never raises and always returns `None` (a raise would block the tool).
 - The prefetch runs on a daemon thread: `ct_wisdom.discover_ct()` →
@@ -794,11 +798,356 @@ A post-merge review of 0.6.7 found the following:
   string that is sent (`python <top>`). A name in either sends `python` alone. For
   example, `python -m tests.alice_notes` sends `python`, not `python tests`: a name in
   the command line is a signal that the work is about that person.
+  - **Correction (0.7.0):** that example was already true in 0.6.7, whose full-module
+    check gave `python` alone. Both checks stay: the one on the sent string also
+    catches a multi-word name that shows up only once the program and the module are
+    joined (the parts alone pass). Amendment 8 first removed it as redundant; the
+    PR #72 re-review restored it.
+
+## Amendment 8: approval-gated query (2026-10-17, hermes 0.7.0)
+
+Supersedes "Trigger: prefetch on `pre_tool_call`" and the budget/breaker bullets of
+"3 s budget and breaker sharing" above. A minor bump, because the timing changes.
+
+### Problem
+
+0.6.x started the CT query in `pre_tool_call`, before Hermes decided whether the call
+may run. A call the user then refused, or another plugin blocked, had already sent its
+bare target to CT and its embedding provider. The OpenCode leg showed that a bare target
+can matter: `secrets.env` alone opened CT's gate at 0.71.
+
+### Verified host order (pin ee8dd6c8, read as data)
+
+The agent loop (`agent/tool_executor.py::_dispatch_authorized_once`) and the direct path
+(`model_tools.py::handle_function_call` → `_pre_dispatch_guards`) run, in this order:
+
+1. tool-request middleware, then the tool-scope check;
+2. **all** `pre_tool_call` callbacks (ours included), in one `invoke_hook` pass
+   (`hermes_cli/plugins.py::_get_pre_tool_call_directive_details`);
+3. only then the directives are resolved: any plugin's `block` wins; an `approve`
+   directive asks the human gate (`_resolve_block_from_details` →
+   `tools.approval.request_tool_approval`), and a denial or timeout blocks;
+4. the pruned-argument check and guardrails (`agent._tool_guardrails.before_call`), then
+   ACP edit approval (`acp_adapter.edit_approval`);
+5. execution. Inside it, `terminal` runs `check_all_command_guards` (hardline floors,
+   the user's `approvals.deny` rules, the dangerous-command prompt, `-q`/cron deny
+   modes), and `write_file`/`patch` run their write guards (sensitive paths, the SSH
+   config approval). A refusal here is **returned as the tool result**, not raised:
+   `terminal` gives `{"output": "", "exit_code": -1, "error": "BLOCKED: …", "status":
+   "blocked"}` (or `"status": "pending_approval"`), file tools give `{"error":
+   "BLOCKED: …"}` or `{"error": "Refusing to write …"}`;
+6. `post_tool_call`, then `transform_tool_result`, for every call that was not blocked
+   in steps 1–4 and did not time out or get cancelled
+   (`_publish_sequential_result`: `if not managed.blocked and not _execution_timed_out`;
+   the direct path returns before the transform on a block).
+
+So `pre_tool_call` cannot know the outcome: approvals and blocks are decided after
+every callback has returned. No hook fires only for approved calls before they execute
+(`pre_approval_request` / `post_approval_response` are observers and fire only for
+flagged calls, so silence there does not mean "approved"). `transform_tool_result` is
+the first point after the decision. It also sees the in-tool refusals of step 5, so it
+must recognize them.
+
+### Design
+
+- **No `pre_tool_call` hook** (changed in the PR #72 review, see "Amendment 8 update"
+  below). The plugin registers `on_session_start`, `pre_llm_call` and
+  `transform_tool_result` only.
+- **`transform_tool_result` decides, claims and queries.** For every call (it receives
+  `api_request_id` like `pre_tool_call` did: both read `tool_hook_ids(agent, …)` /
+  `_CallIds.hook_kwargs()` at the pin):
+  1. `empty_id` (session, tool call or `api_request_id` empty), `ct_tool`, then a pure
+     peek: `step_used` if the step already started its query (the common case for the
+     other calls of a step, decided before any parsing).
+  2. The result is parsed once. **Refused** (`is_refusal`, see "Refusal check"): class
+     `refused`. No query; nothing reaches the breaker or verbose mode.
+  3. Unsupported result shape: `unsupported_result`.
+  4. The activity is built from the transform's `args` (the args that actually ran,
+     after any plugin `modify`); none → `no_activity`.
+  5. No ledger (`no_ledger`), an open breaker (`breaker_open`), or a ct remembered as
+     unusable (`ct_unavailable`, see "Unusable ct").
+  6. **The step and the key are claimed together**, atomically
+     (`ActivityState.start`): `step_used` if this `(session, api_request_id)` already
+     started a query, `seen_key` if the key is recent.
+  7. The query starts on a worker thread (discover → probe → `ct wisdom match --max 1`,
+     `--exclude` from the ledger at this moment) and the transform waits up to
+     `LIVE_TIMEOUT` (3 s) for it, as OpenCode and OpenClaw do. If the thread cannot
+     start, the step and the key are both freed (`spawn_failed`).
+
+  Every skip in 1–6 records nothing, so a later call of the same step may still
+  start the step's query. Only a started query (7) uses the step: still one query per
+  step. In a parallel batch, the first transform to reach step 6 wins (0.6.x: the first
+  `pre_tool_call`); the claim is one lock, so two can never both start.
+
+### Key release (from the DSH review; the core's `finishActivityOutcome.retry`)
+
+A started query that ends without a delivery for any reason other than `zero_hits`
+(CT answered, nothing new) **releases the key**: `budget`, `timeout`, `exit`, `spawn`,
+`parse_error`, `discovery_miss`, `probe_timeout`, `capability_missing`, `no_ledger`
+after the query, `unsupported_result` at splice time, `hook_failed`. A claim of the same
+fact by a parallel call (`claim` returns empty for every candidate) counts as
+`zero_hits`. The step stays
+used, so the retry happens in a later step, never twice in one. `zero_hits` (no match,
+or every hit already in context) keeps the key.
+
+### Budget miss = one breaker failure (the core's `recordActivityBudgetMiss`)
+
+Each started query settles the breaker **exactly once**, under a per-query lock. The
+worker publishes its result, marks the query done and settles in one locked step; the
+transform's timeout path re-checks "done" under the same lock:
+- the worker finishes first (even a moment after the transform's wait returned): its
+  result is used, and `timeout`/`exit` record one failure, success records a success,
+  anything else records nothing;
+- the transform's 3 s wait runs out first and the query was **warm** (discovery and the
+  capability probe were both cached when it started, so the match had the whole
+  budget): one failure (`budget`), and the worker's later outcome is ignored for the
+  breaker (a late success no longer resets it, a late timeout is not counted twice);
+- the wait runs out first and the query was **cold** (discovery or the probe ran inside
+  this budget): class `budget` for delivery, but the transform records nothing; the
+  worker's own outcome settles the breaker when it finishes.
+- after any budget miss the key stays held while the worker runs and is freed when it
+  finishes (nothing was delivered), so one activity never has two queries in flight.
+- a probe timeout (`ct --help` during discovery, or `ct wisdom match --help`) is a
+  breaker failure: a hung ct is a sick CT.
+
+### Unusable ct
+
+A worker that ends `discovery_miss` (no Curated Thoughts `ct`, e.g. chart-testing's
+`ct` first on PATH), `capability_missing` (no `wisdom match`) or `probe_timeout` marks ct
+unusable for `CT_UNUSABLE_PAUSE` (= `BREAKER_PAUSE`, 300 s) while `PATH` is unchanged.
+Until then the transform skips with `ct_unavailable` before claiming anything, so a
+broken or absent ct costs at most one wait (≤ 3 s) per pause, then goes quiet for the
+user. (Verbose mode, which is opt-in, still logs one `ct_unavailable` record per
+new-activity step during the pause.) A `PATH` change retries at once, and also resets
+`discover_ct`'s accepted path and the capability cache, since both are kept per
+process regardless of `PATH`.
+
+`has_match_capability` returns `None` both on a timeout and on an `OSError` at spawn. A
+`None` that comes back before `PROBE_TIMEOUT` could have fired is the spawn error (ct
+moved or uninstalled): class `spawn`, as on the match path. It resets the discovery
+and capability caches, charges no breaker failure and is not remembered, so the next
+step re-discovers.
+
+At most one cold query (discovery plus the capability probe) is in flight per process.
+While one runs, a cold step for another activity skips with `probing` (once-per-step
+verbose record) instead of starting a parallel probe; warm steps are not affected. The key of the failed query is still freed: during the pause
+nothing queries, and after it the activity may be tried again. `ct_wisdom.discover_ct`
+itself does not memoize a miss (its docstring said it did; fixed); the memo lives in the
+activity module so the shared live path is unchanged.
+A refused or blocked call starts no query, so it counts zero. A Hermes-cancelled or
+timed-out tool never reaches the transform, so it also counts zero.
+
+### Latency trade-off
+
+0.6.x overlapped the CT call with tool execution; the visible delay was
+`max(0, CT latency − tool time)`. Now the transform waits for the whole CT call after the
+tool has run: measured CT latency 0.44–2.07 s (p95 1.22 s), capped at 3 s, plus discovery
+and the capability probe on the first query of the process (both cached afterwards). It
+is paid at most once per model step, and only on a step whose first activity is new for
+the session; every other call passes through at once. That is the cost of never
+sending a refused call's target, the same trade OpenCode (`tool.execute.after`) and
+OpenClaw (the tool-result middleware) made. A user who refuses a call has said "not
+this"; sending its target anyway is the worse failure.
+
+### Other changes in 0.7.0 (0.6.8 review, minor)
+
+- `_python_module` also parses `-m` with an attached module: `-mpytest`, `-umpytest`
+  (`m` ends the flag word; the rest of the word is the module).
+- The name check on the sent string stays (first removed here as redundant, then
+  restored in the PR #72 re-review): a user name that spans the space between the
+  program and the module, such as a two-word name made of the end of `python` and the
+  start of the package, passes the per-part checks and is caught only on the joined
+  string. One extra `name_hit` call per `python -m` command.
+- `_project_package` `stat`s `<top>.py` / `<top>/__init__.py` first and lists the
+  directory only on a hit, to confirm the exact case.
+- `_resolve` computes the homes inside the project root once per root, cached with the
+  root (same key and TTL), instead of on every call.
+
+### Tests
+
+- A call refused by Hermes (terminal `status: blocked`, `pending_approval`, a file
+  tool's `BLOCKED`/`Refusing` error) sends nothing and frees the step; a call another
+  plugin blocks (no transform) sends nothing; a `modify`-ed call sends its final args.
+- `pre_tool_call` alone never runs `ct` (now: no `pre_tool_call` hook is registered).
+- A call blocked before it runs (no transform) does not hold the step: the next call
+  of the same step queries.
+- A cold-process budget miss is not a breaker failure (three in a row leave it closed);
+  the worker's late outcome settles it. A worker that finishes just as the wait runs
+  out is delivered, with no budget failure.
+- `peek` is pure: it creates no session and refreshes no key.
+- A stuck probe or discovery is one breaker failure, then later steps skip without
+  starting a worker; a discovery miss or `capability_missing` is remembered (no
+  breaker failure) until the pause ends or `PATH` changes.
+- After a cold budget miss no second worker starts for the same key; the key is freed
+  when the late worker finishes.
+- A spawn failure frees the step and the key.
+- A used step skips before the activity is built; the result is parsed once.
+- `python -m pytest` with a name that appears only in `python pytest` sends `python`.
+- No test uses a `pre_tool_call` stand-in any more.
+- A probe spawn error (instant `None`) is spawn-class; a `PATH` change resets both
+  caches; a second cold step skips while a cold probe runs; an exception after the
+  claim (constructor, warm check, render, ledger claim) frees the key; declined /
+  approval timed out / not allowed are refusals in envelope fields only.
+- Key release: `budget`/`timeout`/`exit`/`parse_error`/`spawn` free the key (a later
+  step re-queries the same activity), `zero_hits` keeps it; the step stays used.
+- Breaker: a budget miss counts once even when the worker later times out; a late
+  success does not reset it; a refused call counts zero.
+- e2e: Hermes at the pin with a second plugin that blocks `read_file secrets.env` and an
+  `approvals.deny` rule that refuses `git push*`; CT must receive neither target.
+  **Done (2026-10-17): all checks pass**, checks 1–5 unchanged. The agent read
+  `secrets.env` (blocked: `{"error": "BLOCKED by e2e-blocker: …"}`) and ran
+  `git push origin main` (refused: `"status": "blocked"`, the deny-rule message); CT
+  received only `TASK.md`, `pnpm test` and `.env.local`.
+  **Rerun after the Amendment 8 update (2026-10-17): RESULT PASS, all checks.** No
+  `pre_tool_call` hook of ours; the blocker's message is now
+  `secrets.env is off limits (e2e-blocker).` (no refusal wording), so check 6 shows
+  Hermes ran no transform for the blocked call. The `git push` refusal came back as
+  `"status": "blocked"` with the deny-rule `BLOCKED: …` error. CT again received only
+  `TASK.md`, `pnpm test` and `.env.local`. Two facts were delivered (terminal and
+  write_file), each once, and no key value was found in `out/`.
+  **Rerun after Amendment 8 update 3 (2026-10-17): RESULT PASS, all checks**, with check
+  6 now matching the refused target precisely (a query starting `git push`). CT again
+  received only `TASK.md`, `pnpm test` and `.env.local`; secrets.env and `git push`
+  sent nothing; no key value in `out/`.
+
+### Amendment 8 update (PR #72 review, 2026-10-17)
+
+Same version (0.7.0 is unreleased). Each change and why:
+
+1. **Cold start and the breaker.** The 3 s wait starts when the query starts, after the
+   tool ran. On a cold process it must also cover discovery (`ct --help`) and the
+   capability probe (`ct wisdom match --help`), each with its own 3 s timeout. Both are
+   already cached per process (the accepted path; the probe per path) after their first
+   success. Counting a cold miss as a breaker failure let three slow first starts pause
+   **both** wisdom paths for 5 minutes while CT was healthy. Now only a warm miss counts
+   (see "Budget miss" above). The user still waits at most 3 s. `pre_tool_call` still
+   never runs `ct` (there is no such hook any more); no warm-up runs anywhere else.
+2. **The step is claimed at transform time.** At the pin, a call blocked before
+   execution (another plugin's `block`, an `approve` directive denied or timed out, the
+   pruned-argument check, guardrails, ACP edit approval) gets only the terminal
+   `post_tool_call` (status `blocked`), never `transform_tool_result`
+   (`agent/tool_executor.py::_blocked_tool_result`, `model_tools.py::handle_function_call`).
+   0.7.0 as first written claimed the step in `pre_tool_call`, so such a call held it
+   and every later call of that step got `step_used`. Releasing on `post_tool_call`
+   would have needed a second hook and a claim map. Claiming in the transform is
+   simpler: there is nothing to release, and the plugin no longer registers a
+   `pre_tool_call` hook at all, so a bug of ours can never veto a tool (Hermes fails
+   `pre_tool_call` closed). Still one query per step.
+3. **e2e check 6** used a blocker message starting `BLOCKED`, which `is_refusal` also
+   matches, so it could not tell "no transform" from "transform saw a refusal". The
+   blocker now says `secrets.env is off limits (e2e-blocker).`
+4. **Refusal check** (see below) is broader and case-insensitive.
+5. **Settle race.** The worker could settle (or publish a ready result) just after the
+   transform's wait timed out; the transform then reported `budget`, dropped the
+   failure and discarded the result. Fixed by the locked done/settle step above.
+6. **`peek` is pure.** The `seen_key` check that used to run in `pre_tool_call` moved
+   the key to the front of the LRU; that check is gone, and `peek` (used for the
+   once-per-step verbose report) no longer creates a session or touches recency.
+7. `command_target`'s docstring fixed (superseded by update 2, item 7: the check on
+   the sent string is back).
+
+### Amendment 8 update 2 (PR #72 re-review, 2026-10-17)
+
+Same version. Each change and why:
+
+1. **A ct that never warms up.** Under update 1, a hung `ct --help` or `ct wisdom match
+   --help` made every step wait the full 3 s (each miss cold, so nothing recorded) and
+   the breaker never opened. Now a probe timeout is a breaker failure, and the failure
+   is remembered (see "Unusable ct").
+2. **No usable ct.** A discovery miss and `capability_missing` are remembered the same
+   way, so a host without a Curated Thoughts `ct` stops spawning discovery and probe
+   subprocesses on every step. `discover_ct`'s docstring no longer claims a memo.
+3. **Refusal check** reads more wording (rejected, cancelled by / operation cancelled),
+   Hermes's own `status` / `error_type` / `error_message` kwargs, and nested or
+   JSON-string errors (see "Refusal check").
+4. **Key in flight.** After a budget miss the key stays held until the worker
+   finishes, so a later step cannot start a second query for the same activity.
+5. **Spawn failure** frees the step and the key.
+6. **Cost:** a used step is decided by a peek before any parsing; the result is parsed
+   once and shared by the refusal check, the splice mode and the splice.
+7. **Name check on the sent string restored** (see the correction under privacy
+   amendment 7).
+
+### Amendment 8 update 3 (PR #72 third review, 2026-10-17)
+
+Same version; the smallest change per scenario, no new mechanism beyond the probe slot:
+
+1. A capability probe's `None` from a spawn `OSError` is spawn-class (caches reset, no
+   breaker charge, not remembered), told apart from a timeout by its elapsed time. A
+   moved or uninstalled ct no longer keeps a stale accepted path, and repeated pauses
+   no longer open the shared breaker.
+2. The unusable memo clearing on a `PATH` change also resets the discovery and
+   capability caches, so the retry really re-discovers.
+3. Refusal wording: declined, approval timed out / timed out waiting for approval, not
+   allowed (envelope fields only).
+4. Any exception after the step and key are claimed frees them: before the worker
+   starts, the step, the key and the probe slot; after it, the key (the step stays
+   used: the query ran).
+5. One cold probe in flight per process (`probing`).
+6. e2e check 6 matches the refused target precisely (a query starting `git push`),
+   not any query containing `git`.
+7. CI's stub-host check calls `transform_tool_result` with full ids and read_file args
+   and no ct on PATH, and accepts `None` or a string.
+8. The comment above the `python -m` name checks describes both checks.
+9. `_blocked_report` lists `ct_unavailable` and `probing`; the verbose behavior during
+   a pause is stated above.
+
+Not changed: splitting the Hermes hooks out of the shared builder module, so that
+claude-code and docker-agent stop shipping a byte-identical copy of the hook code
+they never run. That is a separate refactor.
+
+### Refusal check (`is_refusal`)
+
+Matched case-insensitively on the result envelope, never on tool output fields
+(`output`, `content`, `stdout`, `stderr`, …):
+- `status` in `blocked`, `pending_approval`, `approval_required`, `denied`, `rejected`,
+  `refused`, `cancelled`/`canceled`, `not_approved`;
+- `"approved": false` or `"approval_pending": true`;
+- `error`, `message`, `reason`, `detail` or `error_message` starting `blocked`,
+  `refusing`, `denied`, `command denied`, `access denied`, `not approved`, `rejected`,
+  `cancelled`/`canceled`, `declined`, `not allowed`, `approval timed out`, or containing
+  "not approved", "did not approve", "denied by", "user denied", "was not run", "not
+  executed", "rejected", "cancelled by"/"canceled by", "user cancelled", "operation
+  cancelled" (and the `canceled` spellings), "declined", "approval timed out", "timed
+  out waiting for approval" or "not allowed". This wording list is a stopgap; a
+  fail-closed check (send only when the result shows the tool ran) is an open question
+  for the user. These
+  fields are also read when nested (`{"error": {"message": …}}`, up to 3 levels) or
+  when they hold a JSON-object string; the same envelope rules apply inside;
+- Hermes's transform kwargs: `status` in the list above, `error_message` with the
+  wording above, or an `error_type` containing block, denied, deny, reject, refus,
+  approval or cancel (at the pin Hermes derives them from the result's `error`, so
+  they mostly repeat it);
+- a plain-text result: only its leading wording (the prefixes above), since the rest
+  is tool output.
+
+[V] Sources at the pin: `tools/terminal_tool.py` (`_error_json` with `status="blocked"`
+/ `"pending_approval"`, the fallback "Command denied: …"), `tools/approval.py` and
+`tools/approval_floors.py` (every "BLOCKED: …" message, the action gate's
+`"status": "approval_required"` and `"approved": False`, "denied by user", "was not
+approved"), `tools/file_tools_write_guards.py` ("BLOCKED: write to …", "Refusing to
+write …"), `tools/mcp_tool_handlers.py` ("did not approve … was NOT run").
+
+It leans closed: a false positive only skips one delivery (for example read_file's own
+"BLOCKED: You have read this exact file region N times", which did run). **Still not
+covered:** a refusal worded some other way inside a tool's normal output (a terminal
+command that ran and printed "denied" is, correctly, not a refusal); a future Hermes
+status or wording not in these lists; and another plugin's `transform_tool_result`
+that rewrites a refusal before ours sees it (Hermes passes each callback the original
+result, so this needs a plugin that runs first and returns a non-refusal string, and
+then our block is dropped anyway: first string wins). A fail-closed design (send only
+when the result shows the tool ran, per tool) is proposed in the PR, not built.
+
+### Versioning
+
+hermes `0.6.9 → 0.7.0`. claude-code `0.4.0 → 0.4.1` and docker-agent `0.1.0 → 0.1.1`
+(byte-identical `ct_wisdom_activity.py`): they use only the builder and the renderer,
+so their one behavior change is that `python -mpytest` now sends `python pytest`.
 
 ## Alignment with INTENT.md
 
 - **Goal "During autonomous work":** this is that step for Hermes. Host events
-  (`pre_tool_call` / `transform_tool_result`), query text (an activity line), frequency
+  (`transform_tool_result` since Amendment 8; `pre_tool_call` before), query text (an activity line), frequency
   (once per model step on key change) and channel (the tool result) are the four open
   questions INTENT lists, answered for this host.
 - **Rule 1 (at most once):** marker on every fact, atomic claim against the in-turn
@@ -808,8 +1157,8 @@ A post-merge review of 0.6.7 found the following:
   append-only channel.
 - **Rule 3 (no superseded fact):** CT filters superseded entries; corrections ride only
   when they supersede an id in context, as on the live path.
-- **Rule 4 (fail quietly):** both hooks catch everything; the pre-hook can never block a
-  tool; 3 s budget; shared breaker.
+- **Rule 4 (fail quietly):** the hook catches everything; there is no pre-hook (since
+  Amendment 8), so nothing of ours can block a tool; 3 s budget; shared breaker.
 - **Rule 5 (provenance):** same provenance label as live.
 - **Rule 6 (keep it small):** 1 fact, ≤ 600 chars per delivery (decision 5), no
   per-session cap, consistent with PR #49. Limits are not raised to compensate for weak
@@ -827,6 +1176,16 @@ A post-merge review of 0.6.7 found the following:
   that cannot be sent safely fails quietly with no query (rule 4). The project-root lookup
   only `stat`s and lists directories on the user's own machine; it writes nothing and runs
   no subprocess, and the brain is still reached only through `ct` (rule 7).
+- **Amendment 8 (approval-gated query):** serves "Why this repo exists" (private,
+  local-first): a call the user refused or a plugin blocked sends nothing. Rule 4 (fail
+  quietly): a warm budget miss or a hung probe counts once on the shared breaker, a
+  cold-start miss or a refusal never, so a slow first start cannot silence wisdom while
+  CT is healthy; a broken or absent ct costs at most one 3 s wait per 5-minute pause,
+  then goes quiet; the 3 s cap is unchanged; with no `pre_tool_call` hook the plugin can
+  never block a tool.
+  Rule 6: still one query per step (claimed atomically in the transform). Rule 7: still
+  `ct wisdom match` only, and no warm-up call. Rule 8: the refusal check reads Hermes's
+  own result envelope (status and error wording), never scores relevance.
 - **Departures:** none. INTENT says every host should reach every step; Hermes now does.
 
 ## Known limitations

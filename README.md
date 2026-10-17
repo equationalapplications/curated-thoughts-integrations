@@ -10,12 +10,12 @@ common architecture.
 
 | Harness | Directory | Status | Version |
 |---------|-----------|--------|---------|
-| [Hermes Agent](https://github.com/NousResearch/hermes-agent) | [`integrations/hermes/`](integrations/hermes/) | implemented | [0.6.9](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=hermes) |
+| [Hermes Agent](https://github.com/NousResearch/hermes-agent) | [`integrations/hermes/`](integrations/hermes/) | implemented | [0.7.0](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=hermes) |
 | DeepSeek Harness | [`integrations/deepseek/`](integrations/deepseek/) | implemented | [0.6.2](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=deepseek) |
 | OpenCode | [`integrations/opencode/`](integrations/opencode/) | implemented | [0.4.2](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=opencode) |
 | OpenClaw | [`integrations/openclaw/`](integrations/openclaw/) | implemented | [0.3.1](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=openclaw) |
-| Claude Code | [`integrations/claude-code/`](integrations/claude-code/) | implemented | [0.4.0](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=claude-code) |
-| [Docker Agent](https://github.com/docker/docker-agent) | [`integrations/docker-agent/`](integrations/docker-agent/) | implemented | [0.1.0](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=docker-agent) |
+| Claude Code | [`integrations/claude-code/`](integrations/claude-code/) | implemented | [0.4.1](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=claude-code) |
+| [Docker Agent](https://github.com/docker/docker-agent) | [`integrations/docker-agent/`](integrations/docker-agent/) | implemented | [0.1.1](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=docker-agent) |
 
 Each version links to that integration's releases.
 
@@ -122,7 +122,7 @@ DeepSeek Harness, OpenCode and OpenClaw use the TypeScript port in
 
 | Host | Trigger | Delivered as |
 |------|---------|--------------|
-| Hermes | `pre_tool_call` starts the query, `transform_tool_result` delivers | spliced into that tool's result |
+| Hermes | `transform_tool_result` only (the call ran: approvals and other plugins' blocks are decided) claims the model step, queries and delivers, never for a call Hermes refused | spliced into that tool's result |
 | DeepSeek Harness | `tools/pre-execute` starts the query, the next `agent/pre-step` (step 2 and later) delivers | a user message persisted in the session log (source kind `curated-thoughts-wisdom-activity`), before the next model step |
 | [Docker Agent](integrations/docker-agent/README.md#intuitive-wisdom) | `tool_response_transform` queries and delivers (`read_file`, `write_file`, `edit_file`, `search_files_content`, `shell`; one query per model step, counted by `before_llm_call`) | spliced into that tool's result, marker first |
 | [OpenCode](integrations/opencode/README.md#intuitive-wisdom) | `tool.execute.before` plans; `tool.execute.after` (the call ran, so it was approved) queries and delivers (`read`, `write`, `edit`, `grep`, `glob`, `bash`; one query per model step, the step read from the persisted tool part) | appended to that tool's result, marker first; subagents included |
@@ -136,6 +136,10 @@ On Hermes:
   `ct wisdom match` per model step, only when the activity changes (a new
   file, command or search). There is no ceiling per message or per session.
   Curated Thoughts' own tools never trigger it.
+- **Only calls that ran (since hermes 0.7.0):** nothing is sent until
+  Hermes has let the call run, so a call you refuse, or another plugin
+  blocks, sends nothing. The query starts after the tool finishes, so a
+  step whose activity is new waits up to 3 s for it, once per step.
 - **What is sent to Curated Thoughts:** only the bare target, for example
   `src/billing/invoice.py`, `pnpm test` or a search pattern. For shell
   commands (since hermes 0.6.6) that is the bare program name, and nothing
@@ -261,7 +265,7 @@ sidecar in the agent's MCP config, ships the shared doctor as
 Hermes skills tree. It is the reference implementation of Intuitive Wisdom:
 the bootstrap block is a system-prompt section memoized per session,
 live delivery runs from the `pre_llm_call` hook, and autonomous-work
-delivery runs from `pre_tool_call` and `transform_tool_result`. Without Curated Thoughts,
+delivery claims the step and queries in `transform_tool_result`, after Hermes has let the call run. Without Curated Thoughts,
 or with an unreachable brain, both blocks are simply absent. The edge cases
 of restored sessions and the 256-session memo window are listed under 0.3.0
 in its [CHANGELOG](integrations/hermes/CHANGELOG.md).

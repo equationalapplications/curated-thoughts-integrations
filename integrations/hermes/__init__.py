@@ -15,9 +15,11 @@ What it wires up:
     user turn (ct_wisdom_live), and a `transform_tool_result` hook that keeps
     agent-initiated CT recall from repeating a fact already in context
     (ct_tool_dedup) — the Intuitive Wisdom live path;
-  * a `pre_tool_call` hook plus the same `transform_tool_result` hook that
-    deliver one fact per model step during autonomous work, keyed to the
-    file, command or search the agent is busy with (ct_wisdom_activity);
+  * the same `transform_tool_result` hook delivers one fact per model step
+    during autonomous work, keyed to the file, command or search the agent
+    is busy with (ct_wisdom_activity). No `pre_tool_call` hook: Hermes
+    resolves approvals and blocks only after those callbacks return, so the
+    query waits for a call Hermes let run;
 
 The tool surface itself is NOT registered here — it is served by the
 `curated-thoughts-mcp` sidecar over MCP, registered under `mcp_servers` in
@@ -149,20 +151,6 @@ def _pre_llm_call(**kwargs):
         return None
 
 
-def _pre_tool_call(**kwargs):
-    """Start an autonomous-work wisdom prefetch (ct_wisdom_activity).
-
-    Always returns None: Hermes treats a raising or blocking pre_tool_call
-    callback as a veto and blocks the tool, so nothing here may escape."""
-    try:
-        import ct_wisdom_activity
-
-        ct_wisdom_activity.on_pre_tool_call(**kwargs)
-    except Exception:  # pragma: no cover - defensive
-        logger.debug("curated-thoughts: activity pre hook failed", exc_info=True)
-    return None
-
-
 def _transform_tool_result(**kwargs):
     """Stub CT recall entries already in context (ct_tool_dedup); for any
     other tool, deliver the step's activity fact (ct_wisdom_activity). One
@@ -205,7 +193,6 @@ def register(ctx):
 
     for hook_name, callback in (
         ("pre_llm_call", _pre_llm_call),
-        ("pre_tool_call", _pre_tool_call),
         ("transform_tool_result", _transform_tool_result),
     ):
         try:
