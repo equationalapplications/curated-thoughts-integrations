@@ -412,16 +412,30 @@ function realpathPosix(path: string): string {
   return normpath(out.startsWith('/') ? out : `${process.cwd()}/${out}`);
 }
 
+/**
+ * Python `ntpath.realpath` (non-strict): normalize, then resolve the longest
+ * existing prefix (`GetFinalPathNameByHandle` ≈ `realpathSync.native`, which
+ * also expands 8.3 short names such as `RUNNER~1`) and append the rest.
+ */
+function realpathWindows(path: string): string {
+  const norm = nodePath.win32.normalize(nodePath.win32.resolve(path));
+  const parts = norm.split('\\');
+  for (let i = parts.length; i > 0; i--) {
+    const head = parts.slice(0, i).join('\\');
+    try {
+      const resolved = realpathSync.native(i === 1 ? `${head}\\` : head);
+      const rest = parts.slice(i);
+      return rest.length === 0 ? resolved : nodePath.win32.join(resolved, ...rest);
+    } catch {
+      /* try a shorter prefix */
+    }
+  }
+  return norm;
+}
+
 function real(path: string): string | null {
   try {
-    if (WINDOWS) {
-      try {
-        return realpathSync.native(path);
-      } catch {
-        return nodePath.resolve(path);
-      }
-    }
-    return realpathPosix(path);
+    return WINDOWS ? realpathWindows(path) : realpathPosix(path);
   } catch {
     return null;
   }
