@@ -1,4 +1,3 @@
-import { randomUUID } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -14,8 +13,9 @@ import {
   runUserTurn,
   runToolResult,
 } from './wisdom-live/adapter.js';
-import { Breaker } from '@equational-applications/ct-wisdom-core';
-import { dshVerboseRecorder } from './verbose.js';
+import { DshActivity, LIVE_SOURCE_KIND, activityMessage, wisdomMessage } from './wisdom-live/activity.js';
+import { Breaker, lruSet } from '@equational-applications/ct-wisdom-core';
+import { dshVerboseRecorder, namedLogger } from './verbose.js';
 import type { MemoRecord } from './wisdom-live/adapter.js';
 import { expandHome } from '../scripts/ct_env.js';
 
@@ -134,6 +134,7 @@ interface DshContextExtensions {
   on(event: 'agent/created', listener: (payload: AgentCreatedPayload) => Promise<void>): unknown;
   on(event: 'agent/pre-step', listener: PreStepListener): unknown;
   on(event: 'tools/post-execute', listener: PostExecuteListener): unknown;
+  on(event: 'tools/pre-execute', listener: PreExecuteListener): unknown;
   systemPrompt: {
     context(c: {
       name: string;
@@ -197,7 +198,19 @@ type PreStepListener = (
 interface ToolExecutionLike {
   name: string;
   agent?: AgentHandle;
+  /** Provider call id (`ToolExecutionInput.callId`). */
+  callId?: string;
+  /** Parsed model arguments. */
+  arguments?: unknown;
+  /** Set only on transport sub-dispatches (PTC `run_code` inner calls). */
+  parent?: unknown;
 }
+
+/** `tools/pre-execute` waterfall (dsh-tools types/index.d.ts:47); the decision is passed through. */
+type PreExecuteListener = (
+  exec: ToolExecutionLike,
+  next: () => Promise<unknown>,
+) => Promise<unknown>;
 
 interface ToolExecutionResultLike {
   isError: boolean;
@@ -317,11 +330,22 @@ export function apply(ctx: Context, config: Config): void {
   // the first pre-step call whose claimed `messages` batch carries new user
   // input for this turn. We track (agent.id, turn) pairs: multi-step turns
   // and model-retry re-entries of the SAME step must not deliver twice.
+  // The plugin's named logger, resolved once on first use and shared by the
+  // verbose notices and the activity debug lines.
+  const logger = namedLogger(ctx);
   const adapter = new DshWisdomAdapter({
     env: wisdomEnv,
-    recordVerbose: dshVerboseRecorder(ctx, process.env),
+    recordVerbose: dshVerboseRecorder(ctx, process.env, logger),
   });
   const breaker = new Breaker();
+  // Autonomous-work delivery shares the adapter (ledger, capability latch,
+  // verbose recorder) and the breaker with the user-turn path (rule 4).
+  const activity = new DshActivity({
+    adapter,
+    breaker,
+    beforeLedger: (agentId) => noteMemoBlock(agentId, liveMemoBlockFor(agentId)),
+    log: (line) => logger.debug(line),
+  });
   // Memo-record parity (N5): the live ledger needs the v1 bootstrap ids. The
   // section's memo is module state; mirror it here by recording ids whenever
   // a NEW block is rendered for an agent id (see renderWisdomDeps below).
@@ -361,13 +385,10 @@ export function apply(ctx: Context, config: Config): void {
         const claimedUserText = payload.messages
           .map((m) => userMessageText(m))
           .join('\n');
+        let userTurnRan = false;
         if (!liveTurns.has(turnKey)) {
-          liveTurns.add(turnKey);
-          while (liveTurns.size > 512) {
-            const oldest = liveTurns.values().next();
-            if (oldest.done) break;
-            liveTurns.delete(oldest.value);
-          }
+          userTurnRan = true;
+          lruSet(liveTurns, turnKey, true, 512);
           // Snapshot the derived session log BEFORE the engine runs: the m5
           // ledger rule rebuilds from what the NEXT trigger reads — the
           // persisted log — never from the pre-step decision itself (its
@@ -376,13 +397,9 @@ export function apply(ctx: Context, config: Config): void {
             typeof payload.agent?.session?.deriveMessages === 'function'
               ? payload.agent.session.deriveMessages()
               : [];
-          adapter.sessionMessages.set(agentId, derived);
-          // Keep the session log bounded: 128 agents × their latest snapshot.
-          while (adapter.sessionMessages.size > 128) {
-            const oldest = adapter.sessionMessages.keys().next();
-            if (oldest.done) break;
-            adapter.sessionMessages.delete(oldest.value);
-          }
+          // Bounded LRU (128 agents × their latest snapshot), shared with
+          // the activity path.
+          adapter.snapshotMessages(agentId, derived);
           noteMemoBlock(agentId, liveMemoBlockFor(agentId));
           const block = await runUserTurn(
             adapter,
@@ -399,13 +416,23 @@ export function apply(ctx: Context, config: Config): void {
             // "corrupt" and cannot be continued (live e2e, 2026-10-16).
             decision.messages = [
               ...decision.messages,
-              Object.freeze({
-                id: randomUUID(),
-                role: 'user',
-                content: [{ type: 'text', text: block }],
-                source: { kind: 'curated-thoughts-wisdom' },
-              }),
+              wisdomMessage(block, LIVE_SOURCE_KIND),
             ];
+          }
+        }
+        // Autonomous-work delivery (spec 2026-10-16-dsh-autonomous-work-
+        // wisdom-design.md): pre-step runs before EVERY model step; on step
+        // >= 2 the previous step's tool calls may bring one fact. Never in
+        // the same call as the user-turn path, so the two cannot both
+        // deliver into one decision.
+        if (!userTurnRan && payload.step >= 2 && Array.isArray(decision.messages)) {
+          const block = await activity.deliver(
+            payload.agent,
+            Array.isArray(payload.messages) ? payload.messages : [],
+            decision.messages,
+          );
+          if (block !== null) {
+            decision.messages = [...decision.messages, activityMessage(block)];
           }
         }
       } catch (error) {
@@ -467,7 +494,26 @@ export function apply(ctx: Context, config: Config): void {
       }
     },
   );
-  const liveTurns = new Set<string>();
+  const liveTurns = new Map<string, true>();
+
+  // Autonomous-work prefetch — `tools/pre-execute` (waterfall). The first
+  // APPROVED call of a step with a new activity key starts the step's one CT
+  // match so it overlaps tool execution; the next pre-step awaits it.
+  // `next()` resolves to the PreToolDecision (`allow | deny | cancel | ask`,
+  // dsh-tools types/index.d.ts:445 at 0.2.0-rc.2): only `allow` prefetches,
+  // so a denied, cancelled or pending call sends nothing to CT. Observe
+  // only: the tool decision is always next()'s, untouched.
+  dsh.on('tools/pre-execute', async (exec: ToolExecutionLike, next: () => Promise<unknown>) => {
+    const decision = await next();
+    if ((decision as { kind?: unknown } | null)?.kind === 'allow') {
+      try {
+        activity.prefetch(exec);
+      } catch {
+        // Fail-open: prefetch never blocks or changes a tool call.
+      }
+    }
+    return decision;
+  });
 
   // (4) Skills. dsh skills are kebab-case Markdown; the three SKILL.md files
   // are ported verbatim from Hermes — the content is agent-generic and dsh

@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+## 0.2.2 — 2026-10-16
+
+- Fixed (shared `ct-wisdom-core`): a live delivery could show a fact twice
+  when CT returned a correction whose own id was already in context, or the
+  same id both as an entry and as a correction. A correction now rides only
+  when it supersedes an id in context and is itself new, and each id is
+  delivered at most once per block. This deliberately aligns the TypeScript
+  core with the Hermes reference (`ct_wisdom_live.render_live_block`) and
+  the live-delivery spec's step 7. Also fixed: the block and query caps
+  now count and cut by code point, so a cut never splits an emoji or other
+  non-BMP character (the Python hosts already did). The core
+  also gained the autonomous-work activity API for a later OpenClaw leg;
+  OpenClaw does not call it yet, so there is no other behavior change.
+  Why dropping a correction loses nothing: CT emits a correction only for
+  an id the plugin sent in `--exclude`, which is always a fact in context
+  (the live-delivery spec, CT guarantee 3). A correction that supersedes
+  nothing in context can only come from a stale exclude list, and its job
+  (marking a fact the agent sees as replaced, INTENT rule 3) has no target.
+  A newer fact that replaces something the agent has NOT seen is an ordinary
+  fact: CT returns it in `entries` whenever it matches the query, and it is
+  delivered like any other (CT guarantee 2 keeps the superseded one out).
+
 ## 0.2.1 — 2026-10-16
 
 - Fixed (documented and diagnosed): a brain with an external embedder lost

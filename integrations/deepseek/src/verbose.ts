@@ -18,20 +18,50 @@ import {
 export function dshVerboseRecorder(
   ctx: unknown,
   env: NodeJS.ProcessEnv,
+  logger: NamedLogger = namedLogger(ctx),
 ): ((turn: VerboseTurn) => void) | undefined {
   return createVerboseRecorder({
     host: 'deepseek',
     channel: 'agent/pre-step',
     env,
     logPath: defaultVerboseLogPath('deepseek', env),
-    notify: (text) => {
-      const factory = (ctx as { logger?: unknown } | null)?.logger;
-      if (typeof factory !== 'function') return;
-      const named = (factory as (name: string) => { info?: (m: string) => void } | undefined).call(
-        ctx,
-        'curated-thoughts',
-      );
-      named?.info?.(text);
-    },
+    notify: (text) => logger.info(text),
   });
+}
+
+export interface NamedLogger {
+  info(message: string): void;
+  debug(message: string): void;
+}
+
+/**
+ * The plugin's named cordis logger (`ctx.logger('curated-thoughts')`),
+ * looked up on first use and reused once a lookup succeeds. A failed lookup
+ * (no factory yet, a throw, no logger) is not cached, so the next call
+ * retries. Every failure is a quiet no-op (INTENT rule 4).
+ */
+export function namedLogger(ctx: unknown): NamedLogger {
+  type Logger = { info?: (m: string) => void; debug?: (m: string) => void };
+  let resolved: Logger | null = null;
+  const get = (): Logger | null => {
+    if (resolved !== null) return resolved;
+    try {
+      const factory = (ctx as { logger?: unknown } | null)?.logger;
+      if (typeof factory === 'function') {
+        const out = (factory as (name: string) => Logger | null | undefined).call(ctx, 'curated-thoughts');
+        if (out !== null && typeof out === 'object') resolved = out;
+      }
+    } catch {
+      /* not cached: retried on the next call */
+    }
+    return resolved;
+  };
+  const call = (level: 'info' | 'debug', message: string) => {
+    try {
+      get()?.[level]?.(message);
+    } catch {
+      /* fail quietly */
+    }
+  };
+  return { info: (m) => call('info', m), debug: (m) => call('debug', m) };
 }

@@ -2,6 +2,75 @@
 
 ## Unreleased
 
+## 0.6.0 — 2026-10-16
+
+- Added: Intuitive Wisdom during autonomous work. While the agent works on
+  its own between user messages, what it does (the file it reads, writes or
+  edits, the command it runs, the pattern it searches) can bring one relevant
+  CT fact, delivered before the next model step. Spec:
+  `docs/superpowers/specs/2026-10-16-dsh-autonomous-work-wisdom-design.md`.
+  - Trigger: `agent/pre-step` at step 2 and later of a turn, from the
+    previous step's tool calls (`read`, `write`, `edit`,
+    `str_replace_editor`, `grep`, `glob`, `bash`, `pwsh`). The CT call is
+    prefetched at `tools/pre-execute` once the call is approved (a denied,
+    cancelled or pending call sends nothing), so it overlaps the tool's own
+    work; the pre-step only delivers a prefetched answer and never starts a
+    query itself. A query that got no answer (a timeout, CT down, the 3 s
+    budget) leaves the activity free to trigger again at a later step.
+  - At most one CT call per model step, and only when the activity key is
+    new (a new file, command or search; reading then editing a file is one
+    key). No per-message ceiling and no session cap.
+  - The query is the bare target only, under the hermes 0.6.5 privacy
+    rules with the same shared test vectors
+    (`tests/fixtures/activity_targets.json`, all 206 run in the core suite):
+    - a path is sent only when it resolves inside a project root (the
+      nearest directory at or above the session's working directory, from
+      DSH's session header, holding `.git`, `package.json`,
+      `pyproject.toml`, `Cargo.toml`, `go.mod`, a `*.sln` or an empty
+      `.curated-thoughts-project`, among others), relative to that root.
+      Home directories and their parents, `/`, `/Users`, `/home` and other
+      homes locations are never a root. Files outside a project get no
+      autonomous-work wisdom;
+    - nothing that names you is sent (your user name, also inside a word);
+    - a command sends only a bare program name (`rm`, `cat`, `pytest`; a
+      script or a path as the program sends nothing), plus a known verb for
+      known subcommand tools (`pnpm test`, `git rebase`, `make build`) or a
+      known or in-project `python -m` module; never a path or file name
+      (the hermes 0.6.6 command rules);
+    - a search pattern is sent only when it is plain words (letters,
+      digits, `_`, `.`, `-`; at most 6 words and 80 characters) with no
+      auth word such as `token` or `password`.
+    Never file contents, tool output, diffs, the agent's text, flag values,
+    quoted words, URLs, env assignments or credential-shaped tokens.
+  - The gates are the user-turn ones and live in the shared core
+    (`startActivity` / `finishActivity`): a delivery switch that is off, a
+    restored session with no known bootstrap, a missing `ct wisdom match`
+    or an open breaker stop the query. A delivered id is recorded only for
+    the turn's recall dedup, never in the bootstrap record, so a fact whose
+    message was rejected or compacted away can arrive again.
+  - One fact of at most 600 characters, marker first, under the heading
+    `## Curated Thoughts — relevant to this step`, delivered as an
+    identified user-role message with source kind
+    `curated-thoughts-wisdom-activity`. It is persisted in the session log,
+    replays on `--session-id`, and never touches the system prompt.
+  - The ledger is rebuilt from the session log at every step, and the
+    recall dedup learns each delivered id, so a fact is never shown twice.
+  - Subagents get deliveries too (each has its own ledger); CT's own tools
+    never trigger; the breaker, timeouts and capability latch are shared
+    with the user-turn path.
+  - Verbose mode records each activity delivery, and each activity query
+    that delivered nothing, with `channel: "activity"` and the activity
+    label (`read src/x.ts`).
+  - Known limit: rules about a concept that a path only implies (for
+    example "never edit an applied migration" from
+    `src/db/migrations/0042.sql`) need CT's activity mode
+    (curated-thoughts#282).
+- Fixed: a user-turn delivery could show a fact twice when CT returned a
+  correction whose own id was already in context, or the same id both as an
+  entry and as a correction. A correction now rides only when it supersedes
+  an id in context and is itself new, and each id is delivered at most once
+  per block (the Hermes reference rule; shared `ct-wisdom-core` fix).
+
 ## 0.5.1 — 2026-10-16
 
 - Fixed: a brain with an external embedder lost its API key at the sidecar.

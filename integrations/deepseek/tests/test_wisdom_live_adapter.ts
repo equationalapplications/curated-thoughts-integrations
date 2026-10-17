@@ -151,6 +151,34 @@ describe('ledger rebuild (m5: session-log source of truth)', () => {
     expect(ledger.knownBootstrap).toBe(true);
   });
 
+  it('scans each frozen message once; new or unfrozen messages are always scanned (review of PR #56)', () => {
+    const { a } = adapter();
+    let reads = 0;
+    const frozen = (role: string, text: string) => {
+      const msg = { role, get content() { reads++; return [{ type: 'text', text }]; } };
+      return Object.freeze(msg);
+    };
+    const log: unknown[] = [frozen('user', '<!-- ct-fact:a1 -->'), frozen('tool', '<!-- ct-fact:t1 -->')];
+    a.snapshotMessages('s3', [...log]);
+    expect(a.rebuildLedger({ id: 's3' }).idsMostRecentFirst).toEqual(['t1', 'a1']);
+    expect(reads).toBe(2);
+    expect(a.rebuildLedger({ id: 's3' }).idsMostRecentFirst).toEqual(['t1', 'a1']);
+    expect(reads).toBe(2); // memoized by frozen message identity
+    log.push(frozen('tool', '<!-- ct-fact:t2 -->'));
+    a.snapshotMessages('s3', [...log]); // a tool result arrived after the plan
+    expect(a.rebuildLedger({ id: 's3' }).idsMostRecentFirst).toEqual(['t2', 't1', 'a1']);
+    expect(reads).toBe(3); // only the new message was scanned
+    log.splice(0, 1); // compaction drops the oldest message
+    a.snapshotMessages('s3', [...log]);
+    expect(a.rebuildLedger({ id: 's3' }).idsMostRecentFirst).toEqual(['t2', 't1']);
+    // an unfrozen (mutable) message is never memoized
+    const mutable = { role: 'user', content: [{ type: 'text', text: '<!-- ct-fact:m1 -->' }] };
+    a.snapshotMessages('s4', [mutable]);
+    expect(a.rebuildLedger({ id: 's4' }).idsMostRecentFirst).toEqual(['m1']);
+    mutable.content = [{ type: 'text', text: '<!-- ct-fact:m2 -->' }];
+    expect(a.rebuildLedger({ id: 's4' }).idsMostRecentFirst).toEqual(['m2']);
+  });
+
   it('an unseen session yields the empty ledger (fail-closed)', () => {
     const { a } = adapter();
     const ledger = a.rebuildLedger({ id: 'never-seen' });

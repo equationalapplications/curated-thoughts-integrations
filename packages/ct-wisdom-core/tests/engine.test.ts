@@ -254,6 +254,40 @@ describe('onUserTurn — budgets and dedup', () => {
     expect(block).toContain('Correction'); // corrections still flow
   });
 
+  it('a correction already in context, or superseding nothing in context, is not delivered (Hermes render_live_block parity)', async () => {
+    // Found by the DSH randomized exactly-once test (2026-10-16): CT may
+    // return a correction whose own id the agent already sees; delivering it
+    // again showed the fact twice (INTENT rule 1).
+    const host = new FakeHost();
+    host.contextIds = ['c_seen', 'old'];
+    host.matchResponse = {
+      outcome: 'ok',
+      result: {
+        entries: [],
+        corrections: [fact('c_seen', ['old']), fact('c_nothing', ['absent']), fact('c_ok', ['old'])],
+      },
+    };
+    const block = await onUserTurn(host, { id: 's' }, 'q');
+    expect(block).not.toBeNull();
+    expect(block).toContain(marker('c_ok'));
+    expect(block).not.toContain(marker('c_seen'));
+    expect(block).not.toContain(marker('c_nothing'));
+    expect(host.noted.at(-1)!.ids).toEqual(['c_ok']);
+  });
+
+  it('one id is delivered once even when CT returns it twice (entry and correction, or repeated)', async () => {
+    const host = new FakeHost();
+    host.contextIds = ['old'];
+    host.matchResponse = {
+      outcome: 'ok',
+      result: { entries: [fact('x'), fact('x'), fact('y')], corrections: [fact('x', ['old']), fact('x', ['old'])] },
+    };
+    const block = (await onUserTurn(host, { id: 's' }, 'q'))!;
+    expect(block.split(marker('x')).length - 1).toBe(1);
+    expect(block).toContain('Correction: Tx'); // the correction wins (Hermes: corrections first)
+    expect(host.noted.at(-1)!.ids.sort()).toEqual(['x', 'y']);
+  });
+
   it('empty block delivers nothing', async () => {
     const host = new FakeHost();
     host.contextIds = ['a'];

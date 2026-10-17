@@ -214,6 +214,29 @@ describe('buildRecord', () => {
       ['c1', 'correction', 'budget', null],
     ]);
   });
+
+  it('an activity turn overrides the channel and carries its label (Python field order)', () => {
+    const rec = buildRecord(
+      { kind: 'skip', sessionId: 's1', reason: 'zero_hits', query: 'src/x.ts', activity: 'read src/x.ts',
+        channel: 'activity', result: { entries: [], corrections: [] }, ledgerIds: [] },
+      { host: 'deepseek', channel: 'agent/pre-step', now: () => new Date('2026-10-16T12:00:00.000Z') },
+    );
+    expect(rec.channel).toBe('activity');
+    expect(rec.activity).toBe('read src/x.ts');
+    expect(rec.reason).toBe('no_match');
+    expect(Object.keys(rec)).toEqual(['v', 'ts', 'host', 'channel', 'session_id', 'event', 'reason',
+      'query', 'activity', 'gate', 'matched', 'ledger_size']);
+    expect(formatNotice(rec)).toContain('[activity]');
+  });
+
+  it('a user-turn record is unchanged: no activity key, the recorder channel', () => {
+    const rec = buildRecord(
+      { kind: 'skip', sessionId: 's1', reason: 'empty_query' },
+      { host: 'opencode', channel: 'chat.message', now: () => new Date('2026-10-16T12:00:00.000Z') },
+    );
+    expect(rec).toEqual({ v: 1, ts: '2026-10-16T12:00:00.000Z', host: 'opencode', channel: 'chat.message',
+      session_id: 's1', event: 'skip', reason: 'empty_query' });
+  });
 });
 
 describe('createVerboseRecorder', () => {

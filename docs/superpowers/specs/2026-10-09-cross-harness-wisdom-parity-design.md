@@ -12,6 +12,12 @@ and INTENT invariant adjudication (2026-10-05).
 > host by user decision; the per-turn limits (2 facts, 1200 chars) are unchanged.
 > `Ledger.liveDeliveredCount` was removed with it. See [`2026-10-16-remove-session-wisdom-cap-design.md`](2026-10-16-remove-session-wisdom-cap-design.md).
 > The text below is kept as the historical design.
+>
+> **Amendment 2026-10-16 (PR #56):** Annex A's `corrections = res.corrections` is replaced by the Hermes
+> `render_live_block` filter, the rule the live-delivery spec (step 7) already stated: keep a correction
+> only when its id is not in the ledger and its `supersedes` ∩ ledger is non-empty, and deliver each id
+> at most once per block (a correction wins over an entry with the same id). The unfiltered form let a
+> fact appear twice in context (INTENT rule 1). Reasoning: [`2026-10-16-dsh-autonomous-work-wisdom-design.md`](2026-10-16-dsh-autonomous-work-wisdom-design.md), "Review amendments".
 
 ## Problem
 
