@@ -38,7 +38,6 @@ import hashlib
 import json
 import logging
 import os
-import posixpath
 import re
 import shlex
 import string
@@ -128,10 +127,12 @@ def _clean_target(value):
     return value
 
 
-# Privacy rules (spec "Privacy amendment 4: project-root allowlist"; shared
-# test vectors in tests/fixtures/activity_targets.json, which any port MUST
-# run). Safe by construction: a path is sent only relative to a project root
-# it resolves inside of, and nothing that names the user is ever sent.
+# Privacy rules (spec "Privacy amendment 4: project-root allowlist" and
+# "Privacy amendment 5"; shared test vectors in
+# tests/fixtures/activity_targets.json, which any port MUST run). Safe by
+# construction: a path is sent only relative to a project root it resolves
+# inside of; a command sends only a bare program name plus, for known
+# subcommand tools, a known verb; nothing that names the user is ever sent.
 
 # Service accounts are never private names even when USER says so (CI
 # runners, containers, dev boxes): `node server.js` with USER=node is sent.
@@ -158,28 +159,155 @@ _ROOT_CACHE_TTL = 30.0
 # takes effect almost at once.
 _ROOT_NEGATIVE_TTL = 2.0
 _SLN_CACHE_TTL = 30.0
-_SLN_CACHE_MAX = 256
-_sln_cache = OrderedDict()
-_DARWIN = sys.platform == "darwin"
-_ROOT_CACHE_MAX = 64
-_root_cache = OrderedDict()
-_root_lock = threading.Lock()
-_root_clock = time.monotonic
-_WINDOWS = os.sep == "\\"
+_HOMES_CACHE_TTL = 30.0
 _WIN_ABS_RE = re.compile(r"^[A-Za-z]:[\\/]")
-# A directory whose parent has one of these names is someone's home: never a
-# project root, and the root walk stops there.
+# Names of the known homes locations (`/home`, `/Users`, `C:\Users`,
+# `D:\Profiles`), and the `/<host>/home` hosts (Silverblue, NFS, Solaris, NAS).
 _HOMES_PARENTS = frozenset({"users", "home", "profiles"})
-# `/<host>/home` homes locations (Fedora Silverblue, NFS, Solaris, NAS).
 _HOMES_HOSTS = frozenset({"var", "nfs", "export", "data"})
-# P3 command allowlist.
-_PROGRAM_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,40}$")
-_SUBCOMMAND_RE = re.compile(r"^[a-z][a-z0-9-]{0,30}$")
-_MODULE_RE = re.compile(r"^[a-z_][a-z0-9_.]{0,60}$")
-# Path components are case-folded only where filesystems usually ignore case.
-_CASE_INSENSITIVE = sys.platform in ("darwin", "win32")
 _GIT_BASH_RE = re.compile(r"^/([A-Za-z])(?:/(.*))?$")
 _NAME_TOKEN_FIND = re.compile(r"[^\W_]+")
+
+# The one platform table (tests replace fields with _OS._replace).
+Platform = namedtuple("Platform", "windows darwin case_insensitive")
+_OS = Platform(windows=os.sep == "\\", darwin=sys.platform == "darwin",
+               case_insensitive=sys.platform in ("darwin", "win32"))
+
+# ---- P3 commands (Privacy amendment 5) ----
+# A program is a bare command name: no path separator, no dot (scripts such
+# as `acme_export.sh` are never sent); `python3.11` is the one dotted form.
+_PROGRAM_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_+-]{0,40}$")
+_SUBCOMMAND_RE = re.compile(r"^[a-z][a-z0-9-]{0,30}$")
+_MODULE_RE = re.compile(r"^[a-z_][a-z0-9_.]{0,60}$")
+_MAKE_TARGETS = frozenset({"build", "test", "lint", "fmt", "format", "check", "clean",
+                           "install", "dev", "run", "deploy", "release", "docs", "all"})
+_JS_VERBS = frozenset({"install", "i", "ci", "add", "remove", "rm", "uninstall", "run",
+                       "run-script", "test", "t", "start", "build", "dev", "lint", "exec",
+                       "dlx", "x", "create", "init", "publish", "pack", "update", "upgrade",
+                       "up", "outdated", "audit", "ls", "list", "link", "why", "version",
+                       "info", "workspace", "workspaces"})
+_DOCKER_VERBS = frozenset({"build", "run", "ps", "images", "pull", "push", "exec", "logs",
+                           "compose", "stop", "start", "restart", "rm", "rmi", "inspect",
+                           "tag", "login", "logout", "network", "volume", "system", "buildx",
+                           "container", "image", "cp", "kill", "top", "stats", "version",
+                           "info"})
+_APT_VERBS = frozenset({"install", "remove", "purge", "update", "upgrade", "search", "list",
+                        "show", "info", "autoremove", "reinstall", "check", "makecache"})
+_SUBCOMMAND_TOOLS = {
+    "git": frozenset({"add", "am", "apply", "bisect", "blame", "branch", "checkout",
+                      "cherry-pick", "clean", "clone", "commit", "config", "describe", "diff",
+                      "fetch", "grep", "init", "log", "merge", "mv", "pull", "push", "rebase",
+                      "reflog", "remote", "reset", "restore", "revert", "rm", "show", "stash",
+                      "status", "submodule", "switch", "tag", "worktree", "lfs", "gc",
+                      "shortlog", "notes", "range-diff", "sparse-checkout"}),
+    "npm": _JS_VERBS, "pnpm": _JS_VERBS, "yarn": _JS_VERBS, "bun": _JS_VERBS,
+    "cargo": frozenset({"build", "b", "check", "c", "test", "t", "run", "r", "bench", "doc",
+                        "fmt", "clippy", "add", "remove", "update", "publish", "install",
+                        "new", "init", "clean", "tree", "fix", "metadata", "search",
+                        "nextest"}),
+    "go": frozenset({"build", "test", "run", "mod", "get", "install", "vet", "fmt",
+                     "generate", "env", "list", "work", "tool", "clean", "doc", "version"}),
+    "docker": _DOCKER_VERBS, "podman": _DOCKER_VERBS,
+    "kubectl": frozenset({"get", "describe", "apply", "delete", "logs", "exec", "rollout",
+                          "scale", "port-forward", "config", "create", "edit", "top", "diff",
+                          "explain", "label", "annotate", "patch", "cp", "auth", "version",
+                          "cluster-info"}),
+    "helm": frozenset({"install", "upgrade", "uninstall", "list", "repo", "template", "lint",
+                       "package", "dependency", "status", "rollback", "pull", "push", "show",
+                       "search", "test", "history", "version"}),
+    "gh": frozenset({"pr", "issue", "repo", "run", "workflow", "release", "api", "auth",
+                     "browse", "search", "status", "gist", "label", "secret", "variable",
+                     "cache", "codespace", "extension", "project", "ruleset"}),
+    "pip": frozenset({"install", "uninstall", "list", "freeze", "show", "download", "wheel",
+                      "check", "config", "cache", "index", "inspect", "hash", "search"}),
+    "pipx": frozenset({"install", "uninstall", "run", "list", "upgrade", "upgrade-all",
+                       "inject", "reinstall", "ensurepath"}),
+    "uv": frozenset({"run", "sync", "add", "remove", "lock", "pip", "venv", "tool", "init",
+                     "build", "publish", "python", "tree", "export", "cache", "self"}),
+    "poetry": frozenset({"install", "add", "remove", "update", "lock", "run", "build",
+                         "publish", "shell", "show", "init", "new", "check", "env", "export",
+                         "version", "config"}),
+    "conda": frozenset({"install", "create", "activate", "deactivate", "list", "update",
+                        "remove", "env", "run", "info", "search", "clean", "config"}),
+    "brew": frozenset({"install", "uninstall", "reinstall", "upgrade", "update", "list",
+                       "search", "info", "services", "tap", "untap", "doctor", "cleanup",
+                       "outdated", "bundle", "link", "unlink", "pin", "unpin", "deps"}),
+    "apt": _APT_VERBS, "apt-get": _APT_VERBS, "dnf": _APT_VERBS, "yum": _APT_VERBS,
+    "terraform": frozenset({"init", "plan", "apply", "destroy", "validate", "fmt", "output",
+                            "state", "import", "workspace", "show", "providers", "refresh",
+                            "taint", "untaint", "graph", "console", "login", "version"}),
+    "dotnet": frozenset({"build", "test", "run", "restore", "publish", "new", "add", "pack",
+                         "clean", "format", "watch", "tool", "sln", "list", "remove",
+                         "nuget", "ef"}),
+    "mvn": frozenset({"clean", "compile", "test", "package", "install", "verify", "deploy",
+                      "site", "validate", "dependency"}),
+    "gradle": frozenset({"build", "test", "clean", "assemble", "check", "run", "tasks",
+                         "dependencies", "publish", "bootrun", "jar", "lint"}),
+    "make": _MAKE_TARGETS, "just": _MAKE_TARGETS, "rake": _MAKE_TARGETS,
+    "bundle": frozenset({"install", "exec", "update", "add", "remove", "list", "show",
+                         "outdated", "check", "init", "config", "lock"}),
+    "rails": frozenset({"server", "s", "console", "c", "generate", "g", "destroy", "d", "db",
+                        "test", "new", "routes", "runner", "credentials", "assets"}),
+    "mix": frozenset({"test", "compile", "run", "format", "deps", "new", "release", "clean",
+                      "credo", "dialyzer", "ecto"}),
+    "dart": frozenset({"run", "test", "compile", "pub", "analyze", "format", "create", "fix",
+                       "doc", "info"}),
+    "flutter": frozenset({"run", "test", "build", "pub", "analyze", "format", "create",
+                          "doctor", "clean", "upgrade", "devices", "install", "attach"}),
+    "swift": frozenset({"build", "test", "run", "package", "format"}),
+    "deno": frozenset({"run", "test", "fmt", "lint", "task", "compile", "bench", "check",
+                       "install", "info", "doc", "serve", "add", "remove", "upgrade"}),
+    "nx": frozenset({"run", "build", "test", "lint", "serve", "affected", "graph",
+                     "run-many", "generate", "g", "show", "release", "format", "migrate"}),
+    "turbo": frozenset({"run", "build", "test", "lint", "dev", "prune", "ls", "daemon",
+                        "login", "link", "gen"}),
+}
+_PYTHON_MODULES = frozenset({"pytest", "pip", "venv", "http.server", "unittest", "black",
+                             "ruff", "mypy", "build", "twine"})
+
+
+class _TTLCache:
+    """A small thread-safe LRU cache whose entries expire (the TTL may depend
+    on the value). Used for project roots, *.sln scans and canonical homes."""
+
+    def __init__(self, maxsize):
+        self.maxsize = maxsize
+        self._data = OrderedDict()
+        self._lock = threading.Lock()
+
+    def get(self, key, ttl):
+        """(True, value) on a fresh hit (moved to the LRU end), else
+        (False, None). `ttl` is seconds or a function of the value."""
+        now = _root_clock()
+        with self._lock:
+            hit = self._data.get(key)
+            if hit is not None:
+                limit = ttl(hit[1]) if callable(ttl) else ttl
+                if now - hit[0] < limit:
+                    self._data.move_to_end(key)
+                    return True, hit[1]
+        return False, None
+
+    def put(self, key, value):
+        with self._lock:
+            self._data[key] = (_root_clock(), value)
+            self._data.move_to_end(key)
+            while len(self._data) > self.maxsize:
+                self._data.popitem(last=False)
+
+    def clear(self):
+        with self._lock:
+            self._data.clear()
+
+    def __iter__(self):
+        with self._lock:
+            return iter(list(self._data))
+
+
+_root_clock = time.monotonic
+_root_cache = _TTLCache(64)
+_sln_cache = _TTLCache(256)
+_homes_cache = _TTLCache(16)
 
 
 def _fold(text):
@@ -190,7 +318,7 @@ def _fold(text):
 def _fold_path(text):
     """Path comparison form: NFC everywhere, casefolded only on darwin/win32."""
     text = unicodedata.normalize("NFC", text)
-    return text.casefold() if _CASE_INSENSITIVE else text
+    return text.casefold() if _OS.case_insensitive else text
 
 
 def _environ(env):
@@ -204,7 +332,7 @@ def _env_str(env, name):
 
 def _git_bash(path, windows=None):
     """Git Bash's `/c/Users/x` as `C:\\Users\\x` (on Windows only)."""
-    match = (_WINDOWS if windows is None else windows) and _GIT_BASH_RE.match(
+    match = (_OS.windows if windows is None else windows) and _GIT_BASH_RE.match(
         path.replace("\\", "/"))
     if not match:
         return path
@@ -225,11 +353,12 @@ def _pwd_identity():
 
 
 def _system_identity():
-    """(names, homes) of the process: pwd's pw_name; expanduser("~") and
-    pwd's pw_dir. Tests patch this; it never fails."""
+    """(names, homes, pw_dirs) of the process: pwd's pw_name; the homes
+    `expanduser("~")` and pw_dir; and pw_dir alone (a real user home). Tests
+    patch this; it never fails."""
     name, pw_dir = _pwd_identity()
-    homes = [os.path.expanduser("~"), pw_dir]
-    return [name] if name else [], [h for h in homes if h]
+    homes = [h for h in (os.path.expanduser("~"), pw_dir) if h]
+    return [name] if name else [], homes, [pw_dir] if pw_dir else []
 
 
 def _home(env):
@@ -302,11 +431,26 @@ def _below(child, parent):
     return cp[len(pp):]
 
 
+def _same(a, b):
+    return _fold_path(a) == _fold_path(b)
+
+
 def _real(path):
     try:
         return os.path.realpath(path)
     except (OSError, ValueError):
         return None
+
+
+def _canon(path):
+    """realpath, plus macOS's firmlink alias: `/System/Volumes/Data/x` is
+    the same directory as `/x`."""
+    real = _real(path)
+    if real and _OS.darwin:
+        prefix = "/System/Volumes/Data/"
+        if real.startswith(prefix):
+            real = "/" + real[len(prefix):]
+    return real
 
 
 def _expand(path, env):
@@ -335,29 +479,18 @@ def _fixed_marker(directory):
 
 
 def _sln_marker(directory):
-    """`directory` holds a `*.sln` (one scandir, early return). Cached per
-    directory for _SLN_CACHE_TTL, so a re-walk after the short "no root"
-    cache does not rescan."""
-    now = _root_clock()
-    with _root_lock:
-        hit = _sln_cache.get(directory)
-        if hit is not None and now - hit[0] < _SLN_CACHE_TTL:
-            _sln_cache.move_to_end(directory)
-            return hit[1]
+    """`directory` holds a `*.sln` (one scandir, early return), cached per
+    directory, so a re-walk after the short "no root" cache does not rescan."""
+    fresh, found = _sln_cache.get(directory, _SLN_CACHE_TTL)
+    if fresh:
+        return found
     found = False
     try:
         with os.scandir(directory) as entries:
-            for entry in entries:
-                if entry.name.lower().endswith(".sln"):
-                    found = True
-                    break
+            found = any(e.name.lower().endswith(".sln") for e in entries)
     except OSError:
         pass
-    with _root_lock:
-        _sln_cache[directory] = (now, found)
-        _sln_cache.move_to_end(directory)
-        while len(_sln_cache) > _SLN_CACHE_MAX:
-            _sln_cache.popitem(last=False)
+    _sln_cache.put(directory, found)
     return found
 
 
@@ -407,23 +540,56 @@ def _stop_dir(directory):
     return _fold(os.path.basename(directory)) == "mnt" and _fs_root(parent)
 
 
-def _blocked(directory, homes):
+Homes = namedtuple("Homes", "all real blocking")
+
+
+def _homes(env):
+    """The home directories, cached per (HOME, USERPROFILE, process homes):
+    `all` in normalized and canonical forms (each is never a root), `real`
+    canonical only, and `blocking`, the real user homes that also block
+    every ancestor: a home inside a known homes location, or pw_dir. A HOME
+    elsewhere (a sandbox or Nix HOME inside a project) blocks only itself."""
+    identity = _system_identity()
+    key = (_env_str(env, "HOME"), _env_str(env, "USERPROFILE"), tuple(identity[1]),
+           tuple(identity[2]))
+    fresh, value = _homes_cache.get(key, _HOMES_CACHE_TTL)
+    if fresh:
+        return value
+    values = [v for v in _home_values(env, identity) if os.path.isabs(v)]
+    pw_dirs = [c for c in (_canon(v) for v in identity[2] if os.path.isabs(v)) if c]
+    real, blocking = [], []
+    for v in values:
+        logical, canon = os.path.normpath(v), _canon(v)
+        if canon:
+            real.append(canon)
+        is_user_home = (_homes_location(os.path.dirname(logical))
+                        or (canon and (_homes_location(os.path.dirname(canon))
+                                       or any(_same(canon, p) for p in pw_dirs))))
+        if is_user_home:
+            blocking.extend(f for f in (logical, canon) if f)
+    value = Homes(real + [os.path.normpath(v) for v in values], real, blocking)
+    _homes_cache.put(key, value)
+    return value
+
+
+def _blocked(directory, homes, blocking):
     """Never a root (the walk stops here): a `_stop_dir`, any home directory
-    or any ancestor of one."""
+    in `homes`, or any ancestor of a home in `blocking`."""
     if _stop_dir(directory):
         return True
-    folded = _fold_path(directory)
-    return any(folded == _fold_path(h) or _below(h, directory) is not None for h in homes)
+    if any(_same(directory, h) for h in homes):
+        return True
+    return any(_below(h, directory) is not None for h in blocking)
 
 
-def _find_root(start, homes):
+def _find_root(start, homes, blocking):
     """Nearest ancestor-or-self of `start` holding a marker, stopping (None)
     at the first `_blocked` directory. The fixed markers are checked for the
     whole walk first; `*.sln` is scanned only in directories nearer than the
     nearest fixed-marker hit."""
     chain = []
     directory = start
-    while not _blocked(directory, homes):
+    while not _blocked(directory, homes, blocking):
         chain.append(directory)
         parent = os.path.dirname(directory)
         if parent == directory:
@@ -436,51 +602,32 @@ def _find_root(start, homes):
     return None if fixed is None else chain[fixed]
 
 
-def _canon(path):
-    """realpath, plus macOS's firmlink alias: `/System/Volumes/Data/x` is
-    the same directory as `/x`."""
-    real = _real(path)
-    if real and _DARWIN:
-        prefix = "/System/Volumes/Data/"
-        if real.startswith(prefix):
-            real = "/" + real[len(prefix):]
-    return real
-
-
-def project_root(cwd, env=None):
-    """P1: the real path of the project root for `cwd`, or None. Cached
-    (LRU; 30 s, or 2 s for "no root") on the raw cwd and HOME / USERPROFILE
-    strings, so a hit does no filesystem work; os.path checks only, never a
-    subprocess."""
+def project_root(cwd, env=None, start=None):
+    """P1: the real path of the project root for `cwd`, or None. `start` is
+    `_abs_cwd(cwd, env)` when the caller already has it. Cached (LRU; 30 s,
+    or 2 s for "no root") on the raw cwd and HOME / USERPROFILE strings, so
+    a hit does no filesystem work; os.path checks only, never a subprocess."""
     env = _environ(env)
     key = (cwd, _env_str(env, "HOME"), _env_str(env, "USERPROFILE"))
-    now = _root_clock()
-    with _root_lock:
-        hit = _root_cache.get(key)
-        if hit is not None and now - hit[0] < (_ROOT_CACHE_TTL if hit[1] else _ROOT_NEGATIVE_TTL):
-            _root_cache.move_to_end(key)
-            return hit[1]
+    fresh, root = _root_cache.get(
+        key, lambda r: _ROOT_CACHE_TTL if r else _ROOT_NEGATIVE_TTL)
+    if fresh:
+        return root
     root = None
-    start = _abs_cwd(cwd, env)
+    start = _abs_cwd(cwd, env) if start is None else start
     if start is not None:
+        homes = _homes(env)
         # Walk the logical path (normalized, symlinks NOT resolved), so the
         # stop rules see `/home/bob` even where it resolves elsewhere (macOS:
-        # /System/Volumes/Data/home); homes are compared in both forms.
-        values = [v for v in _home_values(env, _system_identity()) if os.path.isabs(v)]
-        real_homes = [h for h in (_canon(v) for v in values) if h]
-        found = _find_root(os.path.normpath(start),
-                           real_homes + [os.path.normpath(v) for v in values])
+        # /System/Volumes/Data/home).
+        found = _find_root(os.path.normpath(start), homes.all, homes.blocking)
         root = _canon(found) if found else None
-        # A symlinked or aliased cwd can resolve into HOME, an ancestor of
-        # it or a homes location: every stop rule applies again to the real
-        # root, against real homes. Failing any, there is no root.
-        if root is not None and _blocked(root, real_homes):
+        # A symlinked or aliased cwd can resolve into HOME, an ancestor of a
+        # user home or a homes location: every stop rule applies again to the
+        # real root, against real homes. Failing any, there is no root.
+        if root is not None and _blocked(root, homes.real, homes.blocking):
             root = None
-    with _root_lock:
-        _root_cache[key] = (now, root)
-        _root_cache.move_to_end(key)
-        while len(_root_cache) > _ROOT_CACHE_MAX:
-            _root_cache.popitem(last=False)
+    _root_cache.put(key, root)
     return root
 
 
@@ -497,12 +644,12 @@ def _resolve(raw, cwd, env, names):
     base = _abs_cwd(cwd, env)
     raw = _git_bash(raw)
     path = None
-    if ":" not in raw or (_WINDOWS and _WIN_ABS_RE.match(raw) and ":" not in raw[2:]):
-        path = _expand(raw if _WINDOWS else raw.replace("\\", "/"), env)
+    if ":" not in raw or (_OS.windows and _WIN_ABS_RE.match(raw) and ":" not in raw[2:]):
+        path = _expand(raw if _OS.windows else raw.replace("\\", "/"), env)
     if path is None or (base is None and not os.path.isabs(path)):
         return None, False, _digest(raw)
     joined = os.path.join(base, path) if base else path
-    root = project_root(cwd, env) if base else None
+    root = project_root(cwd, env, start=base) if base else None
     if root is None:
         # No realpath needed: nothing is sent, the key only has to differ.
         return None, False, _digest(os.path.normpath(joined))
@@ -529,12 +676,12 @@ def normalize_path(raw, cwd=None, env=None, names=None):
     return _resolve(raw, cwd, env, user_names(env) if names is None else names)[0]
 
 
-def word_check(word, names):
+def word_check(word, names, verbs=None):
     """P3, the one check for a subcommand: True when it may be sent, a plain
-    verb-like word (`^[a-z][a-z0-9-]{0,30}$`) that is not credential-shaped
-    and does not name the user. False means the program is sent alone."""
-    return (_SUBCOMMAND_RE.match(word) is not None and not _credential_shaped(word)
-            and not name_hit(word, names))
+    verb (`^[a-z][a-z0-9-]{0,30}$`), in `verbs` when given, not
+    credential-shaped and not naming the user. False: the program alone."""
+    return (_SUBCOMMAND_RE.match(word) is not None and (verbs is None or word in verbs)
+            and not _credential_shaped(word) and not name_hit(word, names))
 
 
 def search_target(pattern, env=None, names=None):
@@ -596,15 +743,35 @@ def _tokens(command):
         return command.split()
 
 
-def command_target(command, env=None, names=None):
-    """Program plus subcommand of the first simple command (user decision 2,
-    P3 allowlist), or None. The program (basename of the first word) must
-    match `^[A-Za-z0-9][A-Za-z0-9._+-]{0,40}$`, not be credential-shaped and
-    not name the user, or there is no query. The subcommand is the word right
-    after the program, never a flag's value, and is sent only when it is a
-    plain verb-like word (`word_check`); `python -m <module>` sends a module
-    matching `^[a-z_][a-z0-9_.]{0,60}$`. Otherwise the program alone: never
-    a path, a dot or a file name."""
+def _project_module(module, root):
+    """`module`'s top package resolves inside the project root: a package
+    directory or a `.py` file at the root or under `src/`."""
+    if not root:
+        return False
+    top = module.split(".", 1)[0]
+    for base in (root, os.path.join(root, "src")):
+        if (os.path.isdir(os.path.join(base, top))
+                or os.path.isfile(os.path.join(base, top + ".py"))):
+            return True
+    return False
+
+
+def command_target(command, env=None, names=None, root=None):
+    """P3 (Privacy amendment 5): the program, plus a known subcommand for a
+    known subcommand tool, or None.
+
+    - The first word must be a bare command: no path separator, `~` or `:`,
+      and no dot (scripts are never sent; `python3.11` is the one dotted
+      form); it matches `^[A-Za-z0-9][A-Za-z0-9_+-]{0,40}$`, is not
+      credential-shaped and does not name the user. Otherwise no query.
+    - For a program in `_SUBCOMMAND_TOOLS`, the next word is sent when it is
+      in that tool's verb list (for make/just/rake, a common target) and
+      passes `word_check`. Every other program is sent alone: `rm`, `cat`,
+      `cd`, `less`, `mkdir`, `cp`, `mv`, `vim`, ...
+    - `python -m <module>` sends the module when it is a known module or one
+      that resolves to a package inside the project root (`root()`, called
+      only then), and passes the name check.
+    A name in a subcommand or module sends the program alone."""
     command = _clean_target(command) if isinstance(command, str) else None
     if command is None:
         return None
@@ -618,20 +785,25 @@ def command_target(command, env=None, names=None):
         words = words[1:]
     if not words:
         return None
-    program = posixpath.basename(words[0].replace("\\", "/"))
-    if (not _PROGRAM_RE.match(program) or _credential_shaped(program)
-            or name_hit(program, names)):
+    program = words[0]
+    if any(ch in program for ch in "/\\:~"):
         return None
-    if program.lower() in _FREE_TEXT_PROGRAMS:
-        return program
+    if not (_PROGRAM_RE.match(program) or _PYTHON_RE.match(program)):
+        return None
+    if _credential_shaped(program) or name_hit(program, names):
+        return None
     rest = words[1:]
-    if _PYTHON_RE.match(program) and rest[:1] == ["-m"]:
-        module = rest[1] if len(rest) > 1 else ""
-        if (_MODULE_RE.match(module) and not _credential_shaped(module)
-                and not name_hit(module, names)):
-            return program + " " + module
+    if _PYTHON_RE.match(program):
+        if rest[:1] == ["-m"] and len(rest) > 1:
+            module = rest[1]
+            if (_MODULE_RE.match(module) and not _credential_shaped(module)
+                    and not name_hit(module, names)
+                    and (module in _PYTHON_MODULES
+                         or _project_module(module, root() if root else None))):
+                return program + " " + module
         return program
-    if rest and word_check(rest[0], names):
+    verbs = _SUBCOMMAND_TOOLS.get(program.lower())
+    if verbs is not None and rest and word_check(rest[0], names, verbs):
         return program + " " + rest[0]
     return program
 
@@ -643,7 +815,8 @@ def activity_for(tool_name, args, cwd=None, env=None, task_id=None):
     and `query` are built from the same sanitized target, never a raw arg.
     The `key` (local de-duplication only, never sent) uses a digest of the
     full path. `cwd` defaults to `session_cwd(task_id)`, resolved only when
-    a path argument is actually used; `env` to os.environ."""
+    a path argument (or a `python -m` project module) is actually used; `env`
+    to os.environ."""
     if not isinstance(args, dict) or not isinstance(tool_name, str):
         return None
     verb = _FILE_TOOLS.get(tool_name)
@@ -651,20 +824,25 @@ def activity_for(tool_name, args, cwd=None, env=None, task_id=None):
         return None
     env = _environ(env)
     names = user_names(env)
+    resolved_cwd = []
+
+    def the_cwd():
+        if not resolved_cwd:
+            resolved_cwd.append(session_cwd(task_id) if cwd is None else cwd)
+        return resolved_cwd[0]
+
     if tool_name == "terminal":
-        target = command_target(args.get("command"), env, names)
+        target = command_target(args.get("command"), env, names,
+                                root=lambda: project_root(the_cwd(), env))
         if target is None:
             return None
         return Activity("run", target, ("run", target), "run " + target, target)
-    resolved_cwd = []
 
     def path_of(value):
         value = _clean_target(value)
         if value is None:
             return None, False, None
-        if not resolved_cwd:
-            resolved_cwd.append(session_cwd(task_id) if cwd is None else cwd)
-        return _resolve(value, resolved_cwd[0], env, names)
+        return _resolve(value, the_cwd(), env, names)
 
     if verb is not None:
         target, _, local = path_of(args.get("path"))
@@ -792,12 +970,11 @@ def pending_count():
 
 
 def reset_state():
-    """TEST-ONLY: forget keys, steps, pending prefetches, project roots, the
-    *.sln cache and the pwd lookup."""
+    """TEST-ONLY: forget keys, steps, pending prefetches, the root, *.sln and
+    homes caches and the pwd lookup."""
     _STATE.reset()
-    with _root_lock:
-        _root_cache.clear()
-        _sln_cache.clear()
+    for cache in (_root_cache, _sln_cache, _homes_cache):
+        cache.clear()
     _pwd_identity.cache_clear()
     with _pending_lock:
         _pending.clear()

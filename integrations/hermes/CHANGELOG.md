@@ -6,6 +6,38 @@ format below is load-bearing: `## <version> — <date>`.
 
 ## Unreleased
 
+## 0.6.6 — 2026-10-17
+
+- **Privacy fix: commands send only a bare program and known verbs.** 0.6.5
+  kept file paths inside your project, but commands could still send private
+  words to CT and its embedding provider, and show them in the `_for:` label
+  and the verbose log:
+  - **File or folder names after ordinary programs.** Any plain word after
+    any program was sent: `rm divorce-papers`, `less medical-records`,
+    `cd acme-merger`, `cat contract` and `mkdir clients` were sent as typed.
+  - **Script names.** `./acme_export.sh`, or an absolute script path, sent
+    `acme_export.sh`.
+
+  Now:
+  - The program must be a bare command name. A first word with a path
+    (`./x`, `/opt/x`, `~/x`, `C:\x`) or a dot (a script) sends nothing at
+    all.
+  - Only well-known tools with subcommands also send the next word, and only
+    when it is one of that tool's known verbs: `git rebase`, `npm test`,
+    `cargo clippy`, `docker compose`. For `make`, `just` and `rake` that
+    means a common target (`make build`, `make test`). Every other program
+    is sent alone: `rm`, `cat`, `cd`, `less`, `mkdir`, …
+  - `python -m <module>` sends the module only for well-known modules
+    (`pytest`, `pip`, `venv`, `http.server`, `unittest`, `black`, `ruff`,
+    `mypy`, `build`, `twine`) or a package inside your project.
+- Fixed: a sandbox or Nix `HOME` inside a project (for example
+  `repo/.home`) no longer hides the project above it. Only a real user home,
+  in a `Users`, `home` or `Profiles` folder or your system account's home,
+  blocks the folders above it. Such a `HOME` is still never a project
+  itself.
+- Internal: one small expiring cache serves project roots, `*.sln` scans and
+  home folders, and home folders are no longer re-resolved on every call.
+
 ## 0.6.5 — 2026-10-16
 
 - **Privacy redesign: file paths are sent only inside a project.** 0.6.2 through

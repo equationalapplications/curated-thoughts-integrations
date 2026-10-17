@@ -200,6 +200,12 @@ class TestExactlyOnceWithActivity(unittest.TestCase):
         env_patch = mock.patch.dict(os.environ, {"TERMINAL_CWD": proj})
         env_patch.start()
         self.addCleanup(env_patch.stop)
+        # The process identity (pwd, expanduser) is a fixed fake, so results
+        # never depend on the machine's user.
+        identity = mock.patch.object(ct_wisdom_activity, "_system_identity",
+                                     lambda: (["tester"], [], []))
+        identity.start()
+        self.addCleanup(identity.stop)
 
     def test_no_fact_twice_with_activity(self):
         rng = random.Random(20261016)

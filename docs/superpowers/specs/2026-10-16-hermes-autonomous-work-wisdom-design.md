@@ -659,6 +659,64 @@ They now carry an `fs` field, so any port must model the filesystem.
     markers above HOME, and asserts that every query resolves strictly inside the cwd's
     project root.
 
+## Privacy amendment 5 (2026-10-17, hermes 0.6.6)
+
+A post-merge review of 0.6.5 confirmed that the path rules hold, but found that commands
+still leaked:
+- **Words after ordinary programs.** A plain-word subcommand was sent for *any* program,
+  so `rm divorce-papers`, `less medical-records`, `cd acme-merger`, `cat contract` and
+  `mkdir clients` were sent verbatim.
+- **Script names.** A script program sent its file name: `./acme_export.sh` or an
+  absolute script path sent `acme_export.sh`.
+
+P3 of amendment 4 is replaced by:
+
+- **P3a (the program is a bare command).** The first word, after `VAR=value` words, must
+  meet all of these:
+  - no path separator, `~` or `:` (`./x`, `/abs/x`, `../x`, `~/x`, `C:\x`);
+  - no dot (scripts such as `.sh`, `.py` and `.js` are never sent), with `python3.11`
+    style interpreter names the one dotted form;
+  - it matches `^[A-Za-z0-9][A-Za-z0-9_+-]{0,40}$`, is not credential-shaped and does
+    not name the user.
+
+  Otherwise there is no query.
+- **P3b (subcommands by program allowlist, not word shape).** `program subcommand` is
+  sent only when:
+  - the program is in a fixed table of tools with subcommands: `git`, `npm`, `pnpm`,
+    `yarn`, `bun`, `cargo`, `go`, `docker`, `podman`, `kubectl`, `helm`, `gh`, `pip`,
+    `pipx`, `uv`, `poetry`, `conda`, `brew`, `apt`/`apt-get`, `dnf`/`yum`, `terraform`,
+    `dotnet`, `mvn`, `gradle`, `make`, `just`, `rake`, `bundle`, `rails`, `mix`, `dart`,
+    `flutter`, `swift`, `deno`, `nx`, `turbo` (not `npx` or `pytest`);
+  - the subcommand is in that tool's known-verb list. For `make`, `just` and `rake` that
+    list is the common targets: `build`, `test`, `lint`, `fmt`, `format`, `check`,
+    `clean`, `install`, `dev`, `run`, `deploy`, `release`, `docs` and `all`;
+  - the subcommand passes `word_check` (a plain verb, not credential-shaped, no name hit).
+
+  Every other program is sent alone (`rm`, `cat`, `cd`, `less`, `mkdir`, `cp`, `mv`,
+  `vim`, ...), whatever follows it.
+- **P3c (`python -m`).** The module is sent only when it is in a known set (`pytest`,
+  `pip`, `venv`, `http.server`, `unittest`, `black`, `ruff`, `mypy`, `build`, `twine`),
+  or when its top package resolves inside the project root (a package directory or a
+  `.py` file at the root or under `src/`). It must also pass the name check; otherwise
+  just the interpreter is sent. The project root is looked up only for that case.
+- **A HOME that is not a real user home blocks only itself.** A home blocks its
+  ancestors only when it is a real user home: a child of a known homes location, or
+  `pw_dir`. A sandbox or Nix `HOME` inside a project (for example `repo/.home`) no longer
+  hides the project above it, but such a `HOME` is still never a root itself.
+- **Simplifications.**
+  - One small TTL+LRU cache helper (`_TTLCache`) serves the root, `*.sln` and homes
+    caches.
+  - The canonical homes are cached per (`HOME`, `USERPROFILE`, process homes), so they
+    are not re-resolved with `realpath` on every call.
+  - `_abs_cwd` is computed once and passed into `project_root`.
+  - One platform table (`_OS`) replaces three flags.
+- **Testing.**
+  - The vectors are rewritten for commands, and 23 of them fail on 0.6.5.
+  - `test_keys_distinct` builds each case in its own world, one after the other at the
+    same path, so `fs` lists never mix and keys stay comparable. A case built twice must
+    give the same key.
+  - `test_exactly_once` patches the process identity with a fixed fake.
+
 ## Alignment with INTENT.md
 
 - **Goal "During autonomous work":** this is that step for Hermes. Host events
@@ -684,7 +742,7 @@ They now carry an `fs` field, so any port must model the filesystem.
 - **User decisions 1–7:** decision 1 → "Rate rule"; 2 → "Activity line builder" and the
   secret-safety tests; 3 and 4 → "Subagents and scheduled runs"; 5 → constants; 6 → this
   spec; 7 → `ct_tool` class.
-- **Privacy amendments 1-4:** serve "Why this repo exists" (CT is private and local-first):
+- **Privacy amendments 1-5:** serve "Why this repo exists" (CT is private and local-first):
   the query names the work, never the person or their directory layout. They only remove
   what is sent. Relevance stays CT's (rule 8): skipping files outside a project is a
   privacy rule, not a relevance judgment. Limits are unchanged (rule 6), and an activity
