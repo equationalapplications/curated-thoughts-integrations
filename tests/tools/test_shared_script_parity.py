@@ -63,6 +63,9 @@ IDENTICAL = (
 # (spec 2026-10-16-docker-agent-integration-design.md, D1, D7).
 IDENTICAL_EXTRA = {
     "docker-agent": ("ct_wisdom_activity.py",),
+    # Claude Code's autonomous-work leg binds the same builder and renderer
+    # (spec 2026-10-17-claude-code-autonomous-work-wisdom-design.md, D1).
+    "claude-code": ("ct_wisdom_activity.py",),
 }
 # Hook-side modules shared by the command-hook adapters (no Hermes copy:
 # Hermes keeps this state in process). Every listed tree must carry an

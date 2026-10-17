@@ -246,13 +246,16 @@ class MainThreadTests(AdapterTestCase):
         self.assertEqual(self.match_calls, [])
         self.assertEqual(self.store(), before)
 
-    def test_subagent_tool_result_passes_through_and_is_not_recorded(self):
+    def test_subagent_tool_result_passes_through_but_is_recorded(self):
+        # 0.4.0 (spec 2026-10-17 D8): subagents share the session ledger, so
+        # their recall ids are recorded; the result is never stubbed, since
+        # the subagent cannot see the main thread's facts.
         self.start(boot=["a"])
-        before = self.store()
         out = cc.post_tool_use(tool_payload([entry("a"), entry("b")], agent_id="sub1",
                                             agent_type="general-purpose"), env=self.env)
-        self.assertIsNone(out)
-        self.assertEqual(self.store(), before)
+        self.assertIsNone(out)  # "a" is the main thread's, not in the subagent's view
+        self.assertIn("b", cc.ledger_of(self.store()))
+        self.assertEqual(self.store()["agents"]["sub1"]["ids"], ["a", "b"])
 
 
 # ---------------------------------------------------------------------------

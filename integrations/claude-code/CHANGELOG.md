@@ -6,6 +6,40 @@ heading format below is load-bearing: `## <version> — <date>`.
 
 ## Unreleased
 
+## 0.4.0 — 2026-10-17
+
+- Added: **autonomous-work delivery** (Intuitive Wisdom step 3). While the
+  agent works on its own, a `PostToolBatch` hook runs once per model step:
+  when the step's first new file, command or search differs from what this
+  agent already did, it asks `ct wisdom match --max 1` with only the bare
+  target (a project-relative path, a search pattern, or a program plus a
+  known subcommand, built by the shared Hermes builder under its privacy
+  rules) and appends at most one fact (600 chars, marker first) after the
+  step's tool results as `additionalContext`, under
+  `## Curated Thoughts — relevant to this step`. The block is persisted and
+  replayed on resume; the system prompt is never touched. CT's own tools
+  never trigger it, and there is no per-message or per-session cap.
+- Added: only calls that really ran can trigger it. New `PostToolUse` and
+  `PostToolUseFailure` hooks for `Read`, `Write`, `Edit`, `MultiEdit`,
+  `NotebookEdit`, `Bash`, `Grep` and `Glob` record each executed call; a call
+  you (or a rule or hook) denied is in the batch but never becomes a query.
+- Changed: **subagents** now get autonomous-work facts (they still get no
+  per-message facts). The main thread and its subagents share one record of
+  delivered facts, so a fact reaches at most one context of a session tree;
+  a CT recall in a subagent is recorded and stubbed only against that
+  subagent's own facts.
+- The resume/fork OFF latch covers autonomous-work delivery, subagents
+  included; `/compact` keeps delivering without repeats.
+- A started query that got no genuine answer (CT missing, a timeout, the
+  9 s budget) frees its key for a later step; CT's "nothing relevant" does
+  not. The `ct` location and capability are cached for 24 h in
+  `${CLAUDE_PLUGIN_DATA}/wisdom/ct.json`.
+- Verbose mode records each autonomous-work decision with
+  `channel: "activity"` and shows it as the hook's `systemMessage`.
+- `scripts/ct_wisdom_activity.py` is a byte-identical copy of the Hermes
+  0.6.9 module (parity-gated); `hooks/ct_wisdom_cc_activity.py` maps Claude
+  Code tool names onto it. Session stores from 0.3.x keep working.
+
 ## 0.3.3 — 2026-10-17
 
 - Fixed: the session-store prune deleted `.lock` files by age while

@@ -298,45 +298,65 @@ class BudgetTests(HookTestCase):
 class HooksManifestTests(unittest.TestCase):
     """hooks.json is what registers the script; keep its contract asserted."""
 
-    # event -> (matcher or None, script, timeout seconds)
+    ACTIVITY_TOOLS = "Read|Write|Edit|MultiEdit|NotebookEdit|Bash|Grep|Glob"
+    # event -> [(matcher or None, script, timeout seconds)], in order
     EXPECTED = {
-        "SessionStart": ("startup|resume|clear|compact|fork", "session-start.py", 15),
-        "UserPromptSubmit": (None, "ct_wisdom_cc.py", 15),
-        "PostToolUse": ("mcp__.*__curated_recall_context", "ct_wisdom_cc.py", 10),
+        "SessionStart": [("startup|resume|clear|compact|fork", "session-start.py", 15)],
+        "UserPromptSubmit": [(None, "ct_wisdom_cc.py", 15)],
+        "PostToolUse": [("mcp__.*__curated_recall_context", "ct_wisdom_cc.py", 10),
+                        (ACTIVITY_TOOLS, "ct_wisdom_cc.py", 5)],
+        "PostToolUseFailure": [(ACTIVITY_TOOLS, "ct_wisdom_cc.py", 5)],
+        # Autonomous-work delivery (spec 2026-10-17, D2, D10): 15 s, above the
+        # adapter's 9 s CT budget plus two bounded 2 s lock waits.
+        "PostToolBatch": [(None, "ct_wisdom_cc.py", 15)],
     }
 
     def setUp(self):
         self.manifest = json.loads(HOOKS_JSON.read_text(encoding="utf-8"))
 
-    def test_registers_exactly_the_three_events(self):
+    def test_registers_exactly_the_expected_events(self):
         self.assertEqual(sorted(self.manifest["hooks"]), sorted(self.EXPECTED))
 
     def test_matchers_and_timeouts(self):
-        for event, (matcher, _script, timeout) in self.EXPECTED.items():
+        for event, expected in self.EXPECTED.items():
             with self.subTest(event=event):
                 entries = self.manifest["hooks"][event]
-                self.assertEqual(len(entries), 1)
-                self.assertEqual(entries[0].get("matcher"), matcher)
-                hooks = entries[0]["hooks"]
-                self.assertEqual(len(hooks), 1)
-                self.assertEqual(hooks[0]["type"], "command")
-                self.assertEqual(hooks[0]["timeout"], timeout)
+                self.assertEqual(len(entries), len(expected))
+                for entry, (matcher, _script, timeout) in zip(entries, expected):
+                    self.assertEqual(entry.get("matcher"), matcher)
+                    hooks = entry["hooks"]
+                    self.assertEqual(len(hooks), 1)
+                    self.assertEqual(hooks[0]["type"], "command")
+                    self.assertEqual(hooks[0]["timeout"], timeout)
+                    self.assertNotIn("async", hooks[0])
+
+    def test_batch_timeout_is_above_the_internal_budget(self):
+        sys.path.insert(0, str(HOOK.parent))
+        import ct_wisdom_cc
+        worst = ct_wisdom_cc.ACTIVITY_CT_BUDGET + 2 * ct_wisdom_cc.LOCK_WAIT + 1.0
+        self.assertLess(worst, self.EXPECTED["PostToolBatch"][0][2])
 
     def test_post_tool_use_matcher_is_recall_only(self):
         # Rule m4: never curated_get_wiki_entry (plan-time lookups carry no
         # wiki ids). Claude Code matchers are regexes over the tool name.
-        matcher = re.compile(self.EXPECTED["PostToolUse"][0])
+        matcher = re.compile(self.EXPECTED["PostToolUse"][0][0])
         self.assertTrue(matcher.fullmatch("mcp__curated-thoughts__curated_recall_context"))
         self.assertFalse(matcher.fullmatch("mcp__curated-thoughts__curated_get_wiki_entry"))
 
+    def test_activity_matcher_is_an_exact_name_list(self):
+        # Letters and `|` only: Claude Code compares exact names, so
+        # `NotebookEdit` and MCP tools never match `Edit` by substring.
+        self.assertRegex(self.ACTIVITY_TOOLS, r"^[A-Za-z|]+$")
+
     def test_command_tries_python3_then_python_with_quoted_paths(self):
-        for event, (_matcher, script, _timeout) in self.EXPECTED.items():
-            with self.subTest(event=event):
-                command = self.manifest["hooks"][event][0]["hooks"][0]["command"]
-                # Windows has `python`, most POSIX installs have `python3`;
-                # the fallback is what makes one manifest work on both.
-                self.assertIn('python3 "${CLAUDE_PLUGIN_ROOT}/hooks/%s"' % script, command)
-                self.assertIn('|| python "${CLAUDE_PLUGIN_ROOT}/hooks/%s"' % script, command)
+        for event, expected in self.EXPECTED.items():
+            for index, (_matcher, script, _timeout) in enumerate(expected):
+                with self.subTest(event=event, index=index):
+                    command = self.manifest["hooks"][event][index]["hooks"][0]["command"]
+                    # Windows has `python`, most POSIX installs have `python3`;
+                    # the fallback is what makes one manifest work on both.
+                    self.assertIn('python3 "${CLAUDE_PLUGIN_ROOT}/hooks/%s"' % script, command)
+                    self.assertIn('|| python "${CLAUDE_PLUGIN_ROOT}/hooks/%s"' % script, command)
 
     def test_the_registered_scripts_exist(self):
         self.assertTrue(HOOK.is_file())

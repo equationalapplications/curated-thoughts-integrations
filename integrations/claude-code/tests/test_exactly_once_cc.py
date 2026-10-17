@@ -28,6 +28,7 @@ Run: python3 -m unittest tests.test_exactly_once_cc -v
 from __future__ import annotations
 
 import json
+import os
 import random
 import sys
 import tempfile
@@ -41,6 +42,7 @@ sys.path.insert(0, str(HERE.parent / "hooks"))
 import ct_wisdom_cc as cc  # noqa: E402
 import ct_ledger  # noqa: E402
 import ct_wisdom  # noqa: E402
+import ct_wisdom_activity  # noqa: E402
 import ct_wisdom_live  # noqa: E402
 
 UNIVERSE = ["fact_%02d" % i for i in range(16)]
@@ -56,7 +58,7 @@ def item(fid, supersedes=None):
 def visible_counts(context, ours_only=False):
     counts = Counter()
     for kind, payload in context:
-        if kind in ("boot", "live"):
+        if kind in ("boot", "live", "act"):
             for fid in UNIVERSE:
                 counts[fid] += payload.count(ct_ledger.marker(fid))
         elif kind == "tool" and not ours_only:
@@ -179,6 +181,161 @@ class TestExactlyOnceClaudeCode(unittest.TestCase):
         # The randomization must actually exercise every lifecycle path.
         for event in ("compact", "clear_new_id", "clear_same_id", "resume", "turn", "stub"):
             self.assertGreater(seen_events[event], 10, event)
+
+
+class TestExactlyOnceWithActivity(TestExactlyOnceClaudeCode):
+    """Spec 2026-10-17 (autonomous work): activity batches on the main thread
+    and in subagents (executed and denied calls) interleaved with user turns,
+    recalls (main: stubbed; subagent: recorded, never stubbed), /compact,
+    --resume and both /clear branches. Each subagent has its own context; the
+    session tree shares one ledger, so no fact is visible twice in any one
+    context and no fact WE emit appears in two contexts of a tree."""
+
+    FILES = ["src/m%d.py" % i for i in range(6)]
+    COMMANDS = ["pnpm test", "git status", "npm run build", "make lint"]
+
+    def setUp(self):
+        super().setUp()
+        project = tempfile.TemporaryDirectory()
+        self.addCleanup(project.cleanup)
+        self.project = project.name
+        os.makedirs(os.path.join(self.project, ".git"))
+        for rel in self.FILES:
+            os.makedirs(os.path.dirname(os.path.join(self.project, rel)), exist_ok=True)
+            open(os.path.join(self.project, rel), "a").close()
+        self.env = dict(self.env, HOME=os.path.join(self.project, ".nohome"), USER="tester")
+        self.uid = 0
+
+    def call(self, rng):
+        self.uid += 1
+        use_id = "toolu_%06d" % self.uid
+        if rng.random() < 0.6:
+            tool = rng.choice(["Read", "Edit", "Write"])
+            return {"tool_name": tool, "tool_input": {"file_path": rng.choice(self.FILES)},
+                    "tool_use_id": use_id, "tool_response": "ok"}
+        return {"tool_name": "Bash", "tool_input": {"command": rng.choice(self.COMMANDS)},
+                "tool_use_id": use_id, "tool_response": "ok"}
+
+    def recall(self, rng, sid, agent):
+        ids = rng.sample(UNIVERSE, rng.randint(0, 4))
+        blocks = [{"type": "text", "text": json.dumps({
+            "wiki_entries": [{"id": f, "title": "T" + f, "text": "body " + f} for f in ids],
+            "code_chunks": [], "query": "q"})}]
+        payload = {"session_id": sid, "hook_event_name": "PostToolUse", "tool_name": TOOL,
+                   "tool_response": blocks, "tool_use_id": "toolu_r%06d" % self.uid}
+        if agent:
+            payload.update(agent_id=agent, agent_type="general-purpose")
+        res = cc.handle(payload, env=self.env)
+        return res["hookSpecificOutput"]["updatedToolOutput"] if res else blocks
+
+    def batch(self, rng, sid, agent):
+        calls = [self.call(rng) for _ in range(rng.randint(1, 3))]
+        for c in calls:
+            if rng.random() < 0.8:  # executed; the rest were denied (spec D3)
+                payload = {"session_id": sid, "hook_event_name": "PostToolUse", "cwd": self.project,
+                           "tool_name": c["tool_name"], "tool_input": c["tool_input"],
+                           "tool_use_id": c["tool_use_id"], "tool_response": {}}
+                if agent:
+                    payload["agent_id"] = agent
+                cc.handle(payload, env=self.env)
+        payload = {"session_id": sid, "hook_event_name": "PostToolBatch", "cwd": self.project,
+                   "tool_calls": calls}
+        if agent:
+            payload.update(agent_id=agent, agent_type="general-purpose")
+        out = cc.handle(payload, env=self.env)
+        return out["hookSpecificOutput"]["additionalContext"] if out else None
+
+    def check_tree(self, main, subs, where):
+        for name, context in [("main", main)] + sorted(subs.items()):
+            self.check(context, "%s [%s]" % (where, name))
+        if self.off:
+            return
+        owner = {}
+        for name, context in [("main", main)] + sorted(subs.items()):
+            for kind, payload in context:
+                if kind not in ("live", "act"):
+                    continue
+                # Delivered facts carry the full marker; a correction's
+                # "supersedes ct-fact:<old>" reference is not a delivery.
+                for fid in [f for f in UNIVERSE if ct_ledger.marker(f) in payload]:
+                    self.assertNotIn(fid, owner, "%s: %s in %s and %s" % (
+                        where, fid, owner.get(fid), name))
+                    owner[fid] = name
+
+    def test_no_fact_twice_with_activity(self):
+        ct_wisdom_activity.reset_state()
+        rng = self.rng
+        seen = Counter()
+        for s in range(SESSIONS):
+            sid = "act-%d" % s
+            self.off = False
+            self.boot = rng.sample(UNIVERSE, rng.randint(0, 3))
+            main, subs = [], {}
+            block = self.session_start(sid, "startup")
+            if block:
+                main.append(("boot", block))
+            for step in range(rng.randint(2, 18)):
+                where = "session %s step %d" % (sid, step)
+                roll = rng.random()
+                if roll < 0.06:
+                    seen["compact"] += 1
+                    main = []
+                    replay = self.session_start(sid, "compact")
+                    if replay:
+                        main.append(("boot", replay))
+                elif roll < 0.10:
+                    main, subs = [], {}
+                    self.boot = rng.sample(UNIVERSE, rng.randint(0, 3))
+                    if rng.random() < 0.5:
+                        seen["clear_new_id"] += 1
+                        sid = sid + "-c%d" % step
+                        self.off = False
+                    else:
+                        seen["clear_same_id"] += 1
+                        self.off = True
+                    block = self.session_start(sid, "clear")
+                    if block:
+                        main.append(("boot", block))
+                elif roll < 0.14:
+                    seen["resume"] += 1
+                    self.off = True
+                    subs = {}
+                    extra = self.session_start(sid, "resume")
+                    if extra:
+                        main.append(("boot", extra))
+                elif roll < 0.30:
+                    seen["turn"] += 1
+                    out = cc.user_prompt_submit(
+                        {"session_id": sid, "prompt_id": "%s-%d" % (sid, step),
+                         "hook_event_name": "UserPromptSubmit", "prompt": "q %d" % step},
+                        env=self.env)
+                    if self.off:
+                        self.assertIsNone(out, where)
+                    elif out:
+                        main.append(("live", out["hookSpecificOutput"]["additionalContext"]))
+                elif roll < 0.42:
+                    agent = None
+                    if subs and rng.random() < 0.5:
+                        agent = rng.choice(sorted(subs))
+                    seen["recall_sub" if agent else "recall_main"] += 1
+                    shown = self.recall(rng, sid, agent)
+                    (subs[agent] if agent else main).append(("tool", shown))
+                else:
+                    agent = None
+                    if rng.random() < 0.4:
+                        agent = rng.choice(sorted(subs)) if subs and rng.random() < 0.6 \
+                            else "ag%04d" % len(subs)
+                        subs.setdefault(agent, [])
+                    block = self.batch(rng, sid, agent)
+                    if block:
+                        self.assertFalse(self.off, where + ": activity after OFF")
+                        seen["act_sub" if agent else "act_main"] += 1
+                        (subs[agent] if agent else main).append(("act", block))
+                self.check_tree(main, subs, where)
+        self.assertEqual(self.match_calls_while_off, 0, "ct was consulted for an OFF session")
+        for event in ("compact", "clear_new_id", "clear_same_id", "resume", "turn",
+                      "recall_main", "recall_sub", "act_main", "act_sub"):
+            self.assertGreater(seen[event], 10, event)
 
 
 if __name__ == "__main__":
