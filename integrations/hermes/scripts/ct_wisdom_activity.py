@@ -47,6 +47,7 @@ import threading
 import time
 import unicodedata
 from collections import OrderedDict, namedtuple
+from functools import lru_cache
 
 import ct_ledger
 import ct_wisdom
@@ -84,7 +85,6 @@ _FILE_TOOLS = {"read_file": "read", "write_file": "write", "patch": "edit"}
 _VERB_CLASS = {"read": "file", "write": "file", "edit": "file",
                "search": "search", "run": "run"}
 
-_WORD_RE = re.compile(r"^[A-Za-z0-9._][A-Za-z0-9._/-]{0,39}$")
 _ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 _KEY_PREFIXES = ("sk-", "sk_", "pk_", "rk_", "ghp_", "gho_", "ghs_", "ghu_", "github_pat_",
                  "xox", "akia", "asia", "aiza", "glpat-", "eyj")
@@ -96,10 +96,6 @@ _FREE_TEXT_PROGRAMS = {"echo", "printf", "export", "set", "unset", "alias", "eva
                        "security", "op", "vault"}
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 _PYTHON_RE = re.compile(r"^python[0-9.]*$")
-_DRIVE_RE = re.compile(r"^[A-Za-z]:(/|$)")
-_DRIVE_ANY_RE = re.compile(r"^[A-Za-z]:")
-_DRIVE_PART_RE = re.compile(r"^[A-Za-z]:$")
-_HOME_PARENTS = frozenset({"users", "home"})
 
 
 def is_ct_tool(name):
@@ -121,11 +117,6 @@ def _credential_shaped(token):
     return len(token) >= 16 and digits >= 3
 
 
-def _safe_word(token):
-    return (isinstance(token, str) and _WORD_RE.match(token) is not None
-            and not _credential_shaped(token))
-
-
 def _clean_target(value):
     if not isinstance(value, str):
         return None
@@ -137,16 +128,19 @@ def _clean_target(value):
     return value
 
 
-# Privacy rules (spec "Privacy amendment" and "Privacy amendment 2"; shared
+# Privacy rules (spec "Privacy amendment 4: project-root allowlist"; shared
 # test vectors in tests/fixtures/activity_targets.json, which any port MUST
-# run). A user name never leaves the machine.
+# run). Safe by construction: a path is sent only relative to a project root
+# it resolves inside of, and nothing that names the user is ever sent.
 
-# Service accounts are not private user names (CI runners, containers, dev
-# boxes): `node server.js` with USER=node is still `node server.js`.
+# Service accounts are never private names even when USER says so (CI
+# runners, containers, dev boxes): `node server.js` with USER=node is sent.
 _SERVICE_ACCOUNTS = frozenset({
     "root", "node", "app", "user", "admin", "test", "ubuntu", "runner", "docker",
     "www-data", "nobody", "daemon", "ec2-user", "vscode", "codespace"})
-_MIN_NAME_CHARS = 3
+# A name part of at least this many chars hits any token CONTAINING it; a
+# shorter part hits only a token EQUAL to it (`jo` hits `jo.md`, not `join.py`).
+_SUBSTRING_NAME_CHARS = 3
 _SEARCH_MAX_CHARS = 80
 _SEARCH_MAX_WORDS = 6
 _SEARCH_ASCII = frozenset(string.ascii_letters + string.digits + "_ .-")
@@ -155,11 +149,48 @@ _LETTER_CATEGORIES = frozenset({"Lu", "Ll", "Lt", "Lm", "Lo"})
 # sent: what follows such a word is usually its value.
 _AUTH_WORDS = ("bearer", "token", "password", "passwd", "secret", "apikey", "api_key",
                "api-key", "api key", "auth")
+# A directory holding any of these (or a `*.sln` file) is a project root.
+ROOT_MARKERS = (".git", ".hg", "pyproject.toml", "package.json", "Cargo.toml", "go.mod",
+                "pom.xml", "build.gradle", "Gemfile", "composer.json",
+                ".curated-thoughts-project")
+_ROOT_CACHE_TTL = 30.0
+# "No root" is cached only briefly, so `touch .curated-thoughts-project`
+# takes effect almost at once.
+_ROOT_NEGATIVE_TTL = 2.0
+_SLN_CACHE_TTL = 30.0
+_SLN_CACHE_MAX = 256
+_sln_cache = OrderedDict()
+_DARWIN = sys.platform == "darwin"
+_ROOT_CACHE_MAX = 64
+_root_cache = OrderedDict()
+_root_lock = threading.Lock()
+_root_clock = time.monotonic
+_WINDOWS = os.sep == "\\"
+_WIN_ABS_RE = re.compile(r"^[A-Za-z]:[\\/]")
+# A directory whose parent has one of these names is someone's home: never a
+# project root, and the root walk stops there.
+_HOMES_PARENTS = frozenset({"users", "home", "profiles"})
+# `/<host>/home` homes locations (Fedora Silverblue, NFS, Solaris, NAS).
+_HOMES_HOSTS = frozenset({"var", "nfs", "export", "data"})
+# P3 command allowlist.
+_PROGRAM_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,40}$")
+_SUBCOMMAND_RE = re.compile(r"^[a-z][a-z0-9-]{0,30}$")
+_MODULE_RE = re.compile(r"^[a-z_][a-z0-9_.]{0,60}$")
+# Path components are case-folded only where filesystems usually ignore case.
+_CASE_INSENSITIVE = sys.platform in ("darwin", "win32")
+_GIT_BASH_RE = re.compile(r"^/([A-Za-z])(?:/(.*))?$")
+_NAME_TOKEN_FIND = re.compile(r"[^\W_]+")
 
 
 def _fold(text):
-    """Comparison form: NFC (macOS paths are often NFD) and casefolded."""
+    """Name comparison form: NFC (macOS paths are often NFD) and casefolded."""
     return unicodedata.normalize("NFC", text).casefold()
+
+
+def _fold_path(text):
+    """Path comparison form: NFC everywhere, casefolded only on darwin/win32."""
+    text = unicodedata.normalize("NFC", text)
+    return text.casefold() if _CASE_INSENSITIVE else text
 
 
 def _environ(env):
@@ -171,180 +202,346 @@ def _env_str(env, name):
     return value.strip() if isinstance(value, str) and value.strip() else None
 
 
+def _git_bash(path, windows=None):
+    """Git Bash's `/c/Users/x` as `C:\\Users\\x` (on Windows only)."""
+    match = (_WINDOWS if windows is None else windows) and _GIT_BASH_RE.match(
+        path.replace("\\", "/"))
+    if not match:
+        return path
+    return match.group(1).upper() + ":\\" + (match.group(2) or "").replace("/", "\\")
+
+
+@lru_cache(maxsize=1)
+def _pwd_identity():
+    """(pw_name, pw_dir) of the process user, looked up once (an NSS lookup
+    can be slow); (None, None) where pwd is unavailable (Windows). Cleared by
+    reset_state."""
+    try:
+        import pwd
+        entry = pwd.getpwuid(os.getuid())
+        return entry.pw_name, entry.pw_dir
+    except (ImportError, KeyError, AttributeError, OSError):
+        return None, None
+
+
+def _system_identity():
+    """(names, homes) of the process: pwd's pw_name; expanduser("~") and
+    pwd's pw_dir. Tests patch this; it never fails."""
+    name, pw_dir = _pwd_identity()
+    homes = [os.path.expanduser("~"), pw_dir]
+    return [name] if name else [], [h for h in homes if h]
+
+
 def _home(env):
-    return _env_str(env, "HOME") or _env_str(env, "USERPROFILE")
+    """HOME (or USERPROFILE) for `~` expansion."""
+    value = _env_str(env, "HOME") or _env_str(env, "USERPROFILE")
+    return _git_bash(value) if value else None
+
+
+def _home_values(env, identity):
+    """Every home directory string: HOME, USERPROFILE and the process's."""
+    values = [_env_str(env, "HOME"), _env_str(env, "USERPROFILE")] + list(identity[1])
+    return [_git_bash(v.strip()) for v in values if isinstance(v, str) and v.strip()]
 
 
 def user_names(env=None):
-    """Folded private names of the current user: USER, LOGNAME, USERNAME and
-    the basenames of HOME / USERPROFILE, minus service accounts and names
-    shorter than 3 chars."""
+    """Folded private names: USER, LOGNAME, USERNAME and pwd's pw_name, plus
+    the basename of HOME, USERPROFILE or pw_dir only when its parent is named
+    `Users`, `home` or `Profiles`. Service accounts are never private."""
     env = _environ(env)
+    identity = _system_identity()
     names = set()
-    for name in ("USER", "LOGNAME", "USERNAME"):
-        value = _env_str(env, name)
-        if value:
-            names.add(_fold(value))
-    for name in ("HOME", "USERPROFILE"):
-        value = _env_str(env, name)
-        if value:
-            names.add(_fold(posixpath.basename(value.replace("\\", "/").rstrip("/"))))
+    for value in [_env_str(env, n) for n in ("USER", "LOGNAME", "USERNAME")] + list(identity[0]):
+        if isinstance(value, str) and value.strip():
+            names.add(_fold(value.strip()))
+    for value in _home_values(env, identity):
+        comps = [c for c in value.replace("\\", "/").split("/") if c]
+        if len(comps) >= 2 and _fold(comps[-2]) in _HOMES_PARENTS:
+            names.add(_fold(comps[-1]))
     return frozenset(n for n in names
-                     if len(n) >= _MIN_NAME_CHARS and n not in _SERVICE_ACCOUNTS
-                     and ":" not in n)
+                     if n and ":" not in n and n not in _SERVICE_ACCOUNTS
+                     and _NAME_TOKEN_FIND.search(n))
 
 
-def _has_name(component, names):
-    """True when `component` contains a user name (folded substring)."""
-    folded = _fold(component)
-    return any(name in folded for name in names)
+def _tokens_of(folded):
+    """Runs of letters and digits (str.isalnum): every other char splits,
+    including `_`, `-`, en dashes, curly quotes, `×` and `÷`."""
+    return _NAME_TOKEN_FIND.findall(folded)
 
 
-def _rooted(path):
-    """'/'-converted `path` is absolute, `~`, drive-absolute or drive-relative
-    (`C:foo`), or rooted (`\\etc` becomes `/etc`)."""
-    return path.startswith(("/", "~")) or _DRIVE_ANY_RE.match(path) is not None
+def name_hit(text, names):
+    """True when `text` names the user (P2). The text is tokenized on
+    non-alphanumerics (case and NFC folded). Each name part of >= 3 chars hits
+    any token containing it; a shorter part hits only an equal token. A name
+    with spaces or punctuation also hits when the folded text contains it."""
+    folded = _fold(text)
+    tokens = _tokens_of(folded)
+    for name in names:
+        parts = _tokens_of(name)
+        if parts != [name] and name in folded:
+            return True
+        for part in parts:
+            if len(part) >= _SUBSTRING_NAME_CHARS:
+                if any(part in token for token in tokens):
+                    return True
+            elif part in tokens:
+                return True
+    return False
 
 
-def _abs_norm(path, env):
-    """Normalized '/' form of an absolute path (drive letter lowercased, a
-    leading `~` or `~/` expanded from HOME), or None when it is not one (a
-    relative, drive-relative or `~user` path)."""
-    path = path.replace("\\", "/")
-    if path == "~" or path.startswith("~/"):
-        home = _home(env)
-        if home is None:
-            return None
-        path = home.replace("\\", "/").rstrip("/") + path[1:]
-    if _DRIVE_RE.match(path):
-        path = path[0].lower() + path[1:]
-    elif not path.startswith("/"):
+def _comps(path):
+    return path.replace("\\", "/").rstrip("/").split("/")
+
+
+def _below(child, parent):
+    """Components of `child` strictly below `parent` (compared with
+    `_fold_path`), original case kept; None when not strictly below."""
+    cp, pp = _comps(child), _comps(parent)
+    if len(cp) <= len(pp) or any(_fold_path(a) != _fold_path(b) for a, b in zip(pp, cp)):
         return None
-    return posixpath.normpath(path)
+    return cp[len(pp):]
 
 
-def _depth(norm):
-    parts = [p for p in norm.split("/") if p]
-    if parts and _DRIVE_PART_RE.match(parts[0]):
-        parts = parts[1:]
-    return parts
-
-
-def valid_cwd(cwd, env=None):
-    """R1: the normalized cwd, or None when it does not count. It counts when
-    it is strictly inside HOME, or else when it is at depth >= 2 and is
-    neither HOME nor an ancestor of it nor a `/Users/<x>` / `/home/<x>` home
-    directory. So `/`, a drive root, `/Users`, `/home`, HOME itself and an
-    empty or relative cwd never count."""
-    if not isinstance(cwd, str) or not cwd.strip():
+def _real(path):
+    try:
+        return os.path.realpath(path)
+    except (OSError, ValueError):
         return None
-    env = _environ(env)
-    norm = _abs_norm(cwd.strip(), env)
-    if norm is None:
-        return None
-    parts = _depth(norm)
-    if not parts:
+
+
+def _expand(path, env):
+    """`path` with a leading `~` or `~/` expanded from HOME; None for `~user`
+    or when HOME is unset."""
+    if not path.startswith("~"):
+        return path
+    rest = path[1:]
+    if rest and rest[0] not in "/\\":
         return None
     home = _home(env)
-    home_norm = _abs_norm(home, env) if home else None
-    if home_norm:
-        folded, home_folded = _fold(norm), _fold(home_norm)
-        if folded == home_folded or home_folded.startswith(folded.rstrip("/") + "/"):
-            return None
-        if folded.startswith(home_folded.rstrip("/") + "/"):
-            return norm
-    if len(parts) < 2 or (len(parts) == 2 and _fold(parts[0]) in _HOME_PARENTS):
+    return None if home is None else home.rstrip("/\\") + rest if rest else home
+
+
+def _abs_cwd(cwd, env):
+    if not isinstance(cwd, str) or not cwd.strip():
         return None
-    return norm
+    cwd = _expand(_git_bash(cwd.strip()), env)
+    return cwd if cwd and os.path.isabs(cwd) else None
 
 
-def _drop_names(parts, names):
-    """R2: drop every component containing a user name, and `Users`/`home`
-    right before one."""
-    out = []
-    for i, part in enumerate(parts):
-        if _has_name(part, names):
-            continue
-        if (_fold(part) in _HOME_PARENTS and i + 1 < len(parts)
-                and _has_name(parts[i + 1], names)):
-            continue
-        out.append(part)
-    return out
+def _fixed_marker(directory):
+    """One of ROOT_MARKERS exists in `directory` (lexists: cheap, never cached,
+    so a new `.curated-thoughts-project` counts at once)."""
+    return any(os.path.lexists(os.path.join(directory, m)) for m in ROOT_MARKERS)
 
 
-def path_token_ok(token, names):
-    """True when R2 would leave a command's subcommand `token` exactly as it
-    is: relative, no `..`, no component containing a user name."""
-    if _rooted(token.replace("\\", "/")):
-        return False
-    comps = re.split(r"[/\\]", token)
-    if ".." in comps:
-        return False
-    return not any(_has_name(c, names) for c in comps)
+def _sln_marker(directory):
+    """`directory` holds a `*.sln` (one scandir, early return). Cached per
+    directory for _SLN_CACHE_TTL, so a re-walk after the short "no root"
+    cache does not rescan."""
+    now = _root_clock()
+    with _root_lock:
+        hit = _sln_cache.get(directory)
+        if hit is not None and now - hit[0] < _SLN_CACHE_TTL:
+            _sln_cache.move_to_end(directory)
+            return hit[1]
+    found = False
+    try:
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                if entry.name.lower().endswith(".sln"):
+                    found = True
+                    break
+    except OSError:
+        pass
+    with _root_lock:
+        _sln_cache[directory] = (now, found)
+        _sln_cache.move_to_end(directory)
+        while len(_sln_cache) > _SLN_CACHE_MAX:
+            _sln_cache.popitem(last=False)
+    return found
 
 
-def _local_key(path, cwd, env):
-    """Digest of the full local path, for de-duplication only (never sent),
-    so two files with the same sanitized basename never share a key."""
-    full = _abs_norm(path, env)
-    if full is None:
-        converted = path.replace("\\", "/")
-        base = _abs_norm(cwd, env) if isinstance(cwd, str) and cwd.strip() else None
-        full = posixpath.normpath(posixpath.join(base, converted) if base and not _rooted(converted)
-                                  else converted)
-    return hashlib.sha256(full.encode("utf-8", "surrogatepass")).hexdigest()[:24]
+def _has_marker(directory):
+    """Fixed markers first; only then scan the directory for a `*.sln`."""
+    return _fixed_marker(directory) or _sln_marker(directory)
 
 
-def _normalize(raw, base, env, names):
-    path = raw.replace("\\", "/")
-    if _rooted(path):
-        norm = _abs_norm(path, env)
-        if norm is not None and base is not None and norm.startswith(base.rstrip("/") + "/"):
-            parts = norm[len(base.rstrip("/")) + 1:].split("/")
-        else:
-            if _DRIVE_ANY_RE.match(path):
-                path = path[2:]
-            parts = [p for p in posixpath.normpath(path).split("/")
-                     if p not in ("", ".", "..")][-1:]
-            if parts and parts[0].startswith("~"):
-                parts = []
-    else:
-        parts = posixpath.normpath(path).split("/")
-    parts = [p for p in parts if p not in ("", ".", "~")]
-    while parts and parts[0] == "..":
-        parts = parts[1:]
-    parts = _drop_names(parts, names)
-    if not parts:
-        return None
-    target = "/".join(parts)
+def _fs_root(directory):
+    """True for a filesystem root (`/`, `C:\\`). Tests patch this to model
+    `/` with a temp dir."""
+    return os.path.dirname(directory) == directory
+
+
+def _wsl_drive(directory):
+    """`/mnt/<letter>` (a WSL drive)."""
+    up = os.path.dirname(directory)
+    name = os.path.basename(directory)
+    return (len(name) == 1 and name.isalpha() and _fold(os.path.basename(up)) == "mnt"
+            and _fs_root(os.path.dirname(up)))
+
+
+def _homes_location(directory):
+    """A known place holding users' homes: `/home`, `/Users`, `/Profiles`
+    (`C:\\Users`, `D:\\Profiles`); `/var/home`, `/nfs/home`, `/export/home`,
+    `/data/home`; `/mnt/<letter>/Users`."""
+    name = _fold(os.path.basename(directory))
+    parent = os.path.dirname(directory)
+    if name in _HOMES_PARENTS and _fs_root(parent):
+        return True
+    if (name == "home" and _fold(os.path.basename(parent)) in _HOMES_HOSTS
+            and _fs_root(os.path.dirname(parent))):
+        return True
+    return name == "users" and _wsl_drive(parent)
+
+
+def _stop_dir(directory):
+    """Never a project root, and the walk stops here: a filesystem root; a
+    known homes location and anyone's home inside one; `/mnt` and
+    `/mnt/<letter>`. Other direct children of `/` (`/app`, `/workspace`,
+    `D:\\repo`) can be roots."""
+    if _fs_root(directory):
+        return True
+    parent = os.path.dirname(directory)
+    if _homes_location(directory) or _homes_location(parent) or _wsl_drive(directory):
+        return True
+    return _fold(os.path.basename(directory)) == "mnt" and _fs_root(parent)
+
+
+def _blocked(directory, homes):
+    """Never a root (the walk stops here): a `_stop_dir`, any home directory
+    or any ancestor of one."""
+    if _stop_dir(directory):
+        return True
+    folded = _fold_path(directory)
+    return any(folded == _fold_path(h) or _below(h, directory) is not None for h in homes)
+
+
+def _find_root(start, homes):
+    """Nearest ancestor-or-self of `start` holding a marker, stopping (None)
+    at the first `_blocked` directory. The fixed markers are checked for the
+    whole walk first; `*.sln` is scanned only in directories nearer than the
+    nearest fixed-marker hit."""
+    chain = []
+    directory = start
+    while not _blocked(directory, homes):
+        chain.append(directory)
+        parent = os.path.dirname(directory)
+        if parent == directory:
+            break
+        directory = parent
+    fixed = next((i for i, d in enumerate(chain) if _fixed_marker(d)), None)
+    for d in chain[:len(chain) if fixed is None else fixed]:
+        if _sln_marker(d):
+            return d
+    return None if fixed is None else chain[fixed]
+
+
+def _canon(path):
+    """realpath, plus macOS's firmlink alias: `/System/Volumes/Data/x` is
+    the same directory as `/x`."""
+    real = _real(path)
+    if real and _DARWIN:
+        prefix = "/System/Volumes/Data/"
+        if real.startswith(prefix):
+            real = "/" + real[len(prefix):]
+    return real
+
+
+def project_root(cwd, env=None):
+    """P1: the real path of the project root for `cwd`, or None. Cached
+    (LRU; 30 s, or 2 s for "no root") on the raw cwd and HOME / USERPROFILE
+    strings, so a hit does no filesystem work; os.path checks only, never a
+    subprocess."""
+    env = _environ(env)
+    key = (cwd, _env_str(env, "HOME"), _env_str(env, "USERPROFILE"))
+    now = _root_clock()
+    with _root_lock:
+        hit = _root_cache.get(key)
+        if hit is not None and now - hit[0] < (_ROOT_CACHE_TTL if hit[1] else _ROOT_NEGATIVE_TTL):
+            _root_cache.move_to_end(key)
+            return hit[1]
+    root = None
+    start = _abs_cwd(cwd, env)
+    if start is not None:
+        # Walk the logical path (normalized, symlinks NOT resolved), so the
+        # stop rules see `/home/bob` even where it resolves elsewhere (macOS:
+        # /System/Volumes/Data/home); homes are compared in both forms.
+        values = [v for v in _home_values(env, _system_identity()) if os.path.isabs(v)]
+        real_homes = [h for h in (_canon(v) for v in values) if h]
+        found = _find_root(os.path.normpath(start),
+                           real_homes + [os.path.normpath(v) for v in values])
+        root = _canon(found) if found else None
+        # A symlinked or aliased cwd can resolve into HOME, an ancestor of
+        # it or a homes location: every stop rule applies again to the real
+        # root, against real homes. Failing any, there is no root.
+        if root is not None and _blocked(root, real_homes):
+            root = None
+    with _root_lock:
+        _root_cache[key] = (now, root)
+        _root_cache.move_to_end(key)
+        while len(_root_cache) > _ROOT_CACHE_MAX:
+            _root_cache.popitem(last=False)
+    return root
+
+
+def _digest(text):
+    return hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest()[:24]
+
+
+def _resolve(raw, cwd, env, names):
+    """P1 + P2 for one path argument: (target, hit, local). `target` is the
+    path relative to the project root, or None (also when it would exceed
+    TARGET_CHARS: never cut); `hit` is True when it names the user (the
+    caller then gives no activity); `local` is a digest of the full path, for
+    de-duplication only, never sent."""
+    base = _abs_cwd(cwd, env)
+    raw = _git_bash(raw)
+    path = None
+    if ":" not in raw or (_WINDOWS and _WIN_ABS_RE.match(raw) and ":" not in raw[2:]):
+        path = _expand(raw if _WINDOWS else raw.replace("\\", "/"), env)
+    if path is None or (base is None and not os.path.isabs(path)):
+        return None, False, _digest(raw)
+    joined = os.path.join(base, path) if base else path
+    root = project_root(cwd, env) if base else None
+    if root is None:
+        # No realpath needed: nothing is sent, the key only has to differ.
+        return None, False, _digest(os.path.normpath(joined))
+    full = _canon(joined)
+    local = _digest(full or joined)
+    rel = _below(full, root) if full else None
+    if not rel:
+        return None, False, local
+    target = "/".join(rel)
     if len(target) > TARGET_CHARS:
-        target = target[-TARGET_CHARS:].split("/", 1)[-1]
-    return target or None
+        return None, False, local
+    if name_hit(target, names):
+        return None, True, local
+    return target, False, local
 
 
 def normalize_path(raw, cwd=None, env=None, names=None):
-    """Relative, machine-neutral form of a tool's path argument, or None.
-
-    R2: an absolute (or `~`) path under a valid cwd (R1, `valid_cwd`) becomes
-    relative to it; any other absolute, `~`, drive-relative (`C:foo`), rooted
-    (`\\etc`) or UNC path is reduced to its basename. Relative paths are kept,
-    leading `..` dropped. Then every component containing the user's name
-    (`user_names`), and `Users`/`home` right before one, is dropped. None when
-    nothing is left.
-    """
+    """The path to send for a tool's path argument, or None: relative to the
+    project root of `cwd` (P1), never naming the user (P2)."""
     raw = _clean_target(raw)
     if raw is None:
         return None
     env = _environ(env)
-    return _normalize(raw, valid_cwd(cwd, env), env,
-                      user_names(env) if names is None else names)
+    return _resolve(raw, cwd, env, user_names(env) if names is None else names)[0]
+
+
+def word_check(word, names):
+    """P3, the one check for a subcommand: True when it may be sent, a plain
+    verb-like word (`^[a-z][a-z0-9-]{0,30}$`) that is not credential-shaped
+    and does not name the user. False means the program is sent alone."""
+    return (_SUBCOMMAND_RE.match(word) is not None and not _credential_shaped(word)
+            and not name_hit(word, names))
 
 
 def search_target(pattern, env=None, names=None):
-    """R3 (allowlist): the search pattern to send, or None. Sent only when it
-    is at most 80 chars of ASCII letters, digits, `_`, `.`, `-`, spaces and
-    non-ASCII letters; has at most 6 words, none starting with `-`, none
-    credential-shaped, none containing a user name; and names no auth word."""
+    """R3 (allowlist) + P2: the search pattern to send, or None. Sent only
+    when it is at most 80 chars of ASCII letters, digits, `_`, `.`, `-`,
+    spaces and non-ASCII letters; has at most 6 words, none starting with
+    `-`, none credential-shaped; names no auth word; and names no user."""
     pattern = _clean_target(pattern)
     if pattern is None or len(pattern) > _SEARCH_MAX_CHARS:
         return None
@@ -355,13 +552,13 @@ def search_target(pattern, env=None, names=None):
     folded = pattern.casefold()
     if any(word in folded for word in _AUTH_WORDS):
         return None
-    names = user_names(env) if names is None else names
     words = pattern.split()
     if not words or len(words) > _SEARCH_MAX_WORDS:
         return None
-    for word in words:
-        if word.startswith("-") or _credential_shaped(word) or _has_name(word, names):
-            return None
+    if any(w.startswith("-") or _credential_shaped(w) for w in words):
+        return None
+    if name_hit(pattern, user_names(env) if names is None else names):
+        return None
     return pattern
 
 
@@ -400,10 +597,14 @@ def _tokens(command):
 
 
 def command_target(command, env=None, names=None):
-    """Program plus subcommand of the first simple command (user decision 2),
-    or None. The subcommand is the word right after the program, never a
-    flag's value. Everything else is dropped. A program named like the user
-    gives None; a subcommand R2 would change is dropped."""
+    """Program plus subcommand of the first simple command (user decision 2,
+    P3 allowlist), or None. The program (basename of the first word) must
+    match `^[A-Za-z0-9][A-Za-z0-9._+-]{0,40}$`, not be credential-shaped and
+    not name the user, or there is no query. The subcommand is the word right
+    after the program, never a flag's value, and is sent only when it is a
+    plain verb-like word (`word_check`); `python -m <module>` sends a module
+    matching `^[a-z_][a-z0-9_.]{0,60}$`. Otherwise the program alone: never
+    a path, a dot or a file name."""
     command = _clean_target(command) if isinstance(command, str) else None
     if command is None:
         return None
@@ -418,66 +619,67 @@ def command_target(command, env=None, names=None):
     if not words:
         return None
     program = posixpath.basename(words[0].replace("\\", "/"))
-    if not _safe_word(program) or _has_name(program, names):
+    if (not _PROGRAM_RE.match(program) or _credential_shaped(program)
+            or name_hit(program, names)):
         return None
     if program.lower() in _FREE_TEXT_PROGRAMS:
         return program
-    # The subcommand is the word right after the program. A word that follows
-    # a flag is the flag's VALUE (`psql -W secretpw`), never a subcommand, so
-    # it is never sent. One supported form: `python -m <module>`.
     rest = words[1:]
     if _PYTHON_RE.match(program) and rest[:1] == ["-m"]:
-        rest = rest[1:]
-    elif rest[:1] and rest[0].startswith("-"):
+        module = rest[1] if len(rest) > 1 else ""
+        if (_MODULE_RE.match(module) and not _credential_shaped(module)
+                and not name_hit(module, names)):
+            return program + " " + module
         return program
-    if rest and _safe_word(rest[0]) and path_token_ok(rest[0], names):
+    if rest and word_check(rest[0], names):
         return program + " " + rest[0]
     return program
 
 
-def activity_for(tool_name, args, cwd=None, env=None):
+def activity_for(tool_name, args, cwd=None, env=None, task_id=None):
     """Activity for one tool call, built from its args only, or None.
 
     R4: `line` (the visible `_for:` label and the verbose `activity` field)
     and `query` are built from the same sanitized target, never a raw arg.
     The `key` (local de-duplication only, never sent) uses a digest of the
-    full local path, so two files that sanitize to the same basename never
-    collide. `cwd` defaults to `session_cwd()`; `env` to os.environ."""
+    full path. `cwd` defaults to `session_cwd(task_id)`, resolved only when
+    a path argument is actually used; `env` to os.environ."""
     if not isinstance(args, dict) or not isinstance(tool_name, str):
         return None
-    if cwd is None:
-        cwd = session_cwd()
+    verb = _FILE_TOOLS.get(tool_name)
+    if verb is None and tool_name not in ("search_files", "terminal"):
+        return None
     env = _environ(env)
     names = user_names(env)
-    base = valid_cwd(cwd, env)
-
-    def path_of(value):
-        value = _clean_target(value)
-        if value is None:
-            return None, None
-        return _normalize(value, base, env, names), _local_key(value, cwd, env)
-
-    verb = _FILE_TOOLS.get(tool_name)
-    if verb is not None:
-        target, local = path_of(args.get("path"))
-        if target is None:
-            return None
-        line = "%s %s" % (verb, target)
-        return Activity(verb, target, (_VERB_CLASS[verb], local), line, target)
-    if tool_name == "search_files":
-        pattern = search_target(args.get("pattern"), env, names)
-        if pattern is None:
-            return None
-        where, local = path_of(args.get("path")) if args.get("path") else (None, None)
-        target = pattern + (" in " + where if where else "")
-        return Activity("search", target, ("search", pattern, local), "search " + target,
-                        pattern)
     if tool_name == "terminal":
         target = command_target(args.get("command"), env, names)
         if target is None:
             return None
         return Activity("run", target, ("run", target), "run " + target, target)
-    return None
+    resolved_cwd = []
+
+    def path_of(value):
+        value = _clean_target(value)
+        if value is None:
+            return None, False, None
+        if not resolved_cwd:
+            resolved_cwd.append(session_cwd(task_id) if cwd is None else cwd)
+        return _resolve(value, resolved_cwd[0], env, names)
+
+    if verb is not None:
+        target, _, local = path_of(args.get("path"))
+        if target is None:
+            return None
+        line = "%s %s" % (verb, target)
+        return Activity(verb, target, (_VERB_CLASS[verb], local), line, target)
+    pattern = search_target(args.get("pattern"), env, names)
+    if pattern is None:
+        return None
+    where, hit, local = path_of(args.get("path")) if args.get("path") else (None, False, None)
+    if hit:
+        return None
+    target = pattern + (" in " + where if where else "")
+    return Activity("search", target, ("search", pattern, local), "search " + target, pattern)
 
 
 def query_for(activity):
@@ -590,8 +792,13 @@ def pending_count():
 
 
 def reset_state():
-    """TEST-ONLY: forget keys, steps and pending prefetches."""
+    """TEST-ONLY: forget keys, steps, pending prefetches, project roots, the
+    *.sln cache and the pwd lookup."""
     _STATE.reset()
+    with _root_lock:
+        _root_cache.clear()
+        _sln_cache.clear()
+    _pwd_identity.cache_clear()
     with _pending_lock:
         _pending.clear()
 
@@ -660,7 +867,7 @@ def _pre_tool_call(tool_name, args, session_id, tool_call_id, api_request_id, ta
         return _skip(session_id, "empty_id")
     if is_ct_tool(tool_name):
         return _skip(session_id, "ct_tool")
-    activity = activity_for(tool_name, args, cwd=session_cwd(task_id))
+    activity = activity_for(tool_name, args, task_id=task_id)
     if activity is None or not query_for(activity):
         return _skip(session_id, "no_activity")
     ledger = ct_ledger.LEDGER_CACHE.get(session_id)
