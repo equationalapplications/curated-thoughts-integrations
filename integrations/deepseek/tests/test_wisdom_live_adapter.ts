@@ -145,6 +145,10 @@ describe('adapter abort plumbing', { timeout: 30_000 }, () => {
       activity.prefetch({ callId: two.callId, name: 'bash', arguments: { command: 'pnpm test2' }, agent: two.agent });
       expect(await waitFor(() => !alive(gpid), 3000)).toBe(true);
       await firstPlan.promise; // the abandoned match settles
+      // Cancel the second plan too (its own real hanging child) and let it settle.
+      const secondPlan = (activity as unknown as { slots: Map<string, { plan: { promise: Promise<unknown>; cancel: (r: 'abandoned') => void } | null }> }).slots.get('agent-1')!.plan!;
+      secondPlan.cancel('abandoned');
+      await secondPlan.promise;
       expect(failures).toBe(0); // abandoned is never a breaker failure
     } finally {
       ct.cleanup();
@@ -268,6 +272,26 @@ describe('capability probe + wisdomMatch', () => {
     expect(res.outcome).toBe('ok');
     expect(res.result?.entries.map((e) => e.id)).toEqual(['e1']);
     expect(seen[0]).toEqual(['wisdom', 'match', '--help']);
+  });
+
+  it('a timeout_or_exit that surfaces after a cancel keeps the probe cache (no re-probe)', async () => {
+    const seen: string[][] = [];
+    const ctl = new AbortController();
+    let matches = 0;
+    const spawns: SpawnFn = (spec) => {
+      seen.push(spec.args);
+      if (spec.args[2] === '--help') return Promise.resolve(spawnOutcome({}));
+      matches++;
+      if (matches === 1) {
+        ctl.abort(); // the core cancels; the child had already exited non-zero
+        return Promise.resolve(spawnOutcome({ code: 2 }));
+      }
+      return Promise.resolve(spawnOutcome({ stdout: '{"entries": [], "corrections": []}' }));
+    };
+    const { a } = adapter({ spawnFn: spawns });
+    expect((await a.wisdomMatch('q', 1, [], ctl.signal)).outcome).toBe('timeout_or_exit');
+    expect((await a.wisdomMatch('q', 1, [])).outcome).toBe('ok');
+    expect(seen.filter((x) => x[2] === '--help')).toHaveLength(1); // probed once, not again
   });
 
   it('absent subcommand (exit 1) latches OFF for the process (n3 probe semantics)', async () => {

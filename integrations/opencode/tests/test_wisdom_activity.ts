@@ -667,8 +667,10 @@ describe('a ct that hangs past the budget (never settles, ignores the kill)', ()
   it('the miss is charged when the budget runs out, not when the query settles: the breaker opens on the third', async () => {
     const sim = makeSim({ answer: () => 'hang_forever', budgetMs: 300 });
     const breaker = sim.breakerOf('P');
-    // Two earlier misses (the breaker is per session, and a session runs one
-    // query at a time, so they stand in for two earlier steps).
+    // Two earlier misses. A session runs one query at a time and its breaker is
+    // per session; this sim's child never settles (the real binding always
+    // settles within the timeout plus its grace), so the in-flight marker would
+    // block steps 2 and 3. Pre-charging stands in for the two earlier steps.
     breaker.recordFailure();
     breaker.recordFailure();
     expect(breaker.isOpen()).toBe(false);

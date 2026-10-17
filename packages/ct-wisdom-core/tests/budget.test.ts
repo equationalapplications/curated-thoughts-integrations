@@ -248,6 +248,28 @@ describe('a spawn outcome after a cancel still resets the discovery caches', () 
   }
 });
 
+describe('a real answer wins after a cancel', () => {
+  for (const reason of ['budget', 'abandoned'] as const) {
+    it(`cancel('${reason}') then outcome ok with a result: a success, recordSuccess`, async () => {
+      const breaker = new Breaker();
+      let successes = 0;
+      const orig = breaker.recordSuccess.bind(breaker);
+      breaker.recordSuccess = () => { successes++; orig(); };
+      const result = { entries: [], corrections: [] };
+      const h = host({
+        wisdomMatch: (_q, _m, _e, signal) =>
+          new Promise((resolve) => signal?.addEventListener('abort', () => resolve({ outcome: 'ok', result }), { once: true })),
+      });
+      const start = startActivity(h, { id: 's' }, activity, breaker);
+      if (start.failure !== null) throw new Error('refused');
+      start.cancel(reason);
+      expect(await start.match).toEqual({ failure: null, result });
+      expect(successes).toBe(1);
+      expect(breaker.isOpen()).toBe(false);
+    });
+  }
+});
+
 describe('finishActivityOutcome with a cancelled match', () => {
   it('delivers nothing and lets the key retry in a later step', () => {
     const outcome = finishActivityOutcome(host(), { id: 's' }, activity, { failure: 'cancelled' });

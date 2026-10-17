@@ -4,7 +4,7 @@
 
 ## 0.6.4 — 2026-10-17
 
-- Internal: activity cancel goes through the shared core's `cancel` (the adapter's side channel is gone). No behavior change except a rare extra `--help` re-probe after a cancelled query that had already exited non-zero.
+- Internal: activity cancel goes through the shared core's `cancel` (the adapter's side channel is gone). No behavior change.
 
 ## 0.6.3 — 2026-10-17
 

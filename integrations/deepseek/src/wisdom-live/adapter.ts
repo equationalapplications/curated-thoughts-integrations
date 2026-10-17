@@ -356,7 +356,10 @@ export class DshWisdomAdapter implements HostAdapter {
     // instead of charging the breaker on every query. This failure itself
     // still counts once: an exit code cannot tell "unknown command" from
     // any other usage error reliably.
-    if (res.outcome === 'timeout_or_exit') this.probedPath = null;
+    // Not after a core cancel: a child that exited non-zero inside the close
+    // grace as the cancel fired says nothing about the capability, and the
+    // re-probe would spend the next query's budget.
+    if (res.outcome === 'timeout_or_exit' && !signal?.aborted) this.probedPath = null;
     return res;
   }
 

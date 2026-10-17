@@ -1219,15 +1219,11 @@ export interface ActivityMatch {
 }
 
 /**
- * `ct wisdom match --max 1 -- <bare target>` through the host adapter, with
- * the same breaker bookkeeping as the user-turn path (the breaker is SHARED:
- * three failures pause both paths). Never throws.
- */
-/**
  * The one budget-miss rule: an activity match that ran past the host's
  * budget counts as one failure of the shared breaker. `cancel('budget')`
- * (from `startActivity`) applies it at cancel time; a host that cannot
- * cancel its match calls it on expiry instead (never both for one miss).
+ * (from `startActivity`) is the one caller in the core and applies it at
+ * cancel time; hosts must not call it alongside `cancel('budget')` (that
+ * would charge one miss twice).
  */
 export function recordActivityBudgetMiss(breaker: Breaker): void {
   try {
@@ -1246,6 +1242,11 @@ export interface ActivityCancelControl {
   reason(): ActivityCancelReason | null;
 }
 
+/**
+ * `ct wisdom match --max 1 -- <bare target>` through the host adapter, with
+ * the same breaker bookkeeping as the user-turn path (the breaker is SHARED:
+ * three failures pause both paths). Never throws.
+ */
 export async function runActivityMatch(
   host: HostAdapter,
   activity: Activity,
@@ -1384,7 +1385,10 @@ export function startActivity(
       try {
         controller.abort();
       } catch {
-        /* fail quietly */
+        // `cancel` itself never throws. Listeners on the signal must not
+        // throw either: Node rethrows a listener's error asynchronously, not
+        // to this caller (the core's nodeSpawnFn listener cannot: its kill
+        // calls are guarded).
       }
     };
     return { failure: null, match, cancel };
