@@ -123,7 +123,9 @@ function buildInWorld(c: Vector): { tmp: string; activity: Activity | null; syml
   }
 }
 
-describe('OpenClaw binding × shared activity-target vectors', () => {
+// The vectors model POSIX paths (`/Users/alice/...`, symlinks, `/mnt` rules);
+// like the core runner that owns them (CI: ubuntu only), they run on POSIX.
+describe.skipIf(process.platform === 'win32')('OpenClaw binding × shared activity-target vectors', () => {
   it('every vector gives the expected bare-target query and label', () => {
     const cases = JSON.parse(readFileSync(nodePath.join(ROOT, 'activity_targets.json'), 'utf8')) as Vector[];
     expect(cases.length).toBeGreaterThanOrEqual(290);
