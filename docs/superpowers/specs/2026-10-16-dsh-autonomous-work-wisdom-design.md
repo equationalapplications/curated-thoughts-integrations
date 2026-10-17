@@ -431,6 +431,15 @@ rule; opencode and openclaw get patch bumps for it.
   the query (guarantee 2 keeps the superseded one out), and it is delivered like any fact. Rendering
   differences that remain from before (TS lists every `supersedes` id in a correction's title and puts
   entries before corrections; Hermes lists only ids in context, corrections first) change no ids.
+- **Line builder synced to hermes 0.6.3** ("Privacy amendment 2": search-pattern allowlist and
+  auth-word refusal, HOME and its ancestors never a cwd, drive-relative and rooted-backslash paths,
+  embedded user-name drop, service-account exemptions, SHA-256 full-path activity keys); the core suite
+  runs all 111 shared vectors, `key_distinct_from` included. A further sync to hermes 0.6.4 is pending.
+- **Which cwd (DSH).** [V] DSH resolves its tools' relative paths against the session header's
+  validated absolute `cwd` (`dsh-session` `SessionHeader.cwd`; `dsh-tool-fs` `session-cwd`
+  `exec.agent.session.header.cwd`; `dsh-tool-bash` `resolveWorkdir`, 0.2.0-rc.2). The activity builder
+  uses the same value per agent (subagents have their own). Without it the cwd is absent (absolute paths
+  reduce to their basename); `process.cwd()` is never used.
 - **e2e check 5** now reads tab-separated argv and asserts the query is the single element right after
   `--` with nothing after it.
 

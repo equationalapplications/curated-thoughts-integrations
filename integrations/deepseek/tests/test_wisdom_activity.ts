@@ -28,9 +28,13 @@ import {
   activityMessage,
   dshActivitySpec,
   lastAssistantStep,
+  sessionCwd,
 } from '../src/wisdom-live/activity.js';
 
 type Msg = Record<string, unknown>;
+
+/** A fixed environment for the builder (R2 user names), never the real one. */
+const TEST_ENV = { USER: 'alice', HOME: '/Users/alice' };
 
 const text = (t: string) => ({ type: 'text', text: t });
 let seq = 0;
@@ -102,9 +106,10 @@ function setup(
     ...(over.recordVerbose ? { recordVerbose: over.recordVerbose } : {}),
   });
   const breaker = over.breaker ?? new Breaker();
-  const activity = new DshActivity({ adapter, breaker, cwd: () => '/work/repo', ...(over.now ? { now: over.now } : {}) });
+  // The cwd comes from the session header, as DSH's own tools resolve it.
+  const activity = new DshActivity({ adapter, breaker, env: TEST_ENV, ...(over.now ? { now: over.now } : {}) });
   const log: Msg[] = [{ id: 'u0', role: 'user', source: { kind: 'user' }, content: [text('do the task')] }];
-  const agent = { id: 'agent-1', session: { deriveMessages: () => [...log] } };
+  const agent = { id: 'agent-1', session: { deriveMessages: () => [...log], header: { cwd: '/work/repo' } as { cwd?: string } } };
   /** One model step: the assistant's calls, pre-execute per call, then results. */
   const step = (calls: Array<[string, unknown]>, results?: string[]): Msg => {
     const msg = assistant(calls);
@@ -343,6 +348,42 @@ describe('core gates apply to activity delivery (review of PR #56)', () => {
     s.step([['read', { file_path: 'a.ts' }]]);
     await s.pre();
     expect(s.adapter.bootstrapMemo['agent-1'].ids).toEqual(['boot1', 'f1']);
+  });
+});
+
+describe('session cwd (DSH SessionHeader.cwd, never process.cwd())', () => {
+  it('reads the header cwd and fails closed to "no cwd"', () => {
+    expect(sessionCwd({ session: { header: { cwd: '/work/repo' } } })).toBe('/work/repo');
+    expect(sessionCwd({ session: { header: {} } })).toBeNull();
+    expect(sessionCwd({ session: { header: { cwd: '  ' } } })).toBeNull();
+    expect(sessionCwd({ session: {} })).toBeNull();
+    expect(sessionCwd(null)).toBeNull();
+    const throwing = { session: { get header(): { cwd?: unknown } { throw new Error('boom'); } } };
+    expect(sessionCwd(throwing)).toBeNull();
+  });
+
+  it('a path under the session cwd is sent relative to it', async () => {
+    const s = setup();
+    s.step([['read', { file_path: '/work/repo/src/billing/invoice.ts' }]]);
+    await s.pre();
+    expect(s.ct.calls.map((c) => c.query)).toEqual(['src/billing/invoice.ts']);
+  });
+
+  it('without a header cwd, an absolute path reduces to its basename (not process.cwd()-relative)', async () => {
+    const s = setup();
+    delete s.agent.session.header.cwd;
+    const here = process.cwd();
+    s.step([['read', { file_path: `${here}/src/deep/x.ts` }]]);
+    await s.pre();
+    expect(s.ct.calls.map((c) => c.query)).toEqual(['x.ts']);
+  });
+
+  it('a subagent uses its own session cwd', async () => {
+    const s = setup();
+    const childLog: Msg[] = [assistant([['read', { file_path: '/srv/child/lib/a.ts' }]])];
+    const child = { id: 'child-cwd', session: { deriveMessages: () => [...childLog], header: { cwd: '/srv/child' } } };
+    await s.activity.deliver(child, [], []);
+    expect(s.ct.calls.map((c) => c.query)).toEqual(['lib/a.ts']);
   });
 });
 

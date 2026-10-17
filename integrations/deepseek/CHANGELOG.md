@@ -20,12 +20,15 @@
     or a command's program plus its next safe word (`pnpm test`,
     `npm run`). Never file contents, tool output, diffs, the agent's text,
     flag values, quoted words, URLs, env assignments or credential-shaped
-    tokens. The privacy rules are those of hermes 0.6.2, with the same
+    tokens. The privacy rules are those of hermes 0.6.3, with the same
     shared test vectors (`tests/fixtures/activity_targets.json`): a path
-    outside the workspace is reduced to its file name (a workspace counts
-    only at depth 2 or more, never `/`, a drive root, `/Users` or `/home`),
-    the local user name is never sent, and a search pattern holding `=`, a
-    quote, a credential or such a path sends nothing.
+    outside the session's working directory is reduced to its file name
+    (the working directory is the session's own, from DSH's session header;
+    it never counts when it is `/`, a drive root, `/Users`, `/home`, your
+    home directory or one of its parents), no path component containing
+    your user name is sent, and a search pattern is sent only when it is
+    plain words (letters, digits, `_`, `.`, `-`; at most 6 words and 80
+    characters) with no auth word such as `token` or `password`.
   - The gates are the user-turn ones and live in the shared core
     (`startActivity` / `finishActivity`): a delivery switch that is off, a
     restored session with no known bootstrap, a missing `ct wisdom match`

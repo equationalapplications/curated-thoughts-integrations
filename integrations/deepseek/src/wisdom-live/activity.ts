@@ -153,7 +153,24 @@ export function activityMessage(block: string): ReturnType<typeof wisdomMessage>
 
 interface AgentLike {
   id?: unknown;
-  session?: { deriveMessages?: () => unknown[] };
+  session?: { deriveMessages?: () => unknown[]; header?: { cwd?: unknown } };
+}
+
+/**
+ * The agent's working directory as DSH resolves its tools' relative paths:
+ * the session header's validated absolute `cwd` (dsh-session SessionHeader;
+ * dsh-tool-fs `session-cwd` and dsh-tool-bash `resolveWorkdir` read
+ * `exec.agent.session.header.cwd`, 0.2.0-rc.2). Missing → null, which the
+ * builder treats as "no cwd" (absolute paths reduce to their basename).
+ * Never process.cwd(): the harness process may run anywhere.
+ */
+export function sessionCwd(agent: AgentLike | null | undefined): string | null {
+  try {
+    const cwd = agent?.session?.header?.cwd;
+    return typeof cwd === 'string' && cwd.trim() !== '' ? cwd : null;
+  } catch {
+    return null;
+  }
 }
 
 interface Plan {
@@ -179,8 +196,8 @@ export interface DshActivityDeps {
   adapter: DshWisdomAdapter;
   /** The SAME breaker the user-turn path uses (rule 4). */
   breaker: Breaker;
-  /** Workspace root for path normalization (default: process.cwd()). */
-  cwd?: () => string | null;
+  /** The agent's working directory (default: `sessionCwd`, the session header's cwd). */
+  cwd?: (agent: AgentLike) => string | null;
   now?: () => number;
   /** Runs before each ledger rebuild (index.ts: refresh the bootstrap memo record). */
   beforeLedger?: (agentId: string) => void;
@@ -195,7 +212,7 @@ export class DshActivity {
   private readonly slots = new Map<string, AgentSlot>();
   private readonly adapter: DshWisdomAdapter;
   private readonly breaker: Breaker;
-  private readonly cwd: () => string | null;
+  private readonly cwd: (agent: AgentLike) => string | null;
   private readonly now: () => number;
   private readonly beforeLedger?: (agentId: string) => void;
   private readonly log?: (line: string) => void;
@@ -206,13 +223,7 @@ export class DshActivity {
     if (deps.env) this.env = deps.env;
     this.adapter = deps.adapter;
     this.breaker = deps.breaker;
-    this.cwd = deps.cwd ?? (() => {
-      try {
-        return process.cwd();
-      } catch {
-        return null;
-      }
-    });
+    this.cwd = deps.cwd ?? sessionCwd;
     this.now = deps.now ?? (() => Date.now());
     if (deps.beforeLedger) this.beforeLedger = deps.beforeLedger;
   }
@@ -260,7 +271,7 @@ export class DshActivity {
    * capability, breaker) decide whether it may run; a refusal is reported
    * once (this runs once per step) and records no key.
    */
-  private plan(agentId: string, messages: unknown[], step: StepCalls): Plan | null {
+  private plan(agent: AgentLike, agentId: string, messages: unknown[], step: StepCalls): Plan | null {
     const existing = this.slotFor(agentId, step.messageId);
     if (existing !== null) return existing.plan;
     const slot: AgentSlot = { messageId: step.messageId, plan: null, callIds: new Set(step.calls.map((c) => c.id)) };
@@ -272,12 +283,18 @@ export class DshActivity {
       this.slots.delete(oldest.value);
     }
     const session = { id: agentId };
+    let cwd: string | null = null;
+    try {
+      cwd = this.cwd(agent);
+    } catch {
+      cwd = null; // fail closed: no cwd, absolute paths reduce to their basename
+    }
     for (const call of step.calls) {
       if (isCtTool(call.name)) {
         this.debug(agentId, 'ct_tool');
         continue;
       }
-      const activity = buildActivity(dshActivitySpec(call.name, call.args), this.cwd(), this.env ?? process.env);
+      const activity = buildActivity(dshActivitySpec(call.name, call.args), cwd, this.env ?? process.env);
       if (activity === null || activityQuery(activity) === '') {
         this.debug(agentId, 'no_activity');
         continue;
@@ -323,7 +340,7 @@ export class DshActivity {
       if (messages === null) return this.debug(agentId, 'no_ledger');
       const step = lastAssistantStep(messages);
       if (step === null || !step.calls.some((c) => c.id === exec.callId)) return;
-      this.plan(agentId, messages, step);
+      this.plan(exec.agent!, agentId, messages, step);
     } catch {
       /* fail quietly: the tool decision is never touched */
     }
@@ -347,7 +364,7 @@ export class DshActivity {
       }
       const step = lastAssistantStep(messages);
       if (step === null) return null;
-      const plan = this.plan(agentId, messages, step);
+      const plan = this.plan(agent, agentId, messages, step);
       if (plan === null || plan.consumed) return null;
       plan.consumed = true;
       const session = { id: agentId };
