@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+## 0.2.1 — 2026-10-16
+
+- Fixed (documented and diagnosed): a brain with an external embedder lost
+  its API key at the sidecar. OpenClaw 2026.10.3 starts a plugin-declared
+  stdio MCP server from the MCP SDK's default environment only (`HOME`,
+  `LOGNAME`, `PATH`, `SHELL`, `TERM`, `USER`) plus the server's `env`, and the
+  plugin manifest cannot refer to the user's environment. The fix is a user
+  `mcp.servers.curated-thoughts` row, which replaces the manifest row and
+  forwards the key as a `${NAME}` reference.
+  - New doctor check `sidecar-env` (after `embedding-backend`). It reads the
+    brain's `embed_profile` and the user row, and warns with the exact row to
+    add when the key (or a non-default brain location) is not forwarded, or
+    when a forwarded name is unset. Read-only; names only, never values.
+  - `install.sh` and the README explain the row.
+
 ## 0.2.0 — 2026-10-16
 
 - Added: Verbose mode for Intuitive Wisdom (opt-in, off by default). With

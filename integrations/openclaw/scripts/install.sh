@@ -128,6 +128,15 @@ run "$OPENCLAW" config set "plugins.entries.${PLUGIN_ID}.hooks.allowConversation
 run "$OPENCLAW" config set "plugins.entries.${PLUGIN_ID}.hooks.timeouts.before_prompt_build" 20000
 
 say ""
+say "External embedder or a custom CURATED_BRAIN_DIR? OpenClaw starts the"
+say "plugin's MCP sidecar with only HOME, PATH and a few basics, so the"
+say "embedding key (EMBED_API_KEY, OPENROUTER_API_KEY or OPENAI_API_KEY) and a"
+say "non-default brain location must be forwarded by an"
+say "mcp.servers.curated-thoughts row in openclaw.json (the key as a \${NAME}"
+say "reference, never its value; a brain location as an absolute path)."
+say "The doctor's sidecar-env check prints the exact row for this brain:"
+say "  node ${PLUGIN_DIR}/lib/scripts/ct_doctor.js check"
+say ""
 if [ "$edit" -eq 1 ]; then
   node "${PLUGIN_DIR}/lib/scripts/ct_doctor.js" check || warn "doctor reported problems (see above)"
   say "Done. Verify the running gateway with: $OPENCLAW plugins inspect ${PLUGIN_ID} --runtime --json"

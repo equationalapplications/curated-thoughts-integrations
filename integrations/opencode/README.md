@@ -100,6 +100,12 @@ The installer touches exactly:
 Skills are installed as files — OpenCode discovers them from the `skills/`
 directory; nothing registers them at runtime.
 
+**External embedder.** OpenCode starts a local MCP server with its whole
+environment plus the entry's `environment` (verified at 1.18.35), so a brain
+with `embed_profile.type: "external"` only needs its key (`EMBED_API_KEY`,
+else `OPENROUTER_API_KEY` or `OPENAI_API_KEY`) set in the environment
+OpenCode starts from. Nothing needs to be added to `opencode.json`.
+
 ## Verify
 
 ```bash

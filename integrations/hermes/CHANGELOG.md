@@ -6,6 +6,33 @@ format below is load-bearing: `## <version> — <date>`.
 
 ## Unreleased
 
+## 0.6.1 — 2026-10-16
+
+- Fixed: a brain with an external embedder lost its API key at the sidecar.
+  Hermes passes a stdio MCP server only `PATH`, `HOME`, `USER`, `LANG`,
+  `LC_ALL`, `TERM`, `SHELL`, `TMPDIR`, `XDG_*` and the entry's own `env:`
+  (`tools/mcp_tool_config.py::_build_safe_env` at the `ee8dd6c8` pin), so
+  `OPENROUTER_API_KEY` never reached `curated-thoughts-mcp`, and recall and
+  wisdom matching degraded without an error. Found by the 0.6.0 live e2e.
+  - `install.sh` now reads the brain's `config.json` (read-only) and writes
+    an `env:` block into the suggested or appended `mcp_servers` entry: the
+    embedder's key as a `"${NAME}"` reference (`EMBED_API_KEY` if set, else
+    `OPENROUTER_API_KEY` for an OpenRouter `base_url`, else
+    `OPENAI_API_KEY`), and a non-default `CURATED_BRAIN_DIR`,
+    `CURATED_BRAIN_DB` or `CURATED_BRAIN_CONFIG` as an absolute path. A key
+    value is never written. With a local embedder, an inline key, or an
+    unreadable brain config, it prints a commented `env:` example instead.
+    An existing entry is still never modified; the installer prints what it
+    needs instead.
+  - New doctor check `sidecar-env` (after `embedding-backend`). It warns,
+    with the exact `env:` lines to add, when a needed name is not forwarded,
+    and when a forwarded name is set neither in the environment nor in
+    `~/.hermes/.env` (Hermes passes an unset `${NAME}` through as literal
+    text). Read-only, and it prints names only, never values. The check is
+    shared with Claude Code (`scripts/ct_doctor.py` and `scripts/ct_env.py`
+    stay byte-identical outside the harness regions).
+  - Spec: `docs/superpowers/specs/2026-10-16-mcp-sidecar-env-design.md`.
+
 ## 0.6.0 — 2026-10-16
 
 - Added: Intuitive Wisdom **autonomous-work delivery**. While the agent works

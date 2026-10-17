@@ -170,6 +170,149 @@ def resolve_vault_path(config):
 
 
 # --------------------------------------------------------------------------
+# the sidecar's launch environment
+# --------------------------------------------------------------------------
+
+# How Curated Thoughts resolves an external embedder's key
+# (src-tauri/src/embedder/mod.rs, ExternalEmbedProfile::resolved_api_key):
+# the profile's own api_key, else EMBED_API_KEY, else OPENROUTER_API_KEY when
+# base_url names openrouter, else OPENAI_API_KEY. A blank value counts as
+# unset at every step. The default base_url is OpenRouter's.
+ENV_EMBED_API_KEY = "EMBED_API_KEY"
+ENV_OPENROUTER_API_KEY = "OPENROUTER_API_KEY"
+ENV_OPENAI_API_KEY = "OPENAI_API_KEY"
+ENV_OLLAMA_HOST = "OLLAMA_HOST"
+DEFAULT_EXTERNAL_BASE_URL = "https://openrouter.ai/api/v1"
+
+# Kinds of sidecar env need. A "ref" is passed by name only (a ${NAME}
+# reference in the host config; the value is never written). A "path" is a
+# brain location: not a secret, and the sidecar does not expand `~`, so it is
+# written as the absolute path.
+NEED_REF = "ref"
+NEED_PATH = "path"
+
+
+class EnvNeed:
+    """One variable the sidecar needs. `alternatives` lists every name that
+    satisfies the need (CT's key resolution falls through EMBED_API_KEY to
+    the provider default), `name` first: the one to suggest."""
+
+    __slots__ = ("name", "kind", "reason", "value", "alternatives")
+
+    def __init__(self, name, kind, reason, value=None, alternatives=()):
+        self.name = name
+        self.kind = kind
+        self.reason = reason
+        # Only ever set for NEED_PATH. A secret's value is never carried.
+        self.value = value if kind == NEED_PATH else None
+        self.alternatives = (name,) + tuple(a for a in alternatives if a != name)
+
+
+def _is_default_ollama_host(value):
+    """True for the host the sidecar uses anyway (http://localhost:11434)."""
+    host = value.strip().lower()
+    for prefix in ("http://", "https://"):
+        if host.startswith(prefix):
+            host = host[len(prefix):]
+    return host.rstrip("/") in ("localhost:11434", "127.0.0.1:11434")
+
+
+def _set(env, name):
+    value = env.get(name)
+    return isinstance(value, str) and bool(value.strip())
+
+
+def embed_profile_kind(config):
+    """The brain's embed_profile type: "local" (the CT default), "external",
+    "cloud", or the raw unknown string."""
+    profile = (config or {}).get("embed_profile")
+    if not isinstance(profile, dict):
+        return "local"
+    kind = profile.get("type")
+    return kind if isinstance(kind, str) and kind else "local"
+
+
+def external_embed_key_var(config, env=None):
+    """Env var name the sidecar reads the external embedder's key from, or
+    None when the brain is not external or the profile carries its own key.
+
+    EMBED_API_KEY wins when it is set in `env` (CT checks it first);
+    otherwise the provider default for the profile's base_url.
+    """
+    env = os.environ if env is None else env
+    if embed_profile_kind(config) != "external":
+        return None
+    profile = config["embed_profile"]
+    inline = profile.get("api_key")
+    if isinstance(inline, str) and inline.strip():
+        return None
+    if _set(env, ENV_EMBED_API_KEY):
+        return ENV_EMBED_API_KEY
+    base = profile.get("base_url")
+    base = base if isinstance(base, str) and base else DEFAULT_EXTERNAL_BASE_URL
+    return ENV_OPENROUTER_API_KEY if "openrouter" in base else ENV_OPENAI_API_KEY
+
+
+def sidecar_env_needs(config, env=None):
+    """Env vars the sidecar needs from the host that launches it.
+
+    A host that filters its MCP children's environment (Hermes, OpenClaw,
+    DeepSeek Harness) drops these unless its MCP config names them. Returns
+    a list of EnvNeed, in a stable order. Read-only; never raises.
+    """
+    env = os.environ if env is None else env
+    needs = []
+    # A brain location that resolves to the default layout needs no
+    # forwarding: the sidecar finds ~/.brain on its own.
+    custom_location = (
+        resolve_brain_paths(env).as_dict() != resolve_brain_paths({}).as_dict()
+    )
+    for name in (ENV_BRAIN_DIR, ENV_BRAIN_DB, ENV_BRAIN_CONFIG):
+        if custom_location and _set(env, name):
+            needs.append(EnvNeed(
+                name, NEED_PATH,
+                "this brain location is set in the environment; without it "
+                "the sidecar opens the default ~/.brain",
+                os.path.abspath(str(_expand(env[name].strip()))),
+            ))
+    key = external_embed_key_var(config, env)
+    if key:
+        # Either name works at spawn time: EMBED_API_KEY first, then the
+        # provider default (computed with EMBED_API_KEY treated as unset).
+        default = external_embed_key_var(config, {})
+        needs.append(EnvNeed(
+            key, NEED_REF,
+            "the brain's external embedder reads its API key from it; "
+            "without it recall and wisdom matching cannot embed",
+            alternatives=(ENV_EMBED_API_KEY, default),
+        ))
+    if (embed_profile_kind(config) == "local" and _set(env, ENV_OLLAMA_HOST)
+            and not _is_default_ollama_host(env[ENV_OLLAMA_HOST])):
+        needs.append(EnvNeed(
+            ENV_OLLAMA_HOST, NEED_REF,
+            "the brain's local embedder uses Ollama at this host; without "
+            "it the sidecar tries http://localhost:11434",
+        ))
+    return needs
+
+
+def _sidecar_env_main(argv):
+    """`ct_env.py sidecar-env`: the needs for the ambient brain, one per line
+    as `<kind>\\t<name>[\\t<absolute path>]`. A secret's value is never
+    printed. Exit 3 when the brain config cannot be read (the caller then
+    prints generic guidance)."""
+    if argv[:1] != ["sidecar-env"]:
+        sys.stderr.write("usage: ct_env.py sidecar-env\n")
+        return 2
+    config, _err = read_brain_config(resolve_brain_paths().config_path)
+    needs = sidecar_env_needs(config or {})
+    for need in needs:
+        fields = [need.kind, need.name] + ([need.value] if need.value else [])
+        sys.stdout.write("\t".join(fields) + "\n")
+    return 0 if config is not None else 3
+
+
+# --------------------------------------------------------------------------
 # platform-aware sidecar discovery
 # --------------------------------------------------------------------------
 
@@ -295,3 +438,7 @@ def install_kind(resolved_path, platform=None):
     if "/Programs/" in p or "/Program Files" in p:
         return "windows-install"
     return "other"
+
+
+if __name__ == "__main__":
+    sys.exit(_sidecar_env_main(sys.argv[1:]))

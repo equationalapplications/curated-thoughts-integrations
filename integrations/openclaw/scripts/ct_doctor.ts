@@ -2,8 +2,12 @@
  * ct_doctor.ts — install/health doctor for the Curated Thoughts OpenClaw
  * plugin.
  *
- * 1:1 port of integrations/hermes/scripts/ct_doctor.py. The 9 checks run in
+ * 1:1 port of integrations/hermes/scripts/ct_doctor.py. The 10 checks run in
  * the same order and the exit codes (0/1/2) match. Differences from Hermes:
+ *
+ *   - sidecar-env inspects the user mcp.servers["curated-thoughts"] row
+ *     (OpenClaw gives a plugin-declared stdio server only the MCP SDK's
+ *     default env), where Hermes inspects mcp_servers.curated-thoughts.env.
  *
  *   - Sidecar identity uses the shared ct_env.ts helpers (Task 2).
  *   - openclaw-registration reads OpenClaw's JSON5 config
@@ -35,7 +39,7 @@ import {
   readFileSync,
   statSync,
 } from 'node:fs';
-import { join } from 'node:path';
+import { join, normalize as normalizePath, resolve as resolvePath } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { spawnSync } from 'node:child_process';
 
@@ -276,7 +280,7 @@ export function mcpToolsList(
     params: {
       protocolVersion: '2024-11-05',
       capabilities: {},
-      clientInfo: { name: 'ct_doctor', version: '0.2.0' },
+      clientInfo: { name: 'ct_doctor', version: '0.2.1' },
     },
   });
   const notifMsg = JSON.stringify({
@@ -808,6 +812,180 @@ export function checkOpenclawRegistration(
 }
 
 // --------------------------------------------------------------------------
+// sidecar launch environment
+// --------------------------------------------------------------------------
+
+/** One env var the sidecar needs. `alternatives` lists every name that
+ * satisfies it (`name` first); `value` is set only for a brain path. */
+export interface SidecarEnvNeed {
+  name: string;
+  kind: 'ref' | 'path';
+  reason: string;
+  value?: string;
+  alternatives: string[];
+}
+
+const DEFAULT_EXTERNAL_BASE_URL = 'https://openrouter.ai/api/v1';
+
+function isSet(env: NodeJS.ProcessEnv, name: string): boolean {
+  const v = env[name];
+  return typeof v === 'string' && v.trim() !== '';
+}
+
+/** The brain's embed_profile type ("local" when absent, CT's default). */
+export function embedProfileKind(config: Record<string, unknown> | null): string {
+  const p = config?.embed_profile;
+  if (p === null || typeof p !== 'object' || Array.isArray(p)) return 'local';
+  const t = (p as Record<string, unknown>).type;
+  return typeof t === 'string' && t !== '' ? t : 'local';
+}
+
+/** Env var the sidecar reads an external embedder's key from (CT
+ * embedder/mod.rs resolved_api_key: profile api_key, else EMBED_API_KEY,
+ * else OPENROUTER_API_KEY for an openrouter base_url, else OPENAI_API_KEY;
+ * blank counts as unset). Null when not external or the key is inline. */
+export function externalEmbedKeyVar(
+  config: Record<string, unknown> | null,
+  env: NodeJS.ProcessEnv,
+): string | null {
+  if (embedProfileKind(config) !== 'external') return null;
+  const p = config!.embed_profile as Record<string, unknown>;
+  if (typeof p.api_key === 'string' && p.api_key.trim() !== '') return null;
+  if (isSet(env, 'EMBED_API_KEY')) return 'EMBED_API_KEY';
+  const base = typeof p.base_url === 'string' && p.base_url !== '' ? p.base_url : DEFAULT_EXTERNAL_BASE_URL;
+  return base.includes('openrouter') ? 'OPENROUTER_API_KEY' : 'OPENAI_API_KEY';
+}
+
+function isDefaultOllamaHost(value: string): boolean {
+  const h = value.trim().toLowerCase().replace(/^https?:\/\//, '').replace(/\/+$/, '');
+  return h === 'localhost:11434' || h === '127.0.0.1:11434';
+}
+
+/** Env vars the sidecar needs from the host that launches it. */
+export function sidecarEnvNeeds(
+  config: Record<string, unknown> | null,
+  env: NodeJS.ProcessEnv,
+): SidecarEnvNeed[] {
+  const needs: SidecarEnvNeed[] = [];
+  const here = ctEnvResolveBrainPaths(env);
+  const dflt = ctEnvResolveBrainPaths({ HOME: env.HOME, USERPROFILE: env.USERPROFILE });
+  const custom = here.brainDir !== dflt.brainDir || here.dbPath !== dflt.dbPath
+    || here.configPath !== dflt.configPath;
+  for (const name of ['CURATED_BRAIN_DIR', 'CURATED_BRAIN_DB', 'CURATED_BRAIN_CONFIG']) {
+    if (custom && isSet(env, name)) {
+      needs.push({
+        name, kind: 'path', alternatives: [name],
+        value: resolvePath(expandHome(env[name]!.trim(), env)),
+        reason: 'this brain location is set in the environment; without it the sidecar opens the default ~/.brain',
+      });
+    }
+  }
+  const key = externalEmbedKeyVar(config, env);
+  if (key) {
+    const fallback = externalEmbedKeyVar(config, {})!;
+    needs.push({
+      name: key, kind: 'ref', alternatives: [...new Set([key, 'EMBED_API_KEY', fallback])],
+      reason: "the brain's external embedder reads its API key from it; without it recall and wisdom matching cannot embed",
+    });
+  }
+  if (embedProfileKind(config) === 'local' && isSet(env, 'OLLAMA_HOST')
+      && !isDefaultOllamaHost(env.OLLAMA_HOST!)) {
+    needs.push({
+      name: 'OLLAMA_HOST', kind: 'ref', alternatives: ['OLLAMA_HOST'],
+      reason: "the brain's local embedder uses Ollama at this host; without it the sidecar tries http://localhost:11434",
+    });
+  }
+  return needs;
+}
+
+/** (6b) sidecar-env. OpenClaw (2026.10.3, mcp-client-lifecycle) starts a
+ * plugin-declared stdio MCP server from the MCP SDK's default env (HOME,
+ * LOGNAME, PATH, SHELL, TERM, USER; a short list on Windows) plus the
+ * server's own `env`, and the plugin manifest cannot reference the user's
+ * env. A user `mcp.servers.curated-thoughts` row replaces the manifest row
+ * by name, and OpenClaw substitutes `${VAR}` in config strings, so that row
+ * is where a key is forwarded. Read-only; prints names, never values. */
+export function checkSidecarEnv(
+  brainPaths?: BrainPaths,
+  env: NodeJS.ProcessEnv = process.env,
+): CheckResult {
+  const name = 'sidecar-env';
+  const paths = brainPaths ?? ctEnvResolveBrainPaths(env);
+  const { config } = ctEnvReadBrainConfig(paths.configPath);
+  const profile = embedProfileKind(config);
+  const needs = sidecarEnvNeeds(config, env);
+  if (needs.length === 0) {
+    return _pass(name, `the sidecar needs nothing from OpenClaw's environment beyond the defaults (embed_profile: ${profile})`);
+  }
+  const cfgPath = openclawConfigPath(env);
+  let row: Record<string, unknown> | undefined;
+  try {
+    const root = (parseJson5Lenient(readFileSync(cfgPath, 'utf8')) ?? {}) as Record<string, unknown>;
+    const servers = ((root.mcp ?? {}) as Record<string, unknown>).servers as Record<string, unknown> | undefined;
+    const r = servers?.[OPENCLAW_PLUGIN_ID];
+    if (r && typeof r === 'object') row = r as Record<string, unknown>;
+  } catch {
+    // no config, or unparseable: treat as "no user row" (the manifest row)
+  }
+  const rowEnv = row?.env;
+  const forwarded = new Set(
+    rowEnv && typeof rowEnv === 'object' && !Array.isArray(rowEnv) ? Object.keys(rowEnv) : [],
+  );
+  const missing = needs.filter((n) => !n.alternatives.some((a) => forwarded.has(a)));
+  // A brain location forwarded with a different literal path sends the
+  // sidecar to another brain; a ${NAME} reference to itself is fine.
+  const envMap = (rowEnv ?? {}) as Record<string, unknown>;
+  const wrongPath = needs.filter((n) => {
+    if (n.kind !== 'path' || missing.includes(n)) return false;
+    const v = envMap[n.name];
+    if (typeof v !== 'string') return true;
+    const ref = /^\$\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}$/.exec(v.trim());
+    if (ref) return ref[1] !== n.name;
+    return normalizePath(v.trim()) !== normalizePath(n.value!);
+  });
+  if (wrongPath.length > 0) {
+    return _warn(
+      name,
+      `the mcp.servers["${OPENCLAW_PLUGIN_ID}"] row in ${cfgPath} sets `
+        + `${wrongPath.map((n) => n.name).join(', ')} to a different brain location than this environment resolves`,
+      'The sidecar would open a different brain from the one the plugin\'s own calls use. Set: '
+        + wrongPath.map((n) => `${n.name}: ${JSON.stringify(n.value)}`).join(', '),
+    );
+  }
+  if (missing.length > 0) {
+    const envRows = missing.map((n) =>
+      `        ${JSON.stringify(n.name)}: ${JSON.stringify(n.kind === 'path' ? n.value : '${' + n.name + '}')}`);
+    const where = row
+      ? `the mcp.servers["${OPENCLAW_PLUGIN_ID}"] row in ${cfgPath}`
+      : `the plugin's manifest row (no mcp.servers["${OPENCLAW_PLUGIN_ID}"] override in ${cfgPath})`;
+    return _warn(
+      name,
+      `OpenClaw does not pass its environment to the sidecar, and ${where} does not forward `
+        + `${missing.map((n) => n.name).join(', ')} (embed_profile: ${profile})`,
+      missing.map((n) => `${n.name}: ${n.reason}.`).join(' ')
+        + ` Add (or merge into) this row in ${cfgPath}; it replaces the plugin's manifest row, so keep command and args:\n`
+        + '  mcp: {\n    servers: {\n'
+        + `      "${OPENCLAW_PLUGIN_ID}": {\n        command: "${SIDECAR_NAME}",\n        args: ["--mcp"],\n        env: {\n`
+        + envRows.map((r) => '  ' + r).join(',\n') + '\n'
+        + '        },\n      },\n    },\n  },\n'
+        + 'then restart the gateway. OpenClaw substitutes ${NAME} from its environment, so only the name is written.',
+    );
+  }
+  const unresolved = needs.filter((n) => n.kind === 'ref'
+    && !n.alternatives.some((a) => forwarded.has(a) && isSet(env, a)));
+  if (unresolved.length > 0) {
+    const names = unresolved.map((n) => n.name).join(', ');
+    return _warn(
+      name,
+      `${names} forwarded by name in ${cfgPath}, but not set in this environment`,
+      'OpenClaw leaves an unset ${NAME} unresolved, so the sidecar gets no usable key. '
+        + `Set ${names} in the gateway's environment (or OpenClaw's env config), then restart the gateway.`,
+    );
+  }
+  return _pass(name, `${needs.map((n) => n.name).join(', ')} forwarded to the sidecar via ${cfgPath}`);
+}
+
+// --------------------------------------------------------------------------
 // import pre-flight
 // --------------------------------------------------------------------------
 
@@ -1077,7 +1255,7 @@ export interface RunChecksOpts {
   env?: NodeJS.ProcessEnv;
 }
 
-/** Run all 9 checks in order. Returns a list of CheckResult. */
+/** Run all 10 checks in order. Returns a list of CheckResult. */
 export function runChecks(
   opts: RunChecksOpts = {},
 ): CheckResult[] {
@@ -1095,6 +1273,7 @@ export function runChecks(
     checkBrainDir(brainPaths, env),
     checkVault(brainPaths, env),
     checkEmbedding(env),
+    checkSidecarEnv(brainPaths, env),
     checkOpenclawRegistration(env),
     checkImportPreflight({ sidecarPath, brainPaths, env }),
     checkVersionCompat(sidecarPath, { toolCount: probe.toolCount, env }),

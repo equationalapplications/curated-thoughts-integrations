@@ -13,6 +13,10 @@
 #   HERMES_CT_SIDECAR     override the sidecar command shown in the printed
 #                         MCP block (default: curated-thoughts-mcp).
 #   HERMES_CONFIG         override config path (default: $HERMES_HOME/config.yaml).
+#   CURATED_BRAIN_DIR / CURATED_BRAIN_DB / CURATED_BRAIN_CONFIG
+#                         read (never written) to find the brain config, whose
+#                         embed_profile decides which env names the printed
+#                         block forwards to the sidecar (env: section).
 #   HERMES_HOME           override the Hermes home root (default: ~/.hermes).
 #                         Profile-scoped installs use this, e.g.
 #                         HERMES_HOME=~/.hermes/profiles/ct-test bash install.sh.
@@ -36,6 +40,61 @@ DEST_DIR="${HERMES_HOME}/plugins/${PLUGIN_NAME}"
 say() { printf '%s\n' "$*"; }
 warn() { printf 'WARN: %s\n' "$*" >&2; }
 
+# Hermes passes a stdio MCP server only PATH, HOME, USER, LANG, LC_ALL, TERM,
+# SHELL, TMPDIR and XDG_* (plus the entry's own env: mapping), so whatever
+# else the sidecar needs must be forwarded by name. ct_env.py reads the brain
+# config read-only and prints one need per line: "ref<TAB>NAME" (forwarded as
+# a "${NAME}" reference; the value is never written) or
+# "path<TAB>NAME<TAB>/abs/path" (a brain location; not a secret, and the
+# sidecar does not expand ~). Exit 3 means the brain config was unreadable.
+SIDECAR_ENV_NEEDS=""
+SIDECAR_ENV_STATUS=0
+compute_sidecar_env() {
+  local py
+  py="$(command -v python3 || true)"
+  if [ -z "$py" ]; then
+    SIDECAR_ENV_STATUS=127
+    return 0
+  fi
+  SIDECAR_ENV_NEEDS="$("$py" -I "${SCRIPT_SRC}/scripts/ct_env.py" sidecar-env 2>/dev/null)" \
+    || SIDECAR_ENV_STATUS=$?
+  return 0
+}
+
+yaml_quote() {
+  local s="$1"
+  s="${s//\\/\\\\}"
+  s="${s//\"/\\\"}"
+  printf '"%s"' "$s"
+}
+
+env_block() {
+  local kind name value
+  if [ -n "$SIDECAR_ENV_NEEDS" ]; then
+    say "    # Hermes does not pass its environment to MCP servers: forward what"
+    say "    # the sidecar needs. \${NAME} is resolved by Hermes from its own"
+    say "    # environment or ~/.hermes/.env; only the name is stored here."
+    say "    env:"
+    while IFS=$'\t' read -r kind name value; do
+      [ -n "$name" ] || continue
+      if [ "$kind" = "path" ]; then
+        say "      ${name}: $(yaml_quote "$value")"
+      else
+        say "      ${name}: \"\${${name}}\""
+      fi
+    done <<<"$SIDECAR_ENV_NEEDS"
+  fi
+  if [ -z "$SIDECAR_ENV_NEEDS" ] || [ "$SIDECAR_ENV_STATUS" -ne 0 ]; then
+    say "    # External embedder (brain embed_profile.type \"external\")? Hermes"
+    say "    # does not pass its environment to MCP servers, so forward the key"
+    say "    # by name (OPENROUTER_API_KEY for OpenRouter, else OPENAI_API_KEY;"
+    say "    # EMBED_API_KEY overrides both). Only reference a variable that is"
+    say "    # set: Hermes passes an unset \${NAME} through as literal text."
+    say "    # env:"
+    say "    #   OPENROUTER_API_KEY: \"\${OPENROUTER_API_KEY}\""
+  fi
+}
+
 mcp_block() {
   cat <<EOF
 mcp_servers:
@@ -43,6 +102,7 @@ mcp_servers:
     command: ${SIDECAR_CMD}
     args: ["--mcp"]
 EOF
+  env_block
 }
 
 # True if a top-level "mcp_servers:" key exists in the config.
@@ -124,6 +184,12 @@ check_mcp_registration() {
   if has_mcp_servers_section; then
     if has_curated_thoughts_entry; then
       say "OK: mcp_servers.${PLUGIN_NAME} already present — nothing changed."
+      if [ -n "$SIDECAR_ENV_NEEDS" ]; then
+        say "This brain needs these forwarded to the sidecar (names only):"
+        env_block
+        say "Make sure the existing entry carries them; ct_doctor.py check"
+        say "reports any that are missing (check: sidecar-env)."
+      fi
       return 0
     fi
     say "An 'mcp_servers:' section exists but has no '${PLUGIN_NAME}' key."
@@ -231,6 +297,7 @@ main() {
   say "curated-thoughts plugin installer (idempotent, no sudo)"
   say ""
   install_plugin_files
+  compute_sidecar_env
   check_mcp_registration
   check_plugin_enablement
   check_skill_collisions

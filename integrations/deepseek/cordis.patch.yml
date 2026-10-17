@@ -36,3 +36,13 @@
         args: [--mcp]
         env:
           CURATED_BRAIN_DIR: !!js process.env.CURATED_BRAIN_DIR ?? ((process.env.HOME ?? process.env.USERPROFILE ?? '~') + '/.brain')
+          # dsh-mcp-client starts the sidecar from DSH's environment minus
+          # every name matching /KEY|PASSWORD|SECRET|TOKEN/i (dsh-subprocess
+          # scrubbedParentEnv at 0.2.0-rc.2), which drops an external
+          # embedder's key. Forward the names CT reads it from (EMBED_API_KEY,
+          # then OPENROUTER_API_KEY or OPENAI_API_KEY), resolved from DSH's
+          # own environment at composition time; nothing is stored here. An
+          # unset one becomes '', which CT treats as unset.
+          EMBED_API_KEY: !!js process.env.EMBED_API_KEY ?? ''
+          OPENROUTER_API_KEY: !!js process.env.OPENROUTER_API_KEY ?? ''
+          OPENAI_API_KEY: !!js process.env.OPENAI_API_KEY ?? ''
