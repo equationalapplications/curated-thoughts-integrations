@@ -198,7 +198,7 @@ for name, cmd, q in (
         ("python -m quoted module", "python -m 'secretmod'", "python"), ("python -m capitalized module", "python -m MyPkg", "python"),
         ("python script", "python deploy.py", "python")):
     v("cmd: " + name, "terminal", run(cmd), q)
-v("cmd: python -m a project package", "terminal", run("python -m mypkg.cli --key v"), "python mypkg.cli", fs=PFS + [P + "/mypkg/__init__.py"])
+v("cmd: python -m a project package sends the top package only", "terminal", run("python -m mypkg.cli --key v"), "python mypkg", fs=PFS + [P + "/mypkg/__init__.py"])
 v("cmd: python -m a src-layout package", "terminal", run("python -m app"), "python app", fs=PFS + [P + "/src/app/__init__.py"])
 v("cmd: python -m a module file in the project", "terminal", run("python -m tool"), "python tool", fs=PFS + [P + "/tool.py"])
 v("cmd: python -m a package outside the project", "terminal", run("python -m mypkg"), "python", cwd="/srv/none", fs=["/srv/mypkg/__init__.py"])
@@ -308,6 +308,40 @@ v("sandbox HOME is still never a root", "read_file", rd("/srv/repo/.home/x/a.md"
   env={"USER": "svc", "HOME": "/srv/repo/.home"}, fs=["/srv/repo/.git/", "/srv/repo/.home/.git/"])
 v("pw_dir outside a homes location still blocks its ancestors", "read_file", rd("svc/notes.md"), None, cwd="/opt",
   env={"USER": "ci"}, fs=["/opt/.git/", "/opt/svc/"], system_home="/opt/svc")
+
+# ---- 0.6.7 (Privacy amendment 6) ----
+v("cmd: python -m a test submodule sends the top package only", "terminal",
+  run("python -m tests.acme_merger_due_diligence"), "python tests", fs=PFS + [P + "/tests/__init__.py"])
+v("cmd: python -m a deep src submodule", "terminal", run("python -m app.clients.acme"), "python app",
+  fs=PFS + [P + "/src/app/clients/acme.py"])
+v("cmd: python -m a known module is sent as listed", "terminal", run("python3 -m http.server"), "python3 http.server")
+for name, cmd, q in (("-u before -m", "python -u -m pytest", "python pytest"),
+                     ("-X opt before -m", "python -X dev -m pytest -q", "python pytest"),
+                     ("-W opt before -m", "python3 -W ignore -B -m unittest", "python3 unittest"),
+                     ("-I -s -E -q -O", "python -I -s -E -q -O -m pip list", "python pip"),
+                     ("a script after flags", "python -u deploy.py", "python"),
+                     ("python3.11.2 is not an interpreter name", "python3.11.2 -m pytest", None),
+                     ("pythonista is not python", "pythonista -m pytest", "pythonista"),
+                     ("git.exe", "git.exe status", "git status"), ("npm.cmd", "npm.cmd test", "npm test"),
+                     ("make.bat", "make.bat build", "make build"), ("tool.com", "tool.com run", "tool"),
+                     ("script.ps1 is still a script", "deploy.ps1 now", None),
+                     ("a path to an .exe", "C:\\tools\\git.exe status", None)):
+    v("cmd: " + name, "terminal", run(cmd), q)
+# a custom HOME inside a project above it still blocks the project (not a sandbox dir)
+v("home: custom HOME under a project root blocks it", "read_file", rd("/d/work/home/Documents/taxes.pdf"), None,
+  cwd="/d/work/tools", env={"USER": "al", "HOME": "/d/work/home", "USERPROFILE": "/Users/al"}, fs=["/d/work/.git/"])
+v("home: custom HOME blocks it for relative paths too", "read_file", rd("../home/Documents/taxes.pdf"), None,
+  cwd="/d/work/tools", env={"USER": "al", "HOME": "/d/work/home", "USERPROFILE": "/Users/al"}, fs=["/d/work/.git/"])
+v("home: custom HOME blocks even a project file elsewhere in the root", "read_file", rd("README.md"), None,
+  cwd="/d/work", env={"USER": "al", "HOME": "/d/work/home"}, fs=["/d/work/.git/"])
+for sub in (".nix-home", ".cache/home", "tmp/home", ".sandbox"):
+    v("home: sandbox HOME %s inside the repo" % sub, "read_file", rd("src/x.py"), "src/x.py", cwd="/srv/repo",
+      env={"USER": "svc", "HOME": "/srv/repo/" + sub}, fs=["/srv/repo/.git/"])
+for sub in ("home", "sub/.home", "build/home"):
+    v("home: HOME %s inside the repo is not a sandbox" % sub, "read_file", rd("src/x.py"), None, cwd="/srv/repo",
+      env={"USER": "svc", "HOME": "/srv/repo/" + sub}, fs=["/srv/repo/.git/"])
+v("home: a real user home inside a root still blocks it", "read_file", rd("src/x.py"), None, cwd="/srv/repo",
+  env={"USER": "svc", "HOME": "/srv/repo/.home"}, fs=["/srv/repo/.git/"], system_home="/srv/repo/.home")
 
 names = [c["name"] for c in V]
 assert len(names) == len(set(names)), [n for n in names if names.count(n) > 1]
