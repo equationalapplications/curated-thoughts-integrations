@@ -14,6 +14,7 @@ import {
   runUserTurn,
   runToolResult,
 } from './wisdom-live/adapter.js';
+import { DshActivity, activityMessage } from './wisdom-live/activity.js';
 import { Breaker } from '@equational-applications/ct-wisdom-core';
 import { dshVerboseRecorder } from './verbose.js';
 import type { MemoRecord } from './wisdom-live/adapter.js';
@@ -134,6 +135,7 @@ interface DshContextExtensions {
   on(event: 'agent/created', listener: (payload: AgentCreatedPayload) => Promise<void>): unknown;
   on(event: 'agent/pre-step', listener: PreStepListener): unknown;
   on(event: 'tools/post-execute', listener: PostExecuteListener): unknown;
+  on(event: 'tools/pre-execute', listener: PreExecuteListener): unknown;
   systemPrompt: {
     context(c: {
       name: string;
@@ -197,7 +199,19 @@ type PreStepListener = (
 interface ToolExecutionLike {
   name: string;
   agent?: AgentHandle;
+  /** Provider call id (`ToolExecutionInput.callId`). */
+  callId?: string;
+  /** Parsed model arguments. */
+  arguments?: unknown;
+  /** Set only on transport sub-dispatches (PTC `run_code` inner calls). */
+  parent?: unknown;
 }
+
+/** `tools/pre-execute` waterfall (dsh-tools types/index.d.ts:47); the decision is passed through. */
+type PreExecuteListener = (
+  exec: ToolExecutionLike,
+  next: () => Promise<unknown>,
+) => Promise<unknown>;
 
 interface ToolExecutionResultLike {
   isError: boolean;
@@ -322,6 +336,19 @@ export function apply(ctx: Context, config: Config): void {
     recordVerbose: dshVerboseRecorder(ctx, process.env),
   });
   const breaker = new Breaker();
+  // Autonomous-work delivery shares the adapter (ledger, capability latch,
+  // verbose recorder) and the breaker with the user-turn path (rule 4).
+  const activity = new DshActivity({
+    adapter,
+    breaker,
+    beforeLedger: (agentId) => noteMemoBlock(agentId, liveMemoBlockFor(agentId)),
+    log: (line) => {
+      const factory = (ctx as { logger?: unknown }).logger;
+      if (typeof factory !== 'function') return;
+      const named = (factory as (n: string) => { debug?: (m: string) => void } | undefined).call(ctx, 'curated-thoughts');
+      named?.debug?.(line);
+    },
+  });
   // Memo-record parity (N5): the live ledger needs the v1 bootstrap ids. The
   // section's memo is module state; mirror it here by recording ids whenever
   // a NEW block is rendered for an agent id (see renderWisdomDeps below).
@@ -361,7 +388,9 @@ export function apply(ctx: Context, config: Config): void {
         const claimedUserText = payload.messages
           .map((m) => userMessageText(m))
           .join('\n');
+        let userTurnRan = false;
         if (!liveTurns.has(turnKey)) {
+          userTurnRan = true;
           liveTurns.add(turnKey);
           while (liveTurns.size > 512) {
             const oldest = liveTurns.values().next();
@@ -406,6 +435,21 @@ export function apply(ctx: Context, config: Config): void {
                 source: { kind: 'curated-thoughts-wisdom' },
               }),
             ];
+          }
+        }
+        // Autonomous-work delivery (spec 2026-10-16-dsh-autonomous-work-
+        // wisdom-design.md): pre-step runs before EVERY model step; on step
+        // >= 2 the previous step's tool calls may bring one fact. Never in
+        // the same call as the user-turn path, so the two cannot both
+        // deliver into one decision.
+        if (!userTurnRan && payload.step >= 2 && Array.isArray(decision.messages)) {
+          const block = await activity.deliver(
+            payload.agent,
+            Array.isArray(payload.messages) ? payload.messages : [],
+            decision.messages,
+          );
+          if (block !== null) {
+            decision.messages = [...decision.messages, activityMessage(block)];
           }
         }
       } catch (error) {
@@ -468,6 +512,19 @@ export function apply(ctx: Context, config: Config): void {
     },
   );
   const liveTurns = new Set<string>();
+
+  // Autonomous-work prefetch — `tools/pre-execute` (waterfall). The first
+  // call of a step with a new activity key starts the step's one CT match so
+  // it overlaps tool execution; the next pre-step awaits it. Observe only:
+  // the tool decision is always next()'s, untouched.
+  dsh.on('tools/pre-execute', async (exec: ToolExecutionLike, next: () => Promise<unknown>) => {
+    try {
+      activity.prefetch(exec);
+    } catch {
+      // Fail-open: prefetch never blocks or changes a tool call.
+    }
+    return next();
+  });
 
   // (4) Skills. dsh skills are kebab-case Markdown; the three SKILL.md files
   // are ported verbatim from Hermes — the content is agent-generic and dsh

@@ -23,6 +23,7 @@ vi.mock('../src/wisdom-live/adapter.js', async (importOriginal) => {
   return { ...actual, runUserTurn: vi.fn(async () => null) };
 });
 import { runUserTurn } from '../src/wisdom-live/adapter.js';
+import { DshActivity } from '../src/wisdom-live/activity.js';
 
 // The ctx mock encodes the real DSH 0.2.0 runtime surface: there is NO
 // `ctx.plugin(string, ...)` (cordis rejects a string plugin — the MCP client
@@ -55,6 +56,9 @@ function mockCtx() {
   const postExecuteListeners: Array<
     (exec: unknown, result: unknown, next: () => Promise<unknown>) => Promise<unknown>
   > = [];
+  const preExecuteListeners: Array<
+    (exec: unknown, next: () => Promise<unknown>) => Promise<unknown>
+  > = [];
   return {
     ctx: {
       skills: {
@@ -86,10 +90,15 @@ function mockCtx() {
           postExecuteListeners.push(
             listener as (e: unknown, r: unknown, next: () => Promise<unknown>) => Promise<unknown>,
           );
+        } else if (event === 'tools/pre-execute') {
+          preExecuteListeners.push(
+            listener as (e: unknown, next: () => Promise<unknown>) => Promise<unknown>,
+          );
         }
         return () => {};
       }),
     },
+    preExecuteListeners,
     skillRegistrations,
     contextRegistrations,
     sectionRegistrations,
@@ -171,10 +180,69 @@ describe('apply', () => {
     expect(typeof m.createdListeners[0]).toBe('function');
   });
 
-  it('registers the live-delivery listeners: one pre-step, one post-execute', () => {
+  it('registers the live-delivery listeners: one pre-step, one pre-execute, one post-execute', () => {
     apply(m.ctx as unknown as Parameters<typeof apply>[0], {} as Parameters<typeof apply>[1]);
     expect(m.preStepListeners.length).toBe(1);
+    expect(m.preExecuteListeners.length).toBe(1);
     expect(m.postExecuteListeners.length).toBe(1);
+  });
+
+  it('pre-execute prefetches and passes the tool decision through untouched (even if prefetch throws)', async () => {
+    const prefetch = vi.spyOn(DshActivity.prototype, 'prefetch');
+    apply(m.ctx as unknown as Parameters<typeof apply>[0], {} as Parameters<typeof apply>[1]);
+    const decision = { kind: 'allow' };
+    const exec = { callId: 'c1', name: 'bash', arguments: { command: 'ls' }, agent: { id: 'a' } };
+    expect(await m.preExecuteListeners[0](exec, async () => decision)).toBe(decision);
+    expect(prefetch).toHaveBeenCalledWith(exec);
+    prefetch.mockImplementationOnce(() => {
+      throw new Error('boom');
+    });
+    expect(await m.preExecuteListeners[0](exec, async () => decision)).toBe(decision);
+    prefetch.mockRestore();
+  });
+
+  it('step >= 2: appends the activity block as an identified user message with its own source kind', async () => {
+    const block = '## Curated Thoughts — relevant to this step\n_for: run pnpm test_\n\n<!-- ct-fact:f1 --> **T** (provenance: stated)\nbody';
+    const deliver = vi.spyOn(DshActivity.prototype, 'deliver').mockResolvedValue(block);
+    vi.mocked(runUserTurn).mockClear();
+    apply(m.ctx as unknown as Parameters<typeof apply>[0], {} as Parameters<typeof apply>[1]);
+    const agent = { id: 'agent-1', session: { deriveMessages: () => [] } };
+    // Step 1 of turn 1: the user-turn path only.
+    await m.preStepListeners[0]({ agent, messages: [], turn: 1, step: 1 }, async () => ({ kind: 'enter', messages: [] }));
+    expect(deliver).not.toHaveBeenCalled();
+    expect(runUserTurn).toHaveBeenCalledTimes(1);
+    // Step 2: the activity path only.
+    const decision = (await m.preStepListeners[0](
+      { agent, messages: [], turn: 1, step: 2 },
+      async () => ({ kind: 'enter', messages: [] }),
+    )) as { messages: Array<Record<string, unknown>> };
+    expect(runUserTurn).toHaveBeenCalledTimes(1);
+    expect(deliver).toHaveBeenCalledTimes(1);
+    expect(decision.messages).toHaveLength(1);
+    const msg = decision.messages[0];
+    expect(msg.role).toBe('user');
+    expect(typeof msg.id).toBe('string');
+    expect(msg.id).not.toBe('');
+    expect(msg.source).toEqual({ kind: 'curated-thoughts-wisdom-activity' });
+    expect(msg.content).toEqual([{ type: 'text', text: block }]);
+    // A rejected step is never touched.
+    const rejected = await m.preStepListeners[0]({ agent, messages: [], turn: 1, step: 3 }, async () => ({ kind: 'reject' }));
+    expect(rejected).toEqual({ kind: 'reject' });
+    expect(deliver).toHaveBeenCalledTimes(1);
+    deliver.mockRestore();
+  });
+
+  it('step >= 2 with no activity block leaves the decision as next() returned it', async () => {
+    const deliver = vi.spyOn(DshActivity.prototype, 'deliver').mockResolvedValue(null);
+    apply(m.ctx as unknown as Parameters<typeof apply>[0], {} as Parameters<typeof apply>[1]);
+    const agent = { id: 'agent-2', session: { deriveMessages: () => [] } };
+    await m.preStepListeners[0]({ agent, messages: [], turn: 1, step: 1 }, async () => ({ kind: 'enter', messages: [] }));
+    const inner = { kind: 'enter', messages: [{ id: 'ctx' }] };
+    const out = await m.preStepListeners[0]({ agent, messages: [], turn: 1, step: 2 }, async () => inner);
+    expect(out).toEqual({ kind: 'enter', messages: [{ id: 'ctx' }] });
+    expect(deliver.mock.calls[0]![1]).toEqual([]);
+    expect(deliver.mock.calls[0]![2]).toEqual([{ id: 'ctx' }]);
+    deliver.mockRestore();
   });
 
   it('appends the wisdom block as an identified user-role message (DSH session replay contract)', async () => {
