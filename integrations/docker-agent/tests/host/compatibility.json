@@ -1,0 +1,8 @@
+{
+  "dockerAgent": {
+    "version": "v1.150.0",
+    "asset": "docker-agent-linux-amd64",
+    "sha256": "791fa6bac9f829847f00ab948f838bf54d11e0830988a5e5bce88d65ea65f2d1"
+  },
+  "pinNote": "The single pin for the docker-agent host contract. Both ci.yml (host-contract-docker-agent) and release.yml (host-contract) read version, asset and sha256 from here, download the asset and refuse it unless its sha256 matches. Bump all three together."
+}
