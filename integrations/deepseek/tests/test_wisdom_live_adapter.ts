@@ -120,6 +120,9 @@ describe('adapter abort plumbing', { timeout: 30_000 }, () => {
     try {
       const a = new DshWisdomAdapter({ env: { ...process.env }, discover: () => ({ path: ct.script, failure: null }) });
       const breaker = new Breaker();
+      let failures = 0;
+      const recordFailure = breaker.recordFailure.bind(breaker);
+      breaker.recordFailure = () => { failures++; recordFailure(); };
       const activity = new DshActivity({ adapter: a, breaker, env: { USER: 'alice', HOME: '/Users/alice' } });
       const mk = (n: number) => {
         const callId = `call-${n}`;
@@ -136,11 +139,13 @@ describe('adapter abort plumbing', { timeout: 30_000 }, () => {
       activity.prefetch({ callId: one.callId, name: 'bash', arguments: { command: 'pnpm test1' }, agent: one.agent });
       const gpid = await ct.grandchild();
       expect(alive(gpid)).toBe(true);
+      const firstPlan = (activity as unknown as { slots: Map<string, { plan: { promise: Promise<unknown> } | null }> }).slots.get('agent-1')!.plan!;
       // A newer step replaces the slot: the first plan is abandoned.
       const two = mk(2);
       activity.prefetch({ callId: two.callId, name: 'bash', arguments: { command: 'pnpm test2' }, agent: two.agent });
       expect(await waitFor(() => !alive(gpid), 3000)).toBe(true);
-      expect(breaker.isOpen()).toBe(false);
+      await firstPlan.promise; // the abandoned match settles
+      expect(failures).toBe(0); // abandoned is never a breaker failure
     } finally {
       ct.cleanup();
     }

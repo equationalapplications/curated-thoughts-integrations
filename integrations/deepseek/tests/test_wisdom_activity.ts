@@ -576,7 +576,7 @@ const flush = async () => {
   for (let i = 0; i < 5; i++) await new Promise((r) => setTimeout(r, 0));
 };
 
-describe('budget expiry aborts the query (core recordActivityBudgetMiss)', () => {
+describe('budget expiry aborts the query (cancel(\'budget\') charges the miss)', () => {
   it('one expiry: the child is aborted, exactly ONE breaker failure, budget reported', async () => {
     let now = 1000;
     const breaker = new CountingBreaker();
