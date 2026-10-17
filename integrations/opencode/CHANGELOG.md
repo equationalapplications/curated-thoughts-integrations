@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+## 0.4.1 — 2026-10-17
+
+Robustness and cost fixes for autonomous-work delivery (post-merge review of
+0.4.0). Delivery semantics are unchanged.
+
+- Cheap gates first: an unknown session, a latched-off `ct`, or an open
+  breaker now costs no `session.messages` fetch.
+- No spawn with less than 200 ms of the 3 s budget left; nothing is recorded
+  as tried, so the activity can trigger later.
+- A failing `session.get` is remembered for 10 s instead of being retried on
+  every tool call, and the plan-time wait is capped at 300 ms.
+- An aborted spawn reports `aborted: true`, which the shared core
+  classifies as its own outcome and never counts toward the breaker. The
+  abort listener is removed on every exit path. (Counting a budget miss as
+  one breaker failure comes from the shared core in a follow-up, for every
+  host alike.)
+- Internal: the gate host delegates explicitly to the adapter; the unused MCP
+  placement branches are gone (only builtin tools are planned); one expiry
+  rule for not-yet-persisted ids; one shared object guard.
+
 ## 0.4.0 — 2026-10-17
 
 - Added: Intuitive Wisdom during autonomous work. While the agent works on

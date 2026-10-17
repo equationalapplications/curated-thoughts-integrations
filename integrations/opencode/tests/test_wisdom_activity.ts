@@ -64,7 +64,7 @@ interface SimOptions {
    * CT answer for an activity query (`--max 1`). 'hang' runs until the call
    * is aborted (then exits after `killDelayMs`): the budget path.
    */
-  answer?: (query: string) => Entry[] | 'hang' | 'timeout';
+  answer?: (query: string) => Entry[] | 'hang' | 'timeout' | 'aborted';
   killDelayMs?: number;
   /** The activity budget (default 3 s). */
   budgetMs?: number;
@@ -117,6 +117,7 @@ function makeSim(opts: SimOptions = {}) {
         });
       }
       if (a === 'timeout') return { code: null, stdout: '', stderr: '', spawnError: false, timedOut: true };
+      if (a === 'aborted') return { code: null, stdout: '', stderr: '', spawnError: false, timedOut: false, aborted: true };
       return done(JSON.stringify({ entries: a, corrections: [] }));
     }
     return done(JSON.stringify({ entries: opts.userAnswer?.(query) ?? [], corrections: [] }));
@@ -643,6 +644,12 @@ describe('0.4.1 polish (post-merge review of 0.4.0)', () => {
     const t0 = Date.now();
     await sim.hooks['tool.execute.before']({ tool: 'bash', sessionID: 'P', callID: 'c1' }, { args: { command: 'pnpm test' } });
     expect(Date.now() - t0).toBeLessThan(1000);
+  });
+
+  it('9 an abort from elsewhere (not our budget) never counts against the breaker', async () => {
+    const sim = makeSim({ answer: () => 'aborted' });
+    for (const command of ['a1', 'a2', 'a3', 'a4']) await sim.step('P', [{ tool: 'bash', args: { command } }]);
+    expect(sim.activityCalls().length).toBe(4);
   });
 
   it('3 deliver reuses the plan-time lookup (one session.get per session)', async () => {

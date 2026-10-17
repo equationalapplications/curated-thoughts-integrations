@@ -322,8 +322,10 @@ export class OpenCodeActivity {
     }
     this.tracker.admit(sessionID, step, activity.key);
     hold(start.match);
-    // On expiry the ct child is killed (abort), and the query counts as
-    // `budget`: never a breaker failure.
+    // On expiry the ct child is killed (abort); the query reports `budget`.
+    // Whether a budget miss counts toward the breaker is decided in the
+    // shared core (a follow-up moves that rule there for every host), never
+    // here; an `aborted` outcome from anywhere else never counts.
     const match = await settleWithin(start.match, left(), () => abort.abort());
     // No second fetch: ids that can join the context during the query are
     // recorded in memory (adapter `refresh`).
