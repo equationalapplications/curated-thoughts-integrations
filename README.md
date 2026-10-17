@@ -117,10 +117,12 @@ keyed to what the agent is doing:
   Curated Thoughts' own tools never trigger it.
 - **What is sent to Curated Thoughts:** only the bare target, for example
   `src/billing/invoice.py`, `pnpm test` or a search pattern. For shell
-  commands that is the program plus the word right after it, and only when
-  that word is a plain lowercase verb such as `test`, `rebase` or
-  `run-script`. It is never a path, a file name, a flag's value or the rest
-  of the command line, so `pytest tests/billing` sends `pytest`. The one
+  commands that is the program name (letters, digits and `._+-` only, not
+  key-shaped, not naming you, or nothing is sent) plus the word right after
+  it, but only when that word is a plain lowercase verb such as `test`,
+  `rebase` or `run-script` that is not key-shaped and does not name you. It
+  is never a path, a file name, a flag's value or the rest of the command
+  line, so `pytest tests/billing` sends `pytest`. The one
   exception is `python -m <module>`, which sends the module name
   (`python3 pytest`).
   File contents, tool output, diffs and the agent's own words are never sent.
