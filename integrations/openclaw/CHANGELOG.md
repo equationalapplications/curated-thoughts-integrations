@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 0.2.1 — 2026-10-16
+
+- Fixed (shared `ct-wisdom-core`): a live delivery could show a fact twice
+  when CT returned a correction whose own id was already in context, or the
+  same id both as an entry and as a correction. A correction now rides only
+  when it supersedes an id in context and is itself new, and each id is
+  delivered at most once per block (the Hermes reference rule). The core
+  also gained the autonomous-work activity API for a later OpenClaw leg;
+  OpenClaw does not call it yet, so there is no other behavior change.
+
 ## 0.2.0 — 2026-10-16
 
 - Added: Verbose mode for Intuitive Wisdom (opt-in, off by default). With

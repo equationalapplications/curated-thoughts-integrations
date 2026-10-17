@@ -617,10 +617,11 @@ elif [ -z "${ZAI_API_KEY:-}" ]; then
 else
   export CURATED_VAULT_ROOT="$HOME/vault"
   cfg="$HOME/.brain/config.json"
-  jq --arg k "$ZAI_API_KEY" '
+  # jq reads the key as env.ZAI_API_KEY, so it never appears in an argv.
+  jq '
     .embed_profile = {type: "external", base_url: "https://openrouter.ai/api/v1", model: "qwen/qwen3-embedding-4b"}
     | .generation = {provider: "external", external_url: "https://api.z.ai/api/coding/paas/v4",
-                     model_name: "GLM-5.3-FLASH", api_key: $k, model_path: null, timeout_secs: 120}' \
+                     model_name: "GLM-5.3-FLASH", api_key: env.ZAI_API_KEY, model_path: null, timeout_secs: 120}' \
     "$cfg" >"$cfg.tmp" && mv "$cfg.tmp" "$cfg"
   check 'brain config: external qwen3-embedding-4b + ZAI GLM-5.3-FLASH librarian' \
     sh -c "jq -e '.embed_profile.model == \"qwen/qwen3-embedding-4b\" and .generation.model_name == \"GLM-5.3-FLASH\"' '$cfg' >/dev/null"
@@ -640,6 +641,12 @@ else
     'Release branches follow the pattern release/YYYY.MM, cut on the first business day of the month.'
   deposit oncall 'On-call handoff happens Tuesdays at 10:00' \
     'The on-call rotation hands off every Tuesday at 10:00 in the ops channel.'
+  # Facts for the autonomous-work scenario below: rules that name the bare
+  # targets the agent will touch (A6: the gate opens on shared surface text).
+  deposit pnpm 'Run pnpm test before every commit' \
+    'In this repository, always run pnpm test before committing. CI rejects pushes when pnpm test fails.'
+  deposit envlocal '.env.local holds local secrets and is never committed' \
+    'The .env.local file holds local-only secrets. Never commit .env.local; it is listed in .gitignore.'
   ct wisdom scheme activate instr1 >>"$OUT/gate-deposit.log" 2>&1
   ct wisdom scheme status >"$OUT/gate-scheme.txt" 2>&1
   sed 's/^/      /' "$OUT/gate-scheme.txt"
@@ -678,6 +685,13 @@ exec '$real_ct' "\$@"
 EOF
   chmod +x "$HOME/ct-tap/ct"
   gate_path="$HOME/ct-tap:$PATH"
+  # User-turn calls ask for `--max 2`, autonomous-work (activity) calls for
+  # `--max 1`. tap_lines <ARGV|OUT> <max>: the tap lines of one kind only, so
+  # an activity query in the same run never shifts the user-turn counts.
+  tap_lines() {
+    awk -v want="$1 " -v max="--max $2 " \
+      '/^ARGV /{keep = index($0, max) > 0} keep && index($0, want) == 1 {print}' "$TAP"
+  }
   wisdom_msgs='select(.type == "user/message" and .data.source.kind == "curated-thoughts-wisdom")'
   gate_turn() { # gate_turn <tag> <prompt> [session-id]
     local sid_args=()
@@ -692,8 +706,10 @@ EOF
   NSID=$(jq -r 'select(.type == "session") | .sessionId' "$OUT/gate-neg.jsonl" 2>/dev/null | head -1)
   dump_session_log_by_id "$NSID" "$OUT/gate-neg.session.jsonl"
   check "(b) negative-control run exits 0 (rc=$neg_rc)" test "$neg_rc" -eq 0
-  check '(b) plugin asked the real gate and CT answered no entries' \
-    sh -c "grep -q '^OUT .*\"entries\":\[\]' '$TAP' && [ \"\$(grep -c '^ARGV' '$TAP')\" -eq 1 ]"
+  neg_asked_and_closed() {
+    [ "$(tap_lines OUT 2 | grep -c '"entries":\[\]')" -eq 1 ] && [ "$(tap_lines ARGV 2 | grep -c .)" -eq 1 ]
+  }
+  check '(b) plugin asked the real gate and CT answered no entries' neg_asked_and_closed
   check '(b) no wisdom message in the negative-control session' \
     sh -c "test -s '$OUT/gate-neg.session.jsonl' && [ \"\$(jq -c '$wisdom_msgs' '$OUT/gate-neg.session.jsonl' | grep -c .)\" -eq 0 ]"
 
@@ -709,7 +725,7 @@ EOF
   echo "      turn 1 delivered ids: $(printf '%s ' $T1_IDS)"
   ids_from_t1_gate() { # every delivered id is in CT's own answer for turn 1
     local out id
-    out=$(grep '^OUT' "$TAP" | sed -n 2p)
+    out=$(tap_lines OUT 2 | sed -n 2p)
     [ -n "$T1_IDS" ] || return 1
     for id in $T1_IDS; do printf '%s' "$out" | grep -qF "\"id\":\"$id\"" || return 1; done
   }
@@ -735,11 +751,11 @@ EOF
   gate_turn gate-t3 'Once more: what tire pressure do the fleet vehicles run at?' "$GSID"; t3_rc=$?
   dump_session_log_by_id "$GSID" "$OUT/gate-t3.session.jsonl"
   check "(c) turns 2 and 3 (--session-id) exit 0 (rc=$t2_rc/$t3_rc)" sh -c "[ $t2_rc -eq 0 ] && [ $t3_rc -eq 0 ]"
-  calls=$(grep -c '^ARGV' "$TAP")
+  calls=$(tap_lines ARGV 2 | grep -c .)
   check "(c) the plugin asked the real gate once per turn (calls=$calls, incl. the negative control)" test "$calls" -eq 4
-  excludes_t1_ids() { # excludes_t1_ids <tap call number>
+  excludes_t1_ids() { # excludes_t1_ids <user-turn tap call number>
     local line id
-    line=$(grep '^ARGV' "$TAP" | sed -n "${1}p")
+    line=$(tap_lines ARGV 2 | sed -n "${1}p")
     [ -n "$T1_IDS" ] || return 1
     for id in $T1_IDS; do printf '%s' "$line" | grep -qF -- "--exclude=$id" || return 1; done
   }
@@ -765,6 +781,150 @@ EOF
   echo "      wisdom messages across the session: $(jq -c "$wisdom_msgs" "$OUT/gate-t3.session.jsonl" | grep -c .)"
   echo "      real-gate tap (argv / CT answer / gate decision):"
   sed -e 's/^/        /' "$TAP" | cut -c1-400
+
+  # -------------------------------------------------------------------------
+  section 'autonomous-work delivery through the real gate (0.6.0, verbose on)'
+  # Spec: docs/superpowers/specs/2026-10-16-dsh-autonomous-work-wisdom-design.md.
+  # ONE user message makes the agent work on its own: it reads TASK.md and
+  # does five tool steps. Each model step's tool calls may bring one fact at
+  # the NEXT agent/pre-step (step >= 2), as a persisted user-role message
+  # with source kind curated-thoughts-wisdom-activity. The checks mirror the
+  # Hermes harness (integrations/hermes/tests/e2e/e2e.sh):
+  #   1. an activity message arrives, exactly once per fact, marker first;
+  #   2. a later step on the same activity key neither re-queries nor
+  #      re-delivers (`pnpm test` twice; `.env.local` written then read);
+  #   3. the activity message is an identified user-role message, and the
+  #      session continues with --session-id in a new process (no re-delivery);
+  #   4. CT's own tools never trigger a query;
+  #   5. every activity query CT receives is the bare target, after `--`;
+  #   plus verbose mode: the JSONL line for an activity delivery (channel
+  #   activity) and the logger notice.
+  W="$HOME/work"
+  mkdir -p "$W"
+  cat >"$W/package.json" <<'EOF'
+{"name": "e2e-work", "version": "1.0.0", "scripts": {"test": "echo all 3 tests passed"}}
+EOF
+  cat >"$W/TASK.md" <<'EOF'
+# Task
+
+Do these steps in order. Make exactly ONE tool call per step and wait for its
+result before the next step. Do not skip, merge or parallelize steps.
+
+1. Use the bash tool to run: pnpm test
+2. Use the bash tool to run: pnpm test --silent
+3. Use the write tool to create the file .env.local with the content: FOO=bar
+4. Use the read tool to read the file .env.local
+5. Use the Curated Thoughts curated_recall_context tool with the query: pnpm test
+
+When all five steps are done, reply with the single word DONE.
+EOF
+  : >"$TAP"
+  VLOG="$OUT/act-verbose.jsonl"
+  : >"$VLOG"
+  act_start=$(date -Iseconds)
+  (cd "$W" && CT_WISDOM_VERBOSE=1 CT_WISDOM_VERBOSE_LOG="$VLOG" PATH="$gate_path" timeout 900 \
+    dsh --profile "$PROFILE" --json 'Read the file TASK.md in the current directory and do exactly what it says.' \
+    >"$OUT/act1.jsonl" 2>"$OUT/act1.err")
+  act1_rc=$?
+  check "autonomous run exits 0 (rc=$act1_rc)" test "$act1_rc" -eq 0
+  ASID=$(jq -r 'select(.type == "session") | .sessionId' "$OUT/act1.jsonl" 2>/dev/null | head -1)
+  echo "      session: ${ASID:-<none>} (started $act_start)"
+  dump_session_log_by_id "$ASID" "$OUT/act1.session.jsonl"
+  check 'autonomous session log captured' test -s "$OUT/act1.session.jsonl"
+  cp "$TAP" "$OUT/act1.tap.log"
+  # Turn 2: the same session continued in a NEW process (decision messages
+  # must replay; the ledger is rebuilt from the log).
+  (cd "$W" && CT_WISDOM_VERBOSE=1 CT_WISDOM_VERBOSE_LOG="$VLOG" PATH="$gate_path" timeout 600 \
+    dsh --profile "$PROFILE" --json --session-id "$ASID" \
+    'Use the bash tool to run: pnpm test. Then reply with the single word DONE.' \
+    >"$OUT/act2.jsonl" 2>"$OUT/act2.err")
+  act2_rc=$?
+  check "continued autonomous session (--session-id) exits 0 (rc=$act2_rc)" test "$act2_rc" -eq 0
+  dump_session_log_by_id "$ASID" "$OUT/act2.session.jsonl"
+  PLUGIN_LIB="$PROFILE_DIR/node_modules/$PLUGIN_SCOPE/lib"
+  cat >"$OUT/act-check.mjs" <<'EOF'
+// Checks for the autonomous-work scenario (see e2e.sh). argv: out-dir, plugin lib dir.
+import { readFileSync, existsSync } from 'node:fs';
+import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
+const [out, lib] = process.argv.slice(2);
+const act = await import(pathToFileURL(join(lib, 'src/wisdom-live/activity.js')).href);
+const core = await import(pathToFileURL(join(lib, '..', 'node_modules/@equational-applications/ct-wisdom-core/lib/index.js')).href)
+  .catch(() => import(pathToFileURL(join(lib, 'ct-wisdom-core/index.js')).href));
+const KIND = 'curated-thoughts-wisdom-activity';
+const HEADING = '## Curated Thoughts — relevant to this step';
+const jsonl = (f) => existsSync(f) ? readFileSync(f, 'utf8').split('\n').filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean) : [];
+const log1 = jsonl(join(out, 'act1.session.jsonl'));
+const log2 = jsonl(join(out, 'act2.session.jsonl'));
+const tap = readFileSync(join(out, 'act1.tap.log'), 'utf8').split('\n');
+const verbose = jsonl(join(out, 'act-verbose.jsonl'));
+const err = readFileSync(join(out, 'act1.err'), 'utf8');
+let fails = 0;
+const check = (name, cond, detail = '') => { console.log(`${cond ? 'PASS ' : 'FAIL '} ${name}${detail ? '  | ' + detail : ''}`); if (!cond) fails++; };
+const userMsgs = (log) => log.filter((e) => e.type === 'user/message').map((e) => e.data);
+const texts = (m) => (m?.content ?? []).filter((b) => b.type === 'text').map((b) => b.text);
+const actMsgs = (log) => userMsgs(log).filter((m) => m?.source?.kind === KIND);
+const calls = (log) => log.filter((e) => e.type === 'assistant/message')
+  .flatMap((e) => (e.data?.message?.content ?? []).filter((b) => b.type === 'tool-call'));
+// activity argv (--max 1) and their queries (the last argv word, after `--`)
+const argvs = tap.filter((l) => l.startsWith('ARGV ') && l.includes(' --max 1 ')).map((l) => l.slice(5).split(' '));
+const queries = argvs.map((a) => a.slice(a.indexOf('--') + 1).join(' '));
+const steps = calls(log1).map((c) => [c.name, (() => { try { return JSON.parse(c.arguments || '{}'); } catch { return {}; } })()]);
+console.log('      tool steps:', JSON.stringify(steps.map(([n, a]) => [n, a.command ?? a.file_path ?? a.query ?? ''])));
+console.log('      activity queries CT received:', JSON.stringify(queries));
+// What the plugin COULD send: the bare target of each non-CT call.
+const possible = new Set(steps.filter(([n]) => !core.isCtTool(n))
+  .map(([n, a]) => core.buildActivity(act.dshActivitySpec(n, a), process.argv[4] || null))
+  .filter(Boolean).map((x) => core.activityQuery(x)));
+// Visible fact markers across the whole session (both block shapes).
+const visible = {};
+for (const m of userMsgs(log2.length ? log2 : log1)) {
+  for (const t of texts(m)) {
+    for (const re of [/\*\* <!-- ct-fact:([A-Za-z0-9._:-]+) -->/g, /<!-- ct-fact:([A-Za-z0-9._:-]+) --> \*\*/g]) {
+      for (const hit of t.matchAll(re)) visible[hit[1]] = (visible[hit[1]] ?? 0) + 1;
+    }
+  }
+}
+const delivered = actMsgs(log1);
+const ids = delivered.map((m) => [...texts(m).join('\n').matchAll(/<!-- ct-fact:([A-Za-z0-9._:-]+) --> \*\*/g)].map((h) => h[1]));
+// 1
+check('1 at least one activity message arrived', delivered.length >= 1, `${delivered.length} message(s): ${JSON.stringify(ids)}`);
+check('1 every activity message: heading, one marker, marker before the title',
+  delivered.length > 0 && delivered.every((m, i) => texts(m).join('').startsWith(HEADING) && ids[i].length === 1));
+check('1 no delivered fact is visible more than once in context', Object.values(visible).every((n) => n === 1), JSON.stringify(visible));
+// 2
+check('2 `pnpm test` queried exactly once (step 2 has the same key)', queries.filter((q) => q === 'pnpm test').length === 1, JSON.stringify(queries));
+check('2 `.env.local` queried exactly once though written then read (one file key)', queries.filter((q) => q === '.env.local').length === 1);
+// 3
+check('3 activity messages are identified user-role messages', delivered.every((m) => m.role === 'user' && typeof m.id === 'string' && m.id !== ''));
+check('3 the continued session holds both turns', log2.filter((e) => e.type === 'turn/start').length === 2);
+check('3 no activity re-delivery after resume (same ids, once each)', Object.values(visible).every((n) => n === 1) && actMsgs(log2).length >= delivered.length);
+// 4
+const ctCalls = steps.filter(([n]) => core.isCtTool(n));
+check('4 the agent called a Curated Thoughts tool', ctCalls.length >= 1, JSON.stringify(ctCalls.map(([n]) => n)));
+check('4 every activity query comes from a non-CT tool call', queries.every((q) => possible.has(q)), JSON.stringify([...possible]));
+check('4 no verbose activity record names a CT tool', !verbose.some((v) => v.channel === 'activity' && /curated/.test(v.activity ?? '')));
+// 5
+check('5 every activity query is a bare target (no verb)', queries.length > 0 && !queries.some((q) => /^(read|write|edit|run|search) /.test(q)));
+check('5 the argv puts the query after `--`', argvs.every((a) => a.indexOf('--') === a.length - 2 || a.indexOf('--') > 0));
+// verbose
+const acts = verbose.filter((v) => v.channel === 'activity' && v.event === 'delivery');
+check('verbose: JSONL activity delivery with query, activity label and fact id',
+  acts.length >= 1 && acts.every((v) => v.host === 'deepseek' && v.query && v.activity && v.delivered_ids?.length === 1));
+check("verbose: the write's content never reaches the log", !JSON.stringify(verbose).includes('FOO=bar'));
+const notice = /Curated Thoughts wisdom: delivered 1 fact .*\[activity\]/.test(err);
+console.log(`INFO  verbose logger notice on stderr: ${notice ? 'seen' : 'not seen (the headless logger exporter is [U])'}`);
+if (acts[0]) { const s = { ...acts[0] }; delete s.matched; s.block = String(s.block).slice(0, 90) + '...'; console.log('      verbose JSONL (activity delivery):', JSON.stringify(s)); }
+for (const v of verbose.filter((x) => x.channel === 'activity')) console.log(`      verbose: ${v.event} ${v.reason ?? ''} query=${JSON.stringify(v.query)} activity=${JSON.stringify(v.activity)} ids=${JSON.stringify(v.delivered_ids ?? [])}`);
+process.exit(fails ? 1 : 0);
+EOF
+  node "$OUT/act-check.mjs" "$OUT" "$PLUGIN_LIB" "$W" >"$OUT/act-check.txt" 2>&1
+  act_check_rc=$?
+  sed 's/^/      /' "$OUT/act-check.txt"
+  act_fails=$(grep -c '^FAIL' "$OUT/act-check.txt")
+  check "autonomous-work checks 1-5 + verbose pass (rc=$act_check_rc, fails=$act_fails)" \
+    sh -c "[ $act_check_rc -eq 0 ] && [ $act_fails -eq 0 ] && grep -q '^PASS' '$OUT/act-check.txt'"
+  [ "$act1_rc" -ne 0 ] && tail -20 "$OUT/act1.err" | sed 's/^/      /'
 fi
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"

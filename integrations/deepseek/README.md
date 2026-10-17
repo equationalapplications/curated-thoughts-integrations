@@ -23,6 +23,9 @@ discipline.
 - **Intuitive Wisdom live delivery** (0.4.0): relevant facts arrive once per
   user turn, never repeating one already in context. See [Intuitive Wisdom](#intuitive-wisdom)
   below.
+- **Autonomous-work delivery** (0.6.0): while the agent works on its own,
+  the file, command or search of a model step can bring one relevant fact
+  before the next step. See [Autonomous-work delivery](#autonomous-work-delivery).
 - **Three skills** — `curated-thoughts-usage`, `curated-thoughts-ops`,
   `curated-thoughts-sidecar` (verbatim from Hermes).
 - **Doctor** — `node lib/scripts/ct_doctor.js check` runs the nine deep checks
@@ -80,6 +83,43 @@ Needs the standalone `ct` CLI from Curated Thoughts ≥ 3.3.0
   `role: "user"`), so a session that received a block can be continued; in
   0.4.0 DSH rejected such a session on replay.
 
+### Autonomous-work delivery
+
+Since 0.6.0, an agent working on its own between user messages can get one
+relevant fact per model step, keyed to what it is doing
+([spec](../../docs/superpowers/specs/2026-10-16-dsh-autonomous-work-wisdom-design.md)):
+
+- **Trigger.** The tool calls of one model step: `read`, `write`, `edit`
+  and `str_replace_editor` (the file), `grep` and `glob` (the pattern),
+  `bash` and `pwsh` (the command). The first call of the step whose activity
+  is new for the agent starts one `ct wisdom match` at `tools/pre-execute`,
+  so CT works while the tool runs. At most one CT call per model step, and
+  only when the activity changes; reading then editing a file is one
+  activity. No ceiling per message or per session. Curated Thoughts' own
+  tools never trigger it.
+- **What is sent.** Only the bare target: a path relative to the workspace
+  (`src/billing/invoice.ts`), the search pattern, or a command's program
+  plus the unquoted word right after it (`pnpm test`, `npm run`, `git push`).
+  Never a flag's value, a quoted word, a URL, an `ENV=value` assignment or a
+  credential-shaped token, and never file contents, tool output, diffs or
+  the agent's own words.
+- **Delivered as.** At most 1 fact in at most 600 characters, marker first,
+  under `## Curated Thoughts — relevant to this step`, as its own user
+  message (source kind `curated-thoughts-wisdom-activity`) before the next
+  model step (`agent/pre-step`, step 2 and later). It is persisted in the
+  session log and replayed on `--session-id`; the system prompt is never
+  touched. A step that ends the turn gets nothing (delivering would force
+  an extra model call).
+- **Exactly once.** The record of what is in context is rebuilt from the
+  session log at every step, so a fact already delivered, recalled or in the
+  auto-inclusion block is never sent again, and a later
+  `curated_recall_context` in the same turn stubs it.
+- **Where.** Every agent, subagents included (each has its own record), and
+  scheduled or background runs.
+- **Limit.** A rule about a concept that a path only implies (for example a
+  migration rule from a migration file's path) needs CT's activity mode
+  ([curated-thoughts#282](https://github.com/equationalapplications/curated-thoughts/issues/282)).
+
 ### Verbose mode
 
 Set `CT_WISDOM_VERBOSE=1` before starting `dsh` to see each turn's delivery
@@ -89,6 +129,8 @@ is also appended to `$DSH_HOME/logs/ct-wisdom-verbose.jsonl` (default
 `~/.dsh/logs/`; override: `CT_WISDOM_VERBOSE_LOG`). Read it with
 `node node_modules/@equational-applications/ct-wisdom-core/cli/ct-wisdom-log.js --host deepseek [-n 20] [-f] [--block]`
 from the installed plugin directory. See the [spec](../../docs/superpowers/specs/2026-10-16-wisdom-verbose-mode-design.md).
+Autonomous-work deliveries, and activity queries that delivered nothing, are
+recorded with channel `activity` and the activity label (`read src/x.ts`).
 
 ## Install
 

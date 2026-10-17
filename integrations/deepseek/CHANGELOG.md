@@ -2,6 +2,48 @@
 
 ## Unreleased
 
+## 0.6.0 — 2026-10-16
+
+- Added: Intuitive Wisdom during autonomous work. While the agent works on
+  its own between user messages, what it does (the file it reads, writes or
+  edits, the command it runs, the pattern it searches) can bring one relevant
+  CT fact, delivered before the next model step. Spec:
+  `docs/superpowers/specs/2026-10-16-dsh-autonomous-work-wisdom-design.md`.
+  - Trigger: `agent/pre-step` at step 2 and later of a turn, from the
+    previous step's tool calls (`read`, `write`, `edit`,
+    `str_replace_editor`, `grep`, `glob`, `bash`, `pwsh`). The CT call is
+    prefetched at `tools/pre-execute`, so it overlaps the tool's own work.
+  - At most one CT call per model step, and only when the activity key is
+    new (a new file, command or search; reading then editing a file is one
+    key). No per-message ceiling and no session cap.
+  - The query is the bare target only: a relative path, the search pattern,
+    or a command's program plus its next safe word (`pnpm test`,
+    `npm run`). Never file contents, tool output, diffs, the agent's text,
+    flag values, quoted words, URLs, env assignments or credential-shaped
+    tokens.
+  - One fact of at most 600 characters, marker first, under the heading
+    `## Curated Thoughts — relevant to this step`, delivered as an
+    identified user-role message with source kind
+    `curated-thoughts-wisdom-activity`. It is persisted in the session log,
+    replays on `--session-id`, and never touches the system prompt.
+  - The ledger is rebuilt from the session log at every step, and the
+    recall dedup learns each delivered id, so a fact is never shown twice.
+  - Subagents get deliveries too (each has its own ledger); CT's own tools
+    never trigger; the breaker, timeouts and capability latch are shared
+    with the user-turn path.
+  - Verbose mode records each activity delivery, and each activity query
+    that delivered nothing, with `channel: "activity"` and the activity
+    label (`read src/x.ts`).
+  - Known limit: rules about a concept that a path only implies (for
+    example "never edit an applied migration" from
+    `src/db/migrations/0042.sql`) need CT's activity mode
+    (curated-thoughts#282).
+- Fixed: a user-turn delivery could show a fact twice when CT returned a
+  correction whose own id was already in context, or the same id both as an
+  entry and as a correction. A correction now rides only when it supersedes
+  an id in context and is itself new, and each id is delivered at most once
+  per block (the Hermes reference rule; shared `ct-wisdom-core` fix).
+
 ## 0.5.0 — 2026-10-16
 
 - Added: Verbose mode for Intuitive Wisdom (opt-in, off by default). With

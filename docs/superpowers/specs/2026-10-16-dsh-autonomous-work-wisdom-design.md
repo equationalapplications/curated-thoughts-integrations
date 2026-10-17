@@ -262,7 +262,7 @@ Each means "no CT call or no delivery", one `debug` log line, and an unchanged d
 | `ct_tool` (decision 6) | plan | no |
 | `no_activity` (tool not in the map, or args give no safe line) | plan | no |
 | `seen_key`, `step_used` | plan | no |
-| `no_ledger` (no `deriveMessages`) | plan | yes, once per step, for a would-be trigger |
+| `no_ledger` (no `deriveMessages`: the step's calls cannot even be read) | plan, pre-step | no |
 | `breaker_open` | plan | yes, once per step, for a would-be trigger |
 | `capability_missing`, `spawn`, `timeout_or_exit`, `parse_error` | match | yes |
 | `budget` | pre-step | yes |
