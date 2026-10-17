@@ -391,7 +391,11 @@ jobs:
     # A release must satisfy the same host contract CI enforces: the declared
     # `checks.host` command runs against the pinned, real host binary before
     # anything is published. Skips cleanly for integrations that declare no
-    # host check (today: opencode only).
+    # host check. Language-aware: node integrations (opencode) get node/pnpm,
+    # a build and an npm-installed host; python integrations (docker-agent)
+    # get setup-python and the pinned, sha256-verified release binary
+    # (docker-agent-v0.1.0 release run 39017332950 failed because this job
+    # was node-only: pnpm/action-setup found no pnpm version to install).
     name: host contract
     needs: identify
     if: needs.identify.outputs.host != ''
@@ -401,11 +405,26 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Refuse a language this job has no toolchain for
+        if: needs.identify.outputs.language != 'node' && needs.identify.outputs.language != 'python'
+        env:
+          INTEGRATION_LANGUAGE: ${{ needs.identify.outputs.language }}
+        run: |
+          echo "host-contract has no toolchain for language=$INTEGRATION_LANGUAGE" >&2
+          exit 1
+
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        if: needs.identify.outputs.language == 'python'
+        with:
+          python-version: "3.13"
+
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        if: needs.identify.outputs.language == 'node'
         with:
           node-version: 22
 
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        if: needs.identify.outputs.language == 'node'
         with:
           package_json_file: ${{ needs.identify.outputs.dir }}/package.json
 
@@ -415,7 +434,7 @@ jobs:
         # lib/ must be built before the install below (latent today — no
         # host-checked integration depends on the core yet — but the
         # opencode leg will). Same detection as the verify/publish jobs.
-        if: needs.identify.outputs.host != ''
+        if: needs.identify.outputs.language == 'node'
         shell: bash
         env:
           INTEGRATION_DIR: ${{ needs.identify.outputs.dir }}
@@ -435,10 +454,12 @@ jobs:
           fi
 
       - name: Install dependencies
+        if: needs.identify.outputs.language == 'node'
         working-directory: ${{ needs.identify.outputs.dir }}
         run: pnpm install --frozen-lockfile
 
       - name: Build the integration payload
+        if: needs.identify.outputs.language == 'node'
         # The host contract loads the BUILT payload (opencode's wisdom test
         # needs lib/src/index.js + the vendored lib/ct-wisdom-core). CI gets
         # the build for free from its `pnpm pack` step (prepack); this job
@@ -454,6 +475,7 @@ jobs:
           fi
 
       - name: Install the pinned host binary (throwaway HOME)
+        if: needs.identify.outputs.language == 'node'
         # Versions come from the integration's tests/host/compatibility.json —
         # the same file the contract test validates against, so a release can
         # never drift from what was actually verified. opencode-ai litters the
@@ -491,10 +513,54 @@ jobs:
             echo "BUN_BIN=$RUNNER_TEMP/ct-host/node_modules/.bin/bun"
           } >> "$GITHUB_ENV"
 
+      - name: Download the pinned host binary and verify its sha256 (python)
+        # Same pin and check as ci.yml's host-contract-docker-agent job, read
+        # from the one file both workflows share:
+        # <dir>/tests/host/compatibility.json#dockerAgent.
+        if: needs.identify.outputs.language == 'python'
+        working-directory: ${{ needs.identify.outputs.dir }}
+        run: |
+          TESTS_HOST="tests/host/compatibility.json"
+          if [ ! -f "$TESTS_HOST" ]; then
+            echo "checks.host declared but $TESTS_HOST is missing" >&2
+            exit 1
+          fi
+          if ! python3 -c "import json,sys; sys.exit(0 if 'dockerAgent' in json.load(open(sys.argv[1])) else 1)" "$TESTS_HOST"; then
+            echo "$TESTS_HOST declares no python host binary this job can install" >&2
+            exit 1
+          fi
+          pin() { python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['dockerAgent'][sys.argv[2]])" "$TESTS_HOST" "$1"; }
+          version=$(pin version); asset=$(pin asset); sha256=$(pin sha256)
+          url="https://github.com/docker/docker-agent/releases/download/${version}/${asset}"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/docker-agent" "$url"
+          echo "${sha256}  $RUNNER_TEMP/docker-agent" | sha256sum -c -
+          chmod +x "$RUNNER_TEMP/docker-agent"
+          "$RUNNER_TEMP/docker-agent" version
+          echo "DOCKER_AGENT_BIN=$RUNNER_TEMP/docker-agent" >> "$GITHUB_ENV"
+
+      - name: Run the declared host contract (python)
+        # The command comes from integration.yaml's checks.host, handled as
+        # in ci.yml's host-contract-docker-agent job. A throwaway HOME keeps
+        # any runner state out of the run.
+        if: needs.identify.outputs.language == 'python'
+        working-directory: ${{ needs.identify.outputs.dir }}
+        env:
+          HOST_HOME: ${{ runner.temp }}/ct-host-run-home
+        run: |
+          pip install --disable-pip-version-check -r ../../tools/requirements-ci.txt
+          HOST_CMD=$(python3 -c "import yaml; print(yaml.safe_load(open('integration.yaml'))['checks']['host'])")
+          case "$HOST_CMD" in
+            "python "*) ;;
+            *) echo "checks.host must start with 'python ' (got: $HOST_CMD)"; exit 1 ;;
+          esac
+          mkdir -p "$HOST_HOME"
+          HOME="$HOST_HOME" bash -c "$HOST_CMD"
+
       - name: Run the declared host contract
         # The command comes from integration.yaml's checks.host — the manifest
         # is the contract registry. Throwaway HOME/XDG keeps a runner's
         # leftover host state out of the verification.
+        if: needs.identify.outputs.language == 'node'
         working-directory: ${{ needs.identify.outputs.dir }}
         env:
           HOST_HOME: ${{ runner.temp }}/ct-host-run-home
