@@ -4115,6 +4115,7 @@
   },
   "fs": [
    "/Users/alice/code/proj/.git/",
+   "/Users/alice/code/proj/src/app/__init__.py",
    "/Users/alice/code/proj/src/app/clients/acme.py"
   ],
   "expected_query": "python app",
@@ -4274,7 +4275,7 @@
   "expected_line": "run git status"
  },
  {
-  "name": "cmd: npm.cmd",
+  "name": "cmd: npm.cmd is a script",
   "tool": "terminal",
   "args": {
    "command": "npm.cmd test"
@@ -4287,11 +4288,11 @@
   "fs": [
    "/Users/alice/code/proj/.git/"
   ],
-  "expected_query": "npm test",
-  "expected_line": "run npm test"
+  "expected_query": null,
+  "expected_line": null
  },
  {
-  "name": "cmd: make.bat",
+  "name": "cmd: make.bat is a script",
   "tool": "terminal",
   "args": {
    "command": "make.bat build"
@@ -4304,11 +4305,11 @@
   "fs": [
    "/Users/alice/code/proj/.git/"
   ],
-  "expected_query": "make build",
-  "expected_line": "run make build"
+  "expected_query": null,
+  "expected_line": null
  },
  {
-  "name": "cmd: tool.com",
+  "name": "cmd: tool.com is not stripped",
   "tool": "terminal",
   "args": {
    "command": "tool.com run"
@@ -4321,8 +4322,8 @@
   "fs": [
    "/Users/alice/code/proj/.git/"
   ],
-  "expected_query": "tool",
-  "expected_line": "run tool"
+  "expected_query": null,
+  "expected_line": null
  },
  {
   "name": "cmd: script.ps1 is still a script",
@@ -4547,5 +4548,404 @@
   "expected_query": null,
   "expected_line": null,
   "system_home": "/srv/repo/.home"
+ },
+ {
+  "name": "cmd: GIT.EXE uppercase",
+  "tool": "terminal",
+  "args": {
+   "command": "GIT.EXE status"
+  },
+  "cwd": "/Users/alice/code/proj",
+  "env": {
+   "USER": "alice",
+   "HOME": "/Users/alice"
+  },
+  "fs": [
+   "/Users/alice/code/proj/.git/"
+  ],
+  "expected_query": "GIT status",
+  "expected_line": "run GIT status"
+ },
+ {
+  "name": "cmd: git.exe.bak",
+  "tool": "terminal",
+  "args": {
+   "command": "git.exe.bak status"
+  },
+  "cwd": "/Users/alice/code/proj",
+  "env": {
+   "USER": "alice",
+   "HOME": "/Users/alice"
+  },
+  "fs": [
+   "/Users/alice/code/proj/.git/"
+  ],
+  "expected_query": null,
+  "expected_line": null
+ },
+ {
+  "name": "cmd: -Xdev attached",
+  "tool": "terminal",
+  "args": {
+   "command": "python -Xdev -m pytest"
+  },
+  "cwd": "/Users/alice/code/proj",
+  "env": {
+   "USER": "alice",
+   "HOME": "/Users/alice"
+  },
+  "fs": [
+   "/Users/alice/code/proj/.git/"
+  ],
+  "expected_query": "python pytest",
+  "expected_line": "run python pytest"
+ },
+ {
+  "name": "cmd: -Wignore attached",
+  "tool": "terminal",
+  "args": {
+   "command": "python -Wignore -m pytest"
+  },
+  "cwd": "/Users/alice/code/proj",
+  "env": {
+   "USER": "alice",
+   "HOME": "/Users/alice"
+  },
+  "fs": [
+   "/Users/alice/code/proj/.git/"
+  ],
+  "expected_query": "python pytest",
+  "expected_line": "run python pytest"
+ },
+ {
+  "name": "cmd: -uB combined",
+  "tool": "terminal",
+  "args": {
+   "command": "python -uB -m pytest"
+  },
+  "cwd": "/Users/alice/code/proj",
+  "env": {
+   "USER": "alice",
+   "HOME": "/Users/alice"
+  },
+  "fs": [
+   "/Users/alice/code/proj/.git/"
+  ],
+  "expected_query": "python pytest",
+  "expected_line": "run python pytest"
+ },
+ {
+  "name": "cmd: -OO",
+  "tool": "terminal",
+  "args": {
+   "command": "python -OO -m pip"
+  },
+  "cwd": "/Users/alice/code/proj",
+  "env": {
+   "USER": "alice",
+   "HOME": "/Users/alice"
+  },
+  "fs": [
+   "/Users/alice/code/proj/.git/"
+  ],
+  "expected_query": "python pip",
+  "expected_line": "run python pip"
+ },
+ {
+  "name": "cmd: -i -R -x",
+  "tool": "terminal",
+  "args": {
+   "command": "python -i -R -x -m pytest"
+  },
+  "cwd": "/Users/alice/code/proj",
+  "env": {
+   "USER": "alice",
+   "HOME": "/Users/alice"
+  },
+  "fs": [
+   "/Users/alice/code/proj/.git/"
+  ],
+  "expected_query": "python pytest",
+  "expected_line": "run python pytest"
+ },
+ {
+  "name": "cmd: -um combined",
+  "tool": "terminal",
+  "args": {
+   "command": "python -um pytest"
+  },
+  "cwd": "/Users/alice/code/proj",
+  "env": {
+   "USER": "alice",
+   "HOME": "/Users/alice"
+  },
+  "fs": [
+   "/Users/alice/code/proj/.git/"
+  ],
+  "expected_query": "python pytest",
+  "expected_line": "run python pytest"
+ },
+ {
+  "name": "cmd: --version stops the scan",
+  "tool": "terminal",
+  "args": {
+   "command": "python --version -m pytest"
+  },
+  "cwd": "/Users/alice/code/proj",
+  "env": {
+   "USER": "alice",
+   "HOME": "/Users/alice"
+  },
+  "fs": [
+   "/Users/alice/code/proj/.git/"
+  ],
+  "expected_query": "python",
+  "expected_line": "run python"
+ },
+ {
+  "name": "cmd: -c stops the scan",
+  "tool": "terminal",
+  "args": {
+   "command": "python -c 'import x' -m pytest"
+  },
+  "cwd": "/Users/alice/code/proj",
+  "env": {
+   "USER": "alice",
+   "HOME": "/Users/alice"
+  },
+  "fs": [
+   "/Users/alice/code/proj/.git/"
+  ],
+  "expected_query": "python",
+  "expected_line": "run python"
+ },
+ {
+  "name": "cmd: unknown flag stops the scan",
+  "tool": "terminal",
+  "args": {
+   "command": "python -Z -m pytest"
+  },
+  "cwd": "/Users/alice/code/proj",
+  "env": {
+   "USER": "alice",
+   "HOME": "/Users/alice"
+  },
+  "fs": [
+   "/Users/alice/code/proj/.git/"
+  ],
+  "expected_query": "python",
+  "expected_line": "run python"
+ },
+ {
+  "name": "cmd: -X without a value",
+  "tool": "terminal",
+  "args": {
+   "command": "python -X"
+  },
+  "cwd": "/Users/alice/code/proj",
+  "env": {
+   "USER": "alice",
+   "HOME": "/Users/alice"
+  },
+  "fs": [
+   "/Users/alice/code/proj/.git/"
+  ],
+  "expected_query": "python",
+  "expected_line": "run python"
+ },
+ {
+  "name": "cmd: fullwidth digit is not python",
+  "tool": "terminal",
+  "args": {
+   "command": "python３ -m pytest"
+  },
+  "cwd": "/Users/alice/code/proj",
+  "env": {
+   "USER": "alice",
+   "HOME": "/Users/alice"
+  },
+  "fs": [
+   "/Users/alice/code/proj/.git/"
+  ],
+  "expected_query": null,
+  "expected_line": null
+ },
+ {
+  "name": "cmd: three digits is not an interpreter name",
+  "tool": "terminal",
+  "args": {
+   "command": "python311 -m pytest"
+  },
+  "cwd": "/Users/alice/code/proj",
+  "env": {
+   "USER": "alice",
+   "HOME": "/Users/alice"
+  },
+  "fs": [
+   "/Users/alice/code/proj/.git/"
+  ],
+  "expected_query": "python311",
+  "expected_line": "run python311"
+ },
+ {
+  "name": "cmd: python3.11",
+  "tool": "terminal",
+  "args": {
+   "command": "python3.11 -m pytest"
+  },
+  "cwd": "/Users/alice/code/proj",
+  "env": {
+   "USER": "alice",
+   "HOME": "/Users/alice"
+  },
+  "fs": [
+   "/Users/alice/code/proj/.git/"
+  ],
+  "expected_query": "python3.11 pytest",
+  "expected_line": "run python3.11 pytest"
+ },
+ {
+  "name": "cmd: a package dir without __init__.py is not a package",
+  "tool": "terminal",
+  "args": {
+   "command": "python -m mypkg"
+  },
+  "cwd": "/Users/alice/code/proj",
+  "env": {
+   "USER": "alice",
+   "HOME": "/Users/alice"
+  },
+  "fs": [
+   "/Users/alice/code/proj/.git/",
+   "/Users/alice/code/proj/mypkg/x.py"
+  ],
+  "expected_query": "python",
+  "expected_line": "run python"
+ },
+ {
+  "name": "cmd: the package name is matched case-sensitively",
+  "tool": "terminal",
+  "args": {
+   "command": "python -m tests"
+  },
+  "cwd": "/Users/alice/code/proj",
+  "env": {
+   "USER": "alice",
+   "HOME": "/Users/alice"
+  },
+  "fs": [
+   "/Users/alice/code/proj/.git/",
+   "/Users/alice/code/proj/Tests/__init__.py"
+  ],
+  "expected_query": "python",
+  "expected_line": "run python"
+ },
+ {
+  "name": "cmd: a name in the full module sends python alone",
+  "tool": "terminal",
+  "args": {
+   "command": "python -m tests.alice_notes"
+  },
+  "cwd": "/Users/alice/code/proj",
+  "env": {
+   "USER": "alice",
+   "HOME": "/Users/alice"
+  },
+  "fs": [
+   "/Users/alice/code/proj/.git/",
+   "/Users/alice/code/proj/tests/__init__.py"
+  ],
+  "expected_query": "python",
+  "expected_line": "run python"
+ },
+ {
+  "name": "cmd: a name in the top package sends python alone",
+  "tool": "terminal",
+  "args": {
+   "command": "python -m alice_tools.x"
+  },
+  "cwd": "/Users/alice/code/proj",
+  "env": {
+   "USER": "alice",
+   "HOME": "/Users/alice"
+  },
+  "fs": [
+   "/Users/alice/code/proj/.git/",
+   "/Users/alice/code/proj/alice_tools/__init__.py"
+  ],
+  "expected_query": "python",
+  "expected_line": "run python"
+ },
+ {
+  "name": "sandbox: a document in the sandbox HOME",
+  "tool": "read_file",
+  "args": {
+   "path": ".home/Documents/taxes.pdf"
+  },
+  "cwd": "/srv/repo",
+  "env": {
+   "USER": "svc",
+   "HOME": "/srv/repo/.home"
+  },
+  "fs": [
+   "/srv/repo/.git/",
+   "/srv/repo/.home/Documents/"
+  ],
+  "expected_query": null,
+  "expected_line": null
+ },
+ {
+  "name": "sandbox: credentials in the sandbox HOME",
+  "tool": "read_file",
+  "args": {
+   "path": "/srv/repo/.home/.aws/credentials"
+  },
+  "cwd": "/srv/repo",
+  "env": {
+   "USER": "svc",
+   "HOME": "/srv/repo/.home"
+  },
+  "fs": [
+   "/srv/repo/.git/",
+   "/srv/repo/.home/.aws/"
+  ],
+  "expected_query": null,
+  "expected_line": null
+ },
+ {
+  "name": "sandbox: a search path in the sandbox HOME is dropped",
+  "tool": "search_files",
+  "args": {
+   "pattern": "TODO",
+   "path": ".home/notes"
+  },
+  "cwd": "/srv/repo",
+  "env": {
+   "USER": "svc",
+   "HOME": "/srv/repo/.home"
+  },
+  "fs": [
+   "/srv/repo/.git/"
+  ],
+  "expected_query": "TODO",
+  "expected_line": "search TODO"
+ },
+ {
+  "name": "sandbox: project files outside it are still sent",
+  "tool": "read_file",
+  "args": {
+   "path": "src/x.py"
+  },
+  "cwd": "/srv/repo",
+  "env": {
+   "USER": "svc",
+   "HOME": "/srv/repo/.home"
+  },
+  "fs": [
+   "/srv/repo/.git/",
+   "/srv/repo/.home/"
+  ],
+  "expected_query": "src/x.py",
+  "expected_line": "read src/x.py"
  }
 ]
