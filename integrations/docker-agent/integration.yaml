@@ -29,6 +29,8 @@ checks:
   # The real pinned binary against a scripted local model endpoint. Run by
   # the dedicated `host contract (docker-agent)` CI job, which downloads and
   # sha256-checks docker-agent v1.150.0; skips anywhere DOCKER_AGENT_BIN is unset.
+  # The pin (version, asset, sha256) is tests/host/compatibility.json, read by
+  # both ci.yml and release.yml's host-contract job.
   # No quotes here: the discover job embeds the matrix JSON in a Python
   # string literal, where an escaped quote breaks the JSON.
   host: python tests/host/test_host_contract.py
