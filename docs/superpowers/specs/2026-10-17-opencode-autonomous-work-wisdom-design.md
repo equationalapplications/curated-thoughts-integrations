@@ -377,6 +377,34 @@ the DSH real-gate setup). One user message makes the agent run `pnpm test` twice
 plus 6, the refused call sent nothing, and verbose (JSONL `activity` records). All of it runs under the container's
 throwaway HOME and brain.
 
+**Host contract (done, 2026-10-17):** all 7 real-binary tests pass on opencode 1.18.35 (macOS). The new test confirms
+the [V run] facts:
+- the block appended in `tool.execute.after` reaches the model and persists in the tool part;
+- the tool part with the hook's `callID` is in the history while the hook runs (step ids are found);
+- the absolute in-project path reaches CT as `src/index.ts`;
+- the repeated `ls` key makes no second query;
+- the refused `secrets.env` read sends nothing.
+
+One host detail: a refused ask ends `opencode run`'s loop, so the model never sees that call's error result.
+
+**E2E (done, 2026-10-17 UTC):** `CT_E2E_REAL_GATE=1 integrations/opencode/tests/e2e/run.sh`, 41 passed, 0 failed, with CT 3.5.1's
+real gate and ZAI GLM-5.3-FLASH.
+- **Tool steps.** The agent made seven: `read TASK.md`, a stray read the host refused, `bash pnpm test`,
+  `bash pnpm test --silent`, `write .env.local`, `curated_recall_context`, and `read secrets.env` (auto-rejected).
+- **Queries and deliveries.** These gave exactly three activity queries, `TASK.md`, `pnpm test` and `.env.local`
+  (absolute paths normalized to the project). Two blocks came through the real gate:
+  - `pnpm test` → "pnpm is used to run this repository's test suite…";
+  - `.env.local` → ".env.local holds local-only secrets."
+
+  Each arrived once, marker first, and persisted in its tool part.
+- **Continue.** `--continue` re-queried `pnpm test` in the new process (limitation 6). CT got the delivered id in
+  `--exclude` and answered no_match, so there was no re-delivery.
+- **Verbose.** The JSONL carried the `activity` records.
+- **No leaks.** A scan of every output file found neither key.
+- **Finding.** A direct real-gate probe of `secrets.env` **opens** the gate (0.71, on the `.env.local` fact). The
+  investigation's before-prefetch would therefore have sent the refused call's target to CT *and* delivered a fact for
+  a call the host refused. The approval rule (decision 8) is what prevents it.
+
 ## Versioning and docs
 
 - opencode `0.3.1 → 0.4.0` (`package.json`, `integration.yaml`), CHANGELOG, README (Intuitive Wisdom section and
