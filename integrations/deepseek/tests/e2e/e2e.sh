@@ -681,7 +681,7 @@ else
 if [ "\$1" = wisdom ] && [ "\$2" = match ] && [ "\${3:-}" != --help ]; then
   o=\$(mktemp); e=\$(mktemp)
   '$real_ct' "\$@" >"\$o" 2>"\$e"; rc=\$?
-  { printf 'ARGV %s\n' "\$*"; printf 'RC %s\n' "\$rc"; printf 'OUT %s\n' "\$(jq -c . "\$o" 2>/dev/null || cat "\$o")"; printf 'ERR %s\n' "\$(tr '\t' ' ' <"\$e")"; } >>'$TAP'
+  { printf 'ARGV %s\n' "\$*"; printf 'TABS'; for a in "\$@"; do printf '\t%s' "\$a"; done; printf '\n'; printf 'RC %s\n' "\$rc"; printf 'OUT %s\n' "\$(jq -c . "\$o" 2>/dev/null || cat "\$o")"; printf 'ERR %s\n' "\$(tr '\t' ' ' <"\$e")"; } >>'$TAP'
   cat "\$o"; cat "\$e" >&2; rm -f "\$o" "\$e"; exit "\$rc"
 fi
 exec '$real_ct' "\$@"
@@ -870,8 +870,10 @@ const actMsgs = (log) => userMsgs(log).filter((m) => m?.source?.kind === KIND);
 const calls = (log) => log.filter((e) => e.type === 'assistant/message')
   .flatMap((e) => (e.data?.message?.content ?? []).filter((b) => b.type === 'tool-call'));
 // activity argv (--max 1) and their queries (the last argv word, after `--`)
-const argvs = tap.filter((l) => l.startsWith('ARGV ') && l.includes(' --max 1 ')).map((l) => l.slice(5).split(' '));
-const queries = argvs.map((a) => a.slice(a.indexOf('--') + 1).join(' '));
+// TABS lines keep the argv boundaries (one tab-separated element each).
+const argvs = tap.filter((l) => l.startsWith('TABS\t')).map((l) => l.split('\t').slice(1))
+  .filter((a) => a[a.indexOf('--max') + 1] === '1');
+const queries = argvs.map((a) => a[a.indexOf('--') + 1] ?? '');
 const steps = calls(log1).map((c) => [c.name, (() => { try { return JSON.parse(c.arguments || '{}'); } catch { return {}; } })()]);
 console.log('      tool steps:', JSON.stringify(steps.map(([n, a]) => [n, a.command ?? a.file_path ?? a.query ?? ''])));
 console.log('      activity queries CT received:', JSON.stringify(queries));
@@ -909,7 +911,9 @@ check('4 every activity query comes from a non-CT tool call', queries.every((q) 
 check('4 no verbose activity record names a CT tool', !verbose.some((v) => v.channel === 'activity' && /curated/.test(v.activity ?? '')));
 // 5
 check('5 every activity query is a bare target (no verb)', queries.length > 0 && !queries.some((q) => /^(read|write|edit|run|search) /.test(q)));
-check('5 the argv puts the query after `--`', argvs.every((a) => a.indexOf('--') === a.length - 2 || a.indexOf('--') > 0));
+check('5 the query is the single argv element right after `--`, and nothing follows it',
+  argvs.length > 0 && argvs.every((a) => a.indexOf('--') > 0 && a.indexOf('--') === a.length - 2 && a[a.length - 1] !== ''),
+  JSON.stringify(argvs.map((a) => a.slice(a.indexOf('--')))));
 // verbose
 const acts = verbose.filter((v) => v.channel === 'activity' && v.event === 'delivery');
 check('verbose: JSONL activity delivery with query, activity label and fact id',

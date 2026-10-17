@@ -6,6 +6,8 @@
  * block renderer and the match runner.
  */
 
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
 import {
@@ -28,6 +30,10 @@ import {
   scanIds,
   selectActivityDelivery,
   shellWords,
+  startActivity,
+  finishActivity,
+  userNames,
+  validCwd,
 } from '../src/index.js';
 import type {
   Activity,
@@ -58,9 +64,14 @@ function hermes(tool: string, args: unknown): ActivitySpec | null {
   }
 }
 
+/** The environment R2 reads; fixed so the suite never depends on the CI user. */
+const ENV = { USER: 'alice', HOME: '/Users/alice' };
+/** The language-neutral contract shared with Hermes (tests/tools/test_activity_target_vectors.py). */
+const VECTORS = fileURLToPath(new URL('../../../tests/fixtures/activity_targets.json', import.meta.url));
+
 function act(tool: string, args: unknown, cwd = '/work/repo'): Activity | null {
   const spec = hermes(tool, args);
-  return spec === null ? null : buildActivity(spec, cwd);
+  return spec === null ? null : buildActivity(spec, cwd, ENV);
 }
 
 const CASES: Array<[string, Record<string, unknown>, string, string]> = [
@@ -156,16 +167,127 @@ describe('activity line builder (Hermes parity)', () => {
 
   it('normalizes paths', () => {
     const cwd = '/work/repo';
-    expect(normalizePath('/work/repo/src/x.py', cwd)).toBe('src/x.py');
-    expect(normalizePath('/Users/alice/other/proj/y.py', cwd)).toBe('proj/y.py');
-    expect(normalizePath('~/notes/z.md', cwd)).toBe('notes/z.md');
-    expect(normalizePath('../../etc/passwd', cwd)).toBe('etc/passwd');
-    expect(normalizePath('a\\b\\c.py', cwd)).toBe('a/b/c.py');
-    expect(normalizePath('C:\\Users\\bob\\proj\\y.py', cwd)).toBe('proj/y.py');
-    expect(normalizePath('./', cwd)).toBeNull();
-    expect(normalizePath('', cwd)).toBeNull();
-    expect(normalizePath(null, cwd)).toBeNull();
-    expect(normalizePath('d/'.repeat(300) + 'f.py', cwd)!.length).toBeLessThanOrEqual(ACTIVITY_TARGET_CHARS);
+    expect(normalizePath('/work/repo/src/x.py', cwd, ENV)).toBe('src/x.py');
+    expect(normalizePath('/Users/alice/other/proj/y.py', cwd, ENV)).toBe('y.py');
+    expect(normalizePath('~/notes/z.md', cwd, ENV)).toBe('z.md');
+    expect(normalizePath('../../etc/passwd', cwd, ENV)).toBe('etc/passwd');
+    expect(normalizePath('a\\b\\c.py', cwd, ENV)).toBe('a/b/c.py');
+    expect(normalizePath('C:\\Users\\bob\\proj\\y.py', cwd, ENV)).toBe('y.py');
+    expect(normalizePath('./', cwd, ENV)).toBeNull();
+    expect(normalizePath('', cwd, ENV)).toBeNull();
+    expect(normalizePath(null, cwd, ENV)).toBeNull();
+    expect(normalizePath('d/'.repeat(300) + 'f.py', cwd, ENV)!.length).toBeLessThanOrEqual(ACTIVITY_TARGET_CHARS);
+  });
+
+  // Privacy rules R1–R4 (hermes 0.6.2 "Privacy amendment"; review of PR #56).
+  it('R1: the cwd counts only at depth >= 2, never the parent of HOME', () => {
+    for (const cwd of ['/', 'C:\\', 'C:/', '/Users', '/home', '/tmp', '', 'relative/dir']) {
+      expect(validCwd(cwd, ENV), cwd).toBeNull();
+      expect(normalizePath('/Users/carol/projects/app/src/x.ts', cwd, ENV), cwd).toBe('x.ts');
+    }
+    expect(validCwd('C:\\Users', ENV)).toBeNull();
+    expect(validCwd('/Users/alice', ENV)).toBe('/Users/alice'); // a cwd equal to HOME counts
+    expect(normalizePath('/srv/app/src/x.ts', '/srv/app', ENV)).toBe('src/x.ts');
+    expect(normalizePath('C:\\work\\repo\\src\\x.ts', 'C:\\work\\repo', ENV)).toBe('src/x.ts');
+  });
+
+  it('R2: outside-cwd absolute and ~ paths reduce to the basename; user names never leave', () => {
+    const cwd = '/work/repo';
+    expect(normalizePath('/Users/alice/notes.txt', cwd, ENV)).toBe('notes.txt');
+    expect(normalizePath('/home/alice', cwd, ENV)).toBeNull();
+    expect(normalizePath('~/alice', cwd, ENV)).toBeNull();
+    expect(normalizePath('~', cwd, ENV)).toBeNull();
+    expect(normalizePath('home/alice/notes.txt', cwd, ENV)).toBe('notes.txt');
+    expect(normalizePath('Users/Alice/x.txt', cwd, ENV)).toBe('x.txt');
+    expect(normalizePath('/work/repo/alice/x.ts', cwd, ENV)).toBe('x.ts');
+    expect(normalizePath('src/home/x.ts', cwd, ENV)).toBe('src/home/x.ts'); // `home` alone stays
+    expect(normalizePath('/Users/alice/proj/src/a.ts', '/Users/alice/proj', ENV)).toBe('src/a.ts');
+    expect(normalizePath('~/proj/src/a.ts', '/Users/alice/proj', ENV)).toBe('src/a.ts'); // ~ expands from HOME
+  });
+
+  it('R2: the user names come from the environment (NFC, case-folded)', () => {
+    expect([...userNames({ USER: 'Alice', HOME: '/Users/alice', USERPROFILE: 'C:\\Users\\Bob' })].sort())
+      .toEqual(['alice', 'bob']);
+    expect([...userNames({ USER: 'Jose\u0301' })]).toEqual(['jos\u00e9']);
+    expect([...userNames({})]).toEqual([]);
+  });
+
+  it('R3: search patterns with =, quotes, credentials or a word R2 would change send nothing', () => {
+    for (const pattern of ['API_KEY="hunter2pass"', 'password=letmein', "it's", 'say "hi"', 'run `x`',
+      'curly \u201cquote\u201d', 'token a1b2c3d4e5f6g7h8i9', '/Users/alice/secret.txt', '~/notes', 'alice',
+      'C:\\secret', '../up', 'src/Alice/x']) {
+      expect(act('search_files', { pattern }, '/work/repo'), pattern).toBeNull();
+    }
+    expect(act('search_files', { pattern: '**/*.ts' })!.query).toBe('**/*.ts');
+    expect(act('search_files', { pattern: 'error 404', path: 'src' })!.line).toBe('search error 404 in src');
+    expect(act('search_files', { pattern: 'TODO', path: '/Users/alice' })!.line).toBe('search TODO');
+  });
+
+  it('R3: a command subcommand R2 would change is dropped; a program named like the user gives nothing', () => {
+    expect(act('terminal', { command: 'cat ../alice/notes.txt' })!.query).toBe('cat');
+    expect(act('terminal', { command: 'cat src/alice/x' })!.query).toBe('cat');
+    expect(act('terminal', { command: 'alice --help' })).toBeNull();
+    expect(act('terminal', { command: 'cat src/x.ts' })!.query).toBe('cat src/x.ts');
+  });
+
+  it('R4: the label and the query carry only the sanitized target', () => {
+    const a = act('read_file', { path: '/Users/alice/other/proj/y.py' })!;
+    expect(a.line).toBe('read y.py');
+    expect(activityQuery(a)).toBe('y.py');
+    const block = renderActivityBlock({ id: 'f1', title: 'T', text: 'x' }, [], a);
+    expect(block).toContain('_for: read y.py_');
+    expect(block).not.toMatch(/alice|Users|other\/proj/);
+  });
+
+  it('randomized paths and search patterns never carry the user name, a home layout or a value', () => {
+    const r = rng(20261017);
+    const choice = <T>(arr: T[]): T => arr[Math.floor(r() * arr.length)];
+    const comps = ['src', 'alice', 'Alice', 'home', 'Users', 'proj', '..', '.', 'notes.txt', 'x.ts', '~'];
+    const roots = ['', '/', '~/', 'C:\\', '/Users/', '/home/', '/work/repo/'];
+    const cwds = ['/', '', '/Users', '/home', '/work', '/work/repo', '/Users/alice', 'C:\\'];
+    const words = ['TODO', 'alice', 'API_KEY=x', '"q"', "'q'", '`q`', 'password=p', 'src/x', '/abs', '~/h',
+      '../up', 'sk-ABCDEF1234567890xyz', 'error', '404'];
+    for (let i = 0; i < 1000; i++) {
+      const p = choice(roots) + Array.from({ length: 1 + Math.floor(r() * 4) }, () => choice(comps)).join(choice(['/', '\\']));
+      const cwd = choice(cwds);
+      const a = act('read_file', { path: p }, cwd);
+      if (a !== null) {
+        const q = activityQuery(a);
+        expect(q.toLowerCase().split('/'), `${p} @ ${cwd}`).not.toContain('alice');
+        expect(q, `${p} @ ${cwd}`).not.toMatch(/^(\/|~|[A-Za-z]:)/);
+        if (validCwd(cwd, ENV) === null && /^(\/|~|[A-Za-z]:)/.test(p)) {
+          expect(q.includes('/'), `${p} @ ${cwd}: outside cwd keeps the basename only`).toBe(false);
+        }
+        expect(a.line).toBe(`read ${q}`);
+      }
+      const pattern = Array.from({ length: 1 + Math.floor(r() * 3) }, () => choice(words)).join(' ');
+      const s = act('search_files', { pattern }, cwd);
+      if (s !== null) {
+        const q = activityQuery(s);
+        expect(q, pattern).not.toMatch(/[='"`]|alice|sk-|^\/|~|\.\./i);
+      }
+    }
+  });
+
+  it('runs every shared vector of tests/fixtures/activity_targets.json (Hermes parity)', () => {
+    const vectors = JSON.parse(readFileSync(VECTORS, 'utf8')) as Array<{
+      name: string; tool: string; args: Record<string, unknown>; cwd: string;
+      env: Record<string, string>; expected_query: string | null; expected_line: string | null;
+    }>;
+    expect(vectors.length).toBeGreaterThanOrEqual(50);
+    for (const v of vectors) {
+      const spec = hermes(v.tool, v.args);
+      const a = spec === null ? null : buildActivity(spec, v.cwd, v.env);
+      if (v.expected_query === null) {
+        expect(a === null || activityQuery(a) === '', `${v.name}: got ${a?.line}`).toBe(true);
+        continue;
+      }
+      expect(a, v.name).not.toBeNull();
+      expect(activityQuery(a!), v.name).toBe(v.expected_query);
+      expect(a!.line, v.name).toBe(v.expected_line);
+      const block = renderActivityBlock({ id: 'f1', title: 'T', text: 'x', provenance: 'p' }, [], a!);
+      expect(block, v.name).toContain(`_for: ${v.expected_line}_`);
+    }
   });
 
   it('gives no line for unsafe or unknown calls', () => {
@@ -427,6 +549,102 @@ function fakeHost(over: Partial<HostAdapter> & { outcome?: MatchOutcome; result?
   } as unknown as HostAdapter;
   return { host, calls, resets: () => resets };
 }
+
+/** A HostAdapter with every gate switchable (the onUserTurn preconditions). */
+function gateHost(over: Record<string, unknown> = {}) {
+  const state = {
+    enabled: true,
+    restored: false,
+    known: false,
+    absent: false,
+    ids: [] as string[],
+    cached: null as Ledger | null,
+    noted: [] as string[][],
+    turns: [] as Array<Record<string, unknown>>,
+    queries: [] as Array<{ query: string; max: number; exclude: string[] }>,
+    result: { entries: [item('f1')], corrections: [] } as WisdomMatchResult,
+    ...over,
+  };
+  const host = {
+    deliveryEnabled: () => state.enabled,
+    restored: () => state.restored,
+    rebuildLedger: () => ({ ...ledgerOf(state.ids), knownBootstrap: state.known }),
+    cacheLedger: (_s: unknown, l: Ledger) => {
+      state.cached = l;
+    },
+    cachedLedger: () => state.cached,
+    wisdomMatchAbsent: () => state.absent,
+    resetDiscoveryAndProbeCaches: () => {},
+    wisdomMatch: async (query: string, max: number, exclude: string[]) => {
+      state.queries.push({ query, max, exclude });
+      return { outcome: 'ok' as MatchOutcome, result: state.result };
+    },
+    noteDelivered: (_s: unknown, ids: string[]) => {
+      state.noted.push(ids);
+    },
+    recordVerbose: (t: Record<string, unknown>) => {
+      state.turns.push(t);
+    },
+  } as unknown as HostAdapter;
+  return { host, state };
+}
+
+describe('core activity gates (startActivity / finishActivity)', () => {
+  const S = { id: 's1' };
+
+  it('runs behind every onUserTurn gate; a refused start makes no CT call', async () => {
+    const cases: Array<[Record<string, unknown>, string, Breaker?]> = [
+      [{ enabled: false }, 'delivery_off'],
+      [{ restored: true, known: false }, 'restored_unknown_bootstrap'],
+      [{ absent: true }, 'capability_missing'],
+    ];
+    for (const [over, reason] of cases) {
+      const { host, state } = gateHost(over);
+      expect(startActivity(host, S, READ, new Breaker()).failure, reason).toBe(reason);
+      expect(state.queries).toEqual([]);
+    }
+    const open = new Breaker();
+    for (let i = 0; i < BREAKER_FAILS; i++) open.recordFailure();
+    expect(startActivity(gateHost().host, S, READ, open).failure).toBe('breaker_open');
+    expect(startActivity(gateHost().host, { id: '' }, READ, new Breaker()).failure).toBe('no_session');
+    // restored with a KNOWN bootstrap is fine (Hermes M2 semantics)
+    expect(startActivity(gateHost({ restored: true, known: true }).host, S, READ, new Breaker()).failure).toBeNull();
+  });
+
+  it('excludes the ledger newest first, then delivers one fact and records it everywhere', async () => {
+    const { host, state } = gateHost({ ids: ['b', 'a'] });
+    const start = startActivity(host, S, READ, new Breaker());
+    expect(start.failure).toBeNull();
+    const match = await (start as { match: Promise<unknown> }).match;
+    expect(state.queries).toEqual([{ query: 'src/x.ts', max: 1, exclude: ['b', 'a'] }]);
+    const block = finishActivity(host, S, READ, match as never)!;
+    expect(scanIds(block)).toEqual(['f1']);
+    expect(state.noted).toEqual([['f1']]);
+    expect(state.cached!.has('f1') && state.cached!.has('a')).toBe(true);
+    expect(state.turns).toHaveLength(1);
+    expect(state.turns[0]).toMatchObject({ kind: 'delivery', channel: 'activity', query: 'src/x.ts',
+      activity: 'read src/x.ts', deliveredIds: ['f1'], sessionId: 's1' });
+  });
+
+  it('a latch that turns OFF before delivery wins (e.g. a resume-OFF latch)', () => {
+    const { host, state } = gateHost();
+    state.enabled = false;
+    expect(finishActivity(host, S, READ, { failure: null, result: state.result })).toBeNull();
+    expect(state.noted).toEqual([]);
+    expect(state.turns[0]).toMatchObject({ kind: 'skip', reason: 'delivery_off', channel: 'activity' });
+  });
+
+  it('reports budget, failures and zero hits; never throws', () => {
+    const { host, state } = gateHost({ ids: ['f1'] });
+    expect(finishActivity(host, S, READ, null)).toBeNull();
+    expect(finishActivity(host, S, READ, { failure: 'timeout_or_exit' })).toBeNull();
+    expect(finishActivity(host, S, READ, { failure: null, result: state.result })).toBeNull();
+    expect(state.turns.map((t) => t.reason)).toEqual(['budget', 'timeout_or_exit', 'zero_hits']);
+    const boom = { ...host, rebuildLedger: () => { throw new Error('boom'); } } as HostAdapter;
+    expect(finishActivity(boom, S, READ, { failure: null, result: state.result })).toBeNull();
+    expect(startActivity(boom, S, READ, new Breaker()).failure).toBe('hook_failed');
+  });
+});
 
 describe('runActivityMatch', () => {
   it('asks CT for one fact with the bare target', async () => {

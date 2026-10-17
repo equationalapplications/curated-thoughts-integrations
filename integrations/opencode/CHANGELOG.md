@@ -11,6 +11,14 @@
   delivered at most once per block (the Hermes reference rule). The core
   also gained the autonomous-work activity API for a later OpenCode leg;
   OpenCode does not call it yet, so there is no other behavior change.
+  Why dropping a correction loses nothing: CT emits a correction only for
+  an id the plugin sent in `--exclude`, which is always a fact in context
+  (the live-delivery spec, CT guarantee 3). A correction that supersedes
+  nothing in context can only come from a stale exclude list, and its job
+  (marking a fact the agent sees as replaced, INTENT rule 3) has no target.
+  A newer fact that replaces something the agent has NOT seen is an ordinary
+  fact: CT returns it in `entries` whenever it matches the query, and it is
+  delivered like any other (CT guarantee 2 keeps the superseded one out).
 
 ## 0.3.0 — 2026-10-16
 

@@ -26,31 +26,28 @@
 import { randomUUID } from 'node:crypto';
 
 import {
+  ACTIVITY_SESSIONS_MAX,
   ActivityTracker,
-  EXCLUDE_MAX,
   TIMEOUT_MS,
+  activityGate,
   activityQuery,
   buildActivity,
+  finishActivity,
   isCtTool,
-  runActivityMatch,
-  selectActivityDelivery,
+  reportActivity,
+  startActivity,
   type Activity,
   type ActivityMatch,
   type ActivitySpec,
   type Breaker,
-  type Ledger,
-  type VerboseTurn,
 } from '@equational-applications/ct-wisdom-core';
 
 import type { DshWisdomAdapter } from './adapter.js';
 
-/** `source.kind` of an activity delivery (distinct from `curated-thoughts-wisdom`). */
+/** `source.kind` of a user-turn delivery. */
+export const LIVE_SOURCE_KIND = 'curated-thoughts-wisdom';
+/** `source.kind` of an activity delivery (distinct from the user-turn kind). */
 export const ACTIVITY_SOURCE_KIND = 'curated-thoughts-wisdom-activity';
-
-/** Plans kept (agent × step); a stale one is never consulted again. */
-const PLANS_MAX = 64;
-/** Derived-log snapshots kept for the N3 fallback (mirrors index.ts). */
-const SNAPSHOTS_MAX = 128;
 
 function obj(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -131,11 +128,11 @@ export function lastAssistantStep(messages: readonly unknown[]): StepCalls | nul
 }
 
 /**
- * The persisted message: an identified user-role message (the 0.4.1
+ * A persisted wisdom message: an identified user-role message (the 0.4.1
  * lesson — without a non-empty `id` and role "user" the stored session can
- * no longer be resumed).
+ * no longer be resumed). One builder for both channels.
  */
-export function activityMessage(block: string): Readonly<{
+export function wisdomMessage(block: string, kind: string): Readonly<{
   id: string;
   role: 'user';
   source: { kind: string };
@@ -144,9 +141,14 @@ export function activityMessage(block: string): Readonly<{
   return Object.freeze({
     id: randomUUID(),
     role: 'user' as const,
-    source: { kind: ACTIVITY_SOURCE_KIND },
+    source: { kind },
     content: [{ type: 'text' as const, text: block }],
   });
+}
+
+/** The activity delivery message (source kind `curated-thoughts-wisdom-activity`). */
+export function activityMessage(block: string): ReturnType<typeof wisdomMessage> {
+  return wisdomMessage(block, ACTIVITY_SOURCE_KIND);
 }
 
 interface AgentLike {
@@ -156,10 +158,21 @@ interface AgentLike {
 
 interface Plan {
   activity: Activity;
-  query: string;
   deadline: number;
   promise: Promise<ActivityMatch>;
   consumed: boolean;
+}
+
+/**
+ * Per agent: ONLY the newest step matters (pre-step N+1 reads step N's
+ * calls), so one slot per agent, never a shared LRU that a busy sibling
+ * could evict before the pre-step (review of PR #56). `callIds` lets
+ * prefetch skip the log read for every later call of a planned step.
+ */
+interface AgentSlot {
+  messageId: string;
+  plan: Plan | null;
+  callIds: Set<string>;
 }
 
 export interface DshActivityDeps {
@@ -173,20 +186,24 @@ export interface DshActivityDeps {
   beforeLedger?: (agentId: string) => void;
   /** One debug line per skip (index.ts: the plugin's named logger, debug level). */
   log?: (line: string) => void;
+  /** Environment the builder reads for R2 (user names, HOME for `~`); default process.env. */
+  env?: Record<string, string | undefined>;
 }
 
 export class DshActivity {
   private readonly tracker = new ActivityTracker();
-  private readonly plans = new Map<string, Plan | null>();
+  private readonly slots = new Map<string, AgentSlot>();
   private readonly adapter: DshWisdomAdapter;
   private readonly breaker: Breaker;
   private readonly cwd: () => string | null;
   private readonly now: () => number;
   private readonly beforeLedger?: (agentId: string) => void;
   private readonly log?: (line: string) => void;
+  private readonly env?: Record<string, string | undefined>;
 
   constructor(deps: DshActivityDeps) {
     if (deps.log) this.log = deps.log;
+    if (deps.env) this.env = deps.env;
     this.adapter = deps.adapter;
     this.breaker = deps.breaker;
     this.cwd = deps.cwd ?? (() => {
@@ -203,7 +220,7 @@ export class DshActivity {
   /** TEST-ONLY: forget keys, steps and plans. */
   _resetForTests(): void {
     this.tracker.reset();
-    this.plans.clear();
+    this.slots.clear();
   }
 
   private debug(agentId: string, cls: string): void {
@@ -214,25 +231,6 @@ export class DshActivity {
     }
   }
 
-  /** Verbose record (channel `activity`); never feeds back into delivery. */
-  private record(turn: Omit<VerboseTurn, 'channel'>): void {
-    const rec = this.adapter.recordVerbose;
-    if (typeof rec !== 'function') return;
-    try {
-      rec({ ...turn, channel: 'activity' });
-    } catch {
-      /* fail quietly */
-    }
-  }
-
-  private skip(agentId: string, cls: string, plan?: Plan | null, extra: Partial<VerboseTurn> = {}): null {
-    this.debug(agentId, cls);
-    if (plan) {
-      this.record({ kind: 'skip', sessionId: agentId, reason: cls, query: plan.query, activity: plan.activity.line, ...extra });
-    }
-    return null;
-  }
-
   private static derive(agent: AgentLike | null | undefined): unknown[] | null {
     const fn = agent?.session?.deriveMessages;
     if (typeof fn !== 'function') return null;
@@ -240,90 +238,87 @@ export class DshActivity {
     return Array.isArray(out) ? out : null;
   }
 
-  /** The ledger from the log the model sees right now (+ bootstrap memo ids). */
-  private ledgerFor(agentId: string, messages: unknown[]): Ledger {
+  /** Publish the log the model sees now, so the core gates rebuild from it. */
+  private publish(agentId: string, messages: unknown[]): void {
     this.beforeLedger?.(agentId);
-    const snaps = this.adapter.sessionMessages;
-    snaps.delete(agentId);
-    snaps.set(agentId, messages);
-    while (snaps.size > SNAPSHOTS_MAX) {
-      const oldest = snaps.keys().next();
-      if (oldest.done) break;
-      snaps.delete(oldest.value);
-    }
-    return this.adapter.rebuildLedger({ id: agentId });
+    this.adapter.snapshotMessages(agentId, messages);
+  }
+
+  private slotFor(agentId: string, messageId: string): AgentSlot | null {
+    const slot = this.slots.get(agentId);
+    if (slot === undefined || slot.messageId !== messageId) return null;
+    this.slots.delete(agentId);
+    this.slots.set(agentId, slot);
+    return slot;
   }
 
   /**
    * The step's plan, made once per (agent, step) and then reused. Walks the
    * step's calls in model order: CT tools and calls without a safe activity
-   * are skipped, a seen key moves on, and the first admitted call starts the
-   * step's one CT query.
+   * are skipped, a seen key moves on, and the first new key is the step's
+   * would-be trigger. The core gates (delivery latch, restored-session rule,
+   * capability, breaker) decide whether it may run; a refusal is reported
+   * once (this runs once per step) and records no key.
    */
   private plan(agentId: string, messages: unknown[], step: StepCalls): Plan | null {
-    const planKey = `${agentId}#${step.messageId}`;
-    if (this.plans.has(planKey)) return this.plans.get(planKey) ?? null;
-    let plan: Plan | null = null;
-    this.plans.set(planKey, null);
-    while (this.plans.size > PLANS_MAX) {
-      const oldest = this.plans.keys().next();
+    const existing = this.slotFor(agentId, step.messageId);
+    if (existing !== null) return existing.plan;
+    const slot: AgentSlot = { messageId: step.messageId, plan: null, callIds: new Set(step.calls.map((c) => c.id)) };
+    this.slots.delete(agentId);
+    this.slots.set(agentId, slot);
+    while (this.slots.size > ACTIVITY_SESSIONS_MAX) {
+      const oldest = this.slots.keys().next();
       if (oldest.done) break;
-      this.plans.delete(oldest.value);
+      this.slots.delete(oldest.value);
     }
+    const session = { id: agentId };
     for (const call of step.calls) {
       if (isCtTool(call.name)) {
         this.debug(agentId, 'ct_tool');
         continue;
       }
-      const activity = buildActivity(dshActivitySpec(call.name, call.args), this.cwd());
+      const activity = buildActivity(dshActivitySpec(call.name, call.args), this.cwd(), this.env ?? process.env);
       if (activity === null || activityQuery(activity) === '') {
         this.debug(agentId, 'no_activity');
         continue;
       }
-      if (this.breaker.isOpen()) {
-        // A would-be trigger that cannot run: verbose hears of it once per step.
-        if (this.tracker.peek(agentId, step.messageId, activity.key) === null) {
-          if (this.tracker.firstReport(agentId, step.messageId)) {
-            this.record({ kind: 'skip', sessionId: agentId, reason: 'breaker_open', query: activityQuery(activity), activity: activity.line });
-          }
-          this.debug(agentId, 'breaker_open');
-          break;
-        }
+      const seen = this.tracker.peek(agentId, step.messageId, activity.key);
+      if (seen === 'seen_key') {
+        this.debug(agentId, seen);
         continue;
       }
-      const refused = this.tracker.admit(agentId, step.messageId, activity.key);
-      if (refused === 'seen_key') {
-        this.debug(agentId, refused);
-        continue;
-      }
-      if (refused === 'step_used') {
-        this.debug(agentId, refused);
+      if (seen === 'step_used') break;
+      this.publish(agentId, messages);
+      const gate = activityGate(this.adapter, session, this.breaker);
+      if (!gate.ok) {
+        this.debug(agentId, gate.reason);
+        reportActivity(this.adapter, session, activity, { kind: 'skip', reason: gate.reason });
         break;
       }
-      const ledger = this.ledgerFor(agentId, messages);
-      const exclude = ledger.idsMostRecentFirst.slice(0, EXCLUDE_MAX);
-      plan = {
-        activity,
-        query: activityQuery(activity),
-        deadline: this.now() + TIMEOUT_MS,
-        promise: runActivityMatch(this.adapter, activity, exclude, this.breaker),
-        consumed: false,
-      };
-      this.plans.set(planKey, plan);
+      this.tracker.admit(agentId, step.messageId, activity.key);
+      const start = startActivity(this.adapter, session, activity, this.breaker);
+      if (start.failure !== null) {
+        this.debug(agentId, start.failure);
+        reportActivity(this.adapter, session, activity, { kind: 'skip', reason: start.failure });
+        break;
+      }
+      slot.plan = { activity, deadline: this.now() + TIMEOUT_MS, promise: start.match, consumed: false };
       break;
     }
-    return plan;
+    return slot.plan;
   }
 
   /**
    * `tools/pre-execute` prefetch for a model-direct call of the newest step.
    * Never throws and returns nothing: the caller passes `next()` through.
+   * Once a step is planned, its other calls return without reading the log.
    */
   prefetch(exec: { callId?: unknown; name?: unknown; arguments?: unknown; parent?: unknown; agent?: AgentLike } | null | undefined): void {
     try {
       if (exec === null || typeof exec !== 'object' || exec.parent !== undefined) return;
       const agentId = typeof exec.agent?.id === 'string' ? exec.agent.id : '';
       if (agentId === '' || typeof exec.callId !== 'string') return;
+      if (this.slots.get(agentId)?.callIds.has(exec.callId)) return;
       const messages = DshActivity.derive(exec.agent);
       if (messages === null) return this.debug(agentId, 'no_ledger');
       const step = lastAssistantStep(messages);
@@ -344,51 +339,30 @@ export class DshActivity {
   async deliver(agent: AgentLike, claimed: readonly unknown[], decisionMessages: readonly unknown[]): Promise<string | null> {
     const agentId = typeof agent?.id === 'string' ? agent.id : '';
     try {
-      if (agentId === '') return this.skip(agentId, 'empty_id');
+      if (agentId === '') return null;
       const messages = DshActivity.derive(agent);
-      if (messages === null) return this.skip(agentId, 'no_ledger');
+      if (messages === null) {
+        this.debug(agentId, 'no_ledger');
+        return null;
+      }
       const step = lastAssistantStep(messages);
       if (step === null) return null;
       const plan = this.plan(agentId, messages, step);
       if (plan === null || plan.consumed) return null;
       plan.consumed = true;
+      const session = { id: agentId };
       if ((claimed?.length ?? 0) > 0 && (decisionMessages?.length ?? 0) === 0) {
-        return this.skip(agentId, 'would_extend_turn', plan);
+        reportActivity(this.adapter, session, plan.activity, { kind: 'skip', reason: 'would_extend_turn' });
+        return null;
       }
       const match = await settleWithin(plan.promise, Math.max(0, plan.deadline - this.now()));
-      if (match === null) return this.skip(agentId, 'budget', plan);
-      if (match.failure !== null || !match.result) return this.skip(agentId, match.failure ?? 'parse_error', plan);
-      const ledger = this.ledgerFor(agentId, messages);
-      const ledgerIds = [...ledger.idsMostRecentFirst];
-      const sel = selectActivityDelivery(match.result, ledger, plan.activity);
-      if (sel === null) return this.skip(agentId, 'zero_hits', plan, { result: match.result, ledgerIds });
-      // N3: a CT recall later in this turn must stub the fact we deliver now
-      // (the message enters the log only when the step starts).
-      const cached = this.adapter.cachedLedger({ id: agentId });
-      const merged = [sel.id];
-      for (const id of [...ledgerIds, ...(cached?.idsMostRecentFirst ?? [])]) {
-        if (!merged.includes(id)) merged.push(id);
-      }
-      const set = new Set(merged);
-      this.adapter.cacheLedger({ id: agentId }, {
-        idsMostRecentFirst: merged,
-        has: (id) => set.has(id),
-        knownBootstrap: ledger.knownBootstrap || (cached?.knownBootstrap ?? false),
-      });
-      this.record({
-        kind: 'delivery',
-        sessionId: agentId,
-        reason: null,
-        query: plan.query,
-        activity: plan.activity.line,
-        result: match.result,
-        ledgerIds,
-        deliveredIds: [sel.id],
-        block: sel.block,
-      });
-      return sel.block;
+      // The core re-checks every gate against the log the model sees now,
+      // records the delivered id and reports the outcome.
+      this.publish(agentId, messages);
+      return finishActivity(this.adapter, session, plan.activity, match);
     } catch {
-      return this.skip(agentId, 'hook_failed');
+      this.debug(agentId, 'hook_failed');
+      return null;
     }
   }
 }

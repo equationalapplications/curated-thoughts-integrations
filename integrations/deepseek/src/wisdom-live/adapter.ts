@@ -351,8 +351,26 @@ export class DshWisdomAdapter implements HostAdapter {
     return out;
   }
 
-  /** Registered per-agent derived-log snapshots (set by index.ts listeners). */
+  /** Registered per-agent derived-log snapshots (set through snapshotMessages). */
   sessionMessages: Map<string, unknown[]> = new Map();
+
+  /**
+   * Publish an agent's derived session log (what the next ledger rebuild
+   * reads). The ONE place both the user-turn and the activity path record a
+   * snapshot: LRU-refreshed, bounded to SNAPSHOTS_MAX agents.
+   */
+  snapshotMessages(agentId: string, messages: unknown[]): void {
+    this.sessionMessages.delete(agentId);
+    this.sessionMessages.set(agentId, messages);
+    while (this.sessionMessages.size > DshWisdomAdapter.SNAPSHOTS_MAX) {
+      const oldest = this.sessionMessages.keys().next();
+      if (oldest.done) break;
+      this.sessionMessages.delete(oldest.value);
+    }
+  }
+
+  /** Agents whose derived-log snapshot is kept. */
+  static readonly SNAPSHOTS_MAX = 128;
 
   /** m1: cache the N1 rebuild before any early return. */
   cacheLedger(session: SessionRef, ledger: Ledger): void {

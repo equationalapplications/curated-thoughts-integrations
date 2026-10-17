@@ -1,4 +1,3 @@
-import { randomUUID } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -14,7 +13,7 @@ import {
   runUserTurn,
   runToolResult,
 } from './wisdom-live/adapter.js';
-import { DshActivity, activityMessage } from './wisdom-live/activity.js';
+import { DshActivity, LIVE_SOURCE_KIND, activityMessage, wisdomMessage } from './wisdom-live/activity.js';
 import { Breaker } from '@equational-applications/ct-wisdom-core';
 import { dshVerboseRecorder } from './verbose.js';
 import type { MemoRecord } from './wisdom-live/adapter.js';
@@ -405,13 +404,9 @@ export function apply(ctx: Context, config: Config): void {
             typeof payload.agent?.session?.deriveMessages === 'function'
               ? payload.agent.session.deriveMessages()
               : [];
-          adapter.sessionMessages.set(agentId, derived);
-          // Keep the session log bounded: 128 agents × their latest snapshot.
-          while (adapter.sessionMessages.size > 128) {
-            const oldest = adapter.sessionMessages.keys().next();
-            if (oldest.done) break;
-            adapter.sessionMessages.delete(oldest.value);
-          }
+          // Bounded LRU (128 agents × their latest snapshot), shared with
+          // the activity path.
+          adapter.snapshotMessages(agentId, derived);
           noteMemoBlock(agentId, liveMemoBlockFor(agentId));
           const block = await runUserTurn(
             adapter,
@@ -428,12 +423,7 @@ export function apply(ctx: Context, config: Config): void {
             // "corrupt" and cannot be continued (live e2e, 2026-10-16).
             decision.messages = [
               ...decision.messages,
-              Object.freeze({
-                id: randomUUID(),
-                role: 'user',
-                content: [{ type: 'text', text: block }],
-                source: { kind: 'curated-thoughts-wisdom' },
-              }),
+              wisdomMessage(block, LIVE_SOURCE_KIND),
             ];
           }
         }

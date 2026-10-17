@@ -314,6 +314,65 @@ describe('per-step plan and delivery', () => {
   });
 });
 
+describe('core gates apply to activity delivery (review of PR #56)', () => {
+  it('a delivery latch that is OFF stops the CT call and the delivery', async () => {
+    const s = setup();
+    (s.adapter as unknown as { deliveryEnabled: () => boolean }).deliveryEnabled = () => false;
+    s.step([['bash', { command: 'pnpm test' }]]);
+    expect(await s.pre()).toBeNull();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(s.ct.calls).toEqual([]);
+  });
+
+  it('a restored session with no known bootstrap fails closed', async () => {
+    const s = setup();
+    (s.adapter as unknown as { restored: () => boolean }).restored = () => true;
+    s.step([['bash', { command: 'pnpm test' }]]);
+    expect(await s.pre()).toBeNull();
+    // with a known bootstrap it delivers
+    const s2 = setup();
+    (s2.adapter as unknown as { restored: () => boolean }).restored = () => true;
+    s2.adapter.bootstrapMemo['agent-1'] = { block: 'b', ids: ['boot1'] };
+    s2.step([['bash', { command: 'pnpm test' }]]);
+    expect(await s2.pre()).not.toBeNull();
+  });
+
+  it('noteDelivered records the activity id next to the bootstrap memo', async () => {
+    const s = setup();
+    s.adapter.bootstrapMemo['agent-1'] = { block: 'b', ids: ['boot1'] };
+    s.step([['read', { file_path: 'a.ts' }]]);
+    await s.pre();
+    expect(s.adapter.bootstrapMemo['agent-1'].ids).toEqual(['boot1', 'f1']);
+  });
+});
+
+describe('plan bookkeeping (review of PR #56)', () => {
+  it('a plan survives many other agents planning before its pre-step (no shared 64-slot LRU)', async () => {
+    const s = setup();
+    s.step([['bash', { command: 'pnpm test' }]]);
+    for (let i = 0; i < 100; i++) {
+      const log: Msg[] = [assistant([['read', { file_path: `f${i}.ts` }]])];
+      const other = { id: `other-${i}`, session: { deriveMessages: () => [...log] } };
+      const b = (log[0].content as Array<{ id: string }>)[0];
+      s.activity.prefetch({ callId: b.id, name: 'read', arguments: { file_path: `f${i}.ts` }, agent: other });
+    }
+    expect(await s.pre()).not.toBeNull();
+    expect(s.ct.calls.filter((c) => c.query === 'pnpm test')).toHaveLength(1);
+  });
+
+  it('prefetch reads the log once per step, not once per tool call', () => {
+    const s = setup();
+    let reads = 0;
+    const derive = s.agent.session.deriveMessages;
+    s.agent.session.deriveMessages = () => {
+      reads++;
+      return derive();
+    };
+    s.step([['read', { file_path: 'a.ts' }], ['read', { file_path: 'b.ts' }], ['grep', { pattern: 'x' }]]);
+    expect(reads).toBe(1);
+  });
+});
+
 describe('fail closed', () => {
   it('no agent id, no deriveMessages, no assistant step, no tool-call: nothing', async () => {
     const s = setup();

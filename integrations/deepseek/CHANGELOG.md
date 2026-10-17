@@ -20,7 +20,16 @@
     or a command's program plus its next safe word (`pnpm test`,
     `npm run`). Never file contents, tool output, diffs, the agent's text,
     flag values, quoted words, URLs, env assignments or credential-shaped
-    tokens.
+    tokens. The privacy rules are those of hermes 0.6.2, with the same
+    shared test vectors (`tests/fixtures/activity_targets.json`): a path
+    outside the workspace is reduced to its file name (a workspace counts
+    only at depth 2 or more, never `/`, a drive root, `/Users` or `/home`),
+    the local user name is never sent, and a search pattern holding `=`, a
+    quote, a credential or such a path sends nothing.
+  - The gates are the user-turn ones and live in the shared core
+    (`startActivity` / `finishActivity`): a delivery switch that is off, a
+    restored session with no known bootstrap, a missing `ct wisdom match`
+    or an open breaker stop the query, and every delivered id is recorded.
   - One fact of at most 600 characters, marker first, under the heading
     `## Curated Thoughts — relevant to this step`, delivered as an
     identified user-role message with source kind

@@ -102,7 +102,11 @@ relevant fact per model step, keyed to what it is doing
   plus the unquoted word right after it (`pnpm test`, `npm run`, `git push`).
   Never a flag's value, a quoted word, a URL, an `ENV=value` assignment or a
   credential-shaped token, and never file contents, tool output, diffs or
-  the agent's own words.
+  the agent's own words. A path outside the workspace is reduced to its
+  file name (the workspace counts only two or more levels deep, never `/`,
+  a drive root, `/Users` or `/home`), your user name is never sent, and a
+  search pattern with `=`, a quote, a credential or such a path sends
+  nothing (the Hermes 0.6.2 rules, with the same test vectors).
 - **Delivered as.** At most 1 fact in at most 600 characters, marker first,
   under `## Curated Thoughts — relevant to this step`, as its own user
   message (source kind `curated-thoughts-wisdom-activity`) before the next

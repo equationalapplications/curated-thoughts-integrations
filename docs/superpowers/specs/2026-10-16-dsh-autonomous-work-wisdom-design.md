@@ -151,10 +151,15 @@ buildActivity(spec, cwd?): Activity | null
 activityQuery(activity): string                          // the bare target
 ```
 
-- **Paths** (`normalizePath`): `\` → `/`, `posix.normalize`; a relative path is kept (leading `./`
-  dropped); an absolute or `~` path under `cwd` becomes relative to it; any other absolute path keeps
-  its last two components; leading `..` are dropped; Windows drive letters are dropped; capped at 200
-  chars by keeping the tail and cutting at the next `/`.
+- **Paths** (`normalizePath`), with the privacy rules R1–R4 of the Hermes hotfix
+  (`fix/hermes-activity-privacy`; amended after the PR #56 review): `\` → `/`, `posix.normalize`; a
+  relative path is kept (leading `./` and `..` dropped); **R1** an absolute or `~` path under `cwd`
+  becomes relative to it, and the cwd counts only at depth ≥ 2 (never `/`, a drive root, `/Users` or
+  `/home`); **R2** any other absolute or `~` path reduces to its basename, and in every path a component
+  equal to the local user name (`$USER`, `$USERNAME`, `$LOGNAME`, the last component of
+  `$HOME`/`$USERPROFILE`; case-insensitive), or a `Users`/`home` right before one, is dropped (nothing
+  left → no activity); Windows drive letters are dropped; capped at 200 chars by keeping the tail and
+  cutting at the next `/`.
 - **Self-trigger guard:** a target with a control character, `ct-fact:` or `## Curated Thoughts —`
   gives no activity.
 - **Commands** (`commandTarget`), exactly Hermes's rules: tokenize like Python
@@ -166,8 +171,11 @@ activityQuery(activity): string                          // the bare target
   ≥ 3 digits); free-text programs (`echo`, `export`, `env`, `sudo`, `ssh`, `curl`, `wget`, …) give only
   the program; a flag right after the program ends the target at the program (a flag's value is never
   sent), except `python[N.M] -m <module>`; the second word must pass the same shape test.
-- **Search:** the pattern (no activity if any word is credential-shaped), capped at 200; the key and
-  label add ` in <path>` when a path is given; the query is the pattern alone.
+- **Search (R3):** no activity when the pattern holds `=`, any quote (`'`, `"`, `` ` ``), a
+  credential-shaped word, or is path-shaped and does not pass R2 unchanged, or when a given search scope
+  fails R2 (`.` or the workspace root itself count as "no scope"). Otherwise the pattern, capped at 200;
+  the key and label add ` in <path>` for a scope; the query is the pattern alone.
+- **R4:** the `_for:` label and the verbose `activity` field are built from the sanitized target only.
 - **Key:** `(verb class, target)`, where read/write/edit fold into `file`.
 - **Query:** `stripForged(target).trim()`, capped at `ACTIVITY_QUERY_CHARS = 300`. The verb stays in
   the key and the visible `_for: <line>_` label, never in the query.
@@ -303,7 +311,16 @@ From `@equational-applications/ct-wisdom-core`:
 - `activityCandidates(result, ledger)`, `renderActivityBlock(item, superseded, activity)`,
   `selectActivityDelivery(result, ledger, activity)`;
 - `runActivityMatch(host, activity, exclude, breaker)`;
+- **the gates, so no host can skip them** (review of PR #56): `activityGate(host, session, breaker?)`
+  (no session, `deliveryEnabled` latch such as Claude Code's resume-OFF, restored without a known
+  bootstrap, capability latch, breaker), `startActivity(host, session, activity, breaker)` (gate +
+  `--exclude` bound + match) and `finishActivity(host, session, activity, match | null)` (re-gate on a
+  fresh ledger, select, `noteDelivered`, N3 cache update, verbose report), plus `reportActivity`;
+- `localUserNames(env)` (R2);
 - `VerboseTurn.channel?` and `VerboseTurn.activity?`.
+
+`ActivityTracker.firstReport` stays in the core for the per-tool hosts (Hermes, OpenCode, OpenClaw),
+where every call of a step reaches the gate; DSH plans a step once and does not use it.
 
 ## Alignment with INTENT.md
 
@@ -389,6 +406,33 @@ reads the ZAI key from the environment, never from argv). A grep of every output
 The randomized test also found two pre-existing user-turn duplicate paths in `ct-wisdom-core` (a correction
 whose own id is in context; one id as both entry and correction), fixed to the Hermes `render_live_block`
 rule; opencode and openclaw get patch bumps for it.
+
+## Review amendments (PR #56, independent review)
+
+- **Privacy R1–R4** (above): implemented in the core builder, identical to the Hermes hotfix rules;
+  the shared vector file `tests/fixtures/activity_targets.json` runs in the core suite once it lands.
+- **Gates in the core** (`activityGate` / `startActivity` / `finishActivity`): DSH no longer
+  re-implements the ledger, cache and verbose steps; `deliveryEnabled`, the restored-session rule and
+  `noteDelivered` now apply to every activity delivery.
+- **One plan slot per agent** (only the newest step matters), LRU-bounded at 256 agents like the key
+  tracker, instead of one 64-entry LRU across agents; prefetch remembers a planned step's call ids and
+  skips the log read for its other calls; one adapter method (`snapshotMessages`) publishes log
+  snapshots for both paths; one message builder (`wisdomMessage`) for both channels.
+- **User-turn corrections** (`onUserTurn`): a correction is delivered only when it supersedes an id in
+  context and its own id is new, and one id renders at most once per block. This is exactly the filter
+  of Hermes `render_live_block` (`seen = set(ledger)`; corrections first, kept only if
+  `supersedes ∩ ledger` is non-empty and the id is unseen; then entries not seen) and of the live-delivery
+  spec's step 7 ("drop a correction whose `supersedes` ∩ ledger is empty"). Annex A of the parity spec
+  wrote `corrections = res.corrections` unfiltered, and the TS port followed it; that was the gap.
+  Nothing relevant is lost: CT emits corrections only for `--exclude` ids (CT guarantee 3), which are
+  facts in context, so a correction superseding nothing in context comes only from a stale exclude list
+  and has nothing to correct (INTENT rule 3 is about facts the agent sees). A newer fact that replaces
+  something the agent has not seen is an ordinary wiki entry: CT returns it in `entries` when it matches
+  the query (guarantee 2 keeps the superseded one out), and it is delivered like any fact. Rendering
+  differences that remain from before (TS lists every `supersedes` id in a correction's title and puts
+  entries before corrections; Hermes lists only ids in context, corrections first) change no ids.
+- **e2e check 5** now reads tab-separated argv and asserts the query is the single element right after
+  `--` with nothing after it.
 
 ## Versioning and docs
 

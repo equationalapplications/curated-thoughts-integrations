@@ -30,6 +30,7 @@ import {
   ACTIVITY_SESSIONS_MAX,
   ACTIVITY_STEP_IDS_MAX,
   ACTIVITY_TARGET_CHARS,
+  EXCLUDE_MAX,
 } from './constants.js';
 import { marker, stripForged, validId } from './ledger.js';
 import type {
@@ -37,8 +38,10 @@ import type {
   FactEntry,
   HostAdapter,
   Ledger,
+  SessionRef,
   WisdomMatchResult,
 } from './types.js';
+import type { VerboseTurn } from './verbose.js';
 
 export type ActivityVerb = 'read' | 'write' | 'edit' | 'search' | 'run';
 
@@ -139,31 +142,157 @@ function basename(path: string): string {
   return i < 0 ? path : path.slice(i + 1);
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// Privacy rules R1–R4 — IDENTICAL to the Hermes builder (hermes 0.6.2,
+// ct_wisdom_activity.py, spec "Privacy amendment"); the shared vectors in
+// tests/fixtures/activity_targets.json run against both. A user name never
+// leaves the machine.
+// ─────────────────────────────────────────────────────────────────────────
+
+/** The environment view the builder reads (user names, HOME for `~`). */
+export type ActivityEnv = Record<string, string | undefined>;
+
+const DRIVE_PREFIX_RE = /^[A-Za-z]:(\/|$)/;
+const QUOTE_CHARS = new Set(['"', "'", '`', '\u2018', '\u2019', '\u201c', '\u201d']);
+const HOME_PARENTS = new Set(['users', 'home']);
+
+/** Comparison form: NFC (macOS paths are often NFD) and case-folded (≈ Python casefold). */
+function fold(text: string): string {
+  return text.normalize('NFC').toLowerCase().toUpperCase().toLowerCase();
+}
+
+function envStr(env: ActivityEnv, name: string): string | null {
+  const v = env[name];
+  return typeof v === 'string' && v.trim() !== '' ? v.trim() : null;
+}
+
+function homeOf(env: ActivityEnv): string | null {
+  return envStr(env, 'HOME') ?? envStr(env, 'USERPROFILE');
+}
+
+/** Python posixpath.dirname. */
+function dirname(path: string): string {
+  const i = path.lastIndexOf('/') + 1;
+  let head = path.slice(0, i);
+  if (head && head !== '/'.repeat(head.length)) head = head.replace(/\/+$/, '');
+  return head;
+}
+
 /**
- * Relative, machine-neutral form of a path argument, or null. Relative paths
- * are kept; absolute (or ~) paths under `cwd` become relative to it; any
- * other absolute path is cut to its last two components so a home directory
- * or user name never leaves the machine. Leading `..` are dropped.
+ * Folded names of the current user: USER, LOGNAME, USERNAME and the
+ * basename of HOME / USERPROFILE (Hermes `user_names`).
  */
-export function normalizePath(raw: unknown, cwd?: string | null): string | null {
+export function userNames(env: ActivityEnv = process.env): Set<string> {
+  const names = new Set<string>();
+  for (const name of ['USER', 'LOGNAME', 'USERNAME']) {
+    const v = envStr(env, name);
+    if (v) names.add(fold(v));
+  }
+  for (const name of ['HOME', 'USERPROFILE']) {
+    const v = envStr(env, name);
+    if (!v) continue;
+    const base = basename(v.replace(/\\/g, '/').replace(/\/+$/, ''));
+    if (base && !base.endsWith(':')) names.add(fold(base));
+  }
+  for (const bad of ['', '.', '..']) names.delete(bad);
+  return names;
+}
+
+/**
+ * Normalized '/' form of an absolute path (drive letter lowercased, a
+ * leading `~` or `~/` expanded from HOME), or null when it is not one.
+ */
+function absNorm(raw: string, env: ActivityEnv): string | null {
+  let path = raw.replace(/\\/g, '/');
+  if (path === '~' || path.startsWith('~/')) {
+    const home = homeOf(env);
+    if (home === null) return null;
+    path = home.replace(/\\/g, '/').replace(/\/+$/, '') + path.slice(1);
+  }
+  if (DRIVE_PREFIX_RE.test(path)) {
+    path = path[0].toLowerCase() + path.slice(1);
+  } else if (!path.startsWith('/')) {
+    return null;
+  }
+  return normpath(path);
+}
+
+function depth(norm: string): number {
+  let parts = norm.split('/').filter((p) => p !== '');
+  if (parts.length > 0 && DRIVE_RE.test(parts[0])) parts = parts.slice(1);
+  return parts.length;
+}
+
+/**
+ * R1: the normalized cwd, or null when it does not count: empty, not
+ * absolute, `/`, a drive root, any cwd of depth < 2 (`/Users`, `/home`,
+ * `C:/Users`) or the parent of the user's home directory.
+ */
+export function validCwd(cwd: unknown, env: ActivityEnv = process.env): string | null {
+  if (typeof cwd !== 'string' || cwd.trim() === '') return null;
+  const norm = absNorm(cwd.trim(), env);
+  if (norm === null || depth(norm) < 2) return null;
+  const home = homeOf(env);
+  const homeNorm = home ? absNorm(home, env) : null;
+  if (homeNorm && fold(dirname(homeNorm)) === fold(norm)) return null;
+  return norm;
+}
+
+/** R2: drop every user-name component, and `Users`/`home` right before one. */
+function dropNames(parts: string[], names: Set<string>): string[] {
+  const out: string[] = [];
+  parts.forEach((part, i) => {
+    const folded = fold(part);
+    if (names.has(folded)) return;
+    if (HOME_PARENTS.has(folded) && i + 1 < parts.length && names.has(fold(parts[i + 1]))) return;
+    out.push(part);
+  });
+  return out;
+}
+
+/**
+ * True when R2 would leave `token` (one word of a search pattern or a
+ * command's subcommand) exactly as it is: relative, no `..`, no user-name
+ * component. An absolute, `~`, drive or UNC token fails.
+ */
+export function pathTokenOk(token: string, names: Set<string>): boolean {
+  if (token.startsWith('/') || token.startsWith('~') || token.startsWith('\\\\')) return false;
+  if (DRIVE_PREFIX_RE.test(token.replace(/\\/g, '/'))) return false;
+  const comps = token.split(/[/\\]/);
+  if (comps.includes('..')) return false;
+  return !comps.some((c) => names.has(fold(c)));
+}
+
+/**
+ * Relative, machine-neutral form of a path argument, or null.
+ *
+ * R2: an absolute (or `~`) path under a valid cwd (R1, `validCwd`) becomes
+ * relative to it; any other absolute or `~` path is reduced to its basename.
+ * Relative paths are kept, leading `..` dropped. Then every component equal
+ * to the user's name (`userNames`), and `Users`/`home` right before one, is
+ * dropped. Null when nothing is left.
+ */
+export function normalizePath(raw: unknown, cwd?: string | null, env: ActivityEnv = process.env): string | null {
   const cleaned = cleanTarget(raw);
   if (cleaned === null) return null;
-  let path = cleaned.replace(/\\/g, '/');
-  let absolute = path.startsWith('/') || path.startsWith('~') || /^[A-Za-z]:\//.test(path);
-  if (absolute && cwd) {
-    const base = normpath(String(cwd).replace(/\\/g, '/')).replace(/\/+$/, '') + '/';
-    const norm = normpath(path);
-    if (norm.startsWith(base)) {
-      path = norm.slice(base.length);
-      absolute = false;
+  const path = cleaned.replace(/\\/g, '/');
+  let parts: string[];
+  if (path.startsWith('/') || path.startsWith('~') || DRIVE_PREFIX_RE.test(path)) {
+    const norm = absNorm(path, env);
+    const base = validCwd(cwd, env);
+    if (norm !== null && base !== null && norm.startsWith(`${base}/`)) {
+      parts = norm.slice(base.length + 1).split('/');
+    } else {
+      parts = normpath(path).split('/').filter((p) => p !== '' && p !== '.' && p !== '..' && !DRIVE_RE.test(p));
+      parts = parts.slice(-1);
+      if (parts.length > 0 && parts[0].startsWith('~')) parts = [];
     }
+  } else {
+    parts = normpath(path).split('/');
   }
-  let parts = normpath(path).split('/').filter((p) => p !== '' && p !== '.' && p !== '~');
-  if (absolute) {
-    if (parts.length > 0 && DRIVE_RE.test(parts[0])) parts = parts.slice(1);
-    parts = parts.slice(-2);
-  }
+  parts = parts.filter((p) => p !== '' && p !== '.' && p !== '~');
   while (parts.length > 0 && parts[0] === '..') parts = parts.slice(1);
+  parts = dropNames(parts, userNames(env));
   if (parts.length === 0) return null;
   let target = parts.join('/');
   if (target.length > ACTIVITY_TARGET_CHARS) {
@@ -173,6 +302,21 @@ export function normalizePath(raw: unknown, cwd?: string | null): string | null 
   }
   return target || null;
 }
+
+/**
+ * R3: the search pattern to send (≤ ACTIVITY_TARGET_CHARS), or null when it
+ * has an `=`, any quote, a credential-shaped word, or a word R2 would change.
+ */
+export function searchTarget(pattern: unknown, env: ActivityEnv = process.env): string | null {
+  const cleaned = cleanTarget(pattern);
+  if (cleaned === null || [...cleaned].some((ch) => ch === '=' || QUOTE_CHARS.has(ch))) return null;
+  const names = userNames(env);
+  for (const word of cleaned.split(/\s+/).filter((w) => w !== '')) {
+    if (credentialShaped(word) || !pathTokenOk(word, names)) return null;
+  }
+  return cleaned.slice(0, ACTIVITY_TARGET_CHARS);
+}
+
 
 /**
  * Shell words with their quotes KEPT, exactly like Python
@@ -218,11 +362,13 @@ function tokens(command: string): string[] {
  * Program plus the next safe word of the first simple command (decision 2),
  * or null. The second word is the one right after the program, never a
  * flag's value (`psql -W secretpw` → `psql`); `python -m <module>` is the
- * one supported form. Everything else is dropped.
+ * one supported form. A program named like the user gives null; a second
+ * word R2 would change is dropped. Everything else is dropped.
  */
-export function commandTarget(command: unknown): string | null {
+export function commandTarget(command: unknown, env: ActivityEnv = process.env): string | null {
   const cleaned = cleanTarget(command);
   if (cleaned === null) return null;
+  const names = userNames(env);
   let words: string[] = [];
   for (const token of tokens(cleaned)) {
     if (token === '' || [...token].some((ch) => OPERATOR_CHARS.has(ch))) break;
@@ -231,7 +377,7 @@ export function commandTarget(command: unknown): string | null {
   while (words.length > 0 && ASSIGN_RE.test(words[0])) words = words.slice(1);
   if (words.length === 0) return null;
   const program = basename(words[0].replace(/\\/g, '/'));
-  if (!safeWord(program)) return null;
+  if (!safeWord(program) || names.has(fold(program))) return null;
   if (FREE_TEXT_PROGRAMS.has(program.toLowerCase())) return program;
   let rest = words.slice(1);
   if (PYTHON_RE.test(program) && rest[0] === '-m') {
@@ -239,7 +385,7 @@ export function commandTarget(command: unknown): string | null {
   } else if (rest.length > 0 && rest[0].startsWith('-')) {
     return program;
   }
-  if (rest.length > 0 && safeWord(rest[0])) return `${program} ${rest[0]}`;
+  if (rest.length > 0 && safeWord(rest[0]) && pathTokenOk(rest[0], names)) return `${program} ${rest[0]}`;
   return program;
 }
 
@@ -247,32 +393,41 @@ function make(verb: ActivityVerb, target: string, line: string, query: string): 
   return { verb, target, key: `${VERB_CLASS[verb]}\u0000${target}`, line, query };
 }
 
-/** The activity for one tool call, built from its args only, or null. */
-export function buildActivity(spec: ActivitySpec | null | undefined, cwd?: string | null): Activity | null {
+/**
+ * The activity for one tool call, built from its args only, or null.
+ * R4: `line` (the visible `_for:` label and the verbose `activity` field)
+ * and `query` come from the same sanitized target, never a raw argument.
+ * `env` defaults to process.env (user names, HOME for `~`).
+ */
+export function buildActivity(
+  spec: ActivitySpec | null | undefined,
+  cwd?: string | null,
+  env: ActivityEnv = process.env,
+): Activity | null {
   if (spec === null || typeof spec !== 'object') return null;
   switch (spec.verb) {
     case 'read':
     case 'write':
     case 'edit': {
-      const target = normalizePath(spec.path, cwd);
+      const target = normalizePath(spec.path, cwd, env);
       return target === null ? null : make(spec.verb, target, `${spec.verb} ${target}`, target);
     }
     case 'search': {
-      let pattern = cleanTarget(spec.pattern);
-      if (pattern === null || pattern.split(/\s+/).some((w) => w !== '' && credentialShaped(w))) return null;
-      pattern = pattern.slice(0, ACTIVITY_TARGET_CHARS);
-      const where = spec.path ? normalizePath(spec.path, cwd) : null;
+      const pattern = searchTarget(spec.pattern, env);
+      if (pattern === null) return null;
+      const where = spec.path ? normalizePath(spec.path, cwd, env) : null;
       const target = pattern + (where ? ` in ${where}` : '');
       return make('search', target, `search ${target}`, pattern);
     }
     case 'run': {
-      const target = commandTarget(spec.command);
+      const target = commandTarget(spec.command, env);
       return target === null ? null : make('run', target, `run ${target}`, target);
     }
     default:
       return null;
   }
 }
+
 
 /** The text sent to CT: the bare target (A6), never the verb. */
 export function activityQuery(activity: Activity): string {
@@ -344,7 +499,13 @@ export class ActivityTracker {
     return s.keys.has(key) ? 'seen_key' : null;
   }
 
-  /** True once per step: bounds verbose skip records to one per step. */
+  /**
+   * True once per step: bounds verbose skip records (a blocked would-be
+   * trigger) to one per step. Needed by per-TOOL hosts (Hermes
+   * `pre_tool_call`, OpenCode `tool.execute.before`, OpenClaw
+   * `before_tool_call`), where every call of one step reaches the gate.
+   * DSH plans a whole step once, so it does not need it.
+   */
   firstReport(sessionId: string, stepId: string): boolean {
     const s = this.state(sessionId);
     if (s.reported.has(stepId)) return false;
@@ -478,5 +639,134 @@ export async function runActivityMatch(
     return { failure: null, result: attempt.result };
   } catch {
     return { failure: 'hook_failed' };
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// host-neutral gates: the SAME preconditions onUserTurn enforces, so no
+// host can skip them for activity delivery (a resume-OFF latch such as
+// Claude Code's, the restored-session fail-closed rule, the capability
+// latch, the shared breaker, delivered-id bookkeeping).
+// ─────────────────────────────────────────────────────────────────────────
+
+export type ActivityGate =
+  | { ok: true; ledger: Ledger }
+  | { ok: false; reason: string; ledger?: Ledger };
+
+/**
+ * Whether activity delivery may run for this session now, and the ledger
+ * rebuilt from host-persisted context. Reasons: `no_session`,
+ * `delivery_off`, `restored_unknown_bootstrap`, `capability_missing`,
+ * `breaker_open` (the last two only when `breaker` is given: before a query).
+ */
+export function activityGate(host: HostAdapter, session: SessionRef, breaker?: Breaker): ActivityGate {
+  if (!session || typeof session.id !== 'string' || session.id === '') return { ok: false, reason: 'no_session' };
+  if (!host.deliveryEnabled(session)) return { ok: false, reason: 'delivery_off' };
+  const ledger = host.rebuildLedger(session);
+  if (host.restored(session) && !ledger.knownBootstrap) return { ok: false, reason: 'restored_unknown_bootstrap', ledger };
+  if (breaker !== undefined) {
+    if (host.wisdomMatchAbsent()) return { ok: false, reason: 'capability_missing', ledger };
+    if (breaker.isOpen()) return { ok: false, reason: 'breaker_open', ledger };
+  }
+  return { ok: true, ledger };
+}
+
+/** Verbose record for an activity (channel `activity`); never throws. */
+export function reportActivity(
+  host: HostAdapter,
+  session: SessionRef,
+  activity: Activity,
+  turn: Omit<VerboseTurn, 'sessionId' | 'channel' | 'activity' | 'query'>,
+): void {
+  if (typeof host.recordVerbose !== 'function') return;
+  try {
+    host.recordVerbose({
+      ...turn,
+      sessionId: typeof session?.id === 'string' ? session.id : '',
+      channel: 'activity',
+      query: activityQuery(activity),
+      activity: oneLine(activity.line),
+    });
+  } catch {
+    /* fail quietly (INTENT rule 4) */
+  }
+}
+
+export type ActivityStart =
+  | { failure: null; match: Promise<ActivityMatch> }
+  | { failure: string };
+
+/**
+ * Start the activity's one CT query, behind every gate: the gate's ledger
+ * gives the `--exclude` bound (newest first, ≤ EXCLUDE_MAX). A refused start
+ * makes no CT call; the caller decides whether to report it (hosts report
+ * at most once per step, see ActivityTracker.firstReport).
+ */
+export function startActivity(
+  host: HostAdapter,
+  session: SessionRef,
+  activity: Activity,
+  breaker: Breaker,
+): ActivityStart {
+  try {
+    const gate = activityGate(host, session, breaker);
+    if (!gate.ok) return { failure: gate.reason };
+    const exclude = gate.ledger.idsMostRecentFirst.slice(0, EXCLUDE_MAX);
+    return { failure: null, match: runActivityMatch(host, activity, exclude, breaker) };
+  } catch {
+    return { failure: 'hook_failed' };
+  }
+}
+
+/**
+ * Finish an activity: `match` is the settled query, or null when it ran
+ * past the host's budget. Re-checks the gates against a FRESH ledger,
+ * selects one fact, records it (`noteDelivered` and the N3 turn cache, so a
+ * CT recall later in the turn stubs it) and reports every outcome to
+ * verbose mode. Resolves to the block for the host to place on its channel,
+ * or null. Never throws.
+ */
+export function finishActivity(
+  host: HostAdapter,
+  session: SessionRef,
+  activity: Activity,
+  match: ActivityMatch | null,
+): string | null {
+  const skip = (reason: string, extra: Partial<VerboseTurn> = {}): null => {
+    reportActivity(host, session, activity, { kind: 'skip', reason, ...extra });
+    return null;
+  };
+  try {
+    if (match === null) return skip('budget');
+    if (match.failure !== null || !match.result) return skip(match.failure ?? 'parse_error');
+    const gate = activityGate(host, session);
+    if (!gate.ok) return skip(gate.reason);
+    const ledger = gate.ledger;
+    const ledgerIds = [...ledger.idsMostRecentFirst];
+    const sel = selectActivityDelivery(match.result, ledger, activity);
+    if (sel === null) return skip('zero_hits', { result: match.result, ledgerIds });
+    host.noteDelivered(session, [sel.id]);
+    const cached = host.cachedLedger ? host.cachedLedger(session) : null;
+    const merged = [sel.id];
+    for (const id of [...ledgerIds, ...(cached?.idsMostRecentFirst ?? [])]) {
+      if (!merged.includes(id)) merged.push(id);
+    }
+    const set = new Set(merged);
+    host.cacheLedger(session, {
+      idsMostRecentFirst: merged,
+      has: (id) => set.has(id),
+      knownBootstrap: ledger.knownBootstrap || (cached?.knownBootstrap ?? false),
+    });
+    reportActivity(host, session, activity, {
+      kind: 'delivery',
+      reason: null,
+      result: match.result,
+      ledgerIds,
+      deliveredIds: [sel.id],
+      block: sel.block,
+    });
+    return sel.block;
+  } catch {
+    return skip('hook_failed');
   }
 }
