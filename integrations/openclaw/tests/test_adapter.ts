@@ -55,6 +55,56 @@ describe('ledger rebuild', () => {
   });
 });
 
+describe('run ledger (autonomous-work spec 2026-10-17: ids that entered context during the run)', () => {
+  const turn = (runId: string, ids: string[] = []) => ({
+    runId,
+    messages: ids.map((id) => ({ role: 'toolResult', content: [{ type: 'text', text: `<!-- ct-fact:${id} -->` }] })),
+    drained: [] as string[],
+    bootstrapIds: ['boot'],
+    restored: false,
+  });
+
+  it('noteRunIds joins the ledger newest first, only for the current run', () => {
+    const a = adapterWith(noSpawn);
+    a.setTurn('s', turn('r1', ['snap']));
+    expect(a.hasRun('s', 'r1')).toBe(true);
+    expect(a.hasRun('s', 'r2')).toBe(false);
+    expect(a.hasRun('other', 'r1')).toBe(false);
+    a.noteRunIds('s', 'r1', ['x', 'bad id', 'y']);
+    a.noteRunIds('s', 'r2', ['stale']);
+    expect(a.rebuildLedger({ id: 's' }).idsMostRecentFirst).toEqual(['y', 'x', 'snap', 'boot']);
+  });
+
+  it('a new runId resets the run ledger (its tool results are in the next snapshot); the same runId keeps it', () => {
+    const a = adapterWith(noSpawn);
+    a.setTurn('s', turn('r1'));
+    a.noteRunIds('s', 'r1', ['x']);
+    a.setTurn('s', turn('r1')); // a second attempt of the same run
+    expect(a.rebuildLedger({ id: 's' }).has('x')).toBe(true);
+    a.setTurn('s', turn('r2', ['x']));
+    a.noteRunIds('s', 'r2', ['z']);
+    expect(a.rebuildLedger({ id: 's' }).idsMostRecentFirst).toEqual(['z', 'x', 'boot']);
+  });
+
+  it('cacheLedger unions into the run ledger; cachedLedger is scoped to the run', () => {
+    const a = adapterWith(noSpawn);
+    a.setTurn('s', turn('r1'));
+    a.cacheLedger({ id: 's' }, { idsMostRecentFirst: ['c'], has: (id) => id === 'c', knownBootstrap: true });
+    expect(a.cachedLedger({ id: 's' })?.idsMostRecentFirst).toEqual(['c']);
+    expect(a.rebuildLedger({ id: 's' }).has('c')).toBe(true);
+    a.setTurn('s', turn('r2'));
+    expect(a.cachedLedger({ id: 's' })).toBeNull();
+    expect(a.rebuildLedger({ id: 's' }).has('c')).toBe(false);
+  });
+
+  it('a turn without a runId (legacy callers) still caches for the session', () => {
+    const a = adapterWith(noSpawn);
+    a.setTurn('s', { messages: [], drained: [], bootstrapIds: null, restored: false });
+    a.cacheLedger({ id: 's' }, { idsMostRecentFirst: ['c'], has: (id) => id === 'c', knownBootstrap: false });
+    expect(a.cachedLedger({ id: 's' })?.has('c')).toBe(true);
+  });
+});
+
 describe('N3 recall envelope (m4)', () => {
   it('matches only the projected curated_recall_context tool (incl. collision suffix)', () => {
     expect(isRecallToolName('curated-thoughts__curated_recall_context')).toBe(true);

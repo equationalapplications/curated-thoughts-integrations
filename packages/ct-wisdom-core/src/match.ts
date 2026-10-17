@@ -17,6 +17,11 @@ export interface SpawnLike {
   command: string;
   args: string[];
   timeoutMs: number;
+  /**
+   * Optional: abort kills the child (process tree). Bindings that ignore it
+   * still end at `timeoutMs`.
+   */
+  signal?: AbortSignal;
 }
 
 export interface SpawnOutcome {
@@ -27,6 +32,8 @@ export interface SpawnOutcome {
   /** True when the binary could not be launched at all (ENOENT, EACCES). */
   spawnError: boolean;
   timedOut: boolean;
+  /** True when the caller aborted the call (`SpawnLike.signal`) and the child was killed. */
+  aborted?: boolean;
 }
 
 export type SpawnFn = (spec: SpawnLike) => Promise<SpawnOutcome>;
@@ -53,6 +60,7 @@ export function matchArgs(
 
 /** Classify a spawn outcome per Annex A (`res.failed` / breaker / n3). */
 export function classify(outcome: SpawnOutcome): MatchOutcome {
+  if (outcome.aborted === true) return 'aborted';
   if (outcome.spawnError) return 'spawn';
   if (outcome.timedOut || outcome.code !== 0) return 'timeout_or_exit';
   return 'ok';
@@ -95,11 +103,13 @@ export async function wisdomMatch(
   max: number,
   exclude: string[],
   spawnFn: SpawnFn,
+  signal?: AbortSignal,
 ): Promise<{ outcome: MatchOutcome; result?: WisdomMatchResult }> {
   const raw = await spawnFn({
     command: ctPath,
     args: matchArgs(query, max, exclude),
     timeoutMs: TIMEOUT_MS,
+    ...(signal ? { signal } : {}),
   });
   const outcome = classify(raw);
   if (outcome !== 'ok') return { outcome };

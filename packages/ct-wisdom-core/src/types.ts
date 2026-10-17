@@ -35,7 +35,11 @@ export interface WisdomMatchResult {
 }
 
 /** Outcome class of a subprocess attempt — drives breaker vs cache reset. */
-export type MatchOutcome = 'ok' | 'timeout_or_exit' | 'spawn';
+/**
+ * `aborted`: the caller's budget ran out and it killed the child (the spawn
+ * reported `aborted: true`). Never a breaker failure: it says nothing about CT.
+ */
+export type MatchOutcome = 'ok' | 'timeout_or_exit' | 'spawn' | 'aborted';
 
 /** The ledger: ids present in the session's context, newest first. */
 export interface Ledger {
@@ -78,11 +82,16 @@ export interface HostAdapter {
   /** Cached ledger from the current turn's N1 rebuild, if any (m2). */
   cachedLedger?(session: SessionRef): Ledger | null;
 
-  /** Run `ct wisdom match` under the core's timeout; never throws. */
+  /**
+   * Run `ct wisdom match` under the core's timeout; never throws. `signal`
+   * (optional; activity delivery passes it) aborts the call and kills the
+   * child when the caller's budget runs out.
+   */
   wisdomMatch(
     query: string,
     max: number,
     exclude: string[],
+    signal?: AbortSignal,
   ): Promise<{ outcome: MatchOutcome; result?: WisdomMatchResult }>;
 
   /** True when a tool result is an agent-initiated CT recall (m4). */

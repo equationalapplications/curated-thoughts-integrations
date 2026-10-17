@@ -12,7 +12,13 @@
  *                          session), N1+N2 live wisdom → prependContext; a
  *                          result the host no longer accepts is salvaged
  *                          through api.session.workflow.enqueueNextTurnInjection.
- *   tool-result middleware (runtime "openclaw") — N3 dedup stub on CT recall.
+ *   model_call_started   — observe-only: the model step id for the activity
+ *                          rate rule (one CT call per step).
+ *   tool-result middleware (runtime "openclaw") — N3 dedup stub on CT recall,
+ *                          then autonomous-work ("activity") delivery: one
+ *                          marker-first block appended to the result of an
+ *                          executed call whose activity is new (spec
+ *                          2026-10-17-openclaw-autonomous-work-wisdom-design.md).
  *
  * Every handler is fail-open for the host: an exception is logged and the
  * handler returns nothing, so the turn proceeds without our contribution.
@@ -31,6 +37,8 @@ import { expandHome } from '../scripts/ct_env.js';
 import {
   str,
   type AgentCtx,
+  type ModelCallCtx,
+  type ModelCallEvent,
   type OpenClawApiLike,
   type PromptBuildEvent,
   type PromptBuildResult,
@@ -38,6 +46,7 @@ import {
   type ToolResultEvent,
   type TurnPrepareEvent,
 } from './host.js';
+import { OpenClawActivity } from './wisdom/activity.js';
 import { OpenClawWisdomAdapter, isRecallToolName } from './wisdom/adapter.js';
 import { BootstrapMemo } from './wisdom/bootstrap.js';
 import { CtLocator } from './wisdom/discover.js';
@@ -45,6 +54,8 @@ import { nodeSpawnFn } from './wisdom/spawn.js';
 import { openclawVerboseRecorder } from './wisdom/verbose.js';
 
 export const PLUGIN_ID = 'curated-thoughts';
+/** Mirrors package.json#version (a test keeps them equal); part of the state key. */
+export const PLUGIN_VERSION = '0.3.1';
 /** First-turn worst case is ~14 s (spec "Budgets"); the default is 15 s. */
 export const PROMPT_HOOK_TIMEOUT_MS = 20_000;
 /** Salvaged blocks expire if the session never takes another turn. */
@@ -58,6 +69,10 @@ export interface PluginDeps {
   candidates?: () => string[];
   usable?: (path: string) => boolean;
   now?: () => number;
+  /** TEST-ONLY: the activity query budget (default the core's 3 s). */
+  activityBudgetMs?: number;
+  /** TEST-ONLY: the bound on a first-use locate + probe wait (default 2 s). */
+  activityReadyMs?: number;
 }
 
 function lruSet<K, V>(map: Map<K, V>, key: K, value: V): void {
@@ -88,7 +103,101 @@ function brainEnv(base: NodeJS.ProcessEnv, configured: unknown): NodeJS.ProcessE
   return raw ? { ...base, CURATED_BRAIN_DIR: expandHome(raw, base) } : base;
 }
 
-export function createPlugin(deps: PluginDeps = {}) {
+/** Everything the hooks and the middleware must share within one process. */
+interface PluginState {
+  current: OpenClawApiLike;
+  adapter: OpenClawWisdomAdapter;
+  breaker: Breaker;
+  activity: OpenClawActivity;
+  bootstrap: BootstrapMemo;
+  /** sessionKey → restored? (decided at this process's first sighting). */
+  sightings: Map<string, boolean>;
+  /** `${sessionKey}#${runId}` → ids drained into that run from our injections. */
+  drained: Map<string, string[]>;
+  /** `${sessionKey}#${admission}` → the one live outcome for that admitted request. */
+  admissions: Map<string, Promise<LiveOutcome | undefined>>;
+  /** `${sessionKey}#${runId}#${toolCallId}` of tool results already processed (idempotent middleware). */
+  processed: Map<string, true>;
+  /**
+   * The CURRENT registration's environment (its pluginConfig.brainDir →
+   * CURATED_BRAIN_DIR), read at spawn time: the state is process-wide, the
+   * config is not fixed to the first registration (review of PR #67).
+   */
+  env: NodeJS.ProcessEnv;
+}
+
+/** What one admitted request's CT call produced (cached; the snapshot never is). */
+interface LiveOutcome {
+  prependContext?: string;
+  /** Ids salvaged to the next turn: they must not be delivered again in this run. */
+  salvaged: string[];
+  /** Ids drained into the admitted request's prompt (a re-run under a new runId replays them). */
+  drained: string[];
+}
+
+/** Where a plugin object keeps its state; the default export uses a process-wide one. */
+export interface StateHolder {
+  state?: PluginState;
+}
+
+/**
+ * The package version is part of the key: a hot reload of a NEW build gets
+ * fresh state instead of an old build's objects (review of 0.3.0).
+ */
+const STATE_KEY = Symbol.for(`curated-thoughts.openclaw.plugin-state@${PLUGIN_VERSION}`);
+/** Set on a tool result our middleware already processed (any module instance). */
+const PROCESSED = Symbol.for('curated-thoughts.openclaw.processed-result');
+
+/** The process-wide holder shared by every module instance of this plugin. */
+export function processStateHolder(): StateHolder {
+  const g = globalThis as unknown as Record<symbol, StateHolder | undefined>;
+  return (g[STATE_KEY] ??= {});
+}
+
+function makeState(api: OpenClawApiLike, deps: PluginDeps): PluginState {
+  const spawnFn = deps.spawnFn ?? nodeSpawnFn(() => state.env);
+  const locator = new CtLocator({
+    env: deps.env ?? process.env, // discovery reads the host PATH as-is
+    spawnFn,
+    candidates: deps.candidates,
+    usable: deps.usable,
+    now: deps.now,
+  });
+  // `logger` resolves to the newest registration's logger at call time.
+  const logger = { get logger() { return state.current.logger; } };
+  const adapter = new OpenClawWisdomAdapter({
+    spawnFn,
+    locator,
+    recordVerbose: openclawVerboseRecorder(logger, deps.env ?? process.env),
+  });
+  const breaker = new Breaker(undefined, undefined, deps.now);
+  const state: PluginState = {
+    current: api,
+    adapter,
+    breaker,
+    activity: new OpenClawActivity({
+      adapter,
+      breaker, // shared with the user-turn path (rule 4)
+      env: deps.env ?? process.env,
+      ...(deps.activityBudgetMs !== undefined ? { budgetMs: deps.activityBudgetMs } : {}),
+      ...(deps.activityReadyMs !== undefined ? { readyMs: deps.activityReadyMs } : {}),
+      log: (line) => state.current.logger?.debug?.(`curated-thoughts: ${line}`),
+    }),
+    env: brainEnv(deps.env ?? process.env, api.pluginConfig?.brainDir),
+    bootstrap: new BootstrapMemo({
+      locate: () => locator.locate(),
+      spawnFn,
+      onSpawnFailure: () => locator.invalidate(),
+    }),
+    sightings: new Map(),
+    drained: new Map(),
+    admissions: new Map(),
+    processed: new Map(),
+  };
+  return state;
+}
+
+export function createPlugin(deps: PluginDeps = {}, holder: StateHolder = {}) {
   return {
     id: PLUGIN_ID,
     name: 'Curated Thoughts',
@@ -100,26 +209,15 @@ export function createPlugin(deps: PluginDeps = {}) {
       properties: { brainDir: { type: 'string' } },
     },
     register(api: OpenClawApiLike): void {
-      const env = brainEnv(deps.env ?? process.env, api.pluginConfig?.brainDir);
-      const spawnFn = deps.spawnFn ?? nodeSpawnFn(env);
-      const locator = new CtLocator({
-        env: deps.env ?? process.env, // discovery reads the host PATH as-is
-        spawnFn,
-        candidates: deps.candidates,
-        usable: deps.usable,
-        now: deps.now,
-      });
-      const adapter = new OpenClawWisdomAdapter({
-        spawnFn,
-        locator,
-        recordVerbose: openclawVerboseRecorder(api, deps.env ?? process.env),
-      });
-      const breaker = new Breaker(undefined, undefined, deps.now);
-      const bootstrap = new BootstrapMemo({
-        locate: () => locator.locate(),
-        spawnFn,
-        onSpawnFailure: () => locator.invalidate(),
-      });
+      // One state per process, whichever registration a hook came from: the
+      // host loads the plugin module several times (live-verified: 3 module
+      // instances per process; the prompt hooks and the tool-result
+      // middleware are served by DIFFERENT instances), so per-registration
+      // state would leave the middleware without the prompt hook's ledger.
+      const state = (holder.state ??= makeState(api, deps));
+      state.current = api; // the logger the shared parts report through
+      state.env = brainEnv(deps.env ?? process.env, api.pluginConfig?.brainDir);
+      const { adapter, breaker, activity, bootstrap, sightings, drained, admissions } = state;
       const warn = (what: string, error: unknown): void => {
         try {
           api.logger?.warn?.(`curated-thoughts: ${what}: ${String(error)}`);
@@ -127,13 +225,6 @@ export function createPlugin(deps: PluginDeps = {}) {
           /* a throwing logger must not escalate */
         }
       };
-
-      /** sessionKey → restored? (decided at this process's first sighting). */
-      const sightings = new Map<string, boolean>();
-      /** `${sessionKey}#${runId}` → ids drained into that run from our injections. */
-      const drained = new Map<string, string[]>();
-      /** `${sessionKey}#${admission}` → the one result for that admitted request. */
-      const admissions = new Map<string, Promise<PromptBuildResult | undefined>>();
 
       // ── agent_turn_prepare: observe our own drained injections ──────────
       api.on('agent_turn_prepare', ((event: TurnPrepareEvent, ctx: AgentCtx) => {
@@ -176,43 +267,45 @@ export function createPlugin(deps: PluginDeps = {}) {
         });
       };
 
-      const compute = async (event: PromptBuildEvent, ctx: AgentCtx, sessionKey: string, admissionKey: string | null): Promise<PromptBuildResult | undefined> => {
-        const bootKey = `${sessionKey}|${str(ctx.sessionId)}`;
-        const boot = await bootstrap.ensure(bootKey);
-        const result: PromptBuildResult = {};
-        if (boot?.block) result.prependSystemContext = boot.block;
-
+      /** The run's snapshot: stored for EVERY prompt build, cached admission or not. */
+      const snapshot = (event: PromptBuildEvent, ctx: AgentCtx, sessionKey: string, bootIds: string[] | null): void => {
         const messages = event?.messages;
-        if (admissionKey !== null && Array.isArray(messages) && isLiveEligible(ctx, sessionKey)) {
-          let restored = sightings.get(sessionKey);
-          if (restored === undefined) {
-            // The session predates this process when its snapshot already
-            // holds assistant turns (gateway restart / resumed session).
-            restored = messages.some((m) => (m as { role?: unknown } | null)?.role === 'assistant');
-            lruSet(sightings, sessionKey, restored);
-          }
-          adapter.setTurn(sessionKey, {
-            messages,
-            drained: drained.get(`${sessionKey}#${str(ctx.runId)}`) ?? [],
-            bootstrapIds: boot ? boot.ids : null,
-            restored,
-          });
-          const query = typeof event.currentUserMessage === 'string'
-            ? event.currentUserMessage
-            : str(event.prompt); // legacy hosts: prompt may carry history (degraded)
-          const block = await onUserTurn(adapter, { id: sessionKey }, query, breaker);
-          if (block !== null) {
-            let accepted = true;
-            try {
-              ctx.hookInvocation?.assertActive();
-            } catch {
-              accepted = false;
-            }
-            if (accepted) result.prependContext = block;
-            else await salvage(ctx, sessionKey, block);
-          }
+        if (!Array.isArray(messages)) return;
+        let restored = sightings.get(sessionKey);
+        if (restored === undefined) {
+          // The session predates this process when its snapshot already
+          // holds assistant turns (gateway restart / resumed session).
+          restored = messages.some((m) => (m as { role?: unknown } | null)?.role === 'assistant');
+          lruSet(sightings, sessionKey, restored);
         }
-        return Object.keys(result).length ? result : undefined;
+        // Every run's snapshot is stored (any trigger, subagents too): it is
+        // the ledger source for this run's activity deliveries.
+        adapter.setTurn(sessionKey, {
+          runId: str(ctx.runId),
+          messages,
+          drained: drained.get(`${sessionKey}#${str(ctx.runId)}`) ?? [],
+          bootstrapIds: bootIds,
+          restored,
+        });
+      };
+
+      /** The one CT call of an admitted user turn (memoized per admission). */
+      const live = async (event: PromptBuildEvent, ctx: AgentCtx, sessionKey: string): Promise<LiveOutcome | undefined> => {
+        const query = typeof event.currentUserMessage === 'string'
+          ? event.currentUserMessage
+          : str(event.prompt); // legacy hosts: prompt may carry history (degraded)
+        const drainedIds = drained.get(`${sessionKey}#${str(ctx.runId)}`) ?? [];
+        const block = await onUserTurn(adapter, { id: sessionKey }, query, breaker);
+        if (block === null) return { salvaged: [], drained: drainedIds };
+        let accepted = true;
+        try {
+          ctx.hookInvocation?.assertActive();
+        } catch {
+          accepted = false;
+        }
+        if (accepted) return { prependContext: block, salvaged: [], drained: drainedIds };
+        await salvage(ctx, sessionKey, block);
+        return { salvaged: scanIds(block), drained: drainedIds };
       };
 
       // ── before_prompt_build: bootstrap (N5) + live delivery (N1/N2) ──────
@@ -220,37 +313,96 @@ export function createPlugin(deps: PluginDeps = {}) {
         try {
           const sessionKey = str(ctx?.sessionKey);
           if (sessionKey === '') return undefined; // invariant 3
+          void adapter.ready(); // warm locate + probe, outside any match budget
+          const boot = await bootstrap.ensure(`${sessionKey}|${str(ctx.sessionId)}`);
+          // BEFORE the admission lookup: a host re-run of a cached admission
+          // under a new runId still gets its own snapshot and run ledger.
+          snapshot(event, ctx, sessionKey, boot ? boot.ids : null);
+          const result: PromptBuildResult = {};
+          if (boot?.block) result.prependSystemContext = boot.block;
           const admission = str(event?.currentUserMessageId) || str(ctx.runId);
           const admissionKey = admission ? `${sessionKey}#${admission}` : null;
-          if (admissionKey !== null) {
-            const prior = admissions.get(admissionKey);
-            if (prior) return await prior; // rebuild/retry: same bytes, no new CT call
+          if (admissionKey !== null && Array.isArray(event?.messages) && isLiveEligible(ctx, sessionKey)) {
+            let pending = admissions.get(admissionKey); // rebuild/retry: same bytes, no new CT call
+            if (pending === undefined) {
+              // Only a SUCCESSFUL outcome is memoized: a failure (e.g. a
+              // rejected salvage enqueue) drops the entry so a host retry gets
+              // a fresh attempt instead of a cached nothing.
+              pending = live(event, ctx, sessionKey).catch((error) => {
+                warn('before_prompt_build failed', error);
+                admissions.delete(admissionKey);
+                return undefined;
+              });
+              lruSet(admissions, admissionKey, pending);
+            }
+            const outcome = await pending;
+            if (outcome?.prependContext) result.prependContext = outcome.prependContext;
+            // This run's prompt carries the live block (and the salvaged one
+            // waits in the queue): both are in this run's ledger, cached or not.
+            adapter.noteRunIds(sessionKey, str(ctx.runId), [
+              ...scanIds(outcome?.prependContext ?? ''),
+              ...(outcome?.salvaged ?? []),
+              ...(outcome?.drained ?? []),
+            ]);
           }
-          // Only a SUCCESSFUL result is memoized for the admission: a failure
-          // (e.g. a rejected salvage enqueue) drops the entry so a host retry
-          // of the same request gets a fresh attempt instead of a cached nothing.
-          const run = compute(event, ctx, sessionKey, admissionKey).catch((error) => {
-            warn('before_prompt_build failed', error);
-            if (admissionKey !== null) admissions.delete(admissionKey);
-            return undefined;
-          });
-          if (admissionKey !== null) lruSet(admissions, admissionKey, run);
-          return await run;
+          return Object.keys(result).length ? result : undefined;
         } catch (error) {
           warn('before_prompt_build failed', error);
           return undefined;
         }
       }) as never, { timeoutMs: PROMPT_HOOK_TIMEOUT_MS });
 
-      // ── N3: tool-result middleware on CT recall results only ─────────────
-      if (typeof api.registerAgentToolResultMiddleware === 'function') {
-        api.registerAgentToolResultMiddleware(((event: ToolResultEvent, ctx: ToolResultCtx) => {
+      // ── compaction during a run: what the model sees is no longer known ──
+      // (embedded runner: runBestEffortCompactionHook, ctx { sessionKey }).
+      // The run goes blind until the next snapshot: no activity delivery, and
+      // the N3 dedup stubs nothing (it could otherwise hide a fact that was
+      // compacted away).
+      for (const name of ['before_compaction', 'after_compaction']) {
+        api.on(name, ((_event: unknown, ctx: { sessionKey?: unknown } | null) => {
           try {
-            if (!isRecallToolName(event?.toolName) || event.isError === true) return undefined;
             const sessionKey = str(ctx?.sessionKey);
-            if (sessionKey === '') return undefined;
-            const rewritten = onToolResult(adapter, { id: sessionKey }, event.result);
-            return rewritten === event.result ? undefined : { result: rewritten };
+            if (sessionKey !== '') adapter.markBlind(sessionKey, 'compacted');
+          } catch (error) {
+            warn(`${name} failed`, error);
+          }
+          return undefined;
+        }) as never);
+      }
+
+      // ── model_call_started: the step id of the activity rate rule ───────
+      api.on('model_call_started', ((event: ModelCallEvent, ctx: ModelCallCtx) => {
+        activity.noteModelCall(event, ctx);
+        return undefined;
+      }) as never);
+
+      // ── tool-result middleware: N3 recall dedup, then activity delivery ──
+      // Never throws: a throwing middleware makes OpenClaw replace the tool
+      // output with an error text.
+      if (typeof api.registerAgentToolResultMiddleware === 'function') {
+        api.registerAgentToolResultMiddleware((async (event: ToolResultEvent, ctx: ToolResultCtx) => {
+          try {
+            const sessionKey = str(ctx?.sessionKey);
+            if (sessionKey === '' || event === null || typeof event !== 'object') return undefined;
+            // Idempotent per tool result: when several module instances
+            // register this middleware, a second pass over the same result
+            // (marked, or the same toolCallId) is a no-op — it would otherwise
+            // stub the facts the first pass just delivered (review of 0.3.0).
+            const incoming = event.result as Record<symbol, unknown> | null | undefined;
+            if (incoming !== null && typeof incoming === 'object' && incoming[PROCESSED] === true) return undefined;
+            const callId = str(event.toolCallId);
+            const passKey = callId ? `${sessionKey}#${str(ctx?.runId)}#${callId}` : '';
+            if (passKey && state.processed.has(passKey)) return undefined;
+            if (passKey) lruSet(state.processed, passKey, true);
+            let result = event.result;
+            if (isRecallToolName(event.toolName) && event.isError !== true) {
+              result = onToolResult(adapter, { id: sessionKey }, result);
+            }
+            result = await activity.process(event, ctx, result);
+            if (result === event.result) return undefined;
+            if (result !== null && typeof result === 'object') {
+              Object.defineProperty(result, PROCESSED, { value: true, enumerable: false });
+            }
+            return { result };
           } catch (error) {
             warn('tool-result middleware failed', error);
             return undefined;
@@ -261,5 +413,6 @@ export function createPlugin(deps: PluginDeps = {}) {
   };
 }
 
-const plugin = createPlugin();
+// The process-wide holder: every module instance the host loads shares one state.
+const plugin = createPlugin({}, processStateHolder());
 export default plugin;

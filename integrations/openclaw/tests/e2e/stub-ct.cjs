@@ -13,6 +13,18 @@ if (args[0] === 'wisdom' && args[1] === 'match') {
   if (args.includes('--help')) { process.stdout.write('usage: ct wisdom match\n'); process.exit(0); }
   const max = Number(args[args.indexOf('--max') + 1]);
   const ex = new Set(args.filter((a) => a.startsWith('--exclude=')).map((a) => a.slice(10)));
+  if (max === 1) {
+    // Activity queries (autonomous work, run_activity.sh): one fact per bare target.
+    const byTarget = {
+      'TASK.md': { id: 'w-task', title: 'Task notes', text: 'Task lists in TASK.md are worked top to bottom.' },
+      'git status': { id: 'w-git', title: 'Git hygiene', text: 'Check git status before every commit.' },
+      '.env.local': { id: 'w-env', title: 'Local secrets', text: '.env.local holds local-only secrets; never commit it.' },
+    };
+    const query = args[args.indexOf('--') + 1];
+    const fact = byTarget[query];
+    out({ entries: fact && !ex.has(fact.id) ? [fact] : [], corrections: [] });
+    process.exit(0);
+  }
   const facts = [
     { id: 'w-release', title: 'Release flow', text: 'Releases are tagged by the controller after merge, never in the PR.' },
     { id: 'w-lockfile', title: 'Lockfiles', text: 'Lockfiles are written with pnpm 9.15.9.' },

@@ -18,8 +18,18 @@ export class FakeCt {
   bootstrap: Fact[] = [];
   /** Returns the facts `ct wisdom match` would offer (before --exclude). */
   pool: () => Fact[] = () => [];
+  /**
+   * Per-query pool (query = the argv element after `--`, max = `--max`);
+   * when set it wins over `pool`. Lets a test answer user-turn queries
+   * (`--max 2`) and activity queries (`--max 1`) differently.
+   */
+  poolFor: ((query: string, max: number) => Fact[]) | null = null;
+  /** Corrections to add to every match answer (after --exclude filtering of entries only). */
+  corrections: Array<{ id: string; supersedes: string[]; title: string; text: string }> = [];
+  /** Ignore --exclude (a CT that disagrees with the ledger). */
+  ignoreExclude = false;
   /** Override a match response (e.g. a timeout). */
-  matchOutcome: (() => SpawnOutcome) | null = null;
+  matchOutcome: (() => SpawnOutcome | Promise<SpawnOutcome>) | null = null;
   capable = true;
 
   spawnFn: SpawnFn = async (spec) => {
@@ -31,15 +41,22 @@ export class FakeCt {
     if (a[0] === 'wisdom') {
       if (this.matchOutcome) return this.matchOutcome();
       const max = Number(a[a.indexOf('--max') + 1]);
+      const query = a[a.indexOf('--') + 1] ?? '';
       const exclude = new Set(a.filter((x) => x.startsWith('--exclude=')).map((x) => x.slice('--exclude='.length)));
-      const entries = this.pool().filter((f) => !exclude.has(f.id)).slice(0, max);
-      return ok(JSON.stringify({ entries, corrections: [] }));
+      const pool = this.poolFor ? this.poolFor(query, max) : this.pool();
+      const entries = pool.filter((f) => this.ignoreExclude || !exclude.has(f.id)).slice(0, max);
+      return ok(JSON.stringify({ entries, corrections: this.corrections }));
     }
     return ok('', 1);
   };
 
   matchCalls(): SpawnLike[] {
     return this.calls.filter((c) => c.args[0] === 'wisdom' && c.args[1] === 'match' && !c.args.includes('--help'));
+  }
+
+  /** Activity queries (`--max 1`), as the bare query strings CT received. */
+  activityQueries(): string[] {
+    return this.matchCalls().filter((c) => c.args[c.args.indexOf('--max') + 1] === '1').map((c) => c.args[c.args.indexOf('--') + 1]);
   }
 }
 
@@ -52,7 +69,8 @@ export class FakeApi {
   middleware: Array<{ handler: (event: unknown, ctx: unknown) => unknown; opts?: Record<string, unknown> }> = [];
   enqueued: Array<Record<string, unknown>> = [];
   warnings: string[] = [];
-  logger = { warn: (m: string) => this.warnings.push(m), info: () => {}, debug: () => {} };
+  debugs: string[] = [];
+  logger = { warn: (m: string) => this.warnings.push(m), info: (_m: string) => {}, debug: (m: string) => this.debugs.push(m) };
   session = {
     workflow: {
       enqueueNextTurnInjection: async (inj: Record<string, unknown>) => {

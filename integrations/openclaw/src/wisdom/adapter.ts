@@ -16,10 +16,18 @@
  *                  tool results, spec F9), ∪ ids drained into THIS turn from
  *                  our own next-turn injections, ∪ the settled bootstrap ids.
  *                  Never from the adapter's own decision (m5).
+ *                  Within a run there is no prompt hook between tool calls,
+ *                  so the adapter also keeps a RUN LEDGER: every id that
+ *                  entered context during the current run (the live block,
+ *                  every tool result's markers, recall envelopes, activity
+ *                  deliveries). It is reset by the next run's snapshot, which
+ *                  then carries those tool results itself (spec 2026-10-17
+ *                  OpenClaw autonomous work, A3).
  *   Session id   — OpenClaw `sessionKey` (stable across compaction).
  */
 
 import {
+  EXCLUDE_MAX,
   marker,
   validId,
   scanIds,
@@ -35,7 +43,7 @@ import {
 import type { CtLocator } from './discover.js';
 
 const RECALL_TOOL_RE = /__curated_recall_context(-\d+)?$/;
-const STRUCTURED_PREFIX = 'structuredContent:\n';
+export const STRUCTURED_PREFIX = 'structuredContent:\n';
 const SNAPSHOT_SCAN_ROLES = new Set(['user', 'toolResult', 'tool']);
 
 /** m4: the CT recall surface only — never curated_get_wiki_entry. */
@@ -43,7 +51,8 @@ export function isRecallToolName(name: unknown): boolean {
   return typeof name === 'string' && RECALL_TOOL_RE.test(name);
 }
 
-function partTexts(content: unknown): string[] {
+/** Text of every text part of a message or tool-result `content`. */
+export function partTexts(content: unknown): string[] {
   if (typeof content === 'string') return [content];
   if (!Array.isArray(content)) return [];
   const out: string[] = [];
@@ -140,6 +149,8 @@ function stubEntry(factId: string): Record<string, unknown> {
 
 /** Per-turn inputs captured by the hook before the core runs. */
 export interface TurnInput {
+  /** The run this snapshot was taken for (`ctx.runId`); absent on legacy callers. */
+  runId?: string;
   messages: unknown[];
   drained: string[];
   /** Settled bootstrap ids, or null while the bootstrap is unsettled. */
@@ -166,11 +177,44 @@ function lruSet<K, V>(map: Map<K, V>, key: K, value: V, max = LRU_MAX): void {
   }
 }
 
+interface RunLedger {
+  /** undefined: no run identity (legacy host) — nothing is run-scoped. */
+  runId: string | undefined;
+  /** Newest first; bounded at EXCLUDE_MAX (`ids` and `set` mirror each other). */
+  ids: string[];
+  set: Set<string>;
+  /**
+   * Why this process can no longer tell what the run shows (fail closed for
+   * activity; N3 stubs nothing): `compacted` (compaction during the run),
+   * `ledger_overflow` (more than EXCLUDE_MAX ids entered), `meta_unreadable`
+   * (a CT recall through the `tool_call` meta tool we could not read).
+   * Cleared by the next snapshot.
+   */
+  blind: string | null;
+}
+
+interface CachedLedger {
+  runId: string | undefined;
+  ledger: Ledger;
+}
+
+/** '' is no run id (legacy hosts): never a run scope. */
+const runKey = (runId: string | undefined): string | undefined => (runId ? runId : undefined);
+
 export class OpenClawWisdomAdapter implements HostAdapter {
   private readonly turns = new Map<string, TurnInput>();
-  private readonly cache = new Map<string, Ledger>();
+  private readonly cache = new Map<string, CachedLedger>();
+  private readonly runs = new Map<string, RunLedger>();
+  /**
+   * Per session: the ids the snapshot itself carries (scan ∪ drained ∪
+   * bootstrap), computed once per snapshot. The run ledger holds only ids
+   * NOT in here (review of 0.3.0: copying the snapshot into the run ledger
+   * overflowed every session with > EXCLUDE_MAX ids in its history).
+   */
+  private readonly bases = new Map<string, { scan: string[]; set: Set<string> }>();
   /** null = not probed yet; true = `ct wisdom match` present; false = absent (latched). */
   private capable: boolean | null = null;
+  private warming: Promise<void> | null = null;
 
   /** Verbose mode only (absent when off, so the adapter is unchanged). */
   declare readonly recordVerbose?: (turn: VerboseTurn) => void;
@@ -179,8 +223,69 @@ export class OpenClawWisdomAdapter implements HostAdapter {
     if (deps.recordVerbose) this.recordVerbose = deps.recordVerbose;
   }
 
+  /**
+   * Store a run's prompt-hook snapshot. A NEW runId, a missing one, or a run
+   * that went blind (compaction, overflow) starts a fresh run ledger: the
+   * snapshot itself now shows what is in context. Another attempt of the same
+   * healthy run keeps it.
+   */
   setTurn(sessionId: string, input: TurnInput): void {
-    lruSet(this.turns, sessionId, input);
+    const runId = runKey(input.runId);
+    lruSet(this.turns, sessionId, { ...input, runId });
+    const scan = snapshotScan(input.messages).all;
+    lruSet(this.bases, sessionId, { scan, set: new Set([...scan, ...input.drained, ...(input.bootstrapIds ?? [])]) });
+    const run = this.runs.get(sessionId);
+    if (run === undefined || runId === undefined || run.runId !== runId || run.blind !== null) {
+      lruSet(this.runs, sessionId, { runId, ids: [], set: new Set<string>(), blind: null });
+    }
+  }
+
+  private run(sessionId: string, runId: string | undefined): RunLedger | null {
+    const key = runKey(runId);
+    const run = this.runs.get(sessionId);
+    return key !== undefined && run !== undefined && run.runId === key ? run : null;
+  }
+
+  /** True when this process holds a snapshot of `runId` for the session. */
+  hasRun(sessionId: string, runId: string): boolean {
+    const turn = this.turns.get(sessionId);
+    return turn !== undefined && runKey(runId) !== undefined && turn.runId === runId;
+  }
+
+  /** Ids that entered context during `runId` (ignored for any other run, or none). */
+  noteRunIds(sessionId: string, runId: string | undefined, ids: readonly string[]): void {
+    const run = this.run(sessionId, runId);
+    if (run === null) return;
+    const base = this.bases.get(sessionId)?.set;
+    for (const id of ids) {
+      if (!validId(id) || base?.has(id)) continue; // the snapshot already shows it
+      if (run.set.has(id)) run.ids.splice(run.ids.indexOf(id), 1);
+      run.ids.unshift(id);
+      run.set.add(id);
+    }
+    if (run.ids.length > EXCLUDE_MAX) {
+      // Bounded: forgetting an id in context could repeat it, so the run
+      // goes blind instead (no activity delivery until the next snapshot).
+      for (const id of run.ids.splice(EXCLUDE_MAX)) run.set.delete(id);
+      run.blind ??= 'ledger_overflow';
+    }
+  }
+
+  /** The run can no longer be trusted to know what is in context (see RunLedger.blind). */
+  markBlind(sessionId: string, reason: string, runId?: string): void {
+    const run = runId === undefined ? this.runs.get(sessionId) : this.run(sessionId, runId);
+    if (run !== undefined && run !== null) run.blind ??= reason;
+    this.cache.delete(sessionId);
+  }
+
+  /** Why the run is blind, or null. */
+  blindReason(sessionId: string, runId: string): string | null {
+    return this.run(sessionId, runId)?.blind ?? null;
+  }
+
+  /** TEST/inspection: did the run overflow its bound? */
+  runOverflow(sessionId: string, runId: string): boolean {
+    return this.run(sessionId, runId)?.blind === 'ledger_overflow';
   }
 
   deliveryEnabled(_session: SessionRef): boolean {
@@ -196,48 +301,103 @@ export class OpenClawWisdomAdapter implements HostAdapter {
     if (turn === undefined) {
       return { idsMostRecentFirst: [], has: () => false, knownBootstrap: false };
     }
-    const scan = snapshotScan(turn.messages);
+    const run = this.run(session.id, turn.runId);
+    if (run !== null && run.blind !== null) {
+      // Unknown view: claim nothing is in context (N3 stubs nothing; the
+      // activity path refuses blind runs before it gets here).
+      return { idsMostRecentFirst: [], has: () => false, knownBootstrap: turn.bootstrapIds !== null };
+    }
+    const scan = this.bases.get(session.id)?.scan ?? snapshotScan(turn.messages).all;
     const merged: string[] = [];
+    const seen = new Set<string>();
     const push = (id: string) => {
-      if (validId(id) && !merged.includes(id)) merged.push(id);
+      if (validId(id) && !seen.has(id)) {
+        seen.add(id);
+        merged.push(id);
+      }
     };
-    turn.drained.forEach(push); // newest: drained into this very request
-    scan.all.forEach(push);
+    run?.ids.forEach(push); // newest: entered context during this run (after the snapshot)
+    turn.drained.forEach(push); // drained into this run's request
+    scan.forEach(push);
     (turn.bootstrapIds ?? []).forEach(push); // oldest: system space
-    const set = new Set(merged);
     return {
       idsMostRecentFirst: merged,
-      has: (id) => set.has(id),
+      has: (id) => seen.has(id),
       knownBootstrap: turn.bootstrapIds !== null,
     };
   }
 
+  /** The N3 cache, scoped to the current run; its ids also join the run ledger. */
   cacheLedger(session: SessionRef, ledger: Ledger): void {
-    lruSet(this.cache, session.id, ledger);
+    const runId = this.turns.get(session.id)?.runId;
+    lruSet(this.cache, session.id, { runId, ledger });
+    this.noteRunIds(session.id, runId, [...ledger.idsMostRecentFirst].reverse());
   }
 
+  /** null when the cache belongs to an earlier run or the run is blind (never a stale view). */
   cachedLedger(session: SessionRef): Ledger | null {
-    return this.cache.get(session.id) ?? null;
+    const cached = this.cache.get(session.id);
+    const turn = this.turns.get(session.id);
+    if (cached === undefined || cached.runId !== turn?.runId) return null;
+    return this.run(session.id, turn?.runId)?.blind ? null : cached.ledger;
+  }
+
+  /**
+   * Locate `ct` and probe `ct wisdom match --help` (both cached), so a
+   * caller's match budget covers the match alone (review of PR #67). Warmed
+   * at prompt time; concurrent callers share one attempt. Never throws.
+   */
+  ready(signal?: AbortSignal): Promise<void> {
+    if (this.capable !== null) return Promise.resolve();
+    // A caller that STARTS the warm passes its signal to the probe; later
+    // callers share the in-flight attempt.
+    this.warming ??= (async () => {
+      try {
+        const path = await this.deps.locator.locate();
+        if (path !== null) await this.probe(path, signal);
+      } catch {
+        /* fail quietly: the match reports the class */
+      }
+    })().finally(() => {
+      this.warming = null;
+    });
+    return this.warming;
+  }
+
+  /** True once `ct wisdom match` is known present or absent. */
+  capabilityKnown(): boolean {
+    return this.capable !== null;
+  }
+
+  /** null when probed (capable decided), else the outcome that stopped it. */
+  private async probe(path: string, signal?: AbortSignal): Promise<MatchOutcome | null> {
+    if (this.capable !== null) return null;
+    const probe = await this.deps.spawnFn({
+      command: path,
+      args: ['wisdom', 'match', '--help'],
+      timeoutMs: 3000,
+      ...(signal ? { signal } : {}),
+    });
+    if (signal?.aborted) return 'spawn'; // abandoned: decide nothing
+    if (probe.spawnError || probe.timedOut) return 'spawn';
+    // Non-zero exit: deterministic absence (CT < 3.3.0), latched OFF.
+    this.capable = probe.code === 0;
+    return null;
   }
 
   async wisdomMatch(
     query: string,
     max: number,
     exclude: string[],
+    signal?: AbortSignal,
   ): Promise<{ outcome: MatchOutcome; result?: WisdomMatchResult }> {
     if (this.capable === false) return { outcome: 'timeout_or_exit' };
-    const path = await this.deps.locator.locate();
-    if (path === null) return { outcome: 'spawn' };
-    if (this.capable === null) {
-      const probe = await this.deps.spawnFn({ command: path, args: ['wisdom', 'match', '--help'], timeoutMs: 3000 });
-      if (probe.spawnError || probe.timedOut) return { outcome: 'spawn' };
-      if (probe.code !== 0) {
-        this.capable = false; // deterministic absence (CT < 3.3.0): latch OFF
-        return { outcome: 'timeout_or_exit' };
-      }
-      this.capable = true;
-    }
-    return coreWisdomMatch(path, query, max, exclude, this.deps.spawnFn);
+    await this.ready(); // the shared in-flight warm: one probe, never a second
+    const capable = this.capable as boolean | null;
+    if (capable === false) return { outcome: 'timeout_or_exit' }; // just latched OFF
+    const path = capable === true ? await this.deps.locator.locate() : null;
+    if (path === null) return { outcome: 'spawn' }; // no ct, or the probe could not run
+    return coreWisdomMatch(path, query, max, exclude, this.deps.spawnFn, signal);
   }
 
   isCtRecallResult(result: unknown): boolean {

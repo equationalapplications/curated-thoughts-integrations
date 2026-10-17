@@ -1088,6 +1088,16 @@ export class ActivityTracker {
     s.steps.delete(stepId);
   }
 
+  /**
+   * Free only the KEY (review of PR #66): the step stays used, so a failed
+   * query can be retried in a LATER step but never a second time in this
+   * one. Per-tool hosts (OpenCode) need it: the other calls of the same step
+   * would otherwise start another query.
+   */
+  releaseKey(sessionId: string, key: string): void {
+    this.sessions.get(sessionId)?.keys.delete(key);
+  }
+
   /** Sessions tracked (tests). */
   sessionCount(): number {
     return this.sessions.size;
@@ -1213,15 +1223,43 @@ export interface ActivityMatch {
  * the same breaker bookkeeping as the user-turn path (the breaker is SHARED:
  * three failures pause both paths). Never throws.
  */
+/**
+ * The one budget-miss rule: an activity match that ran past the host's
+ * budget counts as one failure of the shared breaker. `runActivityMatch`
+ * applies it to an aborted match; a host that cannot abort its match calls
+ * it on expiry instead (never both for one miss).
+ */
+export function recordActivityBudgetMiss(breaker: Breaker): void {
+  try {
+    breaker.recordFailure();
+  } catch {
+    /* fail quietly */
+  }
+}
+
 export async function runActivityMatch(
   host: HostAdapter,
   activity: Activity,
   exclude: string[],
   breaker: Breaker,
+  signal?: AbortSignal,
 ): Promise<ActivityMatch> {
   try {
     if (host.wisdomMatchAbsent()) return { failure: 'capability_missing' };
-    const attempt = await host.wisdomMatch(activityQuery(activity), ACTIVITY_MAX_PER_STEP, exclude);
+    const attempt = signal
+      ? await host.wisdomMatch(activityQuery(activity), ACTIVITY_MAX_PER_STEP, exclude, signal)
+      : await host.wisdomMatch(activityQuery(activity), ACTIVITY_MAX_PER_STEP, exclude);
+    // The caller's budget ran out and killed the child. Never a success; it
+    // counts as ONE breaker failure on every host (controller decision after
+    // the openclaw 0.3.0 review, matching Hermes, where a live timeout is a
+    // failure): a CT that keeps missing the budget pauses both paths.
+    if (signal?.aborted) {
+      recordActivityBudgetMiss(breaker);
+      return { failure: 'budget' };
+    }
+    // An abort from anywhere else (the host cancelled the call; outcome
+    // `aborted`) is not CT's failure and never counts against the breaker.
+    if (attempt.outcome === 'aborted') return { failure: 'budget' };
     if (attempt.outcome === 'spawn') {
       host.resetDiscoveryAndProbeCaches();
       return { failure: 'spawn' };
@@ -1304,12 +1342,13 @@ export function startActivity(
   session: SessionRef,
   activity: Activity,
   breaker: Breaker,
+  signal?: AbortSignal,
 ): ActivityStart {
   try {
     const gate = activityGate(host, session, breaker);
     if (!gate.ok) return { failure: gate.reason };
     const exclude = gate.ledger.idsMostRecentFirst.slice(0, EXCLUDE_MAX);
-    return { failure: null, match: runActivityMatch(host, activity, exclude, breaker) };
+    return { failure: null, match: runActivityMatch(host, activity, exclude, breaker, signal) };
   } catch {
     return { failure: 'hook_failed' };
   }
