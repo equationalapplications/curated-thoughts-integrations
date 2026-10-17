@@ -89,13 +89,12 @@ _KEY_PREFIXES = ("sk-", "sk_", "pk_", "rk_", "ghp_", "gho_", "ghs_", "ghu_", "gi
                  "xox", "akia", "asia", "aiza", "glpat-", "eyj")
 _OPERATOR_CHARS = set(";|&<>()`")
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
-_PYTHON_RE = re.compile(r"^python(\d+(\.\d+)?)?$")
-# Interpreter flags skipped before `-m`; the second set takes a value.
-_PYTHON_FLAGS = frozenset({"-u", "-B", "-O", "-OO", "-E", "-s", "-S", "-I", "-q", "-b", "-bb",
-                           "-d", "-v", "-P"})
-_PYTHON_VALUE_FLAGS = frozenset({"-X", "-W"})
-# Windows executable suffixes stripped from the program (`git.exe` is `git`).
-_EXE_SUFFIXES = (".exe", ".cmd", ".bat", ".com")
+_PYTHON_RE = re.compile(r"^python([0-9]{1,2}(\.[0-9]{1,3})?)?$")
+# Interpreter flags (`python [flags] -m module`): single letters, alone or
+# combined (`-uB`, `-OO`); X and W take a value, attached (`-Xdev`) or as the
+# next word (`-X dev`). Any other flag stops the scan (the program alone).
+_PYTHON_FLAG_CHARS = frozenset("bBdEiIOPqRsSuvx")
+_PYTHON_VALUE_CHARS = frozenset("XW")
 
 
 def is_ct_tool(name):
@@ -598,7 +597,7 @@ def _sandbox_home(home, root, user):
     return "/".join(_fold_path(c) for c in rel) in _SANDBOX_HOMES
 
 
-def _blocked(directory, homes, blocking, user=()):
+def _blocked(directory, homes, blocking, user):
     """Never a root (the walk stops here): a `_stop_dir`, any home in
     `homes`, or any ancestor of a home in `blocking`, unless that home is a
     sandbox HOME inside it (`_sandbox_home`)."""
@@ -610,7 +609,7 @@ def _blocked(directory, homes, blocking, user=()):
                for h in blocking)
 
 
-def _find_root(start, homes, blocking, user=()):
+def _find_root(start, homes, blocking, user):
     """Nearest ancestor-or-self of `start` holding a marker, stopping (None)
     at the first `_blocked` directory. The fixed markers are checked for the
     whole walk first; `*.sln` is scanned only in directories nearer than the
@@ -685,6 +684,13 @@ def _resolve(raw, cwd, env, names):
     local = _digest(full or joined)
     rel = _below(full, root) if full else None
     if not rel:
+        return None, False, local
+    # A path inside ANY home that is itself inside the project root (a
+    # sandbox HOME included) is never sent: that is someone's home content.
+    homes = _homes(env)
+    inner = [h for h in homes.all if _below(h, root) is not None]
+    if any(_same(x, h) or _below(x, h) is not None
+           for h in inner for x in (full, os.path.normpath(joined))):
         return None, False, local
     target = "/".join(rel)
     if len(target) > TARGET_CHARS:
@@ -771,21 +777,70 @@ def _tokens(command):
         return command.split()
 
 
+def _listing(directory):
+    try:
+        return frozenset(os.listdir(directory))
+    except OSError:
+        return frozenset()
+
+
 def _project_package(module, root):
-    """The top package of `module` when it resolves inside the project root
-    (a package directory or a `.py` file at the root or under `src/`), else
-    None. Only the top package is ever sent, never a submodule path. Cached
-    per (root, top)."""
+    """The top package of `module` when it is a real package inside the
+    project root, else None: a `<top>.py` file, or a `<top>/` directory
+    holding `__init__.py`, at the root or under `src/`. Names are matched
+    case-SENSITIVELY by directory listing, even on case-insensitive
+    filesystems. (Namespace packages, without `__init__.py`, do not count:
+    any folder would qualify and nothing marks them.) Only the top package is
+    ever sent, never a submodule path. Cached per (root, top); "not found"
+    only briefly."""
     if not root:
         return None
     top = module.split(".", 1)[0]
-    fresh, found = _module_cache.get((root, top), _ROOT_CACHE_TTL)
+    fresh, found = _module_cache.get(
+        (root, top), lambda f: _ROOT_CACHE_TTL if f else _ROOT_NEGATIVE_TTL)
     if not fresh:
-        found = any(os.path.isdir(os.path.join(base, top))
-                    or os.path.isfile(os.path.join(base, top + ".py"))
-                    for base in (root, os.path.join(root, "src")))
+        found = False
+        for base in (root, os.path.join(root, "src")):
+            names = _listing(base)
+            if top + ".py" in names and os.path.isfile(os.path.join(base, top + ".py")):
+                found = True
+            elif top in names and "__init__.py" in _listing(os.path.join(base, top)):
+                found = True
+            if found:
+                break
         _module_cache.put((root, top), found)
     return top if found else None
+
+
+def _python_module(rest):
+    """The module of `python [flags] -m <module> ...`, or None. Flags are
+    parsed alone or combined (`-uB`, `-OO`, `-um`), X/W values attached or
+    separate; any unknown flag, a long option or a non-flag word stops the
+    scan."""
+    i = 0
+    while i < len(rest):
+        word = rest[i]
+        if not word.startswith("-") or word.startswith("--") or len(word) < 2:
+            return None
+        chars = word[1:]
+        j = 0
+        while j < len(chars):
+            c = chars[j]
+            if c == "m":
+                if j != len(chars) - 1 or i + 1 >= len(rest):
+                    return None
+                return rest[i + 1]
+            if c in _PYTHON_VALUE_CHARS:
+                if j == len(chars) - 1:  # the value is the next word
+                    if i + 1 >= len(rest):
+                        return None
+                    i += 1
+                break  # an attached value ends this word
+            if c not in _PYTHON_FLAG_CHARS:
+                return None
+            j += 1
+        i += 1
+    return None
 
 
 def command_target(command, env=None, names=None, root=None):
@@ -793,18 +848,18 @@ def command_target(command, env=None, names=None, root=None):
     known subcommand tool, or None.
 
     - The first word must be a bare command: no path separator, `~` or `:`,
-      and, after a Windows `.exe`/`.cmd`/`.bat`/`.com` suffix is dropped, no
-      dot (scripts are never sent; `python3.11` is the one dotted form); it
+      and, after a Windows `.exe` suffix is dropped (only that one), no dot
+      (scripts are never sent; `python3.11` is the one dotted form); it
       matches `^[A-Za-z0-9][A-Za-z0-9_+-]{0,40}$`, is not credential-shaped
       and does not name the user. Otherwise no query.
     - For a program in `_SUBCOMMAND_TOOLS`, the next word is sent when it is
       in that tool's verb list (for make/just/rake, a common target) and
       passes `word_check`. Every other program is sent alone: `rm`, `cat`,
       `cd`, `less`, `mkdir`, `cp`, `mv`, `vim`, ...
-    - `python [flags] -m <module>` (interpreter flags skipped) sends a known
-      module as listed, or only the TOP package of a module that resolves
-      inside the project root (`root()`, called only then); either must pass
-      the name check.
+    - `python [flags] -m <module>` (`_python_module` parses the flags) sends
+      a known module as listed, or only the TOP package of a real package
+      inside the project root (`root()`, called only then). The full module
+      and the sent string must both pass the name check.
     A name in a subcommand or module sends the program alone."""
     command = _clean_target(command) if isinstance(command, str) else None
     if command is None:
@@ -822,8 +877,9 @@ def command_target(command, env=None, names=None, root=None):
     program = words[0]
     if any(ch in program for ch in "/\\:~"):
         return None
-    if program.lower().endswith(_EXE_SUFFIXES):
-        program = program[:-4]
+    stem, suffix = os.path.splitext(program)
+    if suffix.lower() == ".exe":  # only .exe: .bat/.cmd/.com/.ps1 are scripts
+        program = stem
     is_python = _PYTHON_RE.match(program) is not None
     if not (is_python or _PROGRAM_RE.match(program)):
         return None
@@ -831,18 +887,15 @@ def command_target(command, env=None, names=None, root=None):
         return None
     rest = words[1:]
     if is_python:
-        while rest and (rest[0] in _PYTHON_FLAGS
-                        or (rest[0] in _PYTHON_VALUE_FLAGS and len(rest) > 1)):
-            rest = rest[2:] if rest[0] in _PYTHON_VALUE_FLAGS else rest[1:]
-        if rest[:1] == ["-m"] and len(rest) > 1:
-            module = rest[1]
-            if (_MODULE_RE.match(module) and not _credential_shaped(module)
-                    and not name_hit(module, names)):
-                if module in _PYTHON_MODULES:
-                    return program + " " + module
-                top = _project_package(module, root() if root else None)
-                if top:
-                    return program + " " + top
+        module = _python_module(rest)
+        # The name check runs on the full module AND on the exact string
+        # sent: `python -m tests.alice_notes` sends `python` alone.
+        if (module and _MODULE_RE.match(module) and not _credential_shaped(module)
+                and not name_hit(module, names)):
+            sent = module if module in _PYTHON_MODULES else _project_package(
+                module, root() if root else None)
+            if sent and not name_hit(program + " " + sent, names):
+                return program + " " + sent
         return program
     verbs = _SUBCOMMAND_TOOLS.get(program.lower())
     if verbs is not None and rest and word_check(rest[0], names, verbs):

@@ -643,9 +643,10 @@ class TestActivityLine(unittest.TestCase):
         self.assertEqual(a.query, "python")
 
     def test_sandbox_home_does_not_block_the_root_above(self):
-        """A HOME that is not a real user home (not in a homes location, not
-        pw_dir) blocks only itself, so a sandbox HOME inside a repo does not
-        hide the repo. pw_dir blocks its ancestors wherever it is."""
+        """Every home blocks its ancestors, except a sandbox HOME inside the
+        candidate root (a dot-dir directly under it, `.cache/home` or
+        `tmp/home`, and not a real user home), so `repo/.home` does not hide
+        `repo`. A real user home (pw_dir) there still blocks it."""
         base = temp_base()
         repo = os.path.join(base, "srv", "repo")
         make_tree(repo, [".git/", ".home/x/"])
@@ -714,14 +715,80 @@ class TestActivityLine(unittest.TestCase):
         base = temp_base()
         make_tree(base, ["tests/__init__.py"])
         calls = []
-        orig = os.path.isdir
-        os.path.isdir = lambda p: calls.append(p) or orig(p)
-        self.addCleanup(setattr, os.path, "isdir", orig)
+        orig = os.listdir
+        os.listdir = lambda p: calls.append(p) or orig(p)
+        self.addCleanup(setattr, os, "listdir", orig)
         self.assertEqual(act._project_package("tests.acme_merger_due_diligence", base), "tests")
         first = len(calls)
         self.assertEqual(act._project_package("tests.other", base), "tests")
         self.assertEqual(len(calls), first, "cached per (root, top)")
         self.assertIsNone(act._project_package("nothere.x", base))
+
+    def test_python_module_flag_parsing(self):
+        pm = act._python_module
+        for rest, module in ((["-m", "pytest"], "pytest"), (["-u", "-m", "pytest"], "pytest"),
+                             (["-uB", "-m", "x"], "x"), (["-OO", "-m", "x"], "x"),
+                             (["-Xdev", "-m", "x"], "x"), (["-X", "dev", "-m", "x"], "x"),
+                             (["-Wignore", "-m", "x"], "x"), (["-W", "ignore", "-m", "x"], "x"),
+                             (["-i", "-R", "-x", "-m", "x"], "x"), (["-um", "x"], "x"),
+                             (["-BXdev", "-m", "x"], "x"),
+                             (["--version", "-m", "x"], None), (["-c", "code", "-m", "x"], None),
+                             (["-Z", "-m", "x"], None), (["-mu", "x"], None), (["-X"], None),
+                             (["-m"], None), (["script.py", "-m", "x"], None), ([], None),
+                             (["-", "-m", "x"], None)):
+            self.assertEqual(pm(rest), module, rest)
+
+    def test_project_package_must_be_real_and_exact_case(self):
+        base = temp_base()
+        make_tree(base, ["ns/x.py", "Tests/__init__.py", "src/app/__init__.py", "tool.py",
+                         "Tool2.py"])
+        pp = act._project_package
+        self.assertIsNone(pp("ns.x", base), "a folder without __init__.py")
+        self.assertIsNone(pp("tests", base), "case differs (Tests)")
+        self.assertEqual(pp("Tests.y", base), "Tests")
+        self.assertEqual(pp("app.cli", base), "app")
+        self.assertEqual(pp("tool", base), "tool")
+        self.assertIsNone(pp("tool2", base), "case differs (Tool2.py)")
+
+    def test_project_package_negative_cache_is_short(self):
+        base = temp_base()
+        now = [100.0]
+        orig = act._root_clock
+        act._root_clock = lambda: now[0]
+        self.addCleanup(setattr, act, "_root_clock", orig)
+        self.assertIsNone(act._project_package("late", base))
+        make_tree(base, ["late/__init__.py"])
+        self.assertIsNone(act._project_package("late", base))  # cached briefly
+        now[0] += act._ROOT_NEGATIVE_TTL + 0.1
+        self.assertEqual(act._project_package("late", base), "late")
+
+    def test_files_inside_an_inner_home_are_never_sent(self):
+        """A sandbox HOME inside the repo does not hide the repo, but nothing
+        inside it is ever sent, including through a Git Bash HOME form."""
+        base = temp_base()
+        repo = os.path.join(base, "d", "work")
+        make_tree(repo, [".git/", ".home/Documents/", ".home/.aws/", "src/"])
+        env = {"USER": "al", "HOME": os.path.join(repo, ".home")}
+        n = act.normalize_path
+        self.assertEqual(n("src/x.py", repo, env), "src/x.py")
+        for raw in (".home/Documents/taxes.pdf", ".home/.aws/credentials", ".home",
+                    os.path.join(repo, ".home", "Documents", "taxes.pdf")):
+            self.assertIsNone(n(raw, repo, env), raw)
+        # Git Bash: HOME=/d/work/.home names the same folder (mapped on win32).
+        orig = act._git_bash
+        act._git_bash = lambda p, windows=None: (
+            os.path.join(base, *p.split("/")[1:]) if p.startswith("/d/") else p)
+        self.addCleanup(setattr, act, "_git_bash", orig)
+        act.reset_state()
+        env = {"USER": "al", "HOME": "/d/work/.home"}
+        self.assertEqual(n("src/x.py", repo, env), "src/x.py")
+        self.assertIsNone(n(".home/Documents/taxes.pdf", repo, env))
+
+    def test_blocked_requires_user_homes(self):
+        import inspect
+        for fn in (act._blocked, act._find_root):
+            self.assertIs(inspect.signature(fn).parameters["user"].default,
+                          inspect.Parameter.empty, fn.__name__)
 
     def test_ttl_cache(self):
         now = [0.0]

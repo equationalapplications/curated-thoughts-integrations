@@ -754,6 +754,47 @@ A post-merge review of 0.6.6 found two leaks and some cleanups.
 - **Cleanups.** The dead `_FREE_TEXT_PROGRAMS` table is deleted, and the interpreter
   check runs once (`is_python`).
 
+## Privacy amendment 7 (2026-10-17, hermes 0.6.8)
+
+A post-merge review of 0.6.7 found the following:
+
+- **Only `.exe` is stripped.**
+  - **The rule:** the program's suffix is taken with `os.path.splitext` and compared
+    case-insensitively. Only `.exe` is dropped: `git.exe status` → `git status`, and
+    `GIT.EXE status` → `GIT status`.
+  - **Scripts:** `.bat`, `.cmd`, `.com`, `.ps1` and any other dotted program are
+    scripts, so they give no query (0.6.7 stripped `.cmd`, `.bat` and `.com`).
+  - **Code:** `os.path.splitext` and the suffix length replace `[:-4]`.
+- **Files inside a home inside the project root are never sent.** The sandbox exception
+  of amendment 6 stays for root-finding: `repo/.home` does not hide `repo`. But any path
+  that resolves inside any home directory that is itself inside the project root,
+  sandbox or not, gives no query. So `.home/Documents/taxes.pdf` and
+  `.home/.aws/credentials` read from the root send nothing. Through Git Bash's mapping,
+  `HOME=D:\work\.home` works the same way. A search `path` there is dropped.
+- **No fail-open defaults.** The `user` parameter of `_blocked` and `_find_root` is
+  required.
+- **Interpreter flags.**
+  - `_python_module` parses flags alone or combined: `-uB`, `-OO`, and `-um` with `m`
+    last.
+  - `X` and `W` take a value, either attached (`-Xdev`, `-Wignore`) or as the next word.
+  - The no-value flags are `b B d E i I O P q R s S u v x`.
+  - Any unknown flag, a long option (`--version`), `-c` or a non-flag word stops the
+    scan, and only `python` is sent.
+- **ASCII interpreter names.** The pattern is `^python([0-9]{1,2}(\.[0-9]{1,3})?)?$`,
+  so a fullwidth `python３` is no interpreter, and `python311` is an ordinary program
+  sent alone.
+- **Real, exact-case packages.** A project package counts only as a `<top>.py` file or
+  a `<top>/` directory holding `__init__.py`, at the root or under `src/`. The name is
+  matched case-sensitively by directory listing, even on case-insensitive filesystems:
+  `Tests/` is not `tests`. Namespace packages (no `__init__.py`) do not count. Nothing
+  marks them, so any folder would qualify, which would turn a folder name into a sent
+  word. The lookup is cached 30 s when found and 2 s when not, the same as the root
+  cache.
+- **The name check runs on both strings.** It runs on the full module and on the exact
+  string that is sent (`python <top>`). A name in either sends `python` alone. For
+  example, `python -m tests.alice_notes` sends `python`, not `python tests`: a name in
+  the command line is a signal that the work is about that person.
+
 ## Alignment with INTENT.md
 
 - **Goal "During autonomous work":** this is that step for Hermes. Host events
@@ -779,7 +820,7 @@ A post-merge review of 0.6.6 found two leaks and some cleanups.
 - **User decisions 1–7:** decision 1 → "Rate rule"; 2 → "Activity line builder" and the
   secret-safety tests; 3 and 4 → "Subagents and scheduled runs"; 5 → constants; 6 → this
   spec; 7 → `ct_tool` class.
-- **Privacy amendments 1-6:** serve "Why this repo exists" (CT is private and local-first):
+- **Privacy amendments 1-7:** serve "Why this repo exists" (CT is private and local-first):
   the query names the work, never the person or their directory layout. They only remove
   what is sent. Relevance stays CT's (rule 8): skipping files outside a project is a
   privacy rule, not a relevance judgment. Limits are unchanged (rule 6), and an activity

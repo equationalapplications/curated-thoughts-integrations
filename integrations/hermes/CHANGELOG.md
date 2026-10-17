@@ -6,6 +6,29 @@ format below is load-bearing: `## <version> — <date>`.
 
 ## Unreleased
 
+## 0.6.8 — 2026-10-17
+
+- **Privacy fix.** What 0.6.7 could still send to CT and its embedding
+  provider (and show in the `_for:` label and the verbose log):
+  - **Files inside a sandbox HOME in the project.** With `HOME=repo/.home`,
+    reading `.home/Documents/taxes.pdf` or `.home/.aws/credentials` from
+    the repo sent that path. Anything inside a home folder that sits in the
+    project is now never sent. The project's own files still are.
+  - **Windows script names.** `npm.cmd test`, `make.bat build` and
+    `tool.com run` were sent as `npm test`, `make build` and `tool`. Only
+    `.exe` is dropped now (`git.exe status` → `git status`). Any other
+    dotted program sends nothing.
+  - **A folder name taken for a Python package.** `python -m mypkg` sent
+    `python mypkg` for any folder named `mypkg`, and on macOS and Windows
+    even for `Mypkg`. A package now needs `__init__.py` (or is a `.py`
+    file), and its name must match exactly.
+- `python -m tests.alice_notes` (your name in the module) now sends
+  `python` alone, not `python tests`.
+- Interpreter flags are parsed in all their forms (`-Xdev`, `-Wignore`,
+  `-uB`, `-OO`, `-um`, `-i`, `-R`, `-x`); an unknown flag sends `python`
+  alone.
+- `python３` (a fullwidth digit) is no longer taken for an interpreter name.
+
 ## 0.6.7 — 2026-10-17
 
 - **Privacy fix.** What 0.6.6 could still send to CT and its embedding
