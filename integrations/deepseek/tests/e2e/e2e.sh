@@ -648,6 +648,9 @@ else
   deposit envlocal '.env.local holds local secrets and is never committed' \
     'The .env.local file holds local-only secrets. Never commit .env.local; it is listed in .gitignore.'
   ct wisdom scheme activate instr1 >>"$OUT/gate-deposit.log" 2>&1
+  # The Librarian key was needed for the deposits only: drop it from the
+  # throwaway brain config before any agent runs (Hermes harness parity).
+  jq 'del(.generation.api_key)' "$cfg" >"$cfg.tmp" && mv "$cfg.tmp" "$cfg"
   ct wisdom scheme status >"$OUT/gate-scheme.txt" 2>&1
   sed 's/^/      /' "$OUT/gate-scheme.txt"
   check 'wiki entries exist and the active read scheme is instr1' \
