@@ -950,6 +950,13 @@ this"; sending its target anyway is the worse failure.
   `secrets.env` (blocked: `{"error": "BLOCKED by e2e-blocker: …"}`) and ran
   `git push origin main` (refused: `"status": "blocked"`, the deny-rule message); CT
   received only `TASK.md`, `pnpm test` and `.env.local`.
+  **Rerun after the Amendment 8 update (2026-10-17): RESULT PASS, all checks.** No
+  `pre_tool_call` hook of ours; the blocker's message is now
+  `secrets.env is off limits (e2e-blocker).` (no refusal wording), so check 6 shows
+  Hermes ran no transform for the blocked call. The `git push` refusal came back as
+  `"status": "blocked"` with the deny-rule `BLOCKED: …` error. CT again received only
+  `TASK.md`, `pnpm test` and `.env.local`. Two facts were delivered (terminal and
+  write_file), each once, and no key value was found in `out/`.
 
 ### Amendment 8 update (PR #72 review, 2026-10-17)
 
