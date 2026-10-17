@@ -23,6 +23,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / "scripts"))
 
 import ct_wisdom_activity as act  # noqa: E402
+import ct_wisdom_activity_delivery as dlv  # noqa: E402
 
 PIN_RESULTS_COMMIT = "ee8dd6c886326db4b468c2ba18d9409f123da827"
 
@@ -159,7 +160,7 @@ class TestPinResults(unittest.TestCase):
         for tool, result, verdict, source in PIN_RESULTS:
             with self.subTest(tool=tool, source=source):
                 data = json.loads(json.dumps(result))
-                self.assertIs(act.proves_ran(tool, data), verdict)
+                self.assertIs(dlv.proves_ran(tool, data), verdict)
 
     def test_every_activity_tool_has_both_verdicts(self):
         tools = set(act._FILE_TOOLS) | set(act._OTHER_ACTIVITY_TOOLS)
@@ -175,11 +176,11 @@ class TestFailsClosed(unittest.TestCase):
         for tool in self.TOOLS:
             for data in (None, "ok 3 passed", "", [1, 2], 42, True, b"{}"):
                 with self.subTest(tool=tool, data=data):
-                    self.assertFalse(act.proves_ran(tool, data))
+                    self.assertFalse(dlv.proves_ran(tool, data))
 
     def test_empty_object(self):
         for tool in self.TOOLS:
-            self.assertFalse(act.proves_ran(tool, {}), tool)
+            self.assertFalse(dlv.proves_ran(tool, {}), tool)
 
     def test_any_non_null_error_fails(self):
         good = {"terminal": {"output": "", "exit_code": 0},
@@ -188,56 +189,56 @@ class TestFailsClosed(unittest.TestCase):
                 "patch": {"success": True},
                 "search_files": {"total_count": 1}}
         for tool, base in good.items():
-            self.assertTrue(act.proves_ran(tool, dict(base)), tool)
-            self.assertTrue(act.proves_ran(tool, dict(base, error=None)), tool)
+            self.assertTrue(dlv.proves_ran(tool, dict(base)), tool)
+            self.assertTrue(dlv.proves_ran(tool, dict(base, error=None)), tool)
             for err in ("", "x", {}, {"message": "m"}, False, 0, []):
                 with self.subTest(tool=tool, error=err):
-                    self.assertFalse(act.proves_ran(tool, dict(base, error=err)))
+                    self.assertFalse(dlv.proves_ran(tool, dict(base, error=err)))
 
     def test_bools_are_not_counts(self):
-        self.assertFalse(act.proves_ran("terminal", {"exit_code": True}))
-        self.assertFalse(act.proves_ran("terminal", {"exit_code": False}))
-        self.assertFalse(act.proves_ran("write_file", {"bytes_written": True}))
-        self.assertFalse(act.proves_ran("search_files", {"total_count": False}))
+        self.assertFalse(dlv.proves_ran("terminal", {"exit_code": True}))
+        self.assertFalse(dlv.proves_ran("terminal", {"exit_code": False}))
+        self.assertFalse(dlv.proves_ran("write_file", {"bytes_written": True}))
+        self.assertFalse(dlv.proves_ran("search_files", {"total_count": False}))
 
     def test_negative_and_non_int_counts(self):
         for value in (-1, 1.0, "0", None):
             with self.subTest(value=value):
-                self.assertFalse(act.proves_ran("terminal", {"exit_code": value}))
-                self.assertFalse(act.proves_ran("write_file", {"bytes_written": value}))
-                self.assertFalse(act.proves_ran("search_files", {"total_count": value}))
+                self.assertFalse(dlv.proves_ran("terminal", {"exit_code": value}))
+                self.assertFalse(dlv.proves_ran("write_file", {"bytes_written": value}))
+                self.assertFalse(dlv.proves_ran("search_files", {"total_count": value}))
 
     def test_terminal_status_needs_the_yield_shape(self):
-        self.assertFalse(act.proves_ran("terminal", {"exit_code": 0, "status": "ok"}))
-        self.assertFalse(act.proves_ran("terminal", {"exit_code": 0, "status": "blocked"}))
-        self.assertFalse(act.proves_ran(
+        self.assertFalse(dlv.proves_ran("terminal", {"exit_code": 0, "status": "ok"}))
+        self.assertFalse(dlv.proves_ran("terminal", {"exit_code": 0, "status": "blocked"}))
+        self.assertFalse(dlv.proves_ran(
             "terminal", {"exit_code": None, "status": "yielded_to_background"}))
-        self.assertFalse(act.proves_ran(
+        self.assertFalse(dlv.proves_ran(
             "terminal", {"exit_code": None, "status": "yielded_to_background",
                          "session_id": ""}))
-        self.assertFalse(act.proves_ran(
+        self.assertFalse(dlv.proves_ran(
             "terminal", {"exit_code": None, "status": "Yielded_To_Background",
                          "session_id": "p"}))
         for sid in (5, None):
-            self.assertFalse(act.proves_ran(
+            self.assertFalse(dlv.proves_ran(
                 "terminal", {"exit_code": None, "status": "yielded_to_background",
                              "session_id": sid}))
-        self.assertFalse(act.proves_ran("terminal", {"exit_code": 0, "status": None}))
+        self.assertFalse(dlv.proves_ran("terminal", {"exit_code": 0, "status": None}))
 
     def test_read_file_rules(self):
-        self.assertFalse(act.proves_ran("read_file", {"content": None}))
-        self.assertFalse(act.proves_ran("read_file", {"content": ["x"]}))
-        self.assertFalse(act.proves_ran("read_file", {"content": "x", "status": "ok"}))
-        self.assertFalse(act.proves_ran("read_file", {"content": "x", "is_binary": True}))
-        self.assertTrue(act.proves_ran("read_file", {"content": "x", "is_binary": False}))
+        self.assertFalse(dlv.proves_ran("read_file", {"content": None}))
+        self.assertFalse(dlv.proves_ran("read_file", {"content": ["x"]}))
+        self.assertFalse(dlv.proves_ran("read_file", {"content": "x", "status": "ok"}))
+        self.assertFalse(dlv.proves_ran("read_file", {"content": "x", "is_binary": True}))
+        self.assertTrue(dlv.proves_ran("read_file", {"content": "x", "is_binary": False}))
 
     def test_patch_needs_true_not_truthy(self):
         for value in (1, "true", "yes", None, False):
-            self.assertFalse(act.proves_ran("patch", {"success": value}), value)
+            self.assertFalse(dlv.proves_ran("patch", {"success": value}), value)
 
     def test_unknown_tools_never_prove(self):
         for tool in ("browser_navigate", "execute_code", "mcp_x", "", None, 3):
-            self.assertFalse(act.proves_ran(tool, {"output": "", "exit_code": 0,
+            self.assertFalse(dlv.proves_ran(tool, {"output": "", "exit_code": 0,
                                                    "content": "x", "success": True,
                                                    "bytes_written": 1, "total_count": 1}))
 

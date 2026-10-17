@@ -26,6 +26,7 @@ import ct_ledger  # noqa: E402
 import ct_tool_dedup  # noqa: E402
 import ct_wisdom  # noqa: E402
 import ct_wisdom_activity  # noqa: E402
+import ct_wisdom_activity_delivery as dlv  # noqa: E402
 import ct_wisdom_live  # noqa: E402
 
 UNIVERSE = ["fact_%02d" % i for i in range(16)]
@@ -177,7 +178,7 @@ class TestExactlyOnceWithActivity(unittest.TestCase):
     def setUp(self):
         ct_wisdom_live.reset_capability_cache()
         ct_wisdom_live.reset_session_state()
-        ct_wisdom_activity.reset_state()
+        dlv.reset_state()
         ct_ledger.LEDGER_CACHE.clear()
         orig_breaker = ct_wisdom_live._BREAKER
         ct_wisdom_live._BREAKER = ct_wisdom_live.Breaker(fails=10 ** 9)
@@ -191,7 +192,7 @@ class TestExactlyOnceWithActivity(unittest.TestCase):
             self.addCleanup(setattr, mod, name, orig)
         self.addCleanup(ct_ledger.LEDGER_CACHE.clear)
         self.addCleanup(ct_wisdom_live.reset_session_state)
-        self.addCleanup(ct_wisdom_activity.reset_state)
+        self.addCleanup(dlv.reset_state)
         # Activity paths are sent only inside a project root (Privacy
         # amendment 4): the session cwd is a temp project.
         proj = os.path.realpath(tempfile.mkdtemp(prefix="ct-exactly-once-"))
@@ -248,7 +249,7 @@ class TestExactlyOnceWithActivity(unittest.TestCase):
                       turn_id="t", api_request_id=req, task_id="")
             new = ct_tool_dedup.on_transform_tool_result(result=raw, **kw)
             if new is None:
-                new = ct_wisdom_activity.on_transform_tool_result(result=raw, **kw)
+                new = dlv.on_transform_tool_result(result=raw, **kw)
             out[n] = {"role": "tool", "content": new or raw,
                       "kind": "recall" if kind == "recall" else "work"}
 
@@ -266,7 +267,7 @@ class TestExactlyOnceWithActivity(unittest.TestCase):
                     restored.add(sid)  # /resume in a new process: in-turn state gone
                     ct_ledger.LEDGER_CACHE.clear()
                     ct_wisdom_live.reset_session_state()
-                    ct_wisdom_activity.reset_state()
+                    dlv.reset_state()
                 out = ct_wisdom_live.on_pre_llm_call(
                     session_id=sid, user_message="question %d" % turn,
                     conversation_history=list(history), is_first_turn=(turn == 0))
