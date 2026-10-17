@@ -1169,6 +1169,18 @@ class TestDelivery(Harness):
         self.assertEqual(self.calls, [])
         self.assertEqual(classes, ["no_activity"])
 
+    def test_unhashable_tool_name_skips_as_no_activity(self):
+        ct_ledger.LEDGER_CACHE.put("s1", set())
+        classes = []
+        orig = act._skip
+        act._skip = lambda sid, cls, *a, **k: classes.append(cls) or orig(sid, cls, *a, **k)
+        self.addCleanup(setattr, act, "_skip", orig)
+        for tool in (["x"], {"a": 1}):
+            with self.subTest(tool=tool):
+                self.assertIsNone(self.post(TERMINAL_OK, tool=tool, args={"command": "ls"}))
+        self.assertEqual(self.calls, [])
+        self.assertEqual(classes, ["no_activity", "no_activity"])
+
     def test_plain_text_result_sends_nothing(self):
         """No activity tool returns plain text at the pin: it proves nothing."""
         ct_ledger.LEDGER_CACHE.put("s1", set())

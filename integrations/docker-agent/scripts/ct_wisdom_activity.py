@@ -95,10 +95,6 @@ Activity = namedtuple("Activity", "verb target key line query")
 
 _FILE_TOOLS = {"read_file": "read", "write_file": "write", "patch": "edit"}
 _OTHER_ACTIVITY_TOOLS = ("search_files", "terminal")
-
-
-def _is_activity_tool(tool_name):
-    return tool_name in _FILE_TOOLS or tool_name in _OTHER_ACTIVITY_TOOLS
 _VERB_CLASS = {"read": "file", "write": "file", "edit": "file",
                "search": "search", "run": "run"}
 
@@ -113,6 +109,12 @@ _PYTHON_RE = re.compile(r"^python([0-9]{1,2}(\.[0-9]{1,3})?)?$")
 # next word (`-X dev`). Any other flag stops the scan (the program alone).
 _PYTHON_FLAG_CHARS = frozenset("bBdEiIOPqRsSuvx")
 _PYTHON_VALUE_CHARS = frozenset("XW")
+
+
+def _is_activity_tool(tool_name):
+    """True for a str tool name in the activity set (an unhashable name is not)."""
+    return isinstance(tool_name, str) and (
+        tool_name in _FILE_TOOLS or tool_name in _OTHER_ACTIVITY_TOOLS)
 
 
 def is_ct_tool(name):
@@ -942,11 +944,9 @@ def activity_for(tool_name, args, cwd=None, env=None, task_id=None):
     full path. `cwd` defaults to `session_cwd(task_id)`, resolved only when
     a path argument (or a `python -m` project module) is actually used; `env`
     to os.environ."""
-    if not isinstance(args, dict) or not isinstance(tool_name, str):
+    if not isinstance(args, dict) or not _is_activity_tool(tool_name):
         return None
     verb = _FILE_TOOLS.get(tool_name)
-    if verb is None and tool_name not in _OTHER_ACTIVITY_TOOLS:
-        return None
     env = _environ(env)
     names = user_names(env)
     resolved_cwd = []

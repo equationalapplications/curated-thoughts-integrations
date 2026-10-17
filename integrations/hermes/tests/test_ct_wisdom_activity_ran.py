@@ -162,7 +162,7 @@ class TestPinResults(unittest.TestCase):
                 self.assertIs(act.proves_ran(tool, data), verdict)
 
     def test_every_activity_tool_has_both_verdicts(self):
-        tools = {"terminal", "read_file", "write_file", "patch", "search_files"}
+        tools = set(act._FILE_TOOLS) | set(act._OTHER_ACTIVITY_TOOLS)
         for tool in tools:
             verdicts = {v for t, _, v, _ in PIN_RESULTS if t == tool}
             self.assertEqual(verdicts, {RAN, NOT_RAN}, tool)
