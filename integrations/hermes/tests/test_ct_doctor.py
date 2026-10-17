@@ -2535,6 +2535,10 @@ class SidecarEnvTests(DoctorTestCase):
         super().setUp()
         for key in ("EMBED_API_KEY", "OPENROUTER_API_KEY", "OPENAI_API_KEY", "OLLAMA_HOST"):
             self.patch_env(key, None)
+        # The default-layout comparison expands `~`, which reads USERPROFILE
+        # (not HOME) on Windows; point both at the fake home so the fixture
+        # brain counts as the default location there too.
+        self.patch_env("USERPROFILE", str(self.fake_home))
 
     def brain(self, profile):
         brain = self.make_brain()
