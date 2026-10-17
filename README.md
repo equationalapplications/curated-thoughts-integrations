@@ -124,9 +124,10 @@ keyed to what the agent is doing:
   known verb (`git rebase`, `npm test`, `make build`). Every other program
   is sent alone, so `rm divorce-papers` sends `rm` and
   `pytest tests/billing` sends `pytest`. `python -m <module>` sends the
-  module only for well-known modules (`pytest`, `pip`, `http.server`, …) or
-  a package inside the project (`python3 pytest`). Nothing naming you is
-  sent.
+  module only for well-known modules (`pytest`, `pip`, `http.server`, …;
+  `python3 -m pytest` sends `python3 pytest`) or a package inside the
+  project (`python -m mypkg.cli` sends `python mypkg.cli`). Nothing naming
+  you is sent.
   File contents, tool output, diffs and the agent's own words are never sent.
 - **Privacy (since hermes 0.6.5):** a file path is sent only when it is
   inside a project (the nearest folder above the session's working
