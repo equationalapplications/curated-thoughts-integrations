@@ -118,6 +118,7 @@ EXPECTED_CHECKS = (
     "brain-dir",
     "vault",
     "embedding-backend",
+    "sidecar-env",
     "claude-code-registration",
     "import-preflight",
     "version-compat",
@@ -2310,6 +2311,99 @@ class TestCompatConstantsAreGenerated(unittest.TestCase):
         by_name = {tier[0]: tier for tier in _compat_generated.TIERS}
         self.assertEqual(by_name["v2.4-read"][3], 8)
         self.assertEqual(by_name["v2.5-full"][3], 14)
+
+
+class SidecarEnvTests(DoctorTestCase):
+    """(6b) sidecar-env on Claude Code. By default Claude Code hands a stdio
+    MCP server its whole process environment (verified in the 2.1.301
+    build), so only a key missing from that environment warns. With
+    CLAUDE_CODE_MCP_ALLOWLIST_ENV on it filters like Hermes and the entry's
+    own `env` must forward the key. Never prints a value."""
+
+    SECRET = "sk-or-v1-FAKE-DO-NOT-PRINT-0123456789"
+
+    def setUp(self):
+        super().setUp()
+        for key in ("EMBED_API_KEY", "OPENROUTER_API_KEY", "OPENAI_API_KEY",
+                    "OLLAMA_HOST", "CLAUDE_CODE_MCP_ALLOWLIST_ENV"):
+            self.patch_env(key, None)
+
+    def brain(self, profile):
+        brain = self.make_brain()
+        cfg = json.loads((brain / "config.json").read_text())
+        if profile is not None:
+            cfg["embed_profile"] = profile
+        (brain / "config.json").write_text(json.dumps(cfg))
+
+    def check(self, env=None):
+        r = ct_doctor.check_sidecar_env(env=env or {})
+        self.assertNotIn(self.SECRET, r.detail + r.hint)
+        return r
+
+    def entry(self, env=None):
+        server = {"command": str(self.mock_path), "args": ["--mcp"]}
+        if env is not None:
+            server["env"] = env
+        self.write_config({"mcpServers": {"curated-thoughts": server}})
+
+    def test_local_brain_passes(self):
+        self.brain(None)
+        self.entry()
+        self.assertEqual(self.check().status, ct_doctor.PASS)
+
+    def test_inherited_key_set_passes(self):
+        self.brain({"type": "external", "model": "m"})
+        self.entry()
+        r = self.check({"OPENROUTER_API_KEY": self.SECRET})
+        self.assertEqual(r.status, ct_doctor.PASS, r.detail)
+        self.assertIn("passes its environment", r.detail)
+
+    def test_inherited_key_missing_warns(self):
+        self.brain({"type": "external", "model": "m"})
+        self.entry()
+        r = self.check()
+        self.assertEqual(r.status, ct_doctor.WARN)
+        self.assertIn("OPENROUTER_API_KEY not set", r.detail)
+
+    def test_allowlist_mode_needs_the_entry_to_forward_the_key(self):
+        self.patch_env("CLAUDE_CODE_MCP_ALLOWLIST_ENV", "1")
+        self.brain({"type": "external", "model": "m"})
+        self.entry()
+        r = self.check({"OPENROUTER_API_KEY": self.SECRET})
+        self.assertEqual(r.status, ct_doctor.WARN)
+        self.assertIn('"OPENROUTER_API_KEY": "${OPENROUTER_API_KEY:-}"', r.hint)
+
+    def test_allowlist_mode_finds_a_project_scope_entry(self):
+        self.patch_env("CLAUDE_CODE_MCP_ALLOWLIST_ENV", "1")
+        self.brain({"type": "external", "model": "m"})
+        self.write_config({})
+        project = self.fake_home / "proj"
+        project.mkdir()
+        (project / ".mcp.json").write_text(json.dumps({"mcpServers": {"curated-thoughts": {
+            "command": "x", "args": ["--mcp"],
+            "env": {"OPENROUTER_API_KEY": "${OPENROUTER_API_KEY:-}"}}}}))
+        r = ct_doctor.check_sidecar_env(env={"OPENROUTER_API_KEY": self.SECRET}, cwd=str(project))
+        self.assertEqual(r.status, ct_doctor.PASS, r.detail)
+        self.assertIn(".mcp.json", r.detail)
+
+    def test_allowlist_mode_flags_a_different_brain_path(self):
+        self.patch_env("CLAUDE_CODE_MCP_ALLOWLIST_ENV", "1")
+        self.brain({"type": "local", "model": "m"})
+        custom = self.fake_home / "brains" / "work"
+        custom.mkdir(parents=True)
+        self.entry({"CURATED_BRAIN_DIR": str(self.fake_home / "brains" / "other")})
+        r = self.check({"CURATED_BRAIN_DIR": str(custom)})
+        self.assertEqual(r.status, ct_doctor.WARN)
+        self.assertIn("different brain location", r.detail)
+        self.entry({"CURATED_BRAIN_DIR": str(custom)})
+        self.assertEqual(self.check({"CURATED_BRAIN_DIR": str(custom)}).status, ct_doctor.PASS)
+
+    def test_allowlist_mode_with_forwarded_key_passes(self):
+        self.patch_env("CLAUDE_CODE_MCP_ALLOWLIST_ENV", "true")
+        self.brain({"type": "external", "model": "m"})
+        self.entry({"OPENROUTER_API_KEY": "${OPENROUTER_API_KEY:-}"})
+        r = self.check({"OPENROUTER_API_KEY": self.SECRET})
+        self.assertEqual(r.status, ct_doctor.PASS, r.detail)
 
 
 def load_suite():

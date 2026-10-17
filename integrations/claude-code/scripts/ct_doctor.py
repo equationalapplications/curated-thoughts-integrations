@@ -643,6 +643,140 @@ def check_embedding(env=None):
         )
 
 
+def _is_set(env, name):
+    value = env.get(name)
+    return isinstance(value, str) and bool(value.strip())
+
+
+_ENV_REF = re.compile(r"^\$\{(?:env:)?\s*([A-Za-z_][A-Za-z0-9_]*)\s*(?::-[^}]*)?\}$")
+
+
+def _path_forward_ok(need, forwarded):
+    """True when the entry forwards `need` (a brain location) to the same
+    path this environment resolves: a reference to the same variable, or
+    a literal equal to it. A differently-valued literal sends the sidecar
+    to another brain."""
+    value = forwarded.get(need.name)
+    if not isinstance(value, str):
+        return False
+    value = value.strip()
+    ref = _ENV_REF.match(value)
+    if ref:
+        return ref.group(1) == need.name
+    return os.path.normcase(os.path.normpath(value)) == os.path.normcase(
+        os.path.normpath(need.value)
+    )
+
+
+def check_sidecar_env(brain_paths=None, env=None, cwd=None):
+    """(6b) the sidecar's launch env carries what the brain needs.
+
+    A host that filters its MCP children's environment drops the embedding
+    key (and a non-default brain location) unless the MCP entry forwards it
+    by name; recall and wisdom matching then degrade without an error. The
+    host's routing comes from the harness-specific `_sidecar_env_route`,
+    which returns the entry's env mapping (name -> configured text); `cwd`
+    is the registration context, as for check 7. Read-only, and only
+    variable NAMES (and brain paths, which are not secrets) are reported,
+    never a key's value.
+    """
+    merged = _merged_env(env)
+    paths = brain_paths or ct_env.resolve_brain_paths(env=merged)
+    config, _err = ct_env.read_brain_config(paths.config_path)
+    profile = ct_env.embed_profile_kind(config)
+    needs = ct_env.sidecar_env_needs(config or {}, merged)
+    if not needs:
+        return CheckResult(
+            "sidecar-env",
+            PASS,
+            f"the sidecar needs nothing from {HARNESS_LABEL}'s environment "
+            f"beyond the defaults (embed_profile: {profile})",
+        )
+    refs = [n for n in needs if n.kind == ct_env.NEED_REF]
+    route = _sidecar_env_route(cwd=cwd)
+    if route is None:
+        # The host hands its whole environment to the sidecar: the only
+        # failure is a key missing from that environment altogether.
+        unset = [n for n in refs if not any(_is_set(merged, a) for a in n.alternatives)]
+        if unset:
+            return CheckResult(
+                "sidecar-env",
+                WARN,
+                f"{', '.join(n.name for n in unset)} not set in this "
+                f"environment (embed_profile: {profile})",
+                f"{HARNESS_LABEL} passes its own environment to the sidecar. "
+                + " ".join(f"{n.name}: {n.reason}." for n in unset)
+                + f" Set it in the environment {HARNESS_LABEL} starts from, "
+                f"then restart {HARNESS_LABEL}.",
+            )
+        return CheckResult(
+            "sidecar-env",
+            PASS,
+            f"{HARNESS_LABEL} passes its environment to the sidecar; "
+            f"{', '.join(n.name for n in needs)} reach it",
+        )
+    forwarded, host_names, where = route
+    if forwarded is None:
+        return CheckResult(
+            "sidecar-env",
+            PASS,
+            "skipped: no curated-thoughts MCP entry to inspect (see the "
+            "registration check)",
+        )
+    missing = [n for n in needs if not any(a in forwarded for a in n.alternatives)]
+    wrong_path = [
+        n for n in needs
+        if n.kind == ct_env.NEED_PATH and n not in missing
+        and not _path_forward_ok(n, forwarded)
+    ]
+    if wrong_path:
+        names = ", ".join(n.name for n in wrong_path)
+        return CheckResult(
+            "sidecar-env",
+            WARN,
+            f"the curated-thoughts entry in {where} sets {names} to a "
+            "different brain location than this environment resolves",
+            "The sidecar would open a different brain from the one the "
+            "plugin's own calls use. "
+            + _sidecar_env_fix(wrong_path),
+        )
+    if missing:
+        return CheckResult(
+            "sidecar-env",
+            WARN,
+            f"{HARNESS_LABEL} does not pass its environment to MCP servers, "
+            f"and the curated-thoughts entry in {where} does not forward "
+            f"{', '.join(n.name for n in missing)} (embed_profile: {profile})",
+            " ".join(f"{n.name}: {n.reason}." for n in missing)
+            + " "
+            + _sidecar_env_fix(missing),
+        )
+    unresolved = [
+        n for n in refs
+        if not any(
+            a in forwarded and (_is_set(merged, a) or a in host_names)
+            for a in n.alternatives
+        )
+    ]
+    if unresolved:
+        names = ", ".join(n.name for n in unresolved)
+        return CheckResult(
+            "sidecar-env",
+            WARN,
+            f"{names} forwarded by name in {where}, but not set in this "
+            f"environment or {HARNESS_LABEL}'s env file",
+            f"An unset reference reaches the sidecar with no usable value "
+            f"(empty, or the literal ${{NAME}} text sent as the key). Set "
+            f"{names} where {HARNESS_LABEL} reads it (its launch environment "
+            f"or env file), then restart {HARNESS_LABEL}.",
+        )
+    return CheckResult(
+        "sidecar-env",
+        PASS,
+        f"{', '.join(n.name for n in needs)} forwarded to the sidecar via {where}",
+    )
+
+
 # >>> harness-specific: registration-check
 def _read_json_file(path):
     """Read a JSON object. Returns (data|None, reason|None).
@@ -922,6 +1056,57 @@ def _check_registration(cwd=None):
     project-scope lookups resolve against it (default: os.getcwd()).
     """
     return check_claude_code_registration(cwd=cwd)
+
+
+MCP_ALLOWLIST_ENV = "CLAUDE_CODE_MCP_ALLOWLIST_ENV"
+
+
+def _sidecar_env_route(cwd=None):
+    """(6b) how this host routes env to the sidecar.
+
+    Claude Code (verified in the 2.1.301 build) spawns a stdio MCP server
+    with its full process environment plus the entry's `env`, so by default
+    the sidecar sees every variable Claude Code was started with: None
+    means "inherits". With CLAUDE_CODE_MCP_ALLOWLIST_ENV truthy it starts
+    from the MCP SDK's short default list instead, so only the entry's own
+    `env` keys reach the sidecar. The entry is resolved with check 7's
+    precedence (user, then local for `cwd`, then the project .mcp.json).
+    """
+    flag = (os.environ.get(MCP_ALLOWLIST_ENV) or "").strip().lower()
+    if flag not in ("1", "true", "yes", "on"):
+        return None
+    effective_cwd = Path(cwd) if cwd else Path(os.getcwd())
+    data, _err = _read_json_file(CLAUDE_CONFIG)
+    source = CLAUDE_CONFIG
+    entry = _mcp_entry(data)
+    if entry is None:
+        entry = _local_scope_entry(data, effective_cwd)
+    if entry is None:
+        project = effective_cwd / PROJECT_MCP_CONFIG
+        project_data, _perr = _read_json_file(project)
+        entry = _mcp_entry(project_data)
+        if entry is not None:
+            source = project
+    if entry is None:
+        return None, set(), str(source)
+    env = entry.get("env")
+    forwarded = {k: v for k, v in env.items() if isinstance(v, str)} if isinstance(env, dict) else {}
+    return forwarded, set(), str(source)
+
+
+def _sidecar_env_fix(needs):
+    """The exact `env` keys that forward `needs` (names only)."""
+    rows = []
+    for n in needs:
+        value = n.value if n.kind == ct_env.NEED_PATH else "${" + n.name + ":-}"
+        rows.append(f'    "{n.name}": {json.dumps(value)}')
+    return (
+        f"{MCP_ALLOWLIST_ENV} is on, so Claude Code passes MCP servers only "
+        f"a short default list. Add to mcpServers.{MCP_SERVER_KEY} in "
+        f'{CLAUDE_CONFIG}:\n  "env": {{\n' + ",\n".join(rows) + "\n  }\n"
+        "then restart Claude Code. ${NAME:-} expands from Claude Code's "
+        "environment (empty when unset), so only the name is written."
+    )
 # <<< harness-specific: registration-check
 
 
@@ -1272,6 +1457,7 @@ def run_checks(timeout=MCP_TIMEOUT, env=None, cwd=None):
     results.append(check_brain_dir(brain_paths, env=merged))
     results.append(check_vault(brain_paths, env=merged))
     results.append(check_embedding(env=merged))
+    results.append(check_sidecar_env(brain_paths, env=merged, cwd=cwd))
     results.append(_check_registration(cwd=cwd))
     results.append(
         check_import_preflight(

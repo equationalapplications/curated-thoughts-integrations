@@ -97,6 +97,22 @@ describe('cordis.patch.yml rows', () => {
     expect(evalWith({ HOME: '/home/u', CURATED_BRAIN_DIR: '/b' })).toBe('/b');
   });
 
+  it('forwards the embedding key names DSH scrubs, by reference only', () => {
+    // dsh-subprocess scrubs /KEY|PASSWORD|SECRET|TOKEN/i from the sidecar's
+    // inherited env, so an external embedder's key must be forwarded on the
+    // MCP row. Each row reads DSH's own env at composition time and falls
+    // back to '' (CT treats a blank key as unset), never a stored value.
+    for (const name of ['EMBED_API_KEY', 'OPENROUTER_API_KEY', 'OPENAI_API_KEY']) {
+      const expr = patch.match(new RegExp(`^ +${name}: !!js (.*)$`, 'm'))?.[1];
+      expect(expr, name).toBe(`process.env.${name} ?? ''`);
+      const evalWith = (env: Record<string, string>) =>
+        new Function('process', `return (${expr});`)({ env });
+      expect(evalWith({})).toBe('');
+      expect(evalWith({ [name]: 'k' })).toBe('k');
+    }
+    expect(patch).not.toMatch(/sk-[A-Za-z0-9]/);
+  });
+
   it('never contains a bare - name: plugin row (unmatched patch target)', () => {
     // 0.1.2's installer appended `- name: ...` rows, which DSH reports as
     // unmatched patch targets and never activates.

@@ -10,11 +10,11 @@ common architecture.
 
 | Harness | Directory | Status | Version |
 |---------|-----------|--------|---------|
-| [Hermes Agent](https://github.com/NousResearch/hermes-agent) | [`integrations/hermes/`](integrations/hermes/) | implemented | [0.6.0](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=hermes) |
+| [Hermes Agent](https://github.com/NousResearch/hermes-agent) | [`integrations/hermes/`](integrations/hermes/) | implemented | [0.6.1](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=hermes) |
 | DeepSeek Harness | [`integrations/deepseek/`](integrations/deepseek/) | implemented | [0.6.0](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=deepseek) |
 | OpenCode | [`integrations/opencode/`](integrations/opencode/) | implemented | [0.3.1](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=opencode) |
-| OpenClaw | [`integrations/openclaw/`](integrations/openclaw/) | implemented | [0.2.1](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=openclaw) |
-| Claude Code | [`integrations/claude-code/`](integrations/claude-code/) | implemented | [0.3.1](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=claude-code) |
+| OpenClaw | [`integrations/openclaw/`](integrations/openclaw/) | implemented | [0.2.2](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=openclaw) |
+| Claude Code | [`integrations/claude-code/`](integrations/claude-code/) | implemented | [0.3.2](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=claude-code) |
 
 Each version links to that integration's releases.
 
@@ -271,6 +271,27 @@ no integration-specific variables:
 config; the *vault* is the documents tree, and its path lives inside
 `config.json` as `vault_path`. That path is absolute and machine-specific,
 which is why it is the first thing to break after an import.
+
+### What reaches the sidecar
+
+Most hosts do not hand their whole environment to an MCP server. If the brain
+uses an external embedder (`embed_profile.type: "external"` in `config.json`),
+the sidecar reads its key from `EMBED_API_KEY`, else `OPENROUTER_API_KEY`
+(OpenRouter `base_url`, the default) or `OPENAI_API_KEY`. When the host drops
+that variable, recall and wisdom matching cannot embed, and nothing reports an
+error. A brain location set through `CURATED_BRAIN_DIR` can be dropped the
+same way, and the sidecar then opens `~/.brain`.
+
+| Host | What the sidecar gets | What the integration does |
+|------|-----------------------|---------------------------|
+| Hermes | `PATH`, `HOME`, `USER`, locale, `TMPDIR`, `XDG_*` and the entry's `env:` | `install.sh` reads the brain config and writes `env:` with `${NAME}` references; the doctor's `sidecar-env` check prints the exact fix |
+| OpenClaw | The MCP SDK's short default list (`HOME`, `PATH`, `SHELL`, `TERM`, `USER`, `LOGNAME`) and the server's `env` | The doctor's `sidecar-env` check prints an `mcp.servers.curated-thoughts` row that forwards the key as `${NAME}` |
+| DeepSeek Harness | Its environment minus every name matching `KEY`, `PASSWORD`, `SECRET` or `TOKEN` | The bundle patch forwards the three key names from DSH's own environment |
+| Claude Code | Its whole environment (unless `CLAUDE_CODE_MCP_ALLOWLIST_ENV` is on) | Nothing to forward; the doctor warns if the key is not set |
+| OpenCode | Its whole environment plus the entry's `environment` | Nothing to forward |
+
+Only names are ever written to a host config. Key values stay in the
+environment, or in the host's own env file, such as `~/.hermes/.env`.
 
 ## Memory in a box
 

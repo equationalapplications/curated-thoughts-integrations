@@ -159,6 +159,14 @@ anything.
 > sidecar does not expand `~` itself. To change the rows permanently, add a
 > profile patch (later layers win) targeting the row's `id`.
 
+> **External embedder:** DSH starts MCP servers with its environment minus
+> every name containing `KEY`, `PASSWORD`, `SECRET` or `TOKEN`, so an embedding
+> key would never reach the sidecar on its own. The MCP row forwards
+> `EMBED_API_KEY`, `OPENROUTER_API_KEY` and `OPENAI_API_KEY` from the
+> environment dsh starts in (an unset one is passed as empty, which Curated
+> Thoughts treats as unset). Set the key your brain's `embed_profile` uses
+> before starting dsh. The patch stores only the names, never a value.
+
 ## Verify
 
 ```bash

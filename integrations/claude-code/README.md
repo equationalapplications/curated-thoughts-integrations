@@ -68,6 +68,15 @@ hand. The hook command and `install.sh` run under Git Bash on Windows; if
 only `python` (not `python3`) is on your `PATH`, the hook's built-in fallback
 covers it, but run the doctor as `python scripts/ct_doctor.py check`.
 
+**External embedder.** Claude Code starts the sidecar with its whole
+environment, so a brain with `embed_profile.type: "external"` only needs its
+key (`EMBED_API_KEY`, else `OPENROUTER_API_KEY` or `OPENAI_API_KEY`) set in the
+environment Claude Code starts from. With `CLAUDE_CODE_MCP_ALLOWLIST_ENV` on,
+Claude Code passes MCP servers a short default list instead, and the entry
+needs an `"env"` block such as
+`{"OPENROUTER_API_KEY": "${OPENROUTER_API_KEY:-}"}`. The doctor's
+`sidecar-env` check reports either case and prints the exact fix, by name only.
+
 ## Verify
 
 ```bash
