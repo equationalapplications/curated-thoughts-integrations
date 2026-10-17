@@ -447,6 +447,14 @@ rule; opencode and openclaw get patch bumps for it.
   the query (guarantee 2 keeps the superseded one out), and it is delivered like any fact. Rendering
   differences that remain from before (TS lists every `supersedes` id in a correction's title and puts
   entries before corrections; Hermes lists only ids in context, corrections first) change no ids.
+- **Line builder synced to hermes 0.6.7** ("Privacy amendment 6"): `python -m` sends a known module as
+  listed, else only the top package and only when it exists at the root or under `src/` (cached per
+  root and top); every home blocks its ancestors again, except a sandbox HOME inside a root (not a real
+  user home, and a dot-dir directly under the root or `.cache/home` / `tmp/home`; with no passwd home,
+  USERPROFILE counts as the real home); a trailing `.exe` / `.cmd` / `.bat` / `.com` is stripped from
+  the program; the interpreter pattern is `^python(\d+(\.\d+)?)?$`; interpreter flags before `-m` are
+  skipped (`-X` / `-W` with their value). The core suite runs all 267 shared vectors. Only the line
+  builder changed, so the real-gate e2e at `5ae2c60` (75/0) stands. A 0.6.8 re-sync is pending.
 - **Line builder synced to hermes 0.6.6** ("Privacy amendment 5"): the command builder (one isolated
   `commandTarget`) now sends a bare program only (no path separator, `~`, `:` or dot, `python3.11` the
   one dotted form, else no query), a subcommand only for the known subcommand tools and their verbs

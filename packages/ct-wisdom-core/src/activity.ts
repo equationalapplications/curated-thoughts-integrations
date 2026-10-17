@@ -89,7 +89,12 @@ const KEY_PREFIXES = ['sk-', 'sk_', 'pk_', 'rk_', 'ghp_', 'gho_', 'ghs_', 'ghu_'
 const OPERATOR_CHARS = new Set([';', '|', '&', '<', '>', '(', ')', '`']);
 // eslint-disable-next-line no-control-regex
 const CONTROL_RE = /[\x00-\x1f\x7f]/;
-const PYTHON_RE = /^python[0-9.]*$/;
+const PYTHON_RE = /^python(\d+(\.\d+)?)?$/;
+/** Interpreter flags skipped before `-m`; the second set takes a value. */
+const PYTHON_FLAGS = new Set(['-u', '-B', '-O', '-OO', '-E', '-s', '-S', '-I', '-q', '-b', '-bb', '-d', '-v', '-P']);
+const PYTHON_VALUE_FLAGS = new Set(['-X', '-W']);
+/** Windows executable suffixes stripped from the program (`git.exe` is `git`). */
+const EXE_SUFFIXES = ['.exe', '.cmd', '.bat', '.com'];
 const DRIVE_RE = /^[A-Za-z]:$/;
 
 /** True for Curated Thoughts' own tools (decision 6: never a trigger). */
@@ -270,10 +275,16 @@ interface Homes {
   all: string[];
   /** Canonical homes only. */
   real: string[];
-  /** Real user homes, which also block every ancestor. */
+  /** Every home (both forms): each blocks its ancestors, except as a sandbox HOME inside a root. */
   blocking: string[];
+  /** The real user homes among them (homes-location child, passwd home; no passwd: USERPROFILE). */
+  user: string[];
 }
 const homesCache = new Map<string, { at: number; homes: Homes }>();
+const MODULE_CACHE_MAX = 256;
+const moduleCache = new Map<string, { at: number; found: boolean }>();
+/** A HOME inside a project root is a sandbox (not blocking it) only here, or as a dot-dir directly under it. */
+const SANDBOX_HOMES = new Set(['.cache/home', 'tmp/home']);
 let pwdIdentityCache: { name: string | null; dir: string | null } | null = null;
 
 /** Python-style casefold approximation (lower → upper → lower maps ß to ss). */
@@ -352,6 +363,7 @@ export function resetActivityCaches(): void {
   roots.clear();
   sln.clear();
   homesCache.clear();
+  moduleCache.clear();
   pwdIdentityCache = null;
 }
 
@@ -616,33 +628,57 @@ function homesOf(env: ActivityEnv): Homes {
   if (hit !== undefined && now - hit.at < HOMES_CACHE_TTL_MS) return hit.homes;
   const values = homeValues(env, identity).filter((v) => nodePath.isAbsolute(v));
   const pwDirs = identity[2].filter((v) => nodePath.isAbsolute(v)).map((v) => canon(v)).filter((c): c is string => !!c);
+  let profile = envStr(env, 'USERPROFILE');
+  if (identity[2].length === 0 && profile) {
+    // No passwd home (Windows): USERPROFILE is the real user home.
+    profile = gitBash(profile);
+    const c = nodePath.isAbsolute(profile) ? canon(profile) : null;
+    if (c) pwDirs.push(c);
+  }
   const realHomes: string[] = [];
   const blocking: string[] = [];
+  const user: string[] = [];
   for (const v of values) {
     const logical = normp(v);
     const c = canon(v);
+    const forms = [logical, c].filter((f): f is string => !!f);
     if (c) realHomes.push(c);
-    const isUserHome = homesLocation(nodePath.dirname(logical))
-      || (!!c && (homesLocation(nodePath.dirname(c)) || pwDirs.some((p) => same(c, p))));
-    if (isUserHome) blocking.push(...[logical, c].filter((f): f is string => !!f));
+    blocking.push(...forms);
+    if (homesLocation(nodePath.dirname(logical))
+      || (!!c && (homesLocation(nodePath.dirname(c)) || pwDirs.some((d) => same(c, d))))) {
+      user.push(...forms);
+    }
   }
-  const homes: Homes = { all: [...realHomes, ...values.map((v) => normp(v))], real: realHomes, blocking };
+  const homes: Homes = { all: [...realHomes, ...values.map((v) => normp(v))], real: realHomes, blocking, user };
   lruSet(homesCache, key, { at: now, homes }, HOMES_CACHE_MAX);
   return homes;
 }
 
-/** A stop directory, any home in `homes`, or any ancestor of a home in `blocking`. */
-function blocked(directory: string, homes: string[], blocking: string[]): boolean {
+/**
+ * A sandbox HOME (strictly inside `root`) does not block `root`: not a real
+ * user home, and at a dot-directory directly under the root or at
+ * `.cache/home` / `tmp/home`.
+ */
+function sandboxHome(home: string, root: string, user: string[]): boolean {
+  if (user.some((u) => same(home, u))) return false;
+  const rel = below(home, root);
+  if (!rel || rel.length === 0) return false;
+  if (rel.length === 1) return rel[0].startsWith('.') && rel[0] !== '.' && rel[0] !== '..';
+  return SANDBOX_HOMES.has(rel.map((c) => foldPath(c)).join('/'));
+}
+
+/** A stop directory, any home in `homes`, or any ancestor of a home in `blocking` (sandbox HOMEs aside). */
+function blocked(directory: string, homes: string[], blocking: string[], user: string[] = []): boolean {
   if (stopDir(directory)) return true;
   if (homes.some((h) => same(directory, h))) return true;
-  return blocking.some((h) => below(h, directory) !== null);
+  return blocking.some((h) => below(h, directory) !== null && !sandboxHome(h, directory, user));
 }
 
 /** Nearest ancestor-or-self of `start` holding a marker, stopping at the first blocked directory. */
-function findRoot(start: string, homes: string[], blockingHomes: string[]): string | null {
+function findRoot(start: string, homes: string[], blockingHomes: string[], user: string[] = []): string | null {
   const chain: string[] = [];
   let directory = start;
-  while (!blocked(directory, homes, blockingHomes)) {
+  while (!blocked(directory, homes, blockingHomes, user)) {
     chain.push(directory);
     const parent = nodePath.dirname(directory);
     if (parent === directory) break;
@@ -681,9 +717,9 @@ export function projectRoot(cwd: unknown, env: ActivityEnv = process.env, start0
     const homes = homesOf(env);
     // Walk the logical path (symlinks NOT resolved); then every stop rule
     // applies again to the real root, against the real homes.
-    const found = findRoot(normp(start), homes.all, homes.blocking);
+    const found = findRoot(normp(start), homes.all, homes.blocking, homes.user);
     root = found ? canon(found) : null;
-    if (root !== null && blocked(root, homes.real, homes.blocking)) root = null;
+    if (root !== null && blocked(root, homes.real, homes.blocking, homes.user)) root = null;
   }
   lruSet(roots, key, { at: now, root }, ROOT_CACHE_MAX);
   return root;
@@ -747,23 +783,37 @@ export function wordCheck(word: string, names: Set<string>, verbsOf?: ReadonlySe
     && !credentialShaped(word) && !nameHit(word, names);
 }
 
-/** `module`'s top package resolves inside the project root (a package dir or `.py` at the root or under `src/`). */
-function projectModule(module: string, root: string | null): boolean {
-  if (!root) return false;
+/**
+ * The top package of `module` when it resolves inside the project root (a
+ * package directory or a `.py` file at the root or under `src/`), else null.
+ * Only the top package is ever sent, never a submodule path. Cached per
+ * (root, top).
+ */
+function projectPackage(module: string, root: string | null): string | null {
+  if (!root) return null;
   const top = module.split('.', 1)[0];
-  for (const base of [root, nodePath.join(root, 'src')]) {
-    try {
-      if (statSync(nodePath.join(base, top)).isDirectory()) return true;
-    } catch {
-      /* absent */
-    }
-    try {
-      if (statSync(nodePath.join(base, `${top}.py`)).isFile()) return true;
-    } catch {
-      /* absent */
-    }
+  const key = JSON.stringify([root, top]);
+  const now = performance.now();
+  const hit = lruGet(moduleCache, key);
+  let found: boolean;
+  if (hit !== undefined && now - hit.at < ROOT_CACHE_TTL_MS) {
+    found = hit.found;
+  } else {
+    found = [root, nodePath.join(root, 'src')].some((base) => {
+      try {
+        if (statSync(nodePath.join(base, top)).isDirectory()) return true;
+      } catch {
+        /* absent */
+      }
+      try {
+        return statSync(nodePath.join(base, `${top}.py`)).isFile();
+      } catch {
+        return false;
+      }
+    });
+    lruSet(moduleCache, key, { at: now, found }, MODULE_CACHE_MAX);
   }
-  return false;
+  return found ? top : null;
 }
 
 /**
@@ -861,17 +911,23 @@ export function commandTarget(
   }
   while (words.length > 0 && ASSIGN_RE.test(words[0])) words = words.slice(1);
   if (words.length === 0) return null;
-  const program = words[0];
+  let program = words[0];
   if ([...'/\\:~'].some((ch) => program.includes(ch))) return null;
-  if (!(PROGRAM_RE.test(program) || PYTHON_RE.test(program))) return null;
+  if (EXE_SUFFIXES.some((x) => program.toLowerCase().endsWith(x))) program = program.slice(0, -4);
+  const isPython = PYTHON_RE.test(program);
+  if (!(isPython || PROGRAM_RE.test(program))) return null;
   if (credentialShaped(program) || nameHit(program, nm)) return null;
-  const rest = words.slice(1);
-  if (PYTHON_RE.test(program)) {
+  let rest = words.slice(1);
+  if (isPython) {
+    while (rest.length > 0 && (PYTHON_FLAGS.has(rest[0]) || (PYTHON_VALUE_FLAGS.has(rest[0]) && rest.length > 1))) {
+      rest = PYTHON_VALUE_FLAGS.has(rest[0]) ? rest.slice(2) : rest.slice(1);
+    }
     if (rest[0] === '-m' && rest.length > 1) {
       const module = rest[1];
-      if (MODULE_RE.test(module) && !credentialShaped(module) && !nameHit(module, nm)
-        && (PYTHON_MODULES.has(module) || projectModule(module, root ? root() : null))) {
-        return `${program} ${module}`;
+      if (MODULE_RE.test(module) && !credentialShaped(module) && !nameHit(module, nm)) {
+        if (PYTHON_MODULES.has(module)) return `${program} ${module}`;
+        const top = projectPackage(module, root ? root() : null);
+        if (top) return `${program} ${top}`;
       }
     }
     return program;

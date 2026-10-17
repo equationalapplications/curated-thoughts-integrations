@@ -217,7 +217,12 @@ describe('activity line builder (hermes 0.6.5 rules; the full contract is activi
     expect(act('terminal', { command: 'python -m billing.cli' })!.query).toBe('python');
     mkdirSync(nodePath.join(PROJ, 'src', 'billing'), { recursive: true });
     resetActivityCaches();
-    expect(act('terminal', { command: 'python -m billing.cli' })!.query).toBe('python billing.cli');
+    expect(act('terminal', { command: 'python -m billing.cli' })!.query).toBe('python billing'); // 0.6.7: top package only
+    expect(act('terminal', { command: 'python -u -X dev -W error -m billing.acme_merger' })!.query).toBe('python billing');
+    expect(act('terminal', { command: 'python -u -m pytest' })!.query).toBe('python pytest');
+    expect(act('terminal', { command: 'python3.11.2 -m pytest' })).toBeNull(); // not an interpreter name: a dotted program
+    expect(act('terminal', { command: 'git.exe status' })!.query).toBe('git status');
+    expect(act('terminal', { command: 'deploy.ps1' })).toBeNull();
     writeFileSync(nodePath.join(PROJ, 'tool.py'), '');
     expect(act('terminal', { command: 'python -m tool' })!.query).toBe('python tool');
     expect(act('terminal', { command: 'python -m tool' }, NO_ROOT)!.query).toBe('python'); // no root: not sent
