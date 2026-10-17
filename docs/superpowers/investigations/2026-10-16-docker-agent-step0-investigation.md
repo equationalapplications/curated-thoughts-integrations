@@ -507,15 +507,41 @@ when an alias or agent has sandbox enabled.
 
 - **Store has `bootstrap_block`** → emit it **byte-identically** (rule 2). This covers every
   later user message, a `--session` resume and compaction.
-- **No store** → `recall_wiki` + `render_block` (≤ 2500 chars). Write the store first (D4
-  ordering), then emit `{"hook_specific_output":{"hook_event_name":"session_start","additional_context":block}}`.
+- **No store, and the session is confirmed new** → `recall_wiki` + `render_block` (≤ 2500
+  chars). Write the store first (D4 ordering), then emit
+  `{"hook_specific_output":{"hook_event_name":"session_start","additional_context":block}}`.
   If the render is empty or failed, record `bootstrap_block: ""` and **never render later in this
   session**: a later first block would change the system region mid-session.
+- **No store, and the session's history is unknown** (a resume of a pre-install session, a
+  branch, a fork) → INTENT rule 1 says to deliver nothing. Write `state: off` with
+  `bootstrap_block: ""` and emit no context. Live and activity delivery stay off for the life of
+  that id.
+- **The catch: the `session_start` payload cannot confirm "new".** `source` is always
+  `"startup"` (§3), so a store-only ledger cannot tell a fresh session from a branch or a resume.
+  The spec has to pick one of these, and the choice is open decision 4:
+  - (a) Confirm "new" from what the model sees: a one-time `before_llm_call` scan of `messages`
+    for `ct-fact:` markers, in the first model call of an id with no store. No markers means
+    new, so delivery is armed. Any marker, or a scan that fails, means off. The ordering problem:
+    `session_start` runs *before* that first call, so on the first run of an unknown id it can
+    only render the block and store it as pending, with nothing emitted. From the second run on
+    (the next user message), `session_start` emits the confirmed block byte-identically. That
+    adds the block to the system region once, at run 2: one cache miss in the session, and step 1
+    starts one message late. To deliver from run 1 instead, the same `before_llm_call` hook could
+    insert the identical system message through `updated_messages` on every call of run 1
+    (**[U]** whether that position matches the extras position byte-for-byte on every provider).
+    The scan also costs one process spawn on every model call, because Docker Agent has no way to
+    register a hook for the first call only. The hook can exit early once the store says "checked".
+  - (b) Treat every id with no store as new. That is a **departure from rule 1**: a branch can
+    repeat a fact already in its cloned history. AGENTS.md rule 2 requires the spec to say so
+    plainly and get human approval.
+  - (c) Treat every id with no store as unknown, so it is off. That fails closed, but **no
+    session would ever get Wisdom**, so it is not viable.
 - Caveats:
-  - A pre-install session that is resumed, or a branch, has no store, so it gets a fresh
-    block. A branch may then show a fact already in its cloned history (open decision 4).
   - The first run pays ≤ 3 s of recall latency before the first model call.
-  - Each child sub-session pays one recall at spawn.
+  - Each child sub-session pays one recall at spawn. A child is new by construction: its
+    `ParentID` is set and it starts with an empty history (§4). But the hook only learns the
+    parent link afterwards, from `subagent_stop`, so under (a) the child is confirmed by the
+    same scan.
 
 ### Step 2: each user message. **Not feasible as specified on the default config; feasible with caveats as deferred delivery**
 
@@ -649,11 +675,16 @@ integrations/docker-agent/
    step. In Docker Agent that needs one extra small hook on every model call to count the steps
    (about a twentieth of a second each). The alternative is "only when the agent moves to a new
    file or command", with no per-step cap. Which do you prefer?
-4. **Branched sessions.** When you branch a conversation (edit a past message), Docker Agent
-   copies the history into a new session that we cannot recognize. A fact shown before the
-   branch point could then be shown a second time. We can (a) accept that small risk, or (b) add
-   a hook that reads the conversation before each model call to see which facts are already
-   there. That is more reliable, but it costs some speed on every call. Which one?
+4. **Branched or resumed sessions.** When you branch a conversation (edit a past message), or
+   resume one from before the install, Docker Agent hands us a session we cannot tell apart
+   from a brand-new one. Our rules say "when unsure, deliver nothing", but we can't be sure of
+   *any* session, so following that rule literally would mean no facts at all. We can (a) look
+   at the conversation once, on the first model call of each session, to check that none of our
+   facts are already in it. That keeps the rule. The costs: the session-start facts arrive one message late, and a small
+   helper starts (and quickly exits) on every model call. Or we can
+   (b) treat every unknown session as new, and accept that a branch may show a fact a second
+   time. That would be a documented exception to the rule, so it needs your approval. The
+   suggestion is (a).
 5. **Should helper agents get a session-start block of their own?** Each helper started by
    `transfer_task` or as a background agent is a fresh conversation. Giving each one a block
    costs one extra CT recall per helper.
@@ -683,8 +714,9 @@ integrations/docker-agent/
 - **Goal (three steps, every host):** step 1 is feasible. Step 2 is only feasible in a deferred
   form unless the user opts in, and the spec must say what the user loses (no delivery on turns
   without tool calls). Step 3 is feasible.
-- **Rule 1 (once):** a store-backed ledger with at-most-once ordering. The one gap is branches,
-  open decision 4.
+- **Rule 1 (once):** a store-backed ledger with at-most-once ordering. A session with no store
+  delivers only after a one-time check confirms it is new (open decision 4a). Without that
+  check, treating unknown sessions as new departs from rule 1 and needs human approval (4b).
 - **Rule 2 (no system-prompt edits):** this rule drives the design. `user_prompt_submit` context
   is rejected on the default config, and the bootstrap is replayed byte-identically.
 - **Rule 4 (fail quietly):** `on_error: ignore`, `|| exit 0`, short timeouts, and sandbox runs as
