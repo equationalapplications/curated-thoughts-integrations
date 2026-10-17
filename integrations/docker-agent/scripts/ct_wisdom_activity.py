@@ -94,6 +94,11 @@ Activity = namedtuple("Activity", "verb target key line query")
 # ---------------------------------------------------------------------------
 
 _FILE_TOOLS = {"read_file": "read", "write_file": "write", "patch": "edit"}
+_OTHER_ACTIVITY_TOOLS = ("search_files", "terminal")
+
+
+def _is_activity_tool(tool_name):
+    return tool_name in _FILE_TOOLS or tool_name in _OTHER_ACTIVITY_TOOLS
 _VERB_CLASS = {"read": "file", "write": "file", "edit": "file",
                "search": "search", "run": "run"}
 
@@ -940,7 +945,7 @@ def activity_for(tool_name, args, cwd=None, env=None, task_id=None):
     if not isinstance(args, dict) or not isinstance(tool_name, str):
         return None
     verb = _FILE_TOOLS.get(tool_name)
-    if verb is None and tool_name not in ("search_files", "terminal"):
+    if verb is None and tool_name not in _OTHER_ACTIVITY_TOOLS:
         return None
     env = _environ(env)
     names = user_names(env)
@@ -1518,6 +1523,8 @@ def _transform(result, session_id, tool_call_id, tool_name=None, args=None, task
     # Cheapest first: most calls of a step pass through here.
     if _STATE.peek(session_id, api_request_id, None) == "step_used":
         return _skip(session_id, "step_used")
+    if not _is_activity_tool(tool_name):
+        return _skip(session_id, "no_activity")
     data = _parse(result)
     # Hermes decided by now (approvals, other plugins' blocks, guardrails),
     # but a refusal can be worded any way. Send only when the result proves

@@ -1140,6 +1140,35 @@ class TestDelivery(Harness):
         self.assertTrue(data[act.ACTIVITY_RESULT_KEY].startswith(act.ACTIVITY_HEADING))
         self.assertEqual(self.calls[0]["text"], "pnpm test")
 
+    def test_patch_result_gets_the_block(self):
+        ct_ledger.LEDGER_CACHE.put("s1", set())
+        out = self.post(json.dumps({"success": True, "diff": "--- a\n+++ b\n",
+                                    "files_modified": ["/w/a.py"]}),
+                        tool="patch",
+                        args={"path": "a.py", "old_string": "x", "new_string": "y"})
+        self.assertIsNotNone(out)
+        self.assertIn(act.ACTIVITY_RESULT_KEY, json.loads(out))
+        self.assertEqual(self.calls[0]["text"], "a.py")
+
+    def test_search_files_result_gets_the_block(self):
+        ct_ledger.LEDGER_CACHE.put("s1", set())
+        out = self.post(json.dumps({"total_count": 0}), tool="search_files",
+                        args={"pattern": "TODO"})
+        self.assertIsNotNone(out)
+        self.assertIn(act.ACTIVITY_RESULT_KEY, json.loads(out))
+        self.assertEqual(self.calls[0]["text"], "TODO")
+
+    def test_non_activity_tool_skips_as_no_activity(self):
+        ct_ledger.LEDGER_CACHE.put("s1", set())
+        classes = []
+        orig = act._skip
+        act._skip = lambda sid, cls, *a, **k: classes.append(cls) or orig(sid, cls, *a, **k)
+        self.addCleanup(setattr, act, "_skip", orig)
+        self.assertIsNone(self.post(json.dumps({"output": "", "exit_code": 0, "error": None}),
+                                    tool="web_search", args={"query": "q"}))
+        self.assertEqual(self.calls, [])
+        self.assertEqual(classes, ["no_activity"])
+
     def test_plain_text_result_sends_nothing(self):
         """No activity tool returns plain text at the pin: it proves nothing."""
         ct_ledger.LEDGER_CACHE.put("s1", set())
@@ -1154,7 +1183,7 @@ class TestDelivery(Harness):
 
     def test_unsupported_results_claim_nothing(self):
         for result in ('[1, 2]', '"str"', '42', {"multimodal": True},
-                       json.dumps({act.ACTIVITY_RESULT_KEY: "x"})):
+                       json.dumps({"content": "x", act.ACTIVITY_RESULT_KEY: "x"})):
             with self.subTest(result=result):
                 act.reset_state()
                 ct_ledger.LEDGER_CACHE.put("s1", set())

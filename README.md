@@ -139,8 +139,9 @@ On Hermes:
 - **Only calls that ran (since hermes 0.7.0; proof required since
   0.7.1):** nothing is sent until Hermes has let the call run and the
   tool's result shows it really ran, so a call you refuse, or another
-  plugin blocks, sends nothing, however the refusal is worded. The query starts after the tool finishes, so a
-  step whose activity is new waits up to 3 s for it, once per step.
+  plugin blocks, sends nothing, however the refusal is worded. The query
+  starts after the tool finishes, so a step whose activity is new waits
+  up to 3 s for it, once per step.
 - **What is sent to Curated Thoughts:** only the bare target, for example
   `src/billing/invoice.py`, `pnpm test` or a search pattern. For shell
   commands (since hermes 0.6.6) that is the bare program name, and nothing

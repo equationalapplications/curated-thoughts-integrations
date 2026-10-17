@@ -218,6 +218,11 @@ class TestFailsClosed(unittest.TestCase):
         self.assertFalse(act.proves_ran(
             "terminal", {"exit_code": None, "status": "Yielded_To_Background",
                          "session_id": "p"}))
+        for sid in (5, None):
+            self.assertFalse(act.proves_ran(
+                "terminal", {"exit_code": None, "status": "yielded_to_background",
+                             "session_id": sid}))
+        self.assertFalse(act.proves_ran("terminal", {"exit_code": 0, "status": None}))
 
     def test_read_file_rules(self):
         self.assertFalse(act.proves_ran("read_file", {"content": None}))
