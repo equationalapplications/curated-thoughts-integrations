@@ -1,0 +1,46 @@
+# CI contract for the Docker Agent integration.
+#
+# This is the *CI* manifest. plugin.json is the integration's native manifest
+# (read by the doctor and stamped into the drop-in by install.sh);
+# `version_mirror` below keeps the two from drifting.
+# Spec: docs/superpowers/specs/2026-10-16-docker-agent-integration-design.md
+id: docker-agent
+name: Curated Thoughts for Docker Agent
+version: 0.1.0
+language: python
+status: implemented
+requires_sidecar: ">=2.5"
+compat_tier: v2.5-full
+version_mirror: plugin.json#version
+
+matrix:
+  # Sidecar discovery and the store lock (fcntl vs msvcrt) are where
+  # cross-platform claims break, so Windows runs the unit suites too, even
+  # though the installer refuses Windows (spec known limit 3).
+  os: [ubuntu-latest, macos-latest, windows-latest]
+  # Stdlib only: the interpreter range is the whole compatibility surface.
+  python: ["3.9", "3.13"]
+
+checks:
+  test: python -m unittest discover -s tests
+  lint: ruff check --select E9,F63,F7,F82,F401 .
+  shell:
+    - scripts/install.sh
+  # The real pinned binary against a scripted local model endpoint. Run by
+  # the dedicated `host contract (docker-agent)` CI job, which downloads and
+  # sha256-checks docker-agent v1.150.0; skips anywhere DOCKER_AGENT_BIN is unset.
+  # No quotes here: the discover job embeds the matrix JSON in a Python
+  # string literal, where an escaped quote breaks the JSON.
+  host: python tests/host/test_host_contract.py
+
+policy:
+  # ct_preflight.py is the import pre-flight census. It opens brain.db through
+  # a mode=ro URI and issues nothing but SELECT — read-only by construction.
+  allow_sqlite_readonly:
+    - scripts/ct_preflight.py
+
+package:
+  include: ["**"]
+  exclude:
+    - "**/__pycache__/**"
+    - "**/*.pyc"
