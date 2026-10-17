@@ -10,7 +10,9 @@ Each case is `{name, tool, args, cwd, env, fs, expected_query,
 expected_line}` plus an optional `key_distinct_from` (another case whose
 local de-duplication key must differ). `fs` lists what exists on disk: a
 string ending in `/` is a directory, any other string a file, and
-`{"symlink": a, "to": b}` a symlink. Every virtual absolute path (starting
+`{"symlink": a, "to": b}` a symlink. Optional `system_user` / `system_home`
+stand for the process identity (`pwd` name, `pwd` dir / `expanduser("~")`);
+absent, the process has none. Every virtual absolute path (starting
 with `/`) in `cwd`, `env.HOME`, `env.USERPROFILE`, `args.path` and `fs` is
 mapped into a fresh temp directory, which models `/` (so `/home` is top
 level, as on a real system); other strings (Windows forms, `~`,
@@ -37,7 +39,7 @@ sys.path.insert(0, str(REPO / "integrations" / "hermes" / "scripts"))
 import ct_wisdom_activity as act  # noqa: E402
 
 FIELDS = {"name", "tool", "args", "cwd", "env", "fs", "expected_query", "expected_line"}
-OPTIONAL = {"key_distinct_from"}
+OPTIONAL = {"key_distinct_from", "system_user", "system_home"}
 
 
 def load():
@@ -45,35 +47,33 @@ def load():
 
 
 class World:
-    """One case's fake filesystem under a temp directory."""
+    """A fake filesystem under one temp directory, which models `/`. Several
+    cases may share one world (their `fs` entries are merged)."""
 
-    def __init__(self, case):
+    def __init__(self, *cases):
         self.tmp = os.path.realpath(tempfile.mkdtemp(prefix="ct-activity-"))
         self.symlinks_ok = True
-        for entry in case["fs"]:
-            if isinstance(entry, dict):
-                target = self.map(entry["to"])
-                os.makedirs(target, exist_ok=True)
-                link = self.map(entry["symlink"])
-                os.makedirs(os.path.dirname(link), exist_ok=True)
+        for case in cases:
+            for entry in case["fs"]:
+                self.create(entry)
+
+    def create(self, entry):
+        if isinstance(entry, dict):
+            target = self.map(entry["to"])
+            os.makedirs(target, exist_ok=True)
+            link = self.map(entry["symlink"])
+            os.makedirs(os.path.dirname(link), exist_ok=True)
+            if not os.path.lexists(link):
                 try:
                     os.symlink(target, link, target_is_directory=True)
                 except (OSError, NotImplementedError):
                     self.symlinks_ok = False
-            elif entry.endswith("/"):
-                os.makedirs(self.map(entry), exist_ok=True)
-            else:
-                path = self.map(entry)
-                os.makedirs(os.path.dirname(path), exist_ok=True)
-                Path(path).touch()
-        self.cwd = self.map(case["cwd"])
-        if self.cwd.startswith(self.tmp):
-            os.makedirs(self.cwd, exist_ok=True)
-        self.env = {k: (self.map(v) if k in ("HOME", "USERPROFILE") else v)
-                    for k, v in case["env"].items()}
-        self.args = dict(case["args"])
-        if isinstance(self.args.get("path"), str):
-            self.args["path"] = self.map(self.args["path"])
+        elif entry.endswith("/"):
+            os.makedirs(self.map(entry), exist_ok=True)
+        else:
+            path = self.map(entry)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            Path(path).touch()
 
     def map(self, value):
         if isinstance(value, str) and value.startswith("/"):
@@ -81,26 +81,41 @@ class World:
         return value
 
     def build(self, case):
-        # The temp dir models `/`: it, its direct children and anything
-        # outside it are top level (never a root, the search stops there).
-        tmp, orig = self.tmp, act._top_level
-        act._top_level = lambda d: (d == tmp or os.path.dirname(d) == tmp
-                                    or not d.startswith(tmp + os.sep))
+        cwd = self.map(case["cwd"])
+        if cwd.startswith(self.tmp):
+            os.makedirs(cwd, exist_ok=True)
+        env = {k: (self.map(v) if k in ("HOME", "USERPROFILE") else v)
+               for k, v in case["env"].items()}
+        args = dict(case["args"])
+        if isinstance(args.get("path"), str):
+            args["path"] = self.map(args["path"])
+        # The temp dir is `/` (anything outside it counts as a filesystem
+        # root, so a walk never leaves it), and the process identity (pwd /
+        # expanduser) comes from the case, never from the machine.
+        tmp = self.tmp
+        identity = ([case["system_user"]] if case.get("system_user") else [],
+                    [self.map(case["system_home"])] if case.get("system_home") else [])
+        saved = act._fs_root, act._system_identity
+        act._fs_root = lambda d: d == tmp or not d.startswith(tmp + os.sep)
+        act._system_identity = lambda: identity
+        act.reset_state()
         try:
-            return act.activity_for(case["tool"], self.args, cwd=self.cwd, env=self.env)
+            return act.activity_for(case["tool"], args, cwd=cwd, env=env)
         finally:
-            act._top_level = orig
+            act._fs_root, act._system_identity = saved
+            act.reset_state()
 
     def close(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
 
-def build(case):
-    world = World(case)
+def build(*cases):
+    """Build every case in ONE world; returns (world, [activity, ...])."""
+    world = World(*cases)
     try:
         if not world.symlinks_ok:
             return world, None
-        return world, world.build(case)
+        return world, [world.build(case) for case in cases]
     finally:
         world.close()
 
@@ -147,9 +162,10 @@ class TestActivityTargetVectors(unittest.TestCase):
     def test_every_vector(self):
         for case in load():
             with self.subTest(case["name"]):
-                world, a = build(case)
-                if not world.symlinks_ok:
+                world, built = build(case)
+                if built is None:
                     self.skipTest("symlinks unavailable")
+                a = built[0]
                 if case["expected_query"] is None:
                     self.assertTrue(a is None or not act.query_for(a),
                                     "expected no query, got %r" % (a and a.line))
@@ -171,8 +187,7 @@ class TestActivityTargetVectors(unittest.TestCase):
             if not other:
                 continue
             with self.subTest(case["name"]):
-                _, a = build(case)
-                _, b = build(cases[other])
+                _, (a, b) = build(case, cases[other])
                 self.assertEqual(act.query_for(a), act.query_for(b))
                 self.assertNotEqual(a.key, b.key)
                 checked += 1

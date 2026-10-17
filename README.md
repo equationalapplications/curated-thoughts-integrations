@@ -125,10 +125,13 @@ keyed to what the agent is doing:
   inside a project (the nearest folder above the session's working
   directory holding `.git`, `.hg`, `pyproject.toml`, `package.json`,
   `Cargo.toml`, `go.mod`, `pom.xml`, `build.gradle`, `Gemfile`,
-  `composer.json`, a `*.sln` or `.curated-thoughts-project`, but never your
-  home folder or above it), and only relative to that project. Files outside
+  `composer.json`, a `*.sln` or `.curated-thoughts-project`). It is never your
+  home folder or above it, anyone's home folder itself (`/home/<x>`,
+  `C:\Users\<x>`), a top-level folder or a WSL drive root. The path is sent
+  only relative to that project. Files outside
   a project get no autonomous-work wisdom. Nothing naming you (`USER`,
-  `LOGNAME`, `USERNAME`, your home folder's name) is ever sent. A search
+  `LOGNAME`, `USERNAME`, your system account, your home folder's name) is
+  ever sent. A search
   pattern is sent only if it is plain words (letters, digits, `_ . -`, at
   most 6 words and 80 chars) with no key-shaped or auth word. To opt a
   folder in without a build file, add an empty `.curated-thoughts-project`.

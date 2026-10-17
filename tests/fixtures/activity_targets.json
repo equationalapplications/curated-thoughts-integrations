@@ -1001,23 +1001,6 @@
   "expected_line": null
  },
  {
-  "name": "fold: path case differs from the root",
-  "tool": "read_file",
-  "args": {
-   "path": "/Users/alice/code/PROJ/Src/X.py"
-  },
-  "cwd": "/Users/alice/code/proj",
-  "env": {
-   "USER": "alice",
-   "HOME": "/Users/alice"
-  },
-  "fs": [
-   "/Users/alice/code/proj/.git/"
-  ],
-  "expected_query": "Src/X.py",
-  "expected_line": "read Src/X.py"
- },
- {
   "name": "fold: NFD path under an NFC root",
   "tool": "read_file",
   "args": {
@@ -1304,7 +1287,7 @@
   "expected_line": null
  },
  {
-  "name": "P2: HOME basename, any parent",
+  "name": "P2: HOME basename under a home dir",
   "tool": "read_file",
   "args": {
    "path": "alice-notes.md"
@@ -2629,5 +2612,358 @@
   ],
   "expected_query": "cat join.py",
   "expected_line": "run cat join.py"
+ },
+ {
+  "name": "home: HOME unset, dotfiles .git at the system home",
+  "tool": "read_file",
+  "args": {
+   "path": "/Users/alice/notes/todo.md"
+  },
+  "cwd": "/Users/alice/notes",
+  "env": {
+   "USER": "alice"
+  },
+  "fs": [
+   "/Users/alice/.git/"
+  ],
+  "expected_query": null,
+  "expected_line": null,
+  "system_home": "/Users/alice"
+ },
+ {
+  "name": "home: USERPROFILE is a home even when HOME is set",
+  "tool": "read_file",
+  "args": {
+   "path": "/Users/carol/notes/todo.md"
+  },
+  "cwd": "/Users/carol/notes",
+  "env": {
+   "HOME": "/opt/x",
+   "USERPROFILE": "/Users/carol"
+  },
+  "fs": [
+   "/Users/carol/.git/"
+  ],
+  "expected_query": null,
+  "expected_line": null
+ },
+ {
+  "name": "home: a project inside the system home works",
+  "tool": "read_file",
+  "args": {
+   "path": "src/a.py"
+  },
+  "cwd": "/Users/alice/code/proj",
+  "env": {
+   "USER": "alice"
+  },
+  "fs": [
+   "/Users/alice/.git/",
+   "/Users/alice/code/proj/.git/"
+  ],
+  "expected_query": "src/a.py",
+  "expected_line": "read src/a.py",
+  "system_home": "/Users/alice"
+ },
+ {
+  "name": "homes: another user's home with a package.json",
+  "tool": "read_file",
+  "args": {
+   "path": "/Users/Alice/docs/a.md"
+  },
+  "cwd": "/Users/Alice/docs",
+  "env": {
+   "USER": "svc",
+   "HOME": "/opt/svc"
+  },
+  "fs": [
+   "/Users/Alice/package.json"
+  ],
+  "expected_query": null,
+  "expected_line": null
+ },
+ {
+  "name": "homes: /data/home/<x> with a marker",
+  "tool": "read_file",
+  "args": {
+   "path": "/data/home/bob/a.md"
+  },
+  "cwd": "/data/home/bob",
+  "env": {
+   "USER": "svc",
+   "HOME": "/opt/svc"
+  },
+  "fs": [
+   "/data/home/bob/.git/"
+  ],
+  "expected_query": null,
+  "expected_line": null
+ },
+ {
+  "name": "homes: Profiles/<x> with a marker",
+  "tool": "read_file",
+  "args": {
+   "path": "/d/Profiles/erin/a.md"
+  },
+  "cwd": "/d/Profiles/erin",
+  "env": {
+   "USER": "svc",
+   "HOME": "/opt/svc"
+  },
+  "fs": [
+   "/d/Profiles/erin/package.json"
+  ],
+  "expected_query": null,
+  "expected_line": null
+ },
+ {
+  "name": "homes: a project below a user's home works",
+  "tool": "read_file",
+  "args": {
+   "path": "src/a.py"
+  },
+  "cwd": "/Users/Alice/code/proj",
+  "env": {
+   "USER": "svc",
+   "HOME": "/opt/svc"
+  },
+  "fs": [
+   "/Users/Alice/package.json",
+   "/Users/Alice/code/proj/.git/"
+  ],
+  "expected_query": "src/a.py",
+  "expected_line": "read src/a.py"
+ },
+ {
+  "name": "WSL: /mnt/c with a marker",
+  "tool": "read_file",
+  "args": {
+   "path": "/mnt/c/dev/a.md"
+  },
+  "cwd": "/mnt/c/dev",
+  "env": {
+   "USER": "alice",
+   "HOME": "/home/alice"
+  },
+  "fs": [
+   "/mnt/c/package.json"
+  ],
+  "expected_query": null,
+  "expected_line": null
+ },
+ {
+  "name": "WSL: /mnt/c/Users with a marker",
+  "tool": "read_file",
+  "args": {
+   "path": "/mnt/c/Users/Bob/s.txt"
+  },
+  "cwd": "/mnt/c/Users",
+  "env": {
+   "USER": "alice",
+   "HOME": "/home/alice"
+  },
+  "fs": [
+   "/mnt/c/Users/package.json"
+  ],
+  "expected_query": null,
+  "expected_line": null
+ },
+ {
+  "name": "WSL: /mnt/d with a marker",
+  "tool": "read_file",
+  "args": {
+   "path": "/mnt/d/x/a.md"
+  },
+  "cwd": "/mnt/d/x",
+  "env": {
+   "USER": "alice",
+   "HOME": "/home/alice"
+  },
+  "fs": [
+   "/mnt/d/.git/"
+  ],
+  "expected_query": null,
+  "expected_line": null
+ },
+ {
+  "name": "names: HOME=/config does not make config private",
+  "tool": "read_file",
+  "args": {
+   "path": "config/app.yml"
+  },
+  "cwd": "/srv/app",
+  "env": {
+   "USER": "ci",
+   "HOME": "/config"
+  },
+  "fs": [
+   "/srv/app/.git/"
+  ],
+  "expected_query": "config/app.yml",
+  "expected_line": "read config/app.yml"
+ },
+ {
+  "name": "names: HOME=/github/home does not make home private",
+  "tool": "read_file",
+  "args": {
+   "path": "home/plan.md"
+  },
+  "cwd": "/srv/app",
+  "env": {
+   "USER": "runner",
+   "HOME": "/github/home"
+  },
+  "fs": [
+   "/srv/app/.git/"
+  ],
+  "expected_query": "home/plan.md",
+  "expected_line": "read home/plan.md"
+ },
+ {
+  "name": "names: HOME=/opt/app-root/src does not make src private",
+  "tool": "read_file",
+  "args": {
+   "path": "src/main.py"
+  },
+  "cwd": "/srv/app",
+  "env": {
+   "HOME": "/opt/app-root/src"
+  },
+  "fs": [
+   "/srv/app/.git/"
+  ],
+  "expected_query": "src/main.py",
+  "expected_line": "read src/main.py"
+ },
+ {
+  "name": "names: pw_name counts with no USER",
+  "tool": "read_file",
+  "args": {
+   "path": "alice/x.md"
+  },
+  "cwd": "/srv/app",
+  "env": {},
+  "fs": [
+   "/srv/app/.git/"
+  ],
+  "expected_query": null,
+  "expected_line": null,
+  "system_user": "alice"
+ },
+ {
+  "name": "names: pw_dir basename under /home counts",
+  "tool": "read_file",
+  "args": {
+   "path": "zed-notes.md"
+  },
+  "cwd": "/srv/app",
+  "env": {},
+  "fs": [
+   "/srv/app/.git/"
+  ],
+  "expected_query": null,
+  "expected_line": null,
+  "system_home": "/home/zed"
+ },
+ {
+  "name": "key: search path a outside the root",
+  "tool": "search_files",
+  "args": {
+   "pattern": "TODO",
+   "path": "/Users/alice/clients/a"
+  },
+  "cwd": "/Users/alice/code/proj",
+  "env": {
+   "USER": "alice",
+   "HOME": "/Users/alice"
+  },
+  "fs": [
+   "/Users/alice/code/proj/.git/"
+  ],
+  "expected_query": "TODO",
+  "expected_line": "search TODO"
+ },
+ {
+  "name": "key: search path b outside the root",
+  "tool": "search_files",
+  "args": {
+   "pattern": "TODO",
+   "path": "/Users/alice/clients/b"
+  },
+  "cwd": "/Users/alice/code/proj",
+  "env": {
+   "USER": "alice",
+   "HOME": "/Users/alice"
+  },
+  "fs": [
+   "/Users/alice/code/proj/.git/"
+  ],
+  "expected_query": "TODO",
+  "expected_line": "search TODO",
+  "key_distinct_from": "key: search path a outside the root"
+ },
+ {
+  "name": "P2: short name split by en dash",
+  "tool": "read_file",
+  "args": {
+   "path": "docs/jo–notes.md"
+  },
+  "cwd": "/srv/p",
+  "env": {
+   "USER": "jo"
+  },
+  "fs": [
+   "/srv/p/.git/"
+  ],
+  "expected_query": null,
+  "expected_line": null
+ },
+ {
+  "name": "P2: short name split by curly quote",
+  "tool": "read_file",
+  "args": {
+   "path": "docs/jo’s.md"
+  },
+  "cwd": "/srv/p",
+  "env": {
+   "USER": "jo"
+  },
+  "fs": [
+   "/srv/p/.git/"
+  ],
+  "expected_query": null,
+  "expected_line": null
+ },
+ {
+  "name": "P2: short name split by times sign",
+  "tool": "read_file",
+  "args": {
+   "path": "docs/jo×2.md"
+  },
+  "cwd": "/srv/p",
+  "env": {
+   "USER": "jo"
+  },
+  "fs": [
+   "/srv/p/.git/"
+  ],
+  "expected_query": null,
+  "expected_line": null
+ },
+ {
+  "name": "P2: short name split by division sign",
+  "tool": "read_file",
+  "args": {
+   "path": "docs/jo÷x.md"
+  },
+  "cwd": "/srv/p",
+  "env": {
+   "USER": "jo"
+  },
+  "fs": [
+   "/srv/p/.git/"
+  ],
+  "expected_query": null,
+  "expected_line": null
  }
 ]

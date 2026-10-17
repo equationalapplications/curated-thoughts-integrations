@@ -146,7 +146,6 @@ _SERVICE_ACCOUNTS = frozenset({
 # A name part of at least this many chars hits any token CONTAINING it; a
 # shorter part hits only a token EQUAL to it (`jo` hits `jo.md`, not `join.py`).
 _SUBSTRING_NAME_CHARS = 3
-_NAME_TOKEN_RE = re.compile("[^0-9A-Za-z\u00c0-\uffff]+")
 _SEARCH_MAX_CHARS = 80
 _SEARCH_MAX_WORDS = 6
 _SEARCH_ASCII = frozenset(string.ascii_letters + string.digits + "_ .-")
@@ -166,11 +165,24 @@ _root_lock = threading.Lock()
 _root_clock = time.monotonic
 _WINDOWS = os.sep == "\\"
 _WIN_ABS_RE = re.compile(r"^[A-Za-z]:[\\/]")
+# A directory whose parent has one of these names is someone's home: never a
+# project root, and the root walk stops there.
+_HOMES_PARENTS = frozenset({"users", "home", "profiles"})
+# Path components are case-folded only where filesystems usually ignore case.
+_CASE_INSENSITIVE = sys.platform in ("darwin", "win32")
+_GIT_BASH_RE = re.compile(r"^/([A-Za-z])(?:/(.*))?$")
+_NAME_TOKEN_FIND = re.compile(r"[^\W_]+")
 
 
 def _fold(text):
-    """Comparison form: NFC (macOS paths are often NFD) and casefolded."""
+    """Name comparison form: NFC (macOS paths are often NFD) and casefolded."""
     return unicodedata.normalize("NFC", text).casefold()
+
+
+def _fold_path(text):
+    """Path comparison form: NFC everywhere, casefolded only on darwin/win32."""
+    text = unicodedata.normalize("NFC", text)
+    return text.casefold() if _CASE_INSENSITIVE else text
 
 
 def _environ(env):
@@ -182,30 +194,74 @@ def _env_str(env, name):
     return value.strip() if isinstance(value, str) and value.strip() else None
 
 
+def _git_bash(path, windows=None):
+    """Git Bash's `/c/Users/x` as `C:\\Users\\x` (on Windows only)."""
+    match = (_WINDOWS if windows is None else windows) and _GIT_BASH_RE.match(
+        path.replace("\\", "/"))
+    if not match:
+        return path
+    return match.group(1).upper() + ":\\" + (match.group(2) or "").replace("/", "\\")
+
+
+_pwd_entry = []
+
+
+def _pwd_identity():
+    """(pw_name, pw_dir) of the process user, looked up once (an NSS lookup
+    can be slow); (None, None) where pwd is unavailable (Windows)."""
+    if not _pwd_entry:
+        try:
+            import pwd
+            entry = pwd.getpwuid(os.getuid())
+            _pwd_entry.append((entry.pw_name, entry.pw_dir))
+        except (ImportError, KeyError, AttributeError, OSError):
+            _pwd_entry.append((None, None))
+    return _pwd_entry[0]
+
+
+def _system_identity():
+    """(names, homes) of the process: pwd's pw_name; expanduser("~") and
+    pwd's pw_dir. Tests patch this; it never fails."""
+    name, pw_dir = _pwd_identity()
+    homes = [os.path.expanduser("~"), pw_dir]
+    return [name] if name else [], [h for h in homes if h]
+
+
 def _home(env):
-    return _env_str(env, "HOME") or _env_str(env, "USERPROFILE")
+    """HOME (or USERPROFILE) for `~` expansion."""
+    value = _env_str(env, "HOME") or _env_str(env, "USERPROFILE")
+    return _git_bash(value) if value else None
+
+
+def _home_values(env, identity):
+    """Every home directory string: HOME, USERPROFILE and the process's."""
+    values = [_env_str(env, "HOME"), _env_str(env, "USERPROFILE")] + list(identity[1])
+    return [_git_bash(v.strip()) for v in values if isinstance(v, str) and v.strip()]
 
 
 def user_names(env=None):
-    """Folded private names: USER, LOGNAME, USERNAME and the basenames of
-    HOME and USERPROFILE, minus service accounts."""
+    """Folded private names: USER, LOGNAME, USERNAME and pwd's pw_name, plus
+    the basename of HOME, USERPROFILE or pw_dir only when its parent is named
+    `Users`, `home` or `Profiles`. Service accounts are never private."""
     env = _environ(env)
+    identity = _system_identity()
     names = set()
-    for name in ("USER", "LOGNAME", "USERNAME"):
-        value = _env_str(env, name)
-        if value:
-            names.add(_fold(value))
-    for name in ("HOME", "USERPROFILE"):
-        value = _env_str(env, name)
-        if value:
-            names.add(_fold(posixpath.basename(value.replace("\\", "/").rstrip("/"))))
+    for value in [_env_str(env, n) for n in ("USER", "LOGNAME", "USERNAME")] + list(identity[0]):
+        if isinstance(value, str) and value.strip():
+            names.add(_fold(value.strip()))
+    for value in _home_values(env, identity):
+        comps = [c for c in value.replace("\\", "/").split("/") if c]
+        if len(comps) >= 2 and _fold(comps[-2]) in _HOMES_PARENTS:
+            names.add(_fold(comps[-1]))
     return frozenset(n for n in names
                      if n and ":" not in n and n not in _SERVICE_ACCOUNTS
-                     and _NAME_TOKEN_RE.sub("", n))
+                     and _NAME_TOKEN_FIND.search(n))
 
 
 def _tokens_of(folded):
-    return [t for t in _NAME_TOKEN_RE.split(folded) if t]
+    """Runs of letters and digits (str.isalnum): every other char splits,
+    including `_`, `-`, en dashes, curly quotes, `×` and `÷`."""
+    return _NAME_TOKEN_FIND.findall(folded)
 
 
 def name_hit(text, names):
@@ -233,10 +289,10 @@ def _comps(path):
 
 
 def _below(child, parent):
-    """Components of `child` strictly below `parent`, compared folded (NFC +
-    casefold), original case kept; None when not strictly below."""
+    """Components of `child` strictly below `parent` (compared with
+    `_fold_path`), original case kept; None when not strictly below."""
     cp, pp = _comps(child), _comps(parent)
-    if len(cp) <= len(pp) or any(_fold(a) != _fold(b) for a, b in zip(pp, cp)):
+    if len(cp) <= len(pp) or any(_fold_path(a) != _fold_path(b) for a, b in zip(pp, cp)):
         return None
     return cp[len(pp):]
 
@@ -268,58 +324,84 @@ def _abs_cwd(cwd, env):
 
 
 def _has_marker(directory):
+    """Fixed markers first; only then scan the directory for a `*.sln`."""
     for marker in ROOT_MARKERS:
         if os.path.lexists(os.path.join(directory, marker)):
             return True
     try:
-        return any(n.lower().endswith(".sln") for n in os.listdir(directory))
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                if entry.name.lower().endswith(".sln"):
+                    return True
     except OSError:
-        return False
+        pass
+    return False
 
 
-def _top_level(directory):
-    """True for a filesystem root or a direct child of one (`/`, `/home`,
-    `C:\\`, `C:\\src`). Tests patch this to model `/` with a temp dir."""
+def _fs_root(directory):
+    """True for a filesystem root (`/`, `C:\\`). Tests patch this to model
+    `/` with a temp dir."""
+    return os.path.dirname(directory) == directory
+
+
+def _stop_dir(directory):
+    """Never a project root, and the walk stops here: a filesystem root or a
+    direct child of one (`/home`, `/srv`, `C:\\src`); a home in a homes dir
+    (parent named `Users`, `home` or `Profiles`); `/mnt/<letter>` and
+    `/mnt/<letter>/Users` (WSL drives)."""
+    if _fs_root(directory):
+        return True
     parent = os.path.dirname(directory)
-    return parent == directory or os.path.dirname(parent) == parent
+    if _fs_root(parent):
+        return True
+    name, pname = _fold(os.path.basename(directory)), _fold(os.path.basename(parent))
+    if pname in _HOMES_PARENTS:
+        return True
+
+    def wsl_drive(d):
+        up = os.path.dirname(d)
+        base = os.path.basename(d)
+        return (len(base) == 1 and base.isalpha() and _fold(os.path.basename(up)) == "mnt"
+                and _fs_root(os.path.dirname(up)))
+
+    return wsl_drive(directory) or (name == "users" and wsl_drive(parent))
 
 
-def _find_root(start, home):
-    """Nearest ancestor-or-self of `start` holding a marker. The search stops
-    at HOME and at the top: HOME, any ancestor of HOME, a filesystem root and
-    a direct child of one (`/home`, `/srv`, `C:\\x`) are never a root."""
+def _find_root(start, homes):
+    """Nearest ancestor-or-self of `start` holding a marker. The walk stops
+    (None) at a `_stop_dir`, at any home directory and at any ancestor of
+    one: those are never a root."""
     directory = start
     while True:
-        if _top_level(directory):
+        if _stop_dir(directory):
             return None
-        parent = os.path.dirname(directory)
-        if home is not None and (_fold(directory) == _fold(home)
-                                 or _below(home, directory) is not None):
+        folded = _fold_path(directory)
+        if any(folded == _fold_path(h) or _below(h, directory) is not None for h in homes):
             return None
         if _has_marker(directory):
             return directory
-        directory = parent
+        directory = os.path.dirname(directory)
 
 
 def project_root(cwd, env=None):
-    """P1: the real path of the project root for `cwd`, or None. Cached per
-    (cwd, HOME) for a few seconds; os.path checks only, never a subprocess."""
+    """P1: the real path of the project root for `cwd`, or None. Cached
+    (LRU, 30 s) on the raw cwd and HOME / USERPROFILE strings, so a hit does
+    no filesystem work; os.path checks only, never a subprocess."""
     env = _environ(env)
-    start = _abs_cwd(cwd, env)
-    if start is None:
-        return None
-    start = _real(start)
-    home = _home(env)
-    home = _real(home) if home and os.path.isabs(home) else None
-    if start is None:
-        return None
-    key = (start, home)
+    key = (cwd, _env_str(env, "HOME"), _env_str(env, "USERPROFILE"))
     now = _root_clock()
     with _root_lock:
         hit = _root_cache.get(key)
         if hit is not None and now - hit[0] < _ROOT_CACHE_TTL:
+            _root_cache.move_to_end(key)
             return hit[1]
-    root = _find_root(start, home)
+    root = None
+    start = _abs_cwd(cwd, env)
+    start = _real(start) if start else None
+    if start is not None:
+        homes = [h for h in (_real(v) for v in _home_values(env, _system_identity())
+                             if os.path.isabs(v)) if h]
+        root = _find_root(start, homes)
     with _root_lock:
         _root_cache[key] = (now, root)
         _root_cache.move_to_end(key)
@@ -328,25 +410,28 @@ def project_root(cwd, env=None):
     return root
 
 
+def _digest(text):
+    return hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest()[:24]
+
+
 def _resolve(raw, cwd, env, names):
     """P1 + P2 for one path argument: (target, hit, local). `target` is the
     path relative to the project root, or None; `hit` is True when it names
     the user (the caller then gives no activity); `local` is a digest of the
-    resolved path for de-duplication (never sent)."""
-    if ":" in raw and not (_WINDOWS and _WIN_ABS_RE.match(raw) and ":" not in raw[2:]):
-        return None, False, None
-    path = _expand(raw if _WINDOWS else raw.replace("\\", "/"), env)
+    full resolved path (of the raw text when it cannot resolve), for
+    de-duplication only, never sent."""
     base = _abs_cwd(cwd, env)
-    if path is None or base is None:
-        return None, False, None
-    root = project_root(base, env)
-    if root is None:
-        return None, False, None
-    real = _real(os.path.join(base, path))
-    rel = _below(real, root) if real else None
+    path = None
+    if ":" not in raw or (_WINDOWS and _WIN_ABS_RE.match(raw) and ":" not in raw[2:]):
+        path = _expand(raw if _WINDOWS else raw.replace("\\", "/"), env)
+    full = None
+    if path is not None and (base is not None or os.path.isabs(path)):
+        full = _real(os.path.join(base, path) if base else path)
+    local = _digest(full or raw)
+    root = project_root(cwd, env) if full and base else None
+    rel = _below(full, root) if root else None
     if not rel or any(c in ("", ".", "..") for c in rel):
-        return None, False, None
-    local = hashlib.sha256(real.encode("utf-8", "surrogatepass")).hexdigest()[:24]
+        return None, False, local
     target = "/".join(rel)
     if name_hit(target, names):
         return None, True, local

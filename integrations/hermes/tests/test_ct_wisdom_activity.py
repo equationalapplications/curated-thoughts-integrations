@@ -100,6 +100,14 @@ CASES = [
 
 
 class TestActivityLine(unittest.TestCase):
+    def setUp(self):
+        # The process identity (pwd, expanduser) never leaks into these tests.
+        orig = act._system_identity
+        act._system_identity = lambda: ([], [])
+        self.addCleanup(setattr, act, "_system_identity", orig)
+        act.reset_state()
+        self.addCleanup(act.reset_state)
+
     def test_cases(self):
         for tool, args, line, query in CASES:
             with self.subTest(tool=tool, args=args):
@@ -329,10 +337,9 @@ class TestActivityLine(unittest.TestCase):
         except (OSError, NotImplementedError):
             pass
         # `base` stands in for `/`: it and its direct children are top level.
-        orig_top = act._top_level
-        act._top_level = lambda d: (os.path.dirname(d) == base or d == base
-                                    or not d.startswith(base) or orig_top(d))
-        self.addCleanup(setattr, act, "_top_level", orig_top)
+        orig_root = act._fs_root
+        act._fs_root = lambda d: d == base or not d.startswith(base + os.sep)
+        self.addCleanup(setattr, act, "_fs_root", orig_root)
         act.reset_state()
         self.addCleanup(act.reset_state)
         envs = [{"USER": "zelda", "HOME": home}, {"USERNAME": "zelda", "HOME": base},
@@ -445,6 +452,118 @@ class TestActivityLine(unittest.TestCase):
         self.assertFalse(hit("docs/plan.md", {"john smith"}))
         self.assertTrue(hit("docs/jose\u0301.md", {"jos\u00e9"}))
         self.assertFalse(hit("anything", frozenset()))
+
+    def test_name_sources(self):
+        """Review of PR #61: pw_name always counts; a HOME / USERPROFILE /
+        pw_dir basename counts only under Users, home or Profiles."""
+        self.assertEqual(act.user_names({"HOME": "/config"}), frozenset())
+        self.assertEqual(act.user_names({"HOME": "/github/home"}), frozenset())
+        self.assertEqual(act.user_names({"HOME": "/opt/app-root/src"}), frozenset())
+        self.assertEqual(act.user_names({"HOME": "/Users/Dana"}), frozenset({"dana"}))
+        self.assertEqual(act.user_names({"USERPROFILE": "C:\\Users\\Erin"}), frozenset({"erin"}))
+        act._system_identity = lambda: (["zed"], ["/home/quinn", "/opt/svc"])
+        self.assertEqual(act.user_names({}), frozenset({"zed", "quinn"}))
+        act._system_identity = lambda: (["runner"], ["/home/runner"])
+        self.assertEqual(act.user_names({}), frozenset())
+
+    def test_tokenizer_splits_on_any_non_alphanumeric(self):
+        for text in ("jo\u2013notes.md", "jo\u2019s.md", "jo\u00d72.md", "jo\u00f7x.md",
+                     "jo_x", "x.jo", "jo"):
+            self.assertTrue(act.name_hit(text, {"jo"}), text)
+        for text in ("join.py", "enjoy", "jo2.md"):
+            self.assertFalse(act.name_hit(text, {"jo"}), text)
+
+    def test_git_bash_home(self):
+        self.assertEqual(act._git_bash("/c/Users/x", windows=True), "C:\\Users\\x")
+        self.assertEqual(act._git_bash("/d", windows=True), "D:\\")
+        self.assertEqual(act._git_bash("/c/Users/x", windows=False), "/c/Users/x")
+        self.assertEqual(act._git_bash("/srv/x", windows=True), "/srv/x")
+
+    def test_case_folding_only_where_case_insensitive(self):
+        orig = act._CASE_INSENSITIVE
+        self.addCleanup(setattr, act, "_CASE_INSENSITIVE", orig)
+        act._CASE_INSENSITIVE = True
+        self.assertEqual(act._below("/w/PROJ/Src/X.py", "/w/proj"), ["Src", "X.py"])
+        act._CASE_INSENSITIVE = False
+        self.assertIsNone(act._below("/w/PROJ/Src/X.py", "/w/proj"))
+        # NFC is normalized everywhere.
+        self.assertEqual(act._below("/w/cafe\u0301/a.md", "/w/caf\u00e9"), ["a.md"])
+
+    def test_system_home_stops_the_walk(self):
+        """With HOME unset, the process home (expanduser / pw_dir) still is a
+        home: a dotfiles repo there is never a root."""
+        base = temp_base()
+        home = os.path.join(base, "srv", "me")
+        make_tree(home, [".git/", "notes/", "code/proj/.git/"])
+        act._system_identity = lambda: ([], [home])
+        self.assertIsNone(act.project_root(os.path.join(home, "notes"), {}))
+        proj = os.path.join(home, "code", "proj")
+        self.assertEqual(act.project_root(proj, {}), proj)
+        self.assertIsNone(act.normalize_path(os.path.join(home, "notes", "a.md"),
+                                             os.path.join(home, "notes"), {}))
+
+    def test_stop_dirs(self):
+        base = temp_base()
+        orig_root = act._fs_root
+        act._fs_root = lambda d: d == base or not d.startswith(base + os.sep)
+        self.addCleanup(setattr, act, "_fs_root", orig_root)
+        j = lambda *parts: os.path.join(base, *parts)  # noqa: E731
+        for d in (base, j("home"), j("srv"), j("Users", "Alice"), j("x", "home", "bob"),
+                  j("d", "Profiles", "erin"), j("mnt", "c"), j("mnt", "C", "Users"),
+                  j("x", "USERS", "bob")):
+            self.assertTrue(act._stop_dir(d), d)
+        for d in (j("srv", "app"), j("Users", "Alice", "code"), j("mnt", "c", "dev"),
+                  j("mnt", "cd"), j("x", "mnt", "c"), j("srv", "home")):
+            self.assertFalse(act._stop_dir(d), d)
+
+    def test_root_cache_is_lru_and_keyed_on_raw_strings(self):
+        base = temp_base()
+        make_tree(base, ["srv/a/.git/", "srv/b/.git/"])
+        calls = []
+        orig = act._real
+
+        def counting(path):
+            calls.append(path)
+            return orig(path)
+
+        act._real = counting
+        self.addCleanup(setattr, act, "_real", orig)
+        a, b = os.path.join(base, "srv", "a"), os.path.join(base, "srv", "b")
+        self.assertEqual(act.project_root(a, {}), a)
+        calls.clear()
+        self.assertEqual(act.project_root(a, {}), a)
+        self.assertEqual(calls, [], "a cache hit resolves nothing")
+        orig_max = act._ROOT_CACHE_MAX
+        act._ROOT_CACHE_MAX = 2
+        self.addCleanup(setattr, act, "_ROOT_CACHE_MAX", orig_max)
+        act.project_root(b, {})
+        act.project_root(a, {})  # hit: moves a to the end
+        act.project_root(os.path.join(base, "srv"), {})  # evicts b, not a
+        keys = [k[0] for k in act._root_cache]
+        self.assertIn(a, keys)
+        self.assertNotIn(b, keys)
+
+    def test_sln_scan_only_after_fixed_markers(self):
+        base = temp_base()
+        make_tree(base, ["p/.git/", "q/App.sln", "r/"])
+        orig = os.scandir
+        scanned = []
+        os.scandir = lambda d: scanned.append(d) or orig(d)
+        self.addCleanup(setattr, os, "scandir", orig)
+        self.assertTrue(act._has_marker(os.path.join(base, "p")))
+        self.assertEqual(scanned, [])
+        self.assertTrue(act._has_marker(os.path.join(base, "q")))
+        self.assertFalse(act._has_marker(os.path.join(base, "r")))
+        self.assertEqual(len(scanned), 2)
+
+    def test_search_key_with_out_of_root_path(self):
+        env = {"USER": "alice"}
+        a = act.activity_for("search_files", {"pattern": "TODO", "path": "/elsewhere/a"},
+                             cwd=PROJ, env=env)
+        b = act.activity_for("search_files", {"pattern": "TODO", "path": "/elsewhere/b"},
+                             cwd=PROJ, env=env)
+        self.assertEqual((a.line, b.line), ("search TODO", "search TODO"))
+        self.assertNotEqual(a.key, b.key)
 
     def test_word_check(self):
         names = {"alice"}

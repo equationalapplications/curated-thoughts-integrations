@@ -12,13 +12,18 @@ VERB = {"read_file": "read", "write_file": "write", "patch": "edit",
 V = []
 
 
-def v(name, tool, args, q, cwd=P, env=A, fs=PFS, line=None, key_distinct_from=None):
+def v(name, tool, args, q, cwd=P, env=A, fs=PFS, line=None, key_distinct_from=None,
+      system_user=None, system_home=None):
     if q is not None and line is None:
         line = VERB[tool] + " " + q
     case = {"name": name, "tool": tool, "args": args, "cwd": cwd, "env": env, "fs": fs,
             "expected_query": q, "expected_line": line if q is not None else None}
     if key_distinct_from:
         case["key_distinct_from"] = key_distinct_from
+    if system_user:
+        case["system_user"] = system_user
+    if system_home:
+        case["system_home"] = system_home
     V.append(case)
 
 
@@ -103,7 +108,6 @@ v("symlink: relative path from a linked cwd", "read_file", rd("src/b.py"), "src/
 v("symlink: a link escaping the project", "read_file", rd("escape/x.md"), None, cwd="/srv/real",
   fs=["/srv/real/.git/", "/Users/alice/private/", {"symlink": "/srv/real/escape", "to": "/Users/alice/private"}])
 # ---- case and NFC folding ----
-v("fold: path case differs from the root", "read_file", rd(P.replace("proj", "PROJ") + "/Src/X.py"), "Src/X.py")
 v("fold: NFD path under an NFC root", "read_file", rd("/srv/caf\u00e9/docs/a.md".replace("caf\u00e9", "cafe\u0301")), "docs/a.md", cwd="/srv/caf\u00e9", fs=["/srv/caf\u00e9/.git/"])
 # ---- Windows and colon forms never resolve ----
 WE = {"USERNAME": "carol", "USERPROFILE": "C:\\Users\\carol"}
@@ -120,7 +124,7 @@ v("P2: user name NFD", "read_file", rd("docs/jose\u0301_plan.md"), None, cwd="/s
 v("P2: substring hit (sample / sam)", "read_file", rd("src/sample.py"), None, cwd="/srv/p", env={"USER": "sam"}, fs=["/srv/p/.git/"])
 v("P2: LOGNAME", "read_file", rd("dave/x.md"), None, cwd="/srv/p", env={"LOGNAME": "dave"}, fs=["/srv/p/.git/"])
 v("P2: USERNAME", "read_file", rd("carol-notes.md"), None, cwd="/srv/p", env=WE, fs=["/srv/p/.git/"])
-v("P2: HOME basename, any parent", "read_file", rd("alice-notes.md"), None, cwd="/nfs/home/alice/proj", env={"HOME": "/nfs/home/alice"}, fs=["/nfs/home/alice/proj/.git/"])
+v("P2: HOME basename under a home dir", "read_file", rd("alice-notes.md"), None, cwd="/nfs/home/alice/proj", env={"HOME": "/nfs/home/alice"}, fs=["/nfs/home/alice/proj/.git/"])
 v("P2: HOME basename under /nfs/home with no USER", "read_file", rd("src/alice.py"), None, cwd="/nfs/home/alice/proj", env={"HOME": "/nfs/home/alice"}, fs=["/nfs/home/alice/proj/.git/"])
 v("P2: USERPROFILE basename, any parent", "read_file", rd("erin/x.md"), None, cwd="/srv/p", env={"USERPROFILE": "D:\\Profiles\\erin"}, fs=["/srv/p/.git/"])
 v("P2: multi-word name, exact", "read_file", rd("docs/John Smith notes.md"), None, cwd="/srv/p", env={"USERNAME": "John Smith"}, fs=["/srv/p/.git/"])
@@ -186,6 +190,50 @@ for name, cmd, env, q in (("service USER=node", "node server.js", {"USER": "node
                           ("service USER=docker", "docker build", {"USER": "docker"}, "docker build"),
                           ("short name inside a word", "cat join.py", {"USER": "jo"}, "cat join.py")):
     v("cmd: " + name, "terminal", run(cmd), q, env=env)
+
+# ---- review of PR #61 ----
+# 1: home dirs come from HOME, USERPROFILE, expanduser("~") and pw_dir
+v("home: HOME unset, dotfiles .git at the system home", "read_file", rd("/Users/alice/notes/todo.md"), None,
+  cwd="/Users/alice/notes", env={"USER": "alice"}, fs=["/Users/alice/.git/"], system_home="/Users/alice")
+v("home: USERPROFILE is a home even when HOME is set", "read_file", rd("/Users/carol/notes/todo.md"), None,
+  cwd="/Users/carol/notes", env={"HOME": "/opt/x", "USERPROFILE": "/Users/carol"}, fs=["/Users/carol/.git/"])
+v("home: a project inside the system home works", "read_file", rd("src/a.py"), "src/a.py",
+  cwd="/Users/alice/code/proj", env={"USER": "alice"}, fs=["/Users/alice/.git/", P + "/.git/"], system_home="/Users/alice")
+# 2: children of a homes dir, and /mnt/<letter>[/Users], are never roots
+SVC = {"USER": "svc", "HOME": "/opt/svc"}
+v("homes: another user's home with a package.json", "read_file", rd("/Users/Alice/docs/a.md"), None,
+  cwd="/Users/Alice/docs", env=SVC, fs=["/Users/Alice/package.json"])
+v("homes: /data/home/<x> with a marker", "read_file", rd("/data/home/bob/a.md"), None,
+  cwd="/data/home/bob", env=SVC, fs=["/data/home/bob/.git/"])
+v("homes: Profiles/<x> with a marker", "read_file", rd("/d/Profiles/erin/a.md"), None,
+  cwd="/d/Profiles/erin", env=SVC, fs=["/d/Profiles/erin/package.json"])
+v("homes: a project below a user's home works", "read_file", rd("src/a.py"), "src/a.py",
+  cwd="/Users/Alice/code/proj", env=SVC, fs=["/Users/Alice/package.json", "/Users/Alice/code/proj/.git/"])
+v("WSL: /mnt/c with a marker", "read_file", rd("/mnt/c/dev/a.md"), None,
+  cwd="/mnt/c/dev", env=W, fs=["/mnt/c/package.json"])
+v("WSL: /mnt/c/Users with a marker", "read_file", rd("/mnt/c/Users/Bob/s.txt"), None,
+  cwd="/mnt/c/Users", env=W, fs=["/mnt/c/Users/package.json"])
+v("WSL: /mnt/d with a marker", "read_file", rd("/mnt/d/x/a.md"), None,
+  cwd="/mnt/d/x", env=W, fs=["/mnt/d/.git/"])
+# 4: HOME/USERPROFILE/pw_dir basenames are names only under Users/home/Profiles
+v("names: HOME=/config does not make config private", "read_file", rd("config/app.yml"), "config/app.yml",
+  cwd="/srv/app", env={"USER": "ci", "HOME": "/config"}, fs=["/srv/app/.git/"])
+v("names: HOME=/github/home does not make home private", "read_file", rd("home/plan.md"), "home/plan.md",
+  cwd="/srv/app", env={"USER": "runner", "HOME": "/github/home"}, fs=["/srv/app/.git/"])
+v("names: HOME=/opt/app-root/src does not make src private", "read_file", rd("src/main.py"), "src/main.py",
+  cwd="/srv/app", env={"HOME": "/opt/app-root/src"}, fs=["/srv/app/.git/"])
+v("names: pw_name counts with no USER", "read_file", rd("alice/x.md"), None,
+  cwd="/srv/app", env={}, fs=["/srv/app/.git/"], system_user="alice")
+v("names: pw_dir basename under /home counts", "read_file", rd("zed-notes.md"), None,
+  cwd="/srv/app", env={}, fs=["/srv/app/.git/"], system_home="/home/zed")
+# 6: search keys with an out-of-root path stay distinct
+v("key: search path a outside the root", "search_files", srch("TODO", "/Users/alice/clients/a"), "TODO", line="search TODO")
+v("key: search path b outside the root", "search_files", srch("TODO", "/Users/alice/clients/b"), "TODO", line="search TODO",
+  key_distinct_from="key: search path a outside the root")
+# 7: tokens split on any non-alphanumeric (en dash, curly quote, x, /)
+for name, raw in (("en dash", "docs/jo\u2013notes.md"), ("curly quote", "docs/jo\u2019s.md"),
+                  ("times sign", "docs/jo\u00d72.md"), ("division sign", "docs/jo\u00f7x.md")):
+    v("P2: short name split by " + name, "read_file", rd(raw), None, cwd="/srv/p", env={"USER": "jo"}, fs=["/srv/p/.git/"])
 
 names = [c["name"] for c in V]
 assert len(names) == len(set(names)), [n for n in names if names.count(n) > 1]

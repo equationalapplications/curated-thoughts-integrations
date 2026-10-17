@@ -564,27 +564,42 @@ They now carry an `fs` field, so any port must model the filesystem.
 
 - **P1 (paths): project root.** A path is sent only when it resolves inside a project
   root, and it is sent relative to that root. Resolving means `realpath` (symlinks
-  resolved, `..` collapsed), with components compared NFC- and case-folded and the
-  original case kept.
+  resolved, `..` collapsed). Components are compared NFC-normalized everywhere and
+  case-folded only on case-insensitive platforms (darwin, win32); the original case is
+  kept.
   - **What a root is:** the nearest directory at or above the session cwd
     (`session_cwd`, as before) holding a marker: `.git` (dir or file), `.hg`,
     `pyproject.toml`, `package.json`, `Cargo.toml`, `go.mod`, `pom.xml`,
     `build.gradle`, `Gemfile`, `composer.json`, `*.sln` or `.curated-thoughts-project`.
-  - **Where the search stops:** at HOME, at the top, and at the depth guard. HOME
-    itself, any ancestor of HOME, a filesystem root and a direct child of one
-    (`/home`, `/srv`, `C:\src`) are never a root. The depth guard is what makes
-    `HOME=/` safe generically.
-  - **How it runs:** `os.path` checks only, cached per (cwd, HOME) for 30 s, and never
-    a subprocess.
+  - **Where the walk stops (and never a root):**
+    - **Home directories and their ancestors.** The home directories are the real paths
+      of `HOME`, `USERPROFILE`, `os.path.expanduser("~")` and `pwd`'s `pw_dir` (where
+      available). Git Bash's `/c/Users/x` maps to `C:\Users\x` on Windows. So with
+      `HOME` unset, a dotfiles `.git` at the real home still sends nothing.
+    - **Filesystem roots and their direct children** (`/home`, `/srv`, `C:\src`). This
+      depth guard makes `HOME=/` safe generically.
+    - **Someone's home in a homes dir:** any directory whose parent is named `Users`,
+      `home` or `Profiles` (any case). So `C:\Users\Alice` with a `package.json` is not
+      a root, while `C:\Users\Alice\code\proj` is. A side effect is that a cwd under a
+      project's own `home/<x>` folder finds no root.
+    - **WSL drives:** `/mnt/<letter>` and `/mnt/<letter>/Users`.
+  - **How it runs:** `os.path` checks only, and never a subprocess. The result is cached
+    (LRU, 30 s) on the raw cwd, `HOME` and `USERPROFILE` strings, so a hit does no
+    filesystem work. The fixed markers are checked first; the directory is scanned for a
+    `*.sln` only after them, and the scan returns early.
   - **Everything else gives no query, not a basename:** a path outside the root
     (including through a symlink), a `~` path outside it, no cwd, no root, or any `:`
     outside a Windows drive prefix.
   - **Behaviour change:** files outside a project get no autonomous-work wisdom. A user
     can opt a folder in with an empty `.curated-thoughts-project`.
 - **P2 (names), the second layer.**
-  - **Private names:** the values of `USER`, `LOGNAME` and `USERNAME`, plus the basenames
-    of `HOME` and `USERPROFILE`, whatever their parent. Service accounts stay exempt.
-  - **Matching:** the candidate query is tokenized on `[^0-9A-Za-zÀ-￿]+`, folded. A name
+  - **Private names:** the values of `USER`, `LOGNAME`, `USERNAME` and `pwd`'s
+    `pw_name`. Also the basename of `HOME`, `USERPROFILE` or `pw_dir`, but only when its
+    parent is named `Users`, `home` or `Profiles`. So `HOME=/config`, `/github/home` and
+    `/opt/app-root/src` make no name private. Service accounts stay exempt.
+  - **Matching:** the candidate query is tokenized into runs of letters and digits
+    (`[^\W_]+`, Unicode `str.isalnum`), folded, so `_`, `-`, en dashes, curly quotes, `×`
+    and `÷` all split tokens (`jo–notes.md` hits for `jo`). A name
     part of ≥ 3 chars hits any token containing it; a shorter part hits only an equal
     token (`jo.md` hits for `jo`, `join.py` does not). A name with spaces or punctuation
     also hits when the folded query contains the whole folded name, and its parts are
@@ -595,14 +610,18 @@ They now carry an `fs` field, so any port must model the filesystem.
   subcommand is dropped.
 - **P4 (search).** The allowlist stays and P2 applies to the whole pattern. A `path`
   argument goes through P1: outside the root the path part is dropped, and a name hit
-  gives no query.
+  gives no query. The search key still uses the full-path digest of the `path`, even
+  outside the root, so two searches for one pattern in different places stay distinct.
 - **P5 (cleanup).** `_resolve` returns `(target, hit, local)` with no sentinel object. The
   session cwd is resolved only when a path argument is actually used.
 - **Testing.**
   - **Vector runner:** it maps virtual absolute paths into a temp directory that models
-    `/` (the `_top_level` seam). It creates the `fs` entries (files, directories,
-    symlinks) and checks that the vector file matches its generator,
-    `tests/fixtures/make_activity_targets.py`.
+    `/` (the `_fs_root` seam). It also supplies the process identity from the optional
+    `system_user` / `system_home` fields (the `_system_identity` seam). It creates the
+    `fs` entries (files, directories, symlinks), builds a `key_distinct_from` pair in one
+    shared world, and checks that the vector file matches its generator,
+    `tests/fixtures/make_activity_targets.py`. Case folding is platform-dependent, so it
+    is unit-tested in both modes rather than vectored.
   - **Randomized path test:** it builds a real tree with projects, a symlink escape and
     markers above HOME, and asserts that every query resolves strictly inside the cwd's
     project root.

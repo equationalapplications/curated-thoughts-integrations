@@ -30,13 +30,23 @@ format below is load-bearing: `## <version> — <date>`.
     `.hg`, `pyproject.toml`, `package.json`, `Cargo.toml`, `go.mod`, `pom.xml`,
     `build.gradle`, `Gemfile`, `composer.json`, a `*.sln` or
     `.curated-thoughts-project`.
-  - Your home folder, anything above it, `/` and top-level folders (`/home`,
-    `/srv`, `C:\src`) are never a project root.
+  - Some folders are never a project root, and the search stops at them:
+    - your home folder (from `HOME`, `USERPROFILE`, `~` or the system account,
+      so a dotfiles repo there counts even with `HOME` unset) and anything
+      above it;
+    - `/` and top-level folders (`/home`, `/srv`, `C:\src`);
+    - anyone's home inside a `Users`, `home` or `Profiles` folder (so
+      `C:\Users\Alice` with a `package.json` is not a project, but
+      `C:\Users\Alice\code\proj` is);
+    - WSL's `/mnt/<letter>` and `/mnt/<letter>/Users`.
   - Anything outside a project root is not sent at all, not even its file name.
+    Paths are compared case-insensitively only on macOS and Windows.
   - Nothing that names you is sent. That covers `USER`, `LOGNAME`, `USERNAME`
-    and the names of `HOME` and `USERPROFILE`, including names with spaces and
-    short names used as a whole word. Service accounts (`root`, `node`,
-    `runner`, …) are still exempt.
+    and the system account name, plus your home folder's name when it sits
+    in a `Users`, `home` or `Profiles` folder (so `HOME=/config` does not
+    hide `config`). It catches names with spaces, and short names as a whole
+    word. Any punctuation separates words, so `jo–notes.md` counts. Service
+    accounts (`root`, `node`, `runner`, …) are still exempt.
   - **Behavior change:** files outside a project get no autonomous-work wisdom.
     To opt a folder in, add an empty `.curated-thoughts-project` file to it.
   - Search patterns keep the 0.6.3 allowlist. A search `path` outside the
