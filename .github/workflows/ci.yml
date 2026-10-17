@@ -75,8 +75,12 @@ jobs:
     # dependent integration's own install (the deepseek matrix's TS2307 red
     # run was exactly this gap). The parity spec makes the core a CI
     # workspace node with its own unit suite; this job is that suite.
-    name: core (ct-wisdom-core)
-    runs-on: ubuntu-latest
+    name: core (ct-wisdom-core, ${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -97,6 +101,7 @@ jobs:
         # Frozen: CI must fail on a package.json that disagrees with the
         # committed lockfile, not paper over the drift.
         working-directory: packages/ct-wisdom-core
+        shell: bash
         run: |
           pnpm install --frozen-lockfile
           pnpm run build

@@ -16,3 +16,4 @@ export * from './activity.js';
 export * from './text.js';
 export * from './lru.js';
 export * from './budget.js';
+export * from './spawn.js';
