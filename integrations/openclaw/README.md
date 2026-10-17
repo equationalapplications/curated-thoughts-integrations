@@ -60,6 +60,33 @@ gateway with `openclaw plugins inspect curated-thoughts --runtime --json` (expec
 `status: loaded` and the typed hooks `agent_turn_prepare` and
 `before_prompt_build`).
 
+### External embedder
+
+OpenClaw starts the manifest's MCP server with only the MCP SDK's default
+environment (`HOME`, `PATH`, `SHELL`, `TERM`, `USER`, `LOGNAME`) plus the
+server's `env`, and a plugin manifest cannot refer to your environment. A
+brain with `embed_profile.type: "external"` therefore needs a user row that
+replaces the manifest's and forwards the key by name; OpenClaw substitutes
+`${NAME}` from its own environment:
+
+```json5
+mcp: {
+  servers: {
+    "curated-thoughts": {
+      command: "curated-thoughts-mcp",
+      args: ["--mcp"],
+      env: { OPENROUTER_API_KEY: "${OPENROUTER_API_KEY}" },
+    },
+  },
+},
+```
+
+Use `OPENAI_API_KEY` for a non-OpenRouter `base_url`, or `EMBED_API_KEY` if
+you set that. Only reference a variable that is set: OpenClaw leaves an unset
+one unresolved. A custom `CURATED_BRAIN_DIR` goes in the same `env` as an
+absolute path. The doctor's `sidecar-env` check prints the exact row for your
+brain.
+
 ### Permission gates
 
 - `hooks.allowConversationAccess: true` is required. OpenClaw refuses

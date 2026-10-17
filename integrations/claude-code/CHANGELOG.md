@@ -6,6 +6,19 @@ heading format below is load-bearing: `## <version> — <date>`.
 
 ## Unreleased
 
+## 0.3.2 — 2026-10-16
+
+- Added: doctor check `sidecar-env` (after `embedding-backend`), shared with
+  Hermes. Claude Code starts a stdio MCP server with its whole environment
+  (verified in the 2.1.301 build), so this check only warns when the brain's
+  external-embedder key (`EMBED_API_KEY`, else `OPENROUTER_API_KEY` or
+  `OPENAI_API_KEY`) or a non-default brain location is missing from that
+  environment. With `CLAUDE_CODE_MCP_ALLOWLIST_ENV` on, Claude Code passes
+  only a short default list, and the check prints the `"env"` keys to add to
+  the `mcpServers.curated-thoughts` entry as `${NAME:-}` references. It
+  prints names only, never values. `scripts/ct_env.py` gains the shared
+  `sidecar_env_needs` helper.
+
 ## 0.3.1 — 2026-10-16
 
 - Changed: the vendored `scripts/ct_ledger.py` gains

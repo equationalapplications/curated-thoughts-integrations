@@ -13,6 +13,7 @@ import {
   openclawConfigPath,
   parseJson5Lenient,
   checkImportPreflight,
+  checkSidecarEnv,
   PASS, WARN, FAIL,
   type CheckResult,
 } from '../scripts/ct_doctor.js';
@@ -297,5 +298,92 @@ describe('checkImportPreflight', () => {
     const r = checkImportPreflight({ brainPaths: paths });
     expect(r.status).toBe('PASS');
     expect(r.detail).not.toContain('soft-deleted');
+  });
+});
+
+describe('checkSidecarEnv (OpenClaw gives a plugin stdio server only the MCP SDK default env)', () => {
+  const SECRET = 'sk-or-v1-FAKE-DO-NOT-PRINT-0123456789';
+  const FORWARDING_ROW = { mcp: { servers: { 'curated-thoughts': {
+    command: 'curated-thoughts-mcp', args: ['--mcp'], env: { OPENROUTER_API_KEY: '${OPENROUTER_API_KEY}' },
+  } } } };
+
+  beforeEach(() => {
+    for (const k of ['EMBED_API_KEY', 'OPENROUTER_API_KEY', 'OPENAI_API_KEY', 'OLLAMA_HOST']) {
+      delete process.env[k];
+    }
+  });
+
+  function brain(profile: Record<string, unknown> | null): void {
+    const dir = join(tmpHome, '.brain');
+    mkdirSync(dir, { recursive: true });
+    const cfg: Record<string, unknown> = { vault_path: tmpHome };
+    if (profile) cfg.embed_profile = profile;
+    writeFileSync(join(dir, 'config.json'), JSON.stringify(cfg));
+  }
+
+  function openclawConfig(body: unknown): void {
+    const dir = join(tmpHome, '.openclaw');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'openclaw.json'), JSON.stringify(body));
+  }
+
+  function check(env: NodeJS.ProcessEnv = {}): CheckResult {
+    const r = checkSidecarEnv(undefined, { ...process.env, ...env });
+    expect(r.detail + (r.hint ?? '')).not.toContain(SECRET);
+    return r;
+  }
+
+  it('passes when the brain embeds locally', () => {
+    brain({ type: 'local', model: 'nomic-embed-code' });
+    expect(check().status).toBe(PASS);
+  });
+
+  it('passes when the profile carries its own key', () => {
+    brain({ type: 'external', model: 'm', api_key: SECRET });
+    expect(check().status).toBe(PASS);
+  });
+
+  it('warns with a full mcp.servers row when only the manifest row exists', () => {
+    brain({ type: 'external', model: 'qwen/qwen3-embedding-4b' });
+    openclawConfig({ plugins: { entries: { 'curated-thoughts': {} } } });
+    const r = check({ OPENROUTER_API_KEY: SECRET });
+    expect(r.status).toBe(WARN);
+    expect(r.detail).toContain("plugin's manifest row");
+    expect(r.hint).toContain('"OPENROUTER_API_KEY": "${OPENROUTER_API_KEY}"');
+    expect(r.hint).toContain('command: "curated-thoughts-mcp"');
+  });
+
+  it('names OPENAI_API_KEY for a non-openrouter base_url', () => {
+    brain({ type: 'external', base_url: 'https://api.openai.com/v1', model: 'm' });
+    expect(check().hint).toContain('"OPENAI_API_KEY": "${OPENAI_API_KEY}"');
+  });
+
+  it('passes when the user row forwards the key and it is set', () => {
+    brain({ type: 'external', model: 'm' });
+    openclawConfig(FORWARDING_ROW);
+    expect(check({ OPENROUTER_API_KEY: SECRET }).status).toBe(PASS);
+  });
+
+  it('warns when the forwarded key is unset', () => {
+    brain({ type: 'external', model: 'm' });
+    openclawConfig(FORWARDING_ROW);
+    const r = check();
+    expect(r.status).toBe(WARN);
+    expect(r.detail).toContain('not set in this environment');
+  });
+
+  it('asks for a custom brain dir as an absolute path', () => {
+    brain({ type: 'local', model: 'm' });
+    const custom = join(tmpHome, 'brains', 'work');
+    mkdirSync(custom, { recursive: true });
+    writeFileSync(join(custom, 'config.json'), '{}');
+    const r = check({ CURATED_BRAIN_DIR: custom });
+    expect(r.status).toBe(WARN);
+    expect(r.hint).toContain(`"CURATED_BRAIN_DIR": ${JSON.stringify(custom)}`);
+  });
+
+  it('is part of runChecks, right after embedding-backend', () => {
+    const order = runChecks().map((r) => r.name);
+    expect(order.indexOf('sidecar-env')).toBe(order.indexOf('embedding-backend') + 1);
   });
 });

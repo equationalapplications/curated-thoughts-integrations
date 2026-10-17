@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## 0.5.1 — 2026-10-16
+
+- Fixed: a brain with an external embedder lost its API key at the sidecar.
+  `@deepseek-ai/dsh-mcp-client` starts the sidecar from DSH's environment
+  minus every name matching `/KEY|PASSWORD|SECRET|TOKEN/i`
+  (`@deepseek-ai/dsh-subprocess` `scrubbedParentEnv` at 0.2.0-rc.2), so
+  `OPENROUTER_API_KEY` was dropped. The bundle patch's MCP row now forwards
+  `EMBED_API_KEY`, `OPENROUTER_API_KEY` and `OPENAI_API_KEY` from DSH's own
+  environment at composition time (`!!js process.env.NAME ?? ''`; an empty
+  value is what Curated Thoughts treats as unset). The patch holds names
+  only.
+
 ## 0.5.0 — 2026-10-16
 
 - Added: Verbose mode for Intuitive Wisdom (opt-in, off by default). With

@@ -97,6 +97,7 @@ EXPECTED_CHECKS = (
     "brain-dir",
     "vault",
     "embedding-backend",
+    "sidecar-env",
     "hermes-registration",
     "import-preflight",
     "version-compat",
@@ -2512,6 +2513,167 @@ class TestCompatConstantsAreGenerated(unittest.TestCase):
         by_name = {tier[0]: tier for tier in _compat_generated.TIERS}
         self.assertEqual(by_name["v2.4-read"][3], 8)
         self.assertEqual(by_name["v2.5-full"][3], 14)
+
+
+class SidecarEnvTests(DoctorTestCase):
+    """(6b) sidecar-env: Hermes filters its MCP children's environment
+    (tools/mcp_tool_config.py::_build_safe_env at the ee8dd6c8 pin), so an
+    external embedder's key reaches the sidecar only when the entry forwards
+    it by name. The check is read-only and never prints a value."""
+
+    SECRET = "sk-or-v1-FAKE-DO-NOT-PRINT-0123456789"
+    ENTRY = (
+        "mcp_servers:\n"
+        "  curated-thoughts:\n"
+        "    command: curated-thoughts-mcp\n"
+        '    args: ["--mcp"]\n'
+    )
+    FORWARD = '    env:\n      OPENROUTER_API_KEY: "${OPENROUTER_API_KEY}"\n'
+    PLUGINS = "plugins:\n  enabled:\n    - curated-thoughts\n"
+
+    def setUp(self):
+        super().setUp()
+        for key in ("EMBED_API_KEY", "OPENROUTER_API_KEY", "OPENAI_API_KEY", "OLLAMA_HOST"):
+            self.patch_env(key, None)
+
+    def brain(self, profile):
+        brain = self.make_brain()
+        cfg = json.loads((brain / "config.json").read_text())
+        if profile is not None:
+            cfg["embed_profile"] = profile
+        (brain / "config.json").write_text(json.dumps(cfg))
+
+    def external(self):
+        self.brain({"type": "external", "model": "qwen/qwen3-embedding-4b"})
+
+    def check(self, env=None):
+        r = ct_doctor.check_sidecar_env(env=env or {})
+        self.assertNotIn(self.SECRET, r.detail + r.hint)
+        return r
+
+    def dotenv(self, text):
+        (ct_doctor.HERMES_CONFIG.parent / ".env").write_text(text)
+
+    def test_no_external_embedder_passes(self):
+        self.brain({"type": "local", "model": "nomic-embed-code"})
+        self.write_config(self.ENTRY)
+        r = self.check()
+        self.assertEqual(r.status, ct_doctor.PASS)
+        self.assertIn("embed_profile: local", r.detail)
+
+    def test_absent_profile_is_local_and_passes(self):
+        self.brain(None)
+        self.write_config(self.ENTRY)
+        self.assertEqual(self.check().status, ct_doctor.PASS)
+
+    def test_default_ollama_host_needs_nothing(self):
+        self.brain(None)
+        self.write_config(self.ENTRY)
+        self.assertEqual(self.check({"OLLAMA_HOST": "http://localhost:11434/"}).status, ct_doctor.PASS)
+
+    def test_custom_ollama_host_must_be_forwarded(self):
+        self.brain(None)
+        self.write_config(self.ENTRY)
+        r = self.check({"OLLAMA_HOST": "http://gpu-box:11434"})
+        self.assertEqual(r.status, ct_doctor.WARN)
+        self.assertIn('OLLAMA_HOST: "${OLLAMA_HOST}"', r.hint)
+        self.assertNotIn("gpu-box", r.hint)
+
+    def test_inline_profile_key_needs_nothing(self):
+        self.brain({"type": "external", "model": "m", "api_key": self.SECRET})
+        self.write_config(self.ENTRY)
+        self.assertEqual(self.check().status, ct_doctor.PASS)
+
+    def test_key_not_forwarded_warns_with_the_exact_fix(self):
+        self.external()
+        cfg = self.write_config(self.ENTRY + self.PLUGINS)
+        before = cfg.read_bytes()
+        r = self.check({"OPENROUTER_API_KEY": self.SECRET})
+        self.assertEqual(r.status, ct_doctor.WARN)
+        self.assertIn("does not forward OPENROUTER_API_KEY", r.detail)
+        self.assertIn('    env:\n      OPENROUTER_API_KEY: "${OPENROUTER_API_KEY}"', r.hint)
+        self.assertIn(str(ct_doctor.HERMES_CONFIG), r.hint)
+        self.assertEqual(cfg.read_bytes(), before)  # read-only
+
+    def test_openai_base_url_names_openai_key(self):
+        self.brain({"type": "external", "base_url": "https://api.openai.com/v1", "model": "m"})
+        self.write_config(self.ENTRY)
+        r = self.check()
+        self.assertEqual(r.status, ct_doctor.WARN)
+        self.assertIn('OPENAI_API_KEY: "${OPENAI_API_KEY}"', r.hint)
+
+    def test_key_forwarded_and_set_passes(self):
+        self.external()
+        self.write_config(self.ENTRY + self.FORWARD)
+        r = self.check({"OPENROUTER_API_KEY": self.SECRET})
+        self.assertEqual(r.status, ct_doctor.PASS, r.detail)
+        self.assertIn("OPENROUTER_API_KEY forwarded", r.detail)
+
+    def test_flow_style_env_is_understood(self):
+        self.external()
+        self.write_config(self.ENTRY + '    env: {OPENROUTER_API_KEY: "${OPENROUTER_API_KEY}"}\n')
+        self.assertEqual(self.check({"OPENROUTER_API_KEY": self.SECRET}).status, ct_doctor.PASS)
+
+    def test_env_of_another_server_does_not_count(self):
+        self.external()
+        self.write_config(
+            self.ENTRY + "  other:\n    command: x\n    env:\n      OPENROUTER_API_KEY: x\n"
+        )
+        self.assertEqual(self.check({"OPENROUTER_API_KEY": self.SECRET}).status, ct_doctor.WARN)
+
+    def test_forwarded_but_unset_warns(self):
+        self.external()
+        self.write_config(self.ENTRY + self.FORWARD)
+        r = self.check()
+        self.assertEqual(r.status, ct_doctor.WARN)
+        self.assertIn("not set in this environment", r.detail)
+
+    def test_key_set_only_in_hermes_dotenv_passes(self):
+        self.external()
+        self.write_config(self.ENTRY + self.FORWARD)
+        self.dotenv(f"export OPENROUTER_API_KEY='{self.SECRET}'\n")
+        self.assertEqual(self.check().status, ct_doctor.PASS)
+
+    def test_empty_dotenv_value_does_not_count(self):
+        self.external()
+        self.write_config(self.ENTRY + self.FORWARD)
+        self.dotenv('OPENROUTER_API_KEY=""\n')
+        self.assertEqual(self.check().status, ct_doctor.WARN)
+
+    def test_provider_default_satisfies_when_embed_api_key_is_preferred(self):
+        self.external()
+        self.write_config(self.ENTRY + self.FORWARD)
+        # EMBED_API_KEY is the preferred name here, but the forwarded
+        # provider default is CT's next fallback, so the sidecar still embeds.
+        r = self.check({"EMBED_API_KEY": self.SECRET, "OPENROUTER_API_KEY": self.SECRET})
+        self.assertEqual(r.status, ct_doctor.PASS, r.detail)
+
+    def test_custom_brain_dir_must_be_forwarded_as_an_absolute_path(self):
+        self.brain({"type": "local", "model": "m"})
+        self.write_config(self.ENTRY)
+        custom = self.fake_home / "brains" / "work"
+        custom.mkdir(parents=True)
+        r = self.check({"CURATED_BRAIN_DIR": str(custom)})
+        self.assertEqual(r.status, ct_doctor.WARN)
+        self.assertIn(f'CURATED_BRAIN_DIR: "{os.path.abspath(str(custom))}"', r.hint)
+
+    def test_no_entry_defers_to_the_registration_check(self):
+        self.external()
+        self.write_config("mcp_servers:\n  other:\n    command: x\n")
+        r = self.check()
+        self.assertEqual(r.status, ct_doctor.PASS)
+        self.assertIn("skipped", r.detail)
+
+    def test_full_run_and_json_never_print_the_secret(self):
+        self.external()
+        self.write_config(self.ENTRY + self.PLUGINS)
+        self.dotenv(f"OPENROUTER_API_KEY={self.SECRET}\n")
+        env = {"PATH": str(self.bin_dir), "OPENROUTER_API_KEY": self.SECRET}
+        results = ct_doctor.run_checks(timeout=3.0, env=env)
+        by_name = {r.name: r for r in results}
+        self.assertEqual(by_name["sidecar-env"].status, ct_doctor.WARN)
+        self.assertNotIn(self.SECRET, ct_doctor.format_text(results))
+        self.assertNotIn(self.SECRET, json.dumps([r.as_dict() for r in results]))
 
 
 def load_suite():

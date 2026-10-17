@@ -16,6 +16,7 @@ Or:            python3 -m unittest discover -s tests
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -39,6 +40,17 @@ IS_WINDOWS = sys.platform == "win32"
 BASH_SKIP = "POSIX-only: exercises install.sh, a bash script"
 
 
+SIDECAR_ENV_NAMES = (
+    "CURATED_BRAIN_DIR",
+    "CURATED_BRAIN_DB",
+    "CURATED_BRAIN_CONFIG",
+    "EMBED_API_KEY",
+    "OPENROUTER_API_KEY",
+    "OPENAI_API_KEY",
+    "OLLAMA_HOST",
+)
+
+
 def run_install(home: Path, extra_env=None, cwd="/", install_sh=INSTALL_SH):
     """Run install.sh with bash, HOME=home, cwd outside the repo tree.
 
@@ -55,6 +67,10 @@ def run_install(home: Path, extra_env=None, cwd="/", install_sh=INSTALL_SH):
         "HERMES_HOME": str(home / ".hermes"),
     }
     env.pop("CT_INSTALL_EDIT", None)
+    # The printed env: block is derived from the brain config and these
+    # names; a host value would make the expected block machine-dependent.
+    for name in SIDECAR_ENV_NAMES:
+        env.pop(name, None)
     if extra_env:
         env.update(extra_env)
     return subprocess.run(
@@ -489,6 +505,116 @@ class PluginEnablementTests(InstallShTestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn("No 'plugins:' section found", proc.stdout)
         self.assertIn("enabled:", proc.stdout)
+
+
+# A distinctive fake secret: if it ever appears in installer output or in the
+# written config, a secret value leaked (the block must carry names only).
+FAKE_SECRET = "sk-or-v1-FAKE-DO-NOT-PRINT-0123456789"
+
+
+@unittest.skipIf(IS_WINDOWS, BASH_SKIP)
+class SidecarEnvBlockTests(InstallShTestCase):
+    """The printed/written mcp_servers block forwards what the sidecar needs.
+
+    Hermes hands a stdio MCP server only PATH, HOME and a few locale vars
+    (tools/mcp_tool_config.py::_build_safe_env at the ee8dd6c8 pin), so an
+    external embedder's key must be forwarded by name in `env:`.
+    """
+
+    def write_brain(self, profile, brain=None):
+        brain = brain or (self.home / ".brain")
+        brain.mkdir(parents=True, exist_ok=True)
+        cfg = {"vault_path": str(self.home)}
+        if profile is not None:
+            cfg["embed_profile"] = profile
+        (brain / "config.json").write_text(json.dumps(cfg))
+        return brain
+
+    def install(self, **extra):
+        proc = run_install(self.home, extra_env={"CT_INSTALL_EDIT": "1", **extra})
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        cfg = (self.home / ".hermes" / "config.yaml").read_text()
+        for text in (proc.stdout, proc.stderr, cfg):
+            self.assertNotIn(FAKE_SECRET, text)
+        return proc, cfg
+
+    def assert_parses_with_env(self, cfg, expected):
+        try:
+            import yaml  # optional: CI runners may not have PyYAML
+        except ImportError:
+            return
+        entry = yaml.safe_load(cfg)["mcp_servers"]["curated-thoughts"]
+        self.assertEqual(entry.get("env"), expected)
+        self.assertEqual(entry["args"], ["--mcp"])
+
+    def test_openrouter_profile_forwards_openrouter_key_by_name(self):
+        self.write_brain({"type": "external", "model": "qwen/qwen3-embedding-4b"})
+        _proc, cfg = self.install(OPENROUTER_API_KEY=FAKE_SECRET)
+        self.assertIn('OPENROUTER_API_KEY: "${OPENROUTER_API_KEY}"', cfg)
+        self.assert_parses_with_env(cfg, {"OPENROUTER_API_KEY": "${OPENROUTER_API_KEY}"})
+
+    def test_key_name_does_not_depend_on_the_key_being_set(self):
+        self.write_brain({"type": "external", "model": "m"})
+        proc, cfg = self.install()
+        self.assertIn('OPENROUTER_API_KEY: "${OPENROUTER_API_KEY}"', proc.stdout)
+        self.assert_parses_with_env(cfg, {"OPENROUTER_API_KEY": "${OPENROUTER_API_KEY}"})
+
+    def test_non_openrouter_base_url_forwards_openai_key(self):
+        self.write_brain({"type": "external", "base_url": "https://api.openai.com/v1",
+                          "model": "text-embedding-3-small"})
+        _proc, cfg = self.install(OPENAI_API_KEY=FAKE_SECRET)
+        self.assert_parses_with_env(cfg, {"OPENAI_API_KEY": "${OPENAI_API_KEY}"})
+        self.assertNotIn("OPENROUTER_API_KEY: ", cfg.replace("#   OPENROUTER", ""))
+
+    def test_embed_api_key_wins_when_set(self):
+        self.write_brain({"type": "external", "model": "m"})
+        _proc, cfg = self.install(EMBED_API_KEY=FAKE_SECRET)
+        self.assert_parses_with_env(cfg, {"EMBED_API_KEY": "${EMBED_API_KEY}"})
+
+    def test_inline_profile_key_needs_no_env_and_is_never_echoed(self):
+        self.write_brain({"type": "external", "model": "m", "api_key": FAKE_SECRET})
+        _proc, cfg = self.install()
+        self.assert_parses_with_env(cfg, None)
+        self.assertIn("# env:", cfg)
+
+    def test_local_profile_gets_only_the_commented_guidance(self):
+        self.write_brain({"type": "local", "model": "nomic-embed-code"})
+        _proc, cfg = self.install()
+        self.assert_parses_with_env(cfg, None)
+        self.assertNotRegex(cfg, r"(?m)^\s+env:")
+        self.assertIn('#   OPENROUTER_API_KEY: "${OPENROUTER_API_KEY}"', cfg)
+
+    def test_missing_brain_config_gets_the_commented_guidance(self):
+        _proc, cfg = self.install()
+        self.assert_parses_with_env(cfg, None)
+        self.assertIn("# env:", cfg)
+
+    def test_custom_brain_dir_is_forwarded_as_an_absolute_path(self):
+        brain = self.write_brain({"type": "external", "model": "m"},
+                                 brain=self.home / "brains" / "work")
+        _proc, cfg = self.install(CURATED_BRAIN_DIR=str(brain))
+        self.assert_parses_with_env(cfg, {
+            "CURATED_BRAIN_DIR": os.path.abspath(str(brain)),
+            "OPENROUTER_API_KEY": "${OPENROUTER_API_KEY}",
+        })
+
+    def test_existing_entry_is_untouched_but_needs_are_reported(self):
+        self.write_brain({"type": "external", "model": "m"})
+        cfg_path = self.home / ".hermes" / "config.yaml"
+        cfg_path.parent.mkdir(parents=True)
+        original = (
+            "mcp_servers:\n"
+            "  curated-thoughts:\n"
+            "    command: curated-thoughts-mcp\n"
+            '    args: ["--mcp"]\n'
+        )
+        cfg_path.write_text(original)
+        proc = run_install(self.home, extra_env={"OPENROUTER_API_KEY": FAKE_SECRET})
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(cfg_path.read_text(), original)
+        self.assertIn('OPENROUTER_API_KEY: "${OPENROUTER_API_KEY}"', proc.stdout)
+        self.assertIn("sidecar-env", proc.stdout)
+        self.assertNotIn(FAKE_SECRET, proc.stdout + proc.stderr)
 
 
 if __name__ == "__main__":

@@ -608,6 +608,101 @@ def check_embedding(env=None):
         )
 
 
+def _is_set(env, name):
+    value = env.get(name)
+    return isinstance(value, str) and bool(value.strip())
+
+
+def check_sidecar_env(brain_paths=None, env=None):
+    """(6b) the sidecar's launch env carries what the brain needs.
+
+    A host that filters its MCP children's environment drops the embedding
+    key (and a non-default brain location) unless the MCP entry forwards it
+    by name; recall and wisdom matching then degrade without an error. The
+    host's routing comes from the harness-specific `_sidecar_env_route`.
+    Read-only, and only variable NAMES are ever reported, never values.
+    """
+    merged = _merged_env(env)
+    paths = brain_paths or ct_env.resolve_brain_paths(env=merged)
+    config, _err = ct_env.read_brain_config(paths.config_path)
+    profile = ct_env.embed_profile_kind(config)
+    needs = ct_env.sidecar_env_needs(config or {}, merged)
+    if not needs:
+        return CheckResult(
+            "sidecar-env",
+            PASS,
+            f"the sidecar needs nothing from {HARNESS_LABEL}'s environment "
+            f"beyond the defaults (embed_profile: {profile})",
+        )
+    refs = [n for n in needs if n.kind == ct_env.NEED_REF]
+    route = _sidecar_env_route()
+    if route is None:
+        # The host hands its whole environment to the sidecar: the only
+        # failure is a key missing from that environment altogether.
+        unset = [n for n in refs if not any(_is_set(merged, a) for a in n.alternatives)]
+        if unset:
+            return CheckResult(
+                "sidecar-env",
+                WARN,
+                f"{', '.join(n.name for n in unset)} not set in this "
+                f"environment (embed_profile: {profile})",
+                f"{HARNESS_LABEL} passes its own environment to the sidecar. "
+                + " ".join(f"{n.name}: {n.reason}." for n in unset)
+                + f" Set it in the environment {HARNESS_LABEL} starts from, "
+                f"then restart {HARNESS_LABEL}.",
+            )
+        return CheckResult(
+            "sidecar-env",
+            PASS,
+            f"{HARNESS_LABEL} passes its environment to the sidecar; "
+            f"{', '.join(n.name for n in needs)} reach it",
+        )
+    forwarded, host_names, where = route
+    if forwarded is None:
+        return CheckResult(
+            "sidecar-env",
+            PASS,
+            "skipped: no curated-thoughts MCP entry to inspect (see the "
+            "registration check)",
+        )
+    missing = [n for n in needs if not any(a in forwarded for a in n.alternatives)]
+    if missing:
+        return CheckResult(
+            "sidecar-env",
+            WARN,
+            f"{HARNESS_LABEL} does not pass its environment to MCP servers, "
+            f"and the curated-thoughts entry in {where} does not forward "
+            f"{', '.join(n.name for n in missing)} (embed_profile: {profile})",
+            " ".join(f"{n.name}: {n.reason}." for n in missing)
+            + " "
+            + _sidecar_env_fix(missing),
+        )
+    unresolved = [
+        n for n in refs
+        if not any(
+            a in forwarded and (_is_set(merged, a) or a in host_names)
+            for a in n.alternatives
+        )
+    ]
+    if unresolved:
+        names = ", ".join(n.name for n in unresolved)
+        return CheckResult(
+            "sidecar-env",
+            WARN,
+            f"{names} forwarded by name in {where}, but not set in this "
+            f"environment or {HARNESS_LABEL}'s env file",
+            f"An unset reference reaches the sidecar with no usable value "
+            f"(empty, or the literal ${{NAME}} text sent as the key). Set "
+            f"{names} where {HARNESS_LABEL} reads it (its launch environment "
+            f"or env file), then restart {HARNESS_LABEL}.",
+        )
+    return CheckResult(
+        "sidecar-env",
+        PASS,
+        f"{', '.join(n.name for n in needs)} forwarded to the sidecar via {where}",
+    )
+
+
 # >>> harness-specific: registration-check
 def _plugin_listed_under_enabled(text):
     """True if PLUGIN_NAME appears under `plugins.enabled` specifically.
@@ -728,6 +823,104 @@ def _check_registration(cwd=None):
     is a single host file, so it is unused here.
     """
     return check_hermes_registration()
+
+
+def _ct_entry_lines(text):
+    """Lines of the mcp_servers.curated-thoughts entry body, or None."""
+    lines = text.splitlines()
+    in_section, entry_indent, body = False, None, None
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            if body is not None:
+                body.append(line)
+            continue
+        indent = len(line) - len(line.lstrip(" "))
+        if indent == 0:
+            if body is not None:
+                break
+            in_section = stripped.rstrip() == "mcp_servers:"
+            continue
+        if not in_section:
+            continue
+        if body is not None:
+            if indent <= entry_indent:
+                break
+            body.append(line)
+        elif re.match(re.escape(MCP_SERVER_KEY) + r":\s*$", stripped):
+            entry_indent, body = indent, []
+    return body
+
+
+def _forwarded_env_names(body):
+    """Keys of the entry's `env:` mapping (block or flow style)."""
+    names, env_indent = set(), None
+    for line in body:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        indent = len(line) - len(line.lstrip(" "))
+        if env_indent is None:
+            m = re.match(r"env:\s*(.*)$", stripped)
+            if m:
+                env_indent = indent
+                flow = m.group(1).strip()
+                if flow.startswith("{"):
+                    names.update(re.findall(r"[{,]\s*['\"]?([A-Za-z_][A-Za-z0-9_]*)['\"]?\s*:", flow))
+                    return names
+            continue
+        if indent <= env_indent:
+            break
+        m = re.match(r"['\"]?([A-Za-z_][A-Za-z0-9_]*)['\"]?\s*:", stripped)
+        if m:
+            names.add(m.group(1))
+    return names
+
+
+def _hermes_dotenv_names():
+    """Names with a non-empty value in Hermes's env file (beside
+    config.yaml). Hermes loads it before resolving ${VAR} references in
+    mcp_servers. Values are read only to test emptiness, never kept."""
+    text = _read_text_file(HERMES_CONFIG.parent / ".env") or ""
+    names = set()
+    for line in text.splitlines():
+        m = re.match(r"\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$", line)
+        if m and m.group(2).strip().strip("'\""):
+            names.add(m.group(1))
+    return names
+
+
+def _sidecar_env_route():
+    """(6b) how this host routes env to the sidecar.
+
+    Hermes (tools/mcp_tool_config.py::_build_safe_env at the ee8dd6c8 pin)
+    passes a stdio MCP server only PATH, HOME, USER, LANG, LC_ALL, TERM,
+    SHELL, TMPDIR, XDG_* and names injected by an external secret source,
+    plus the entry's own `env:` mapping, whose ${VAR} references it
+    resolves from its environment and ~/.hermes/.env (unset ones stay
+    literal). Returns (forwarded names | None when there is no entry,
+    names set in the env file, where).
+    """
+    text = _read_text_file(HERMES_CONFIG)
+    body = _ct_entry_lines(text) if text is not None else None
+    if body is None:
+        return None, set(), str(HERMES_CONFIG)
+    return _forwarded_env_names(body), _hermes_dotenv_names(), str(HERMES_CONFIG)
+
+
+def _sidecar_env_fix(needs):
+    """The exact config.yaml lines that forward `needs` (names only)."""
+    rows = []
+    for n in needs:
+        value = n.value if n.kind == ct_env.NEED_PATH else "${" + n.name + "}"
+        rows.append(f'      {n.name}: "{value}"')
+    return (
+        f"Add to mcp_servers.{MCP_SERVER_KEY} in {HERMES_CONFIG} (merge into "
+        "an existing env: block):\n"
+        "    env:\n" + "\n".join(rows) + "\n"
+        "then restart Hermes. Hermes resolves ${NAME} from its environment "
+        f"or {HERMES_CONFIG.parent / '.env'}, so only the name is written."
+    )
 # <<< harness-specific: registration-check
 
 
@@ -1078,6 +1271,7 @@ def run_checks(timeout=MCP_TIMEOUT, env=None, cwd=None):
     results.append(check_brain_dir(brain_paths, env=merged))
     results.append(check_vault(brain_paths, env=merged))
     results.append(check_embedding(env=merged))
+    results.append(check_sidecar_env(brain_paths, env=merged))
     results.append(_check_registration(cwd=cwd))
     results.append(
         check_import_preflight(
