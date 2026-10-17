@@ -473,6 +473,12 @@ reading had missed:
   N3 check reports the `tool_call` routing above as known. The real CT gate was not run here (no
   native `ct` on the dev Mac); the same bare-target queries went through the real gate in the DSH
   leg's e2e.
+- **AC 9 cache gate re-run** with the process-wide state (`tests/e2e/run.sh`, isolated `HOME` and
+  brain): **cache-safe** (system prompt identical, turn 1 replayed byte-identically, turn-2 block in
+  the last user message only, no repeated id).
+- **Other suites:** core 122, deepseek 290, opencode 288 (with `--testTimeout 60000` on the slow
+  dev Mac; two doctor tests time out at the 5 s default under load), all `tsc` clean; `ct_ci.py`
+  validate, generate, policy and readme gates pass.
 
 ## Versioning and docs
 

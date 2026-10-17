@@ -13,7 +13,7 @@ common architecture.
 | [Hermes Agent](https://github.com/NousResearch/hermes-agent) | [`integrations/hermes/`](integrations/hermes/) | implemented | [0.6.9](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=hermes) |
 | DeepSeek Harness | [`integrations/deepseek/`](integrations/deepseek/) | implemented | [0.6.0](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=deepseek) |
 | OpenCode | [`integrations/opencode/`](integrations/opencode/) | implemented | [0.3.1](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=opencode) |
-| OpenClaw | [`integrations/openclaw/`](integrations/openclaw/) | implemented | [0.2.2](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=openclaw) |
+| OpenClaw | [`integrations/openclaw/`](integrations/openclaw/) | implemented | [0.3.0](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=openclaw) |
 | Claude Code | [`integrations/claude-code/`](integrations/claude-code/) | implemented | [0.3.3](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=claude-code) |
 | [Docker Agent](https://github.com/docker/docker-agent) | [`integrations/docker-agent/`](integrations/docker-agent/) | implemented | [0.1.0](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=docker-agent) |
 
@@ -49,8 +49,8 @@ Wisdom, every integration does two things:
   the user's message. The ones not yet in context are added *to that turn*.
   They never go into the system prompt, so the prompt and its provider cache
   stay untouched.
-- **During autonomous work** (Hermes, DeepSeek Harness and Docker Agent so
-  far), while the agent works on its own between messages, the file it reads
+- **During autonomous work** (Hermes, DeepSeek Harness, Docker Agent and
+  OpenClaw so far), while the agent works on its own between messages, the file it reads
   or edits, the command it runs or the pattern it searches can bring in one
   relevant fact. See [Autonomous-work delivery](#autonomous-work-delivery).
 
@@ -111,18 +111,19 @@ receive live delivery. Host-specific gates:
 
 ### Autonomous-work delivery
 
-Since hermes 0.6.0, deepseek 0.6.0 and docker-agent 0.1.0, Hermes, DeepSeek
-Harness and Docker Agent also deliver facts *between* user messages, keyed
-to what the agent is doing. The rules are the same on all three (Docker
-Agent runs a byte-identical copy of the Hermes builder; the TypeScript side
-lives in `packages/ct-wisdom-core`, ready for the other hosts); the hook and
-the channel differ:
+Since hermes 0.6.0, deepseek 0.6.0, docker-agent 0.1.0 and openclaw 0.3.0,
+Hermes, DeepSeek Harness, Docker Agent and OpenClaw also deliver facts
+*between* user messages, keyed to what the agent is doing. The rules are the
+same on all four (Docker Agent runs a byte-identical copy of the Hermes
+builder; the TypeScript side lives in `packages/ct-wisdom-core`, shared by
+DeepSeek Harness and OpenClaw); the hook and the channel differ:
 
 | Host | Trigger | Delivered as |
 |------|---------|--------------|
 | Hermes | `pre_tool_call` starts the query, `transform_tool_result` delivers | spliced into that tool's result |
 | DeepSeek Harness | `tools/pre-execute` starts the query, the next `agent/pre-step` (step 2 and later) delivers | a user message persisted in the session log (source kind `curated-thoughts-wisdom-activity`), before the next model step |
 | [Docker Agent](integrations/docker-agent/README.md#intuitive-wisdom) | `tool_response_transform` queries and delivers (`read_file`, `write_file`, `edit_file`, `search_files_content`, `shell`; one query per model step, counted by `before_llm_call`) | spliced into that tool's result, marker first |
+| [OpenClaw](integrations/openclaw/README.md#autonomous-work-delivery) | the tool-result middleware queries and delivers, after the call ran (`read`, `write`, `edit`, `grep`, `find`, `exec`; one query per model step, from `model_call_started`; embedded runtime) | an extra text block at the end of that tool's result, marker first |
 
 On Hermes:
 
@@ -182,6 +183,11 @@ On DeepSeek Harness the same rules apply to the `read`, `write`, `edit`,
 The fact arrives as its own user message before the next model step, is
 replayed on `--session-id`, and the record of what is in context is rebuilt
 from the session log at every step. Subagents get deliveries too.
+
+On OpenClaw the query starts only after the host ran the call (its
+`before_tool_call` runs before approvals), so it cannot overlap the tool: a
+triggering result can wait up to 3 s. Subagents, cron and heartbeat runs are
+included; see [its README](integrations/openclaw/README.md#autonomous-work-delivery).
 
 ### Verbose mode
 
