@@ -140,9 +140,10 @@ tool.execute.after
   ├─ fetch own history → step id = messageID of the tool part with this callID (none → no_step)
   ├─ step already started a query → nothing
   ├─ startActivity(gate, --exclude from the fresh ledger, `ct wisdom match --max 1 -- <target>`)
-  ├─ admit(session, step, key); await ≤ 3 s from the start
-  ├─ fetch own history again → finishActivityOutcome (re-gate, select, N3 cache, verbose)
-  ├─ retry? → release(session, step, key)
+  ├─ admit(session, step, key); await within the hook's ONE 3 s deadline
+  │    (fetches included); on expiry abort → the ct child is killed
+  ├─ rebuild the view from memory (no second fetch) → finishActivityOutcome
+  ├─ retry? → releaseKey(session, key) (this step stays used)
   └─ block → append "\n\n" + block to output.output (builtin) or to the last content text item (MCP)
 ```
 
@@ -183,9 +184,12 @@ The shared `ActivityTracker`, keyed by session id, with the **step id = assistan
   first is still querying is coalesced. Its key is not admitted, so a later step can trigger on it.
 - `peek(session, step, key)` after the history read: `step_used` → skip. `admit` only after `startActivity`
   succeeded, so a refused start records nothing.
-- `release(session, step, key)` when the started query got no genuine answer: `budget`, a CT failure, a gate that
-  closed by the finish, or the block not fitting (`outcome.retry`). `zero_hits` (no_match, deduped,
-  gate_uncalibrated) keeps the key, because CT answered.
+- `releaseKey(session, key)` when the started query got no genuine answer: `budget`, a CT failure, or a gate that
+  closed by the finish (`outcome.retry`). The **step stays used**, so the key can be retried in a later step but
+  never by a second query in this one (review of PR #66). `zero_hits` (no_match, deduped, gate_uncalibrated) keeps
+  the key, because CT answered.
+- The in-flight marker is held until the `ct` child has exited or been killed, so a dying query never overlaps a new
+  one.
 
 ### Channel: the tool output, marker first
 
@@ -197,8 +201,9 @@ renderer (the golden fixture).
   This is never truncated by the host [V].
 - **MCP** (`Array.isArray(output.content)`): append `'\n\n' + block` to the **last** `text` item, so the block is the
   tail of the joined output, or push a `text` item when there is none. Rewriting `content[].text` is the same mechanism
-  N3 uses (LD2). **Fit guard:** deliver only when the joined text plus the worst-case block (600 lines, 2400 bytes)
-  stays under the host's default truncation limits (2000 lines, 51 200 bytes). Otherwise the head-direction truncation
+  N3 uses (LD2). **Fit guard:** deliver only when the joined text plus a worst-case block (`BLOCK_LINES_WORST` = 8
+  lines, 2402 bytes) stays under the host's default truncation limits (2000 lines, 51 200 bytes). A fact text with
+  more newlines can only push its own tail past the cut; the marker comes first. Otherwise the head-direction truncation
   could cut the tail. This check runs **before** the query starts (class `unsupported_result`, nothing sent).
 - Any other shape → `unsupported_result`, before the start.
 - CT tools are never activity carriers, so a block never lands next to a recall envelope's line 1. Investigation
@@ -216,13 +221,24 @@ carry-forward) ∪ `memo[session].ids` (bootstrap) ∪ `delivered[session]` (use
 
 - **`unpersisted`** holds ids this process placed in a tool result that may not be persisted yet: activity
   deliveries, and the ids of a CT recall envelope N3 just rewrote. Parallel calls of one step finish before their
-  parts are persisted, so without it a parallel recall of fact X and an activity delivery of X could both show it. An
-  id leaves `unpersisted` once a fresh scan of the session's own history finds it. History is the record (LD5), so a
-  later `revert` that removes the row frees the id again.
+  parts are persisted, so without it a parallel recall of fact X and an activity delivery of X could both show it.
+  Each entry remembers its tool call. A scan of the session's own history drops it when any of these holds:
+  - the id is shown (the history holds it);
+  - the call's tool part is gone (`/undo`, revert);
+  - the part is final (completed or error) without the marker (an aborted step);
+  - 60 s have passed (`UNPERSISTED_TTL_MS`; a part that never lands must not block the fact for the session).
+
+  A running part keeps it (review of PR #66).
 - `buildLedger` adds `unpersisted` for **every** view (user turn, N3, activity), so a queued user message whose
   `chat.message` runs while a tool result is still in flight cannot redeliver an activity fact.
-- **Fresh at the finish:** the history is fetched again after the query settles, because results of the same step (CT
-  recall markers among them) can land during the wait.
+- **One fetch per triggering call** (review of PR #66): the history is read once, before the query. After it, the
+  view is rebuilt from memory (`refresh`). That is enough, because every id that can join the context while the
+  query runs is recorded in memory first:
+  - a parallel CT recall's ids and another activity block land in `unpersisted`;
+  - a user-turn delivery lands in `delivered`.
+
+  The N3 turn cache is deliberately not merged in. For a child it unions the parent's history (LD7), which the child
+  cannot see, and every id it gains within a step is already in `unpersisted`.
 - The core `finishActivityOutcome` re-gates on that ledger, selects, merges the id into the N3 turn cache (so a CT
   recall later in the turn stubs it) and reports to verbose mode. It never calls `noteDelivered` (DSH review).
 - **At most once:** the id joins `unpersisted` before the block is placed, and nothing can make the host drop a block
@@ -248,14 +264,19 @@ children is unchanged.
 
 ### Gates, budget, breaker (rule 4)
 
-- The core gates through a thin activity host (`ActivityHost`, a `HostAdapter` that delegates CT calls, the N3 cache
-  and verbose output to the OpenCode adapter): `deliveryEnabled` = session kind known, `restored` = false (LD10:
-  resume rebuilds from history), and `rebuildLedger` = the activity view fetched just before the gate.
+- The core gates through `activityHost(adapter)`: `Object.create(adapter)` overriding only `deliveryEnabled`
+  (session kind known), `restored` (false, LD10), `rebuildLedger` (the activity view), `deliver` and `noteDelivered`
+  (no-ops). The two methods that assign adapter fields (`wisdomMatch`'s capability latch and probe cache,
+  `resetDiscoveryAndProbeCaches`) are bound to the adapter, so a latch set through the host is the adapter's.
 - `startActivity` checks the capability latch and the shared per-session breaker, takes `--exclude` from the fresh
   ledger (newest first, ≤ 256), and runs `ct wisdom match --json --max 1 --exclude=… -- <bare target>` through the
   adapter's `wisdomMatch` (the same probe, discovery and spawn hygiene as live delivery).
-- **Budget:** `deadline = start + TIMEOUT_MS (3 s)`. A match that has already settled is used even past the deadline.
-  Running out is `budget`: not a breaker failure, and the key is released.
+- **Budget:** ONE deadline (`TIMEOUT_MS`, 3 s) covers the whole after-hook: the `session.get` and
+  `session.messages` fetches and the query. A fetch that does not answer in time fails open (no block). The CT wait
+  uses the core's `settleWithin`, now shared with DSH. On expiry it aborts the query: `wisdomMatch` passes an
+  `AbortSignal` to the spawn, and the opencode binding kills the process tree. An aborted query is `budget`, never a
+  breaker failure. A match that has already settled is used even past the deadline. The `before` hook's session
+  lookup is bounded the same way.
 - Every hook catches everything and leaves the tool result untouched on any error.
 
 ### Fail-closed classes
@@ -405,10 +426,31 @@ real gate and ZAI GLM-5.3-FLASH.
   investigation's before-prefetch would therefore have sent the refused call's target to CT *and* delivered a fact for
   a call the host refused. The approval rule (decision 8) is what prevents it.
 
+## Review amendments (PR #66, high-effort review)
+
+1. `unpersisted` entries now expire. They are tied to their tool call and dropped on abort, `/undo` or 60 s; the
+   same applies to N3's recall ids. Tests: an aborted step, an undone step, an undone recall, and a never-persisted
+   part after 60 s each make the fact deliverable again.
+2. One 3 s deadline covers the whole after-hook, fetches included, and expiry fails open (test: a hung
+   `session.messages` returns well within 2 s, untouched).
+3. Budget expiry kills the `ct` child. The core gained optional abort support (`SpawnLike.signal`,
+   `wisdomMatch(…, signal)`, `HostAdapter.wisdomMatch(…, signal?)`, `runActivityMatch`/`startActivity(…, signal?)`;
+   an aborted match is `budget`, not a breaker failure), and the opencode spawn binding kills the tree on abort.
+   `ActivityTracker.releaseKey` frees only the key, so the step stays used. The in-flight marker is held until the
+   child exits. Tests: core `budget.test.ts`, the kill, the same step making no second query, a later-step retry, the
+   marker held during a slow exit, and real-process kills in `test_spawn_abort.ts`.
+4. One history fetch per triggering call (tested); the after-query view is rebuilt from memory (see "Ledger").
+5. The fit guard uses an 8-line worst case.
+6. `isOpenCodeCtTool` lowercases before its OpenCode-specific checks.
+7. `settleWithin(promise, ms, onExpire?)` is exported from `ct-wisdom-core` and used by opencode and deepseek
+   (deepseek 0.6.1, no behavior change).
+8. `activityHost` is `Object.create(adapter)` with overrides; the latch-writing methods are bound (tested).
+
 ## Versioning and docs
 
 - opencode `0.3.1 → 0.4.0` (`package.json`, `integration.yaml`), CHANGELOG, README (Intuitive Wisdom section and
   limitations), README table via `tools/ct_ci.py readme`.
+- deepseek `0.6.0 → 0.6.1`: the shared `settleWithin`, with no behavior change (review amendment 7).
 
 ## Out of scope
 

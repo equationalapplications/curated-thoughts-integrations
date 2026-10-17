@@ -18,7 +18,10 @@
   plugins: a call the host refuses sends nothing. Subagent sessions are
   included (own ledger); per-message delivery stays parent-only. CT tools
   and experimental code-mode child calls never trigger. Verbose mode reports
-  these on channel `activity`.
+  these on channel `activity`. One 3 s deadline covers the whole hook
+  (session lookups included); on expiry the `ct` child is killed and the
+  key, not the step, is freed for a later step. Not-yet-persisted ids
+  expire (60 s) and are dropped when the step is aborted or undone.
   Spec: `docs/superpowers/specs/2026-10-17-opencode-autonomous-work-wisdom-design.md`.
 - Tests: binding vectors and golden blocks, rate/coalescing, subagents,
   fail-closed, verbose byte-identity, a randomized exactly-once test with

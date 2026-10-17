@@ -22,7 +22,8 @@ import {
   type VerboseTurn,
 } from '@equational-applications/ct-wisdom-core';
 import { createWisdomHooks } from '../src/wisdom-live/hooks.js';
-import { isCodeModeCall, isOpenCodeCtTool, opencodeActivitySpec } from '../src/wisdom-live/activity.js';
+import { activityHost, canCarry, isCodeModeCall, isOpenCodeCtTool, opencodeActivitySpec } from '../src/wisdom-live/activity.js';
+import { OpenCodeWisdomAdapter } from '../src/wisdom-live/adapter.js';
 
 type Part = Record<string, unknown>;
 type Row = { info: { role: string; id: string }; parts: Part[] };
@@ -50,11 +51,27 @@ interface CallSpec {
   mcp?: boolean;
   /** Tool output text. */
   text?: string;
+  /**
+   * How the host persists the part after the hooks: 'normal' (the hook's
+   * output), 'abort' (an error part without the output: the step was
+   * cancelled), 'none' (still running: never persisted).
+   */
+  persist?: 'normal' | 'abort' | 'none';
 }
 
 interface SimOptions {
-  /** CT answer for an activity query (`--max 1`); 'hang' never settles in budget. */
+  /**
+   * CT answer for an activity query (`--max 1`). 'hang' runs until the call
+   * is aborted (then exits after `killDelayMs`): the budget path.
+   */
   answer?: (query: string) => Entry[] | 'hang' | 'timeout';
+  killDelayMs?: number;
+  /** The activity budget (default 3 s). */
+  budgetMs?: number;
+  /** session.messages never answers for activity fetches. */
+  hangHistory?: boolean;
+  /** Run the afters of a step one after the other. */
+  sequential?: boolean;
   /** CT answer for user-turn queries (`--max 2`). */
   userAnswer?: (query: string) => Entry[];
   sessions?: Record<string, { parentID?: string; directory?: string } | null>;
@@ -69,6 +86,8 @@ function makeSim(opts: SimOptions = {}) {
   const rows: Record<string, Row[]> = {};
   const sessions = opts.sessions ?? { P: { directory: work } };
   const argvs: string[][] = [];
+  const killed: string[] = [];
+  let historyFetches = 0;
   let seq = 0;
   const spawnFn: SpawnFn = async (spec) => {
     if (spec.args.includes('--help')) return done('');
@@ -78,7 +97,17 @@ function makeSim(opts: SimOptions = {}) {
     if (max === 1) {
       if (opts.delayMs) await new Promise((r) => setTimeout(r, opts.delayMs));
       const a = opts.answer?.(query) ?? [];
-      if (a === 'hang') return new Promise(() => {});
+      if (a === 'hang') {
+        return new Promise((resolve) => {
+          const exit = () =>
+            setTimeout(() => {
+              killed.push(query);
+              resolve({ code: null, stdout: '', stderr: '', spawnError: false, timedOut: false });
+            }, opts.killDelayMs ?? 0);
+          if (spec.signal?.aborted) exit();
+          else spec.signal?.addEventListener('abort', exit, { once: true });
+        });
+      }
       if (a === 'timeout') return { code: null, stdout: '', stderr: '', spawnError: false, timedOut: true };
       return done(JSON.stringify({ entries: a, corrections: [] }));
     }
@@ -90,6 +119,8 @@ function makeSim(opts: SimOptions = {}) {
     discover: () => ({ path: '/bin/ct', failure: null }),
     fetchHistory: async (id) => {
       if (opts.fetchFails) throw new Error('boom');
+      historyFetches++;
+      if (opts.hangHistory) return new Promise(() => {});
       return structuredClone(rows[id] ?? []);
     },
     fetchSession: async (id) => {
@@ -99,6 +130,7 @@ function makeSim(opts: SimOptions = {}) {
     renderBootstrap: () => '',
     ...(opts.verbose ? { recordVerbose: opts.verbose } : {}),
     ...(opts.now ? { now: opts.now } : {}),
+    ...(opts.budgetMs !== undefined ? { budgetMs: opts.budgetMs } : {}),
   });
   const hooks = built.hooks;
   const activityCalls = () => argvs.filter((a) => a[a.indexOf('--max') + 1] === '1');
@@ -127,18 +159,22 @@ function makeSim(opts: SimOptions = {}) {
     for (let i = 0; i < calls.length; i++) {
       await hooks['tool.execute.before']({ tool: calls[i]!.tool, sessionID: session, callID: callIDs[i]! }, { args: calls[i]!.args });
     }
-    await Promise.all(
-      calls.map(async (c, i) => {
-        if (c.refused) return;
-        await hooks['tool.execute.after']({ tool: c.tool, sessionID: session, callID: callIDs[i]!, args: c.args }, outputs[i] as never);
-      }),
-    );
+    const after = async (c: CallSpec, i: number) => {
+      if (c.refused) return;
+      await hooks['tool.execute.after']({ tool: c.tool, sessionID: session, callID: callIDs[i]!, args: c.args }, outputs[i] as never);
+    };
+    if (opts.sequential) {
+      for (let i = 0; i < calls.length; i++) await after(calls[i]!, i);
+    } else {
+      await Promise.all(calls.map(after));
+    }
     const persisted = outputs.map((o, i) => {
       const part = row.parts[i]!;
-      if (calls[i]!.refused) {
-        part.state = { status: 'error', input: calls[i]!.args, error: 'rejected' };
+      if (calls[i]!.refused || calls[i]!.persist === 'abort') {
+        part.state = { status: 'error', input: calls[i]!.args, error: calls[i]!.refused ? 'rejected' : 'Cancelled' };
         return '';
       }
+      if (calls[i]!.persist === 'none') return '';
       const text = 'content' in o
         ? (o.content as Array<{ type: string; text: string }>).filter((x) => x.type === 'text').map((x) => x.text).join('\n')
         : (o as { output: string }).output;
@@ -148,10 +184,20 @@ function makeSim(opts: SimOptions = {}) {
     return persisted;
   }
 
-  return { hooks, rows, argvs, activityCalls, queries, userTurn, step, adapter: built.adapter };
+  /** /undo: the host removes a step's message from the history. */
+  const undo = (session: string, messageID: string) => {
+    rows[session] = (rows[session] ?? []).filter((r) => r.info.id !== messageID);
+  };
+  const lastMessageID = (session: string) => rows[session]!.at(-1)!.info.id;
+  return {
+    hooks, rows, argvs, activityCalls, queries, userTurn, step, undo, lastMessageID, killed,
+    historyFetches: () => historyFetches,
+    adapter: built.adapter,
+  };
 }
 
 const blocksIn = (text: string) => text.split(ACTIVITY_HEADING).length - 1;
+const tick = (ms = 20) => new Promise((r) => setTimeout(r, ms));
 
 // ─────────────────────────────────────────────────────────────────────────
 
@@ -179,6 +225,8 @@ describe('binding (tool table at the 1.18.35 pin)', () => {
       expect(isOpenCodeCtTool(n), n).toBe(true);
     }
     for (const n of ['read', 'bash', 'github_search_code']) expect(isOpenCodeCtTool(n), n).toBe(false);
+    // Case-insensitive (review of PR #66): server and tool names are lowered first.
+    for (const n of ['CT_Curated_Recall_Context', 'Curated_Get_Wiki_Entry', 'Curated-Thoughts_x']) expect(isOpenCodeCtTool(n), n).toBe(true);
     expect(isCodeModeCall('call_abc/1')).toBe(true);
     expect(isCodeModeCall('call_abc')).toBe(false);
   });
@@ -207,7 +255,7 @@ describe('delivery channel (marker first, appended)', () => {
 
   it('MCP fit guard: an output near the host truncation limit sends nothing and is untouched', async () => {
     const sim = makeSim({ answer: () => [fact('f-big')] });
-    const big = 'x\n'.repeat(1500);
+    const big = 'x\n'.repeat(1995);
     const [out] = await sim.step('P', [{ tool: 'bash', args: { command: 'pnpm test' }, mcp: true, text: big }]);
     expect(out).toBe(big);
     expect(sim.activityCalls()).toEqual([]);
@@ -290,9 +338,9 @@ describe('rate rule: one CT call per model step on a key change', () => {
   it('release on a post-start failure (budget, timeout): a later step retries the key', async () => {
     let n = 0;
     const answers: Array<'hang' | 'timeout' | Entry[]> = ['hang', 'timeout', [fact('f-ok')]];
-    let clock = 0;
-    const sim = makeSim({ answer: () => answers[n++]!, now: () => (clock += 2000) });
+    const sim = makeSim({ answer: () => answers[n++]!, budgetMs: 100 });
     const o1 = await sim.step('P', [{ tool: 'bash', args: { command: 'pnpm test' } }]);
+    await tick(); // the killed child exits; the in-flight marker is released then
     const o2 = await sim.step('P', [{ tool: 'bash', args: { command: 'pnpm test' } }]);
     const o3 = await sim.step('P', [{ tool: 'bash', args: { command: 'pnpm test' } }]);
     expect(sim.queries()).toEqual(['pnpm test', 'pnpm test', 'pnpm test']);
@@ -443,5 +491,110 @@ describe('verbose mode (channel activity)', () => {
     await sim.step('P', [{ tool: 'bash', args: { command: 'pnpm test' } }, { tool: 'webfetch', args: { url: 'x' } }]);
     await sim.step('P', [{ tool: 'bash', args: { command: 'pnpm test' } }]);
     expect(turns.map((t) => t.reason)).toEqual(['zero_hits']);
+  });
+});
+
+
+describe('review of PR #66', () => {
+  it('1 unpersisted: an aborted step (part persisted without the block) frees the fact', async () => {
+    const sim = makeSim({ answer: () => [fact('X')] });
+    await sim.step('P', [{ tool: 'bash', args: { command: 'pnpm test' }, persist: 'abort' }]);
+    expect(sim.queries()).toEqual(['pnpm test']);
+    const [out] = await sim.step('P', [{ tool: 'read', args: { filePath: 'src/a.ts' } }]);
+    expect(out).toContain('<!-- ct-fact:X -->');
+  });
+
+  it('1 unpersisted: /undo of the step frees the fact', async () => {
+    const sim = makeSim({ answer: () => [fact('X')] });
+    const [first] = await sim.step('P', [{ tool: 'bash', args: { command: 'pnpm test' } }]);
+    expect(first).toContain('<!-- ct-fact:X -->');
+    sim.undo('P', sim.lastMessageID('P'));
+    const [out] = await sim.step('P', [{ tool: 'read', args: { filePath: 'src/a.ts' } }]);
+    expect(out).toContain('<!-- ct-fact:X -->');
+  });
+
+  it('1 unpersisted: a part never persisted expires after 60 s', async () => {
+    let clock = 1_000_000;
+    const sim = makeSim({ answer: () => [fact('X')], now: () => clock });
+    await sim.step('P', [{ tool: 'bash', args: { command: 'pnpm test' }, persist: 'none' }]);
+    const [soon] = await sim.step('P', [{ tool: 'read', args: { filePath: 'src/a.ts' } }]);
+    expect(soon).not.toContain('ct-fact:X'); // still running: kept
+    clock += 61_000;
+    const [later] = await sim.step('P', [{ tool: 'read', args: { filePath: 'src/b.ts' } }]);
+    expect(later).toContain('<!-- ct-fact:X -->');
+  });
+
+  it('1 unpersisted: a recall step that is undone frees its ids too', async () => {
+    const recall = JSON.stringify({ query: 'q', wiki_entries: [{ id: 'X', title: 'X', text: 'x' }] });
+    const sim = makeSim({ answer: () => [fact('X')] });
+    await sim.step('P', [{ tool: 'curated-thoughts_curated_recall_context', args: { query: 'q' }, mcp: true, text: recall }]);
+    sim.undo('P', sim.lastMessageID('P'));
+    const [out] = await sim.step('P', [{ tool: 'bash', args: { command: 'pnpm test' } }]);
+    expect(out).toContain('<!-- ct-fact:X -->');
+  });
+
+  it('2 one deadline covers the fetches: a hung session.messages fails open', async () => {
+    const sim = makeSim({ answer: () => [fact('X')], hangHistory: true, budgetMs: 100 });
+    const t0 = Date.now();
+    const [out] = await sim.step('P', [{ tool: 'bash', args: { command: 'pnpm test' }, text: 'same' }]);
+    expect(Date.now() - t0).toBeLessThan(2000);
+    expect(out).toBe('same');
+    expect(sim.activityCalls()).toEqual([]);
+  });
+
+  it('3 budget expiry kills the ct child; the step stays used, the key retries in a later step', async () => {
+    let n = 0;
+    const sim = makeSim({ answer: () => (n++ === 0 ? 'hang' : [fact('ok')]), budgetMs: 100, sequential: true });
+    const outs = await sim.step('P', [
+      { tool: 'bash', args: { command: 'pnpm test' } },
+      { tool: 'read', args: { filePath: 'src/a.ts' } }, // same step, after the failure: no second query
+    ]);
+    await tick();
+    expect(sim.killed).toEqual(['pnpm test']);
+    expect(sim.queries()).toEqual(['pnpm test']);
+    expect(outs.every((o) => blocksIn(o) === 0)).toBe(true);
+    const [retry] = await sim.step('P', [{ tool: 'bash', args: { command: 'pnpm test' } }]);
+    expect(sim.queries()).toEqual(['pnpm test', 'pnpm test']);
+    expect(retry).toContain('<!-- ct-fact:ok -->');
+  });
+
+  it('3 the in-flight marker stays until the killed child exits', async () => {
+    let n = 0;
+    const sim = makeSim({ answer: () => (n++ === 0 ? 'hang' : []), budgetMs: 50, killDelayMs: 300 });
+    await sim.step('P', [{ tool: 'bash', args: { command: 'pnpm test' } }]);
+    await sim.step('P', [{ tool: 'read', args: { filePath: 'src/a.ts' } }]); // child still exiting
+    expect(sim.queries()).toEqual(['pnpm test']);
+    await new Promise((r) => setTimeout(r, 400));
+    await sim.step('P', [{ tool: 'read', args: { filePath: 'src/a.ts' } }]);
+    expect(sim.queries()).toEqual(['pnpm test', 'src/a.ts']);
+  });
+
+  it('4 one history fetch per triggering call', async () => {
+    const sim = makeSim({ answer: () => [fact('X')] });
+    await sim.step('P', [{ tool: 'bash', args: { command: 'pnpm test' } }]);
+    expect(sim.historyFetches()).toBe(1);
+  });
+
+  it('5 canCarry uses a small worst case for the block, not 600 lines', () => {
+    const lines = (n: number) => ({ content: [{ type: 'text', text: Array.from({ length: n }, () => 'x').join('\n') }] });
+    expect(canCarry(lines(1980))).toBe(true);
+    expect(canCarry(lines(1995))).toBe(false);
+    expect(canCarry({ content: [{ type: 'text', text: 'y'.repeat(51200 - 2402) }] })).toBe(true);
+    expect(canCarry({ content: [{ type: 'text', text: 'y'.repeat(51200 - 2401) }] })).toBe(false);
+  });
+
+  it('8 the activity host is the adapter (Object.create): a capability latch set through it is the adapter\'s', async () => {
+    const adapter = new OpenCodeWisdomAdapter({
+      env: {},
+      discover: () => ({ path: '/bin/ct', failure: null }),
+      spawnFn: async () => ({ code: 2, stdout: '', stderr: '', spawnError: false, timedOut: false }),
+    });
+    const host = activityHost(adapter);
+    expect(Object.getPrototypeOf(host)).toBe(adapter);
+    await host.wisdomMatch('q', 1, []);
+    expect(adapter.wisdomMatchAbsent()).toBe(true);
+    expect(host.wisdomMatchAbsent()).toBe(true);
+    expect(host.restored({ id: 's' })).toBe(false);
+    expect(host.deliveryEnabled({ id: 'unknown' })).toBe(false);
   });
 });

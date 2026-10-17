@@ -35,6 +35,7 @@ import {
   isCtTool,
   lruSet,
   reportActivity,
+  settleWithin,
   startActivity,
   type Activity,
   type ActivityMatch,
@@ -407,22 +408,4 @@ export class DshActivity {
       return null;
     }
   }
-}
-
-/** The promise's value if it settles within `ms` (or already has), else null. */
-function settleWithin<T>(promise: Promise<T>, ms: number): Promise<T | null> {
-  return new Promise((resolve) => {
-    const timer = setTimeout(() => resolve(null), ms);
-    timer.unref?.();
-    promise.then(
-      (v) => {
-        clearTimeout(timer);
-        resolve(v);
-      },
-      () => {
-        clearTimeout(timer);
-        resolve(null);
-      },
-    );
-  });
 }

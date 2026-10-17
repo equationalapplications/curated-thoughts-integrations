@@ -78,11 +78,16 @@ export interface HostAdapter {
   /** Cached ledger from the current turn's N1 rebuild, if any (m2). */
   cachedLedger?(session: SessionRef): Ledger | null;
 
-  /** Run `ct wisdom match` under the core's timeout; never throws. */
+  /**
+   * Run `ct wisdom match` under the core's timeout; never throws. `signal`
+   * (optional; activity delivery passes it) aborts the call and kills the
+   * child when the caller's budget runs out.
+   */
   wisdomMatch(
     query: string,
     max: number,
     exclude: string[],
+    signal?: AbortSignal,
   ): Promise<{ outcome: MatchOutcome; result?: WisdomMatchResult }>;
 
   /** True when a tool result is an agent-initiated CT recall (m4). */

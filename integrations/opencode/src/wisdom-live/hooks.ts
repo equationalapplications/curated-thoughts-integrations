@@ -32,8 +32,8 @@ export type WisdomHooks = Required<
 export interface WisdomHooksDeps extends AdapterDeps {
   /** v1 bootstrap renderer (tests); defaults to the DSH-parity renderWisdom. */
   renderBootstrap?: (sessionId: string) => string;
-  /** Activity clock (tests). */
-  now?: () => number;
+  /** Activity budget (tests); default TIMEOUT_MS. */
+  budgetMs?: number;
   /** Activity debug lines (tests); unwired in index.ts. */
   log?: (line: string) => void;
 }
@@ -83,6 +83,7 @@ export function createWisdomHooks(deps: WisdomHooksDeps): {
     breakerFor,
     env,
     ...(deps.now ? { now: deps.now } : {}),
+    ...(deps.budgetMs !== undefined ? { budgetMs: deps.budgetMs } : {}),
     ...(deps.log ? { log: deps.log } : {}),
   });
 
@@ -161,6 +162,7 @@ export function createWisdomHooks(deps: WisdomHooksDeps): {
         wisdomAdapter.noteUnpersisted(
           sessionID,
           wisdomAdapter.envelopeFactIds(isObj(raw) && !Array.isArray(raw.content) ? raw.output : raw),
+          typeof input.callID === 'string' ? input.callID : null,
         );
         if (isObj(raw) && Array.isArray(raw.content)) {
           const rewritten = runToolResult(wisdomAdapter, session, raw);
