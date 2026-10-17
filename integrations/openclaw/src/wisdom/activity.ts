@@ -117,6 +117,8 @@ export interface OpenClawActivityDeps {
   env: ActivityEnv;
   /** Wall budget for one match (default TIMEOUT_MS; a test seam). Locate and probe are outside it. */
   budgetMs?: number;
+  /** Bound on the separate locate + probe wait (default READY_WAIT_MS; a test seam). */
+  readyMs?: number;
   /** One debug line per skip (index.ts: api.logger.debug). */
   log?: (line: string) => void;
 }
@@ -128,6 +130,7 @@ export class OpenClawActivity {
   private readonly breaker: Breaker;
   private readonly env: ActivityEnv;
   private readonly budgetMs: number;
+  private readonly readyMs: number;
   private readonly log?: (line: string) => void;
 
   constructor(deps: OpenClawActivityDeps) {
@@ -135,6 +138,7 @@ export class OpenClawActivity {
     this.breaker = deps.breaker;
     this.env = deps.env;
     this.budgetMs = deps.budgetMs ?? TIMEOUT_MS;
+    this.readyMs = deps.readyMs ?? READY_WAIT_MS;
     if (deps.log) this.log = deps.log;
   }
 
@@ -176,6 +180,7 @@ export class OpenClawActivity {
     const c = obj(ctx);
     const sessionKey = typeof c?.sessionKey === 'string' ? c.sessionKey : '';
     const runId = typeof c?.runId === 'string' ? c.runId : '';
+    let claimed: { stepId: string; key: string } | null = null;
     try {
       if (e === null || sessionKey === '' || runId === '') return result;
       // Every id this result shows is now in context (forged markers can only suppress).
@@ -221,35 +226,49 @@ export class OpenClawActivity {
       const blind = this.adapter.blindReason(sessionKey, runId);
       if (blind !== null) return skipOncePerStep(blind);
 
-      // Claim the step synchronously (parallel results of one step race here
-      // and nowhere else), then pay any first-use locate + probe cost (cached,
-      // warmed at prompt time) OUTSIDE the match budget. A refused start
-      // releases the claim, so it records nothing.
+      // Locate + capability probe: cached and warmed at prompt time; a
+      // first-use wait is bounded (READY_WAIT_MS) and separate from the match
+      // budget. Still unknown after it → skip WITHOUT claiming the step, so a
+      // later result of this step can try once the probe is done.
+      if (!this.adapter.capabilityKnown()) {
+        const probeAbort = new AbortController();
+        await settleWithin(this.adapter.ready(probeAbort.signal), this.readyMs, () => probeAbort.abort());
+        if (!this.adapter.capabilityKnown()) return skipOncePerStep('probe_pending');
+        const again = this.tracker.peek(sessionKey, stepId, activity.key); // a sibling may have claimed meanwhile
+        if (again !== null) {
+          this.debug(sessionKey, again);
+          return result;
+        }
+      }
+      // Claim synchronously: parallel results of one step race here and
+      // nowhere else. A refused start frees the key (the step stays used).
+      claimed = { stepId, key: activity.key };
       this.tracker.admit(sessionKey, stepId, activity.key);
-      await this.adapter.ready();
       const abort = new AbortController();
       const start = startActivity(this.adapter, session, activity, this.breaker, abort.signal);
       if (start.failure !== null) {
-        this.tracker.release(sessionKey, stepId, activity.key);
+        this.tracker.releaseKey(sessionKey, activity.key);
+        claimed = null;
         return skipOncePerStep(start.failure);
       }
-      // On expiry: kill the abandoned ct child (the core then reports
-      // `budget`, never a success) and count the miss toward the shared
-      // breaker, so a CT that keeps missing the budget pauses both paths.
-      const match = await settleWithin(start.match, this.budgetMs, () => {
-        abort.abort();
-        this.breaker.recordFailure();
-      });
+      // On expiry: kill the abandoned ct child. The core then reports
+      // `budget` (never a success) and counts the miss as one breaker
+      // failure (recordActivityBudgetMiss), the same on every host.
+      const match = await settleWithin(start.match, this.budgetMs, () => abort.abort());
       // The core re-gates on a FRESH ledger (results that arrived while we
       // waited included), selects one fact, updates the N3 cache and reports.
       const outcome = finishActivityOutcome(this.adapter, session, activity, match);
+      claimed = null; // settled: from here on the outcome decides
       if (outcome.block === null) {
-        if (outcome.retry) this.tracker.release(sessionKey, stepId, activity.key);
+        // Free the key for a LATER step; this step keeps its one query.
+        if (outcome.retry) this.tracker.releaseKey(sessionKey, activity.key);
         return result;
       }
       this.adapter.noteRunIds(sessionKey, runId, scanIds(outcome.block));
       return { ...(obj(result) as Record<string, unknown>), content: [...content, { type: 'text', text: outcome.block }] };
     } catch {
+      // An unexpected throw after the claim must not burn the step or key.
+      if (claimed !== null) this.tracker.release(sessionKey, claimed.stepId, claimed.key);
       this.debug(sessionKey, 'hook_failed');
       return result;
     }
@@ -273,6 +292,8 @@ function resultIds(result: unknown): string[] {
 export const META_TOOL = 'tool_call';
 const WRAP_START = '\n---\n';
 const WRAP_END = '<<<END_EXTERNAL_UNTRUSTED_CONTENT';
+/** Bound on waiting for a first-use locate + probe (separate from the match budget). */
+export const READY_WAIT_MS = 2_000;
 
 /**
  * Fact ids of a CT recall made through the `tool_call` meta tool: null when
@@ -285,33 +306,42 @@ export function metaRecallIds(args: unknown, result: unknown): string[] | 'unrea
   if (typeof target !== 'string') return null;
   const name = target.slice(target.lastIndexOf(':') + 1);
   if (!isRecallToolName(name)) return null;
-  try {
-    for (const text of partTexts(obj(result)?.content)) {
+  let found: string[] | null = null;
+  let nonJson = false;
+  for (const text of partTexts(obj(result)?.content)) {
+    let outer: Record<string, unknown> | null;
+    try {
       let body = text;
       const at = body.indexOf(WRAP_START);
       if (at >= 0) body = body.slice(at + WRAP_START.length);
       const end = body.lastIndexOf(WRAP_END);
       if (end >= 0) body = body.slice(0, end);
-      const outer = obj(JSON.parse(body.trim()));
-      const inner = obj(outer?.result)?.content;
-      if (!Array.isArray(inner)) continue;
-      const ids: string[] = [];
-      let found = false;
-      for (const t of partTexts(inner)) {
-        const env = obj(JSON.parse(t.startsWith(STRUCTURED_PREFIX) ? t.slice(STRUCTURED_PREFIX.length) : t));
-        const entries = env?.wiki_entries;
-        if (!Array.isArray(entries)) continue;
-        found = true;
-        for (const entry of entries) {
-          const id = obj(entry)?.id;
-          if (validId(id) && !ids.includes(id)) ids.push(id);
-        }
-        for (const id of scanIds(t)) if (!ids.includes(id)) ids.push(id);
-      }
-      if (found) return ids;
+      outer = obj(JSON.parse(body.trim()));
+    } catch {
+      nonJson = true;
+      continue;
     }
-  } catch {
-    /* fall through: unreadable */
+    const inner = obj(outer?.result)?.content;
+    if (!Array.isArray(inner)) continue;
+    for (const t of partTexts(inner)) {
+      let env: Record<string, unknown> | null;
+      try {
+        env = obj(JSON.parse(t.startsWith(STRUCTURED_PREFIX) ? t.slice(STRUCTURED_PREFIX.length) : t));
+      } catch {
+        continue;
+      }
+      const entries = env?.wiki_entries;
+      if (!Array.isArray(entries)) continue;
+      found ??= [];
+      for (const entry of entries) {
+        const id = obj(entry)?.id;
+        if (validId(id) && !found.includes(id)) found.push(id);
+      }
+      for (const id of scanIds(t)) if (!found.includes(id)) found.push(id);
+    }
   }
-  return 'unreadable';
+  // Unreadable only when NO part yields an envelope AND some part was not
+  // JSON (a shape we do not know); all-JSON parts without one carry no facts.
+  if (found !== null) return found;
+  return nonJson ? 'unreadable' : [];
 }

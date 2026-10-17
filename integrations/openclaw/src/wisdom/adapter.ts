@@ -205,6 +205,13 @@ export class OpenClawWisdomAdapter implements HostAdapter {
   private readonly turns = new Map<string, TurnInput>();
   private readonly cache = new Map<string, CachedLedger>();
   private readonly runs = new Map<string, RunLedger>();
+  /**
+   * Per session: the ids the snapshot itself carries (scan ∪ drained ∪
+   * bootstrap), computed once per snapshot. The run ledger holds only ids
+   * NOT in here (review of 0.3.0: copying the snapshot into the run ledger
+   * overflowed every session with > EXCLUDE_MAX ids in its history).
+   */
+  private readonly bases = new Map<string, { scan: string[]; set: Set<string> }>();
   /** null = not probed yet; true = `ct wisdom match` present; false = absent (latched). */
   private capable: boolean | null = null;
   private warming: Promise<void> | null = null;
@@ -225,6 +232,8 @@ export class OpenClawWisdomAdapter implements HostAdapter {
   setTurn(sessionId: string, input: TurnInput): void {
     const runId = runKey(input.runId);
     lruSet(this.turns, sessionId, { ...input, runId });
+    const scan = snapshotScan(input.messages).all;
+    lruSet(this.bases, sessionId, { scan, set: new Set([...scan, ...input.drained, ...(input.bootstrapIds ?? [])]) });
     const run = this.runs.get(sessionId);
     if (run === undefined || runId === undefined || run.runId !== runId || run.blind !== null) {
       lruSet(this.runs, sessionId, { runId, ids: [], set: new Set<string>(), blind: null });
@@ -247,8 +256,9 @@ export class OpenClawWisdomAdapter implements HostAdapter {
   noteRunIds(sessionId: string, runId: string | undefined, ids: readonly string[]): void {
     const run = this.run(sessionId, runId);
     if (run === null) return;
+    const base = this.bases.get(sessionId)?.set;
     for (const id of ids) {
-      if (!validId(id)) continue;
+      if (!validId(id) || base?.has(id)) continue; // the snapshot already shows it
       if (run.set.has(id)) run.ids.splice(run.ids.indexOf(id), 1);
       run.ids.unshift(id);
       run.set.add(id);
@@ -297,7 +307,7 @@ export class OpenClawWisdomAdapter implements HostAdapter {
       // activity path refuses blind runs before it gets here).
       return { idsMostRecentFirst: [], has: () => false, knownBootstrap: turn.bootstrapIds !== null };
     }
-    const scan = snapshotScan(turn.messages);
+    const scan = this.bases.get(session.id)?.scan ?? snapshotScan(turn.messages).all;
     const merged: string[] = [];
     const seen = new Set<string>();
     const push = (id: string) => {
@@ -308,7 +318,7 @@ export class OpenClawWisdomAdapter implements HostAdapter {
     };
     run?.ids.forEach(push); // newest: entered context during this run (after the snapshot)
     turn.drained.forEach(push); // drained into this run's request
-    scan.all.forEach(push);
+    scan.forEach(push);
     (turn.bootstrapIds ?? []).forEach(push); // oldest: system space
     return {
       idsMostRecentFirst: merged,
@@ -337,12 +347,14 @@ export class OpenClawWisdomAdapter implements HostAdapter {
    * caller's match budget covers the match alone (review of PR #67). Warmed
    * at prompt time; concurrent callers share one attempt. Never throws.
    */
-  ready(): Promise<void> {
+  ready(signal?: AbortSignal): Promise<void> {
     if (this.capable !== null) return Promise.resolve();
+    // A caller that STARTS the warm passes its signal to the probe; later
+    // callers share the in-flight attempt.
     this.warming ??= (async () => {
       try {
         const path = await this.deps.locator.locate();
-        if (path !== null) await this.probe(path);
+        if (path !== null) await this.probe(path, signal);
       } catch {
         /* fail quietly: the match reports the class */
       }
@@ -352,10 +364,21 @@ export class OpenClawWisdomAdapter implements HostAdapter {
     return this.warming;
   }
 
+  /** True once `ct wisdom match` is known present or absent. */
+  capabilityKnown(): boolean {
+    return this.capable !== null;
+  }
+
   /** null when probed (capable decided), else the outcome that stopped it. */
-  private async probe(path: string): Promise<MatchOutcome | null> {
+  private async probe(path: string, signal?: AbortSignal): Promise<MatchOutcome | null> {
     if (this.capable !== null) return null;
-    const probe = await this.deps.spawnFn({ command: path, args: ['wisdom', 'match', '--help'], timeoutMs: 3000 });
+    const probe = await this.deps.spawnFn({
+      command: path,
+      args: ['wisdom', 'match', '--help'],
+      timeoutMs: 3000,
+      ...(signal ? { signal } : {}),
+    });
+    if (signal?.aborted) return 'spawn'; // abandoned: decide nothing
     if (probe.spawnError || probe.timedOut) return 'spawn';
     // Non-zero exit: deterministic absence (CT < 3.3.0), latched OFF.
     this.capable = probe.code === 0;
@@ -369,12 +392,11 @@ export class OpenClawWisdomAdapter implements HostAdapter {
     signal?: AbortSignal,
   ): Promise<{ outcome: MatchOutcome; result?: WisdomMatchResult }> {
     if (this.capable === false) return { outcome: 'timeout_or_exit' };
-    const path = await this.deps.locator.locate();
-    if (path === null) return { outcome: 'spawn' };
-    const stopped = await this.probe(path);
-    if (stopped !== null) return { outcome: stopped };
-    // The probe may have just latched it OFF (TS narrowed the field above).
-    if ((this.capable as boolean | null) === false) return { outcome: 'timeout_or_exit' };
+    await this.ready(); // the shared in-flight warm: one probe, never a second
+    const capable = this.capable as boolean | null;
+    if (capable === false) return { outcome: 'timeout_or_exit' }; // just latched OFF
+    const path = capable === true ? await this.deps.locator.locate() : null;
+    if (path === null) return { outcome: 'spawn' }; // no ct, or the probe could not run
     return coreWisdomMatch(path, query, max, exclude, this.deps.spawnFn, signal);
   }
 

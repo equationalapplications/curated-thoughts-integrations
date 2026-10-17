@@ -54,6 +54,8 @@ import { nodeSpawnFn } from './wisdom/spawn.js';
 import { openclawVerboseRecorder } from './wisdom/verbose.js';
 
 export const PLUGIN_ID = 'curated-thoughts';
+/** Mirrors package.json#version (a test keeps them equal); part of the state key. */
+export const PLUGIN_VERSION = '0.3.1';
 /** First-turn worst case is ~14 s (spec "Budgets"); the default is 15 s. */
 export const PROMPT_HOOK_TIMEOUT_MS = 20_000;
 /** Salvaged blocks expire if the session never takes another turn. */
@@ -69,6 +71,8 @@ export interface PluginDeps {
   now?: () => number;
   /** TEST-ONLY: the activity query budget (default the core's 3 s). */
   activityBudgetMs?: number;
+  /** TEST-ONLY: the bound on a first-use locate + probe wait (default 2 s). */
+  activityReadyMs?: number;
 }
 
 function lruSet<K, V>(map: Map<K, V>, key: K, value: V): void {
@@ -112,6 +116,8 @@ interface PluginState {
   drained: Map<string, string[]>;
   /** `${sessionKey}#${admission}` → the one live outcome for that admitted request. */
   admissions: Map<string, Promise<LiveOutcome | undefined>>;
+  /** `${sessionKey}#${runId}#${toolCallId}` of tool results already processed (idempotent middleware). */
+  processed: Map<string, true>;
   /**
    * The CURRENT registration's environment (its pluginConfig.brainDir →
    * CURATED_BRAIN_DIR), read at spawn time: the state is process-wide, the
@@ -134,8 +140,13 @@ export interface StateHolder {
   state?: PluginState;
 }
 
-/** Bump when PluginState changes shape (a reload of new code never reuses old state). */
-const STATE_KEY = Symbol.for('curated-thoughts.openclaw.plugin-state.v1');
+/**
+ * The package version is part of the key: a hot reload of a NEW build gets
+ * fresh state instead of an old build's objects (review of 0.3.0).
+ */
+const STATE_KEY = Symbol.for(`curated-thoughts.openclaw.plugin-state@${PLUGIN_VERSION}`);
+/** Set on a tool result our middleware already processed (any module instance). */
+const PROCESSED = Symbol.for('curated-thoughts.openclaw.processed-result');
 
 /** The process-wide holder shared by every module instance of this plugin. */
 export function processStateHolder(): StateHolder {
@@ -169,6 +180,7 @@ function makeState(api: OpenClawApiLike, deps: PluginDeps): PluginState {
       breaker, // shared with the user-turn path (rule 4)
       env: deps.env ?? process.env,
       ...(deps.activityBudgetMs !== undefined ? { budgetMs: deps.activityBudgetMs } : {}),
+      ...(deps.activityReadyMs !== undefined ? { readyMs: deps.activityReadyMs } : {}),
       log: (line) => state.current.logger?.debug?.(`curated-thoughts: ${line}`),
     }),
     env: brainEnv(deps.env ?? process.env, api.pluginConfig?.brainDir),
@@ -180,6 +192,7 @@ function makeState(api: OpenClawApiLike, deps: PluginDeps): PluginState {
     sightings: new Map(),
     drained: new Map(),
     admissions: new Map(),
+    processed: new Map(),
   };
   return state;
 }
@@ -370,12 +383,26 @@ export function createPlugin(deps: PluginDeps = {}, holder: StateHolder = {}) {
           try {
             const sessionKey = str(ctx?.sessionKey);
             if (sessionKey === '' || event === null || typeof event !== 'object') return undefined;
+            // Idempotent per tool result: when several module instances
+            // register this middleware, a second pass over the same result
+            // (marked, or the same toolCallId) is a no-op — it would otherwise
+            // stub the facts the first pass just delivered (review of 0.3.0).
+            const incoming = event.result as Record<symbol, unknown> | null | undefined;
+            if (incoming !== null && typeof incoming === 'object' && incoming[PROCESSED] === true) return undefined;
+            const callId = str(event.toolCallId);
+            const passKey = callId ? `${sessionKey}#${str(ctx?.runId)}#${callId}` : '';
+            if (passKey && state.processed.has(passKey)) return undefined;
+            if (passKey) lruSet(state.processed, passKey, true);
             let result = event.result;
             if (isRecallToolName(event.toolName) && event.isError !== true) {
               result = onToolResult(adapter, { id: sessionKey }, result);
             }
             result = await activity.process(event, ctx, result);
-            return result === event.result ? undefined : { result };
+            if (result === event.result) return undefined;
+            if (result !== null && typeof result === 'object') {
+              Object.defineProperty(result, PROCESSED, { value: true, enumerable: false });
+            }
+            return { result };
           } catch (error) {
             warn('tool-result middleware failed', error);
             return undefined;

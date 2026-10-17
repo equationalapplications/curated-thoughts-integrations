@@ -2,6 +2,38 @@
 
 ## Unreleased
 
+## 0.3.1 — 2026-10-17
+
+- **Fixed (regression in 0.3.0): long sessions lost both the recall dedup
+  and autonomous-work delivery.** The run ledger copied the whole rebuilt
+  ledger (history snapshot, drained and bootstrap ids) on every cache
+  update, so any session whose history carried more than 256 fact ids
+  overflowed it at once, went "blind", and from then on N3 stubbed nothing
+  and activity delivered nothing. The run ledger now holds only ids that
+  entered context during the run; the snapshot is unioned at read time, and
+  overflow means more than 256 NEW ids in one run.
+- **Fixed: N3 double pass across module instances.** OpenClaw loads the
+  plugin several times per process; when more than one instance's
+  middleware sees the same tool result, the second pass could stub the
+  facts the first pass had just delivered. The middleware is now idempotent
+  per tool result (a marker on the result object and the `toolCallId`).
+- Fixed: a retryable activity outcome (budget, CT failure) frees the key
+  for a later step but keeps the step used, so a model step never makes a
+  second CT call; an unexpected error after the claim releases it.
+- Fixed: the first-use locate + capability probe wait is bounded (2 s,
+  separate from the 3 s match budget, the probe gets the abort signal);
+  still unknown after it → `probe_pending`, and the step is not claimed.
+  `wisdomMatch` reuses the in-flight probe instead of starting another.
+- Changed (shared core, controller decision): an activity match that runs
+  past its budget counts as ONE breaker failure on every host
+  (`recordActivityBudgetMiss`, applied by the core to an aborted match); the
+  OpenClaw host no longer counts it itself.
+- Fixed: a `tool_call` meta-tool recall is read part by part; it is
+  "unreadable" (activity off for the run) only when no part holds an
+  envelope and some part is not JSON.
+- The process-wide state key carries the package version, so a hot reload
+  of a new build starts with fresh state.
+
 ## 0.3.0 — 2026-10-17
 
 - Added: **autonomous-work delivery** (spec
