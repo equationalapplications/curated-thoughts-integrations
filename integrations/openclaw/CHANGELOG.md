@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.3.2 — 2026-10-17
+
+- **Fix: no more hang when a killed `ct` never closes its output** (Windows, or a child process that escaped its process group). The spawn binding now lives in the shared core: one kill path, a 250 ms grace after a kill, no signal to a child that never started or already exited, and a call aborted before it starts spawns nothing.
+
 ## 0.3.1 — 2026-10-17
 
 - **Fixed (regression in 0.3.0): long sessions lost both the recall dedup

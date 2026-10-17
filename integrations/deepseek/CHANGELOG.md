@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.6.3 — 2026-10-17
+
+- The spawn binding moved into the shared core (no behavior change), and multi-byte output split across pipe chunks is now decoded correctly.
+
 ## 0.6.2 — 2026-10-17
 
 - Fixed: an autonomous-work query that runs past its 3 s budget is now

@@ -24,6 +24,7 @@
 import {
   lruSet,
   marker,
+  nodeSpawnFn,
   onToolResult as coreOnToolResult,
   onUserTurn as coreOnUserTurn,
   wisdomMatch as coreWisdomMatch,
@@ -32,11 +33,9 @@ import {
   type MatchOutcome,
   type SessionRef,
   type SpawnFn,
-  type SpawnOutcome,
   type VerboseTurn,
   type WisdomMatchResult,
 } from '@equational-applications/ct-wisdom-core';
-import { spawn } from 'node:child_process';
 import { discoverCt, invalidateAcceptedPath } from '../wisdom.js';
 
 /** One v1 memo record: the rendered block plus the fact ids it delivered. */
@@ -66,171 +65,6 @@ function blockTexts(content: unknown): string[] {
 export function userMessageText(message: unknown): string {
   if (message === null || typeof message !== 'object') return '';
   return blockTexts((message as { content?: unknown }).content).join('\n');
-}
-
-// ─────────────────────────────────────────────────────────────────────────
-// SpawnFn: async child_process binding with the same hygiene as the v1
-// spawnSync path (argument LIST — never a shell string — killSignal SIGKILL,
-// maxBuffer, cwd home, no shell, windowsHide). `spec.signal` aborts: on POSIX
-// the child's process group is killed (the child and anything it started);
-// on Windows only the direct child is killed. The outcome reports
-// `aborted: true` unless the child had already exited or never started.
-// ─────────────────────────────────────────────────────────────────────────
-
-/**
- * The binding's one outcome normalization: a binary that could not start
- * and a capped runaway are spawn errors and never `aborted` (the core's
- * classify checks `aborted` first), so ENOENT is never mistaken for an
- * abort. Every other layer relies on this invariant.
- */
-export function spawnOutcomeOf(raw: {
-  code: number | null;
-  stdout: string;
-  stderr: string;
-  spawnError: boolean;
-  overflow: boolean;
-  timedOut: boolean;
-  aborted: boolean;
-}): SpawnOutcome {
-  const spawnError = raw.spawnError || raw.overflow;
-  const out: SpawnOutcome = { code: raw.code, stdout: raw.stdout, stderr: raw.stderr, spawnError, timedOut: raw.timedOut };
-  if (raw.aborted && !spawnError) out.aborted = true;
-  return out;
-}
-
-/**
- * After a kill, how long to wait for 'close' once the child has exited. A
- * kill cannot always close the pipes (Windows kills only the direct child;
- * a descendant that left the process group keeps stdout open), and a
- * promise that never settles would leak the plan and skip the budget miss.
- */
-const KILL_GRACE_MS = 250;
-
-export function nodeSpawnFn(env: NodeJS.ProcessEnv = process.env): SpawnFn {
-  return (spec) =>
-    new Promise((resolve) => {
-      // Already aborted (the budget ran out before the spawn): start nothing.
-      if (spec.signal?.aborted) {
-        resolve({ code: null, stdout: '', stderr: '', spawnError: false, timedOut: false, aborted: true });
-        return;
-      }
-      let child: ReturnType<typeof spawn>;
-      try {
-        child = spawn(spec.command, spec.args, {
-          killSignal: 'SIGKILL' as NodeJS.Signals,
-          cwd: env.HOME || env.USERPROFILE || '.',
-          env,
-          stdio: ['ignore', 'pipe', 'pipe'],
-          shell: false,
-          windowsHide: true,
-          // Process-group leader (POSIX): a kill takes the whole group down.
-          // Without it a `sh -c <tool>` wrapper survives as a grandchild
-          // holding the stdio pipes open and 'close' never fires — the 3 s
-          // budget would leak a 30 s hang. windowsHide covers the console
-          // flash on Windows; detached there is a no-op for kill.
-          detached: process.platform !== 'win32',
-        });
-      } catch {
-        resolve({ code: null, stdout: '', stderr: '', spawnError: true, timedOut: false });
-        return;
-      }
-      // Bounded accumulation stands in for maxBuffer (async spawn has none):
-      // a runaway binary cannot grow these strings past the same 4 MiB cap
-      // the v1 spawnSync path enforced.
-      let stdout = '';
-      let stderr = '';
-      let overflow = false;
-      const CAP = 4 * 1024 * 1024;
-      let timedOut = false;
-      let aborted = false;
-      let settled = false;
-      let killed = false;
-      let exitCode: number | null = null;
-      let exited = false;
-      let grace: ReturnType<typeof setTimeout> | undefined;
-      /** Killed and exited: give 'close' a short grace, then settle anyway. */
-      function armGrace(): void {
-        if (grace !== undefined || settled) return;
-        grace = setTimeout(() => {
-          child.stdout?.destroy();
-          child.stderr?.destroy();
-          finish(exitCode, false);
-        }, KILL_GRACE_MS);
-      }
-      /**
-       * The one kill path (timeout, abort, overflow). POSIX: the process
-       * group (negative pid), falling back to the direct child when the
-       * group is gone; Windows: the direct child only. A child that never
-       * started has no pid and is never signalled: `child.kill()` on a
-       * failed spawn signals pid 0, i.e. OUR OWN process group.
-       */
-      function killTree(): void {
-        const pid = child.pid;
-        if (typeof pid !== 'number' || pid <= 0) return;
-        killed = true;
-        // Already exited: never signal (the leader is reaped, so -pid could
-        // hit a reused group); only bound the wait for pipes others hold,
-        // keeping the output read so far.
-        if (exited) {
-          armGrace();
-          return;
-        }
-        if (process.platform !== 'win32') {
-          try {
-            process.kill(-pid, 'SIGKILL');
-            return;
-          } catch {
-            /* group gone — fall through to the direct kill */
-          }
-        }
-        child.kill('SIGKILL');
-      }
-      const timer = setTimeout(() => {
-        timedOut = true;
-        killTree();
-      }, spec.timeoutMs);
-      const finish = (code: number | null, spawnError: boolean) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        if (grace !== undefined) clearTimeout(grace);
-        // Every end path ('close', 'error', the kill grace) drops the abort listener.
-        spec.signal?.removeEventListener('abort', onAbort);
-        resolve(spawnOutcomeOf({ code, stdout, stderr, spawnError, overflow, timedOut, aborted }));
-      };
-      child.on('error', () => finish(null, true));
-      child.on('exit', (code) => {
-        exited = true;
-        exitCode = code;
-        if (killed) armGrace();
-      });
-      // The caller's budget ran out (activity delivery, `spec.signal`): kill
-      // the tree now and report `aborted`, which the core classifies as its
-      // own outcome (OpenCode / OpenClaw parity). A child that already
-      // exited keeps its real result (killTree then only bounds the wait).
-      function onAbort(): void {
-        if (!exited) aborted = true;
-        killTree();
-      }
-      spec.signal?.addEventListener('abort', onAbort, { once: true });
-      child.stdout?.on('data', (chunk: Buffer) => {
-        if (stdout.length + chunk.length > CAP) {
-          overflow = true;
-          killTree();
-          return;
-        }
-        stdout += chunk.toString('utf8');
-      });
-      child.stderr?.on('data', (chunk: Buffer) => {
-        if (stderr.length + chunk.length > CAP) {
-          overflow = true;
-          killTree();
-          return;
-        }
-        stderr += chunk.toString('utf8');
-      });
-      child.on('close', (code) => finish(code, false));
-    });
 }
 
 // ─────────────────────────────────────────────────────────────────────────

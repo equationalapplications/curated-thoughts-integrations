@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.4.3 — 2026-10-17
+
+- **Fix: no more hang when a killed `ct` never closes its output** (Windows, or a child process that escaped its process group). The spawn binding now lives in the shared core: one kill path, a 250 ms grace after a kill, no signal to a child that never started or already exited, and a call aborted before it starts spawns nothing.
+
 ## 0.4.2 — 2026-10-17
 
 - Budget misses now count once toward the failure pause (shared core rule
