@@ -574,7 +574,13 @@ They now carry an `fs` field, so any port must model the filesystem.
     `build.gradle`, `Gemfile`, `composer.json`, `*.sln` or `.curated-thoughts-project`.
   - **The walk.** It runs on the logical cwd (normalized, symlinks not resolved), so the
     stop rules see `/home/bob` even where it resolves elsewhere (`/home` on macOS is
-    `/System/Volumes/Data/home`). The root it finds is then resolved with `realpath`.
+    `/System/Volumes/Data/home`).
+  - **The real root is checked again.** The root the walk finds is resolved
+    (`realpath`, plus macOS's firmlink alias `/System/Volumes/Data/x` → `/x`), and
+    every stop rule below is applied again to that real path, against the real forms of
+    the home directories. Failing any rule, there is no root. This closes a cwd that is
+    a symlink or alias into HOME, into an ancestor of HOME or into a homes location (for
+    example `/work/link -> /Users/bob` with `~/.git`, which made `/Users/bob` the root).
   - **Where the walk stops (and never a root):**
     - **Home directories and their ancestors.** The home directories are `HOME`,
       `USERPROFILE`, `os.path.expanduser("~")` and `pwd`'s `pw_dir` (where available),
@@ -596,8 +602,11 @@ They now carry an `fs` field, so any port must model the filesystem.
     (LRU) on the raw cwd, `HOME` and `USERPROFILE` strings, so a hit does no filesystem
     work. A root found is kept 30 s; "no root" is kept only 2 s, so
     `touch .curated-thoughts-project` takes effect almost at once. The fixed markers are
-    checked first; the directory is scanned for a `*.sln` only after them, and the scan
-    returns early. For a path argument, the cached root is looked up before any
+    checked (`lexists`, never cached) for the whole walk first. A directory is scanned for
+    a `*.sln` only when it is nearer than the nearest fixed-marker hit. The scan returns
+    early and is cached per directory for 30 s, so a re-walk after the 2 s "no root"
+    cache does not rescan. `pwd` is looked up once (`functools.lru_cache`, cleared by
+    `reset_state`). For a path argument, the cached root is looked up before any
     `realpath`, and `user_names` runs only after the tool-name filter.
   - **Everything else gives no query, not a basename:** a path outside the root
     (including through a symlink), a `~` path outside it, no cwd, no root, any `:`
@@ -617,15 +626,17 @@ They now carry an `fs` field, so any port must model the filesystem.
     token (`jo.md` hits for `jo`, `join.py` does not). A name with spaces or punctuation
     also hits when the folded query contains the whole folded name, and its parts are
     checked as above (`john_smith.md` hits for `John Smith`).
-  - **Any hit gives no query.**
+  - **A hit in a path, a search pattern or a command's program gives no query.** A hit
+    in a command's subcommand or `-m` module sends the **program alone** (the
+    user-approved behavior): the name is never sent either way.
 - **P3 (commands), an allowlist.** No dots, slashes or file names are ever sent from a
   command. This closes `cat Bob/secret.txt` from cwd `/mnt/c/Users`, which bypassed P1.
   - **The program** (the basename of the first word) must match
     `^[A-Za-z0-9][A-Za-z0-9._+-]{0,40}$`, must not be credential-shaped and must not name
     the user. Otherwise there is no query.
   - **The subcommand** is sent only when it is a plain verb-like word
-    (`^[a-z][a-z0-9-]{0,30}$`: `test`, `rebase`, `run-script`) that passes `word_check`
-    (no name hit, not credential-shaped).
+    (`^[a-z][a-z0-9-]{0,30}$`: `test`, `rebase`, `run-script`) for which `word_check`
+    returns True (no name hit, not credential-shaped).
   - **`python -m <module>`** sends the module only when it matches
     `^[a-z_][a-z0-9_.]{0,60}$` and does not name the user.
   - **Otherwise the program alone** is sent: `pytest tests/billing` → `pytest`,

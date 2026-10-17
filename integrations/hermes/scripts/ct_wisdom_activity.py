@@ -47,6 +47,7 @@ import threading
 import time
 import unicodedata
 from collections import OrderedDict, namedtuple
+from functools import lru_cache
 
 import ct_ledger
 import ct_wisdom
@@ -156,6 +157,10 @@ _ROOT_CACHE_TTL = 30.0
 # "No root" is cached only briefly, so `touch .curated-thoughts-project`
 # takes effect almost at once.
 _ROOT_NEGATIVE_TTL = 2.0
+_SLN_CACHE_TTL = 30.0
+_SLN_CACHE_MAX = 256
+_sln_cache = OrderedDict()
+_DARWIN = sys.platform == "darwin"
 _ROOT_CACHE_MAX = 64
 _root_cache = OrderedDict()
 _root_lock = threading.Lock()
@@ -206,20 +211,17 @@ def _git_bash(path, windows=None):
     return match.group(1).upper() + ":\\" + (match.group(2) or "").replace("/", "\\")
 
 
-_pwd_entry = []
-
-
+@lru_cache(maxsize=1)
 def _pwd_identity():
     """(pw_name, pw_dir) of the process user, looked up once (an NSS lookup
-    can be slow); (None, None) where pwd is unavailable (Windows)."""
-    if not _pwd_entry:
-        try:
-            import pwd
-            entry = pwd.getpwuid(os.getuid())
-            _pwd_entry.append((entry.pw_name, entry.pw_dir))
-        except (ImportError, KeyError, AttributeError, OSError):
-            _pwd_entry.append((None, None))
-    return _pwd_entry[0]
+    can be slow); (None, None) where pwd is unavailable (Windows). Cleared by
+    reset_state."""
+    try:
+        import pwd
+        entry = pwd.getpwuid(os.getuid())
+        return entry.pw_name, entry.pw_dir
+    except (ImportError, KeyError, AttributeError, OSError):
+        return None, None
 
 
 def _system_identity():
@@ -326,19 +328,42 @@ def _abs_cwd(cwd, env):
     return cwd if cwd and os.path.isabs(cwd) else None
 
 
-def _has_marker(directory):
-    """Fixed markers first; only then scan the directory for a `*.sln`."""
-    for marker in ROOT_MARKERS:
-        if os.path.lexists(os.path.join(directory, marker)):
-            return True
+def _fixed_marker(directory):
+    """One of ROOT_MARKERS exists in `directory` (lexists: cheap, never cached,
+    so a new `.curated-thoughts-project` counts at once)."""
+    return any(os.path.lexists(os.path.join(directory, m)) for m in ROOT_MARKERS)
+
+
+def _sln_marker(directory):
+    """`directory` holds a `*.sln` (one scandir, early return). Cached per
+    directory for _SLN_CACHE_TTL, so a re-walk after the short "no root"
+    cache does not rescan."""
+    now = _root_clock()
+    with _root_lock:
+        hit = _sln_cache.get(directory)
+        if hit is not None and now - hit[0] < _SLN_CACHE_TTL:
+            _sln_cache.move_to_end(directory)
+            return hit[1]
+    found = False
     try:
         with os.scandir(directory) as entries:
             for entry in entries:
                 if entry.name.lower().endswith(".sln"):
-                    return True
+                    found = True
+                    break
     except OSError:
         pass
-    return False
+    with _root_lock:
+        _sln_cache[directory] = (now, found)
+        _sln_cache.move_to_end(directory)
+        while len(_sln_cache) > _SLN_CACHE_MAX:
+            _sln_cache.popitem(last=False)
+    return found
+
+
+def _has_marker(directory):
+    """Fixed markers first; only then scan the directory for a `*.sln`."""
+    return _fixed_marker(directory) or _sln_marker(directory)
 
 
 def _fs_root(directory):
@@ -382,20 +407,44 @@ def _stop_dir(directory):
     return _fold(os.path.basename(directory)) == "mnt" and _fs_root(parent)
 
 
+def _blocked(directory, homes):
+    """Never a root (the walk stops here): a `_stop_dir`, any home directory
+    or any ancestor of one."""
+    if _stop_dir(directory):
+        return True
+    folded = _fold_path(directory)
+    return any(folded == _fold_path(h) or _below(h, directory) is not None for h in homes)
+
+
 def _find_root(start, homes):
-    """Nearest ancestor-or-self of `start` holding a marker. The walk stops
-    (None) at a `_stop_dir`, at any home directory and at any ancestor of
-    one: those are never a root."""
+    """Nearest ancestor-or-self of `start` holding a marker, stopping (None)
+    at the first `_blocked` directory. The fixed markers are checked for the
+    whole walk first; `*.sln` is scanned only in directories nearer than the
+    nearest fixed-marker hit."""
+    chain = []
     directory = start
-    while True:
-        if _stop_dir(directory):
-            return None
-        folded = _fold_path(directory)
-        if any(folded == _fold_path(h) or _below(h, directory) is not None for h in homes):
-            return None
-        if _has_marker(directory):
-            return directory
-        directory = os.path.dirname(directory)
+    while not _blocked(directory, homes):
+        chain.append(directory)
+        parent = os.path.dirname(directory)
+        if parent == directory:
+            break
+        directory = parent
+    fixed = next((i for i, d in enumerate(chain) if _fixed_marker(d)), None)
+    for d in chain[:len(chain) if fixed is None else fixed]:
+        if _sln_marker(d):
+            return d
+    return None if fixed is None else chain[fixed]
+
+
+def _canon(path):
+    """realpath, plus macOS's firmlink alias: `/System/Volumes/Data/x` is
+    the same directory as `/x`."""
+    real = _real(path)
+    if real and _DARWIN:
+        prefix = "/System/Volumes/Data/"
+        if real.startswith(prefix):
+            real = "/" + real[len(prefix):]
+    return real
 
 
 def project_root(cwd, env=None):
@@ -416,12 +465,17 @@ def project_root(cwd, env=None):
     if start is not None:
         # Walk the logical path (normalized, symlinks NOT resolved), so the
         # stop rules see `/home/bob` even where it resolves elsewhere (macOS:
-        # /System/Volumes/Data/home); homes are compared in both forms. The
-        # root found is then resolved.
+        # /System/Volumes/Data/home); homes are compared in both forms.
         values = [v for v in _home_values(env, _system_identity()) if os.path.isabs(v)]
-        homes = [h for h in (_real(v) for v in values) if h] + [os.path.normpath(v) for v in values]
-        found = _find_root(os.path.normpath(start), homes)
-        root = _real(found) if found else None
+        real_homes = [h for h in (_canon(v) for v in values) if h]
+        found = _find_root(os.path.normpath(start),
+                           real_homes + [os.path.normpath(v) for v in values])
+        root = _canon(found) if found else None
+        # A symlinked or aliased cwd can resolve into HOME, an ancestor of
+        # it or a homes location: every stop rule applies again to the real
+        # root, against real homes. Failing any, there is no root.
+        if root is not None and _blocked(root, real_homes):
+            root = None
     with _root_lock:
         _root_cache[key] = (now, root)
         _root_cache.move_to_end(key)
@@ -452,7 +506,7 @@ def _resolve(raw, cwd, env, names):
     if root is None:
         # No realpath needed: nothing is sent, the key only has to differ.
         return None, False, _digest(os.path.normpath(joined))
-    full = _real(joined)
+    full = _canon(joined)
     local = _digest(full or joined)
     rel = _below(full, root) if full else None
     if not rel:
@@ -476,14 +530,11 @@ def normalize_path(raw, cwd=None, env=None, names=None):
 
 
 def word_check(word, names):
-    """P3, the one check for a command word: "name" when it names the user,
-    "shape" when it is not a plain verb-like word (`^[a-z][a-z0-9-]{0,30}$`)
-    or is credential-shaped, else "ok"."""
-    if name_hit(word, names):
-        return "name"
-    if not _SUBCOMMAND_RE.match(word) or _credential_shaped(word):
-        return "shape"
-    return "ok"
+    """P3, the one check for a subcommand: True when it may be sent, a plain
+    verb-like word (`^[a-z][a-z0-9-]{0,30}$`) that is not credential-shaped
+    and does not name the user. False means the program is sent alone."""
+    return (_SUBCOMMAND_RE.match(word) is not None and not _credential_shaped(word)
+            and not name_hit(word, names))
 
 
 def search_target(pattern, env=None, names=None):
@@ -580,7 +631,7 @@ def command_target(command, env=None, names=None):
                 and not name_hit(module, names)):
             return program + " " + module
         return program
-    if rest and word_check(rest[0], names) == "ok":
+    if rest and word_check(rest[0], names):
         return program + " " + rest[0]
     return program
 
@@ -741,10 +792,13 @@ def pending_count():
 
 
 def reset_state():
-    """TEST-ONLY: forget keys, steps, pending prefetches and project roots."""
+    """TEST-ONLY: forget keys, steps, pending prefetches, project roots, the
+    *.sln cache and the pwd lookup."""
     _STATE.reset()
     with _root_lock:
         _root_cache.clear()
+        _sln_cache.clear()
+    _pwd_identity.cache_clear()
     with _pending_lock:
         _pending.clear()
 

@@ -14,6 +14,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from unittest import mock
 import zlib
 from collections import Counter
 from pathlib import Path
@@ -196,10 +197,9 @@ class TestExactlyOnceWithActivity(unittest.TestCase):
         proj = os.path.realpath(tempfile.mkdtemp(prefix="ct-exactly-once-"))
         os.mkdir(os.path.join(proj, ".git"))
         self.addCleanup(shutil.rmtree, proj, True)
-        old_cwd = os.environ.get("TERMINAL_CWD")
-        os.environ["TERMINAL_CWD"] = proj
-        self.addCleanup(lambda: os.environ.__setitem__("TERMINAL_CWD", old_cwd)
-                        if old_cwd is not None else os.environ.pop("TERMINAL_CWD", None))
+        env_patch = mock.patch.dict(os.environ, {"TERMINAL_CWD": proj})
+        env_patch.start()
+        self.addCleanup(env_patch.stop)
 
     def test_no_fact_twice_with_activity(self):
         rng = random.Random(20261016)

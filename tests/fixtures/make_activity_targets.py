@@ -270,6 +270,21 @@ v("root-level: /home is never a root", "read_file", rd("/home/x.md"), None, cwd=
 v("root-level: /mnt is never a root", "read_file", rd("/mnt/x/a.md"), None, cwd="/mnt/x", env=SVC, fs=["/mnt/.git/"])
 v("root-level: / is never a root", "read_file", rd("/x/a.md"), None, cwd="/x", env=SVC, fs=["/.git/"])
 
+# ---- final review of PR #61: a found root is re-checked in realpath form ----
+BOB = {"USER": "bob", "HOME": "/Users/bob"}
+v("realpath: cwd symlink into HOME", "read_file", rd("Documents/taxes.pdf"), None, cwd="/work/link", env=BOB,
+  fs=["/Users/bob/.git/", "/Users/bob/Documents/", {"symlink": "/work/link", "to": "/Users/bob"}])
+v("realpath: cwd symlink to an ancestor of HOME", "read_file", rd("alice/notes.md"), None, cwd="/work/up",
+  env={"USER": "svc", "HOME": "/data/u/alice"},
+  fs=["/data/u/.git/", "/data/u/alice/", {"symlink": "/work/up", "to": "/data/u"}])
+v("realpath: cwd symlink to a homes location", "read_file", rd("carol/notes.md"), None, cwd="/work/all",
+  env=SVC, fs=["/Users/package.json", "/Users/carol/", {"symlink": "/work/all", "to": "/Users"}])
+v("realpath: macOS firmlink-style alias of HOME", "read_file", rd("Documents/taxes.pdf"), None,
+  cwd="/System/Volumes/Data/Users/bob", env=BOB,
+  fs=["/Users/bob/.git/", "/Users/bob/Documents/", {"symlink": "/System/Volumes/Data", "to": "/"}])
+v("realpath: symlink into a project inside HOME is fine", "read_file", rd("src/a.py"), "src/a.py", cwd="/work/p", env=BOB,
+  fs=["/Users/bob/.git/", "/Users/bob/code/proj/.git/", {"symlink": "/work/p", "to": "/Users/bob/code/proj"}])
+
 names = [c["name"] for c in V]
 assert len(names) == len(set(names)), [n for n in names if names.count(n) > 1]
 with open(sys.argv[1], "w", encoding="utf-8") as fh:

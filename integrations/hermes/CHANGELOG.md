@@ -43,7 +43,11 @@ format below is load-bearing: `## <version> — <date>`.
     - WSL's `/mnt` and `/mnt/<letter>`.
 
     Other top-level folders can be projects, so wisdom works in `/app` or
-    `/workspace` containers.
+    `/workspace` containers. These rules are checked on the working directory
+    as given and again on the project root's real path, so a symlinked or
+    aliased working directory that leads into your home folder (for example
+    `/work/link -> /Users/bob`, or macOS's `/System/Volumes/Data/Users/bob`)
+    finds no project.
   - Anything outside a project root is not sent at all, not even its file name,
     and neither is a path longer than 200 characters (it is never cut). Paths
     are compared case-insensitively only on macOS and Windows.

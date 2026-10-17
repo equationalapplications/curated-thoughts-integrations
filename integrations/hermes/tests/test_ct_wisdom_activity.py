@@ -18,6 +18,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from unittest import mock
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -172,9 +173,9 @@ class TestActivityLine(unittest.TestCase):
     def test_project_root_top_level(self):
         """The filesystem root is never a root; other direct children of it
         (`/app`, `/workspace`) can be, except homes locations and `/mnt`."""
-        orig = act._has_marker
-        act._has_marker = lambda directory: True
-        self.addCleanup(setattr, act, "_has_marker", orig)
+        orig = act._fixed_marker
+        act._fixed_marker = lambda directory: True
+        self.addCleanup(setattr, act, "_fixed_marker", orig)
         act.reset_state()
         self.addCleanup(act.reset_state)
         top = os.path.realpath(os.sep)
@@ -613,14 +614,69 @@ class TestActivityLine(unittest.TestCase):
 
     def test_word_check(self):
         names = {"alice"}
-        for word, verdict in (("test", "ok"), ("run-script", "ok"), ("rebase", "ok"),
-                              ("build2", "ok"), ("alice", "name"),
-                              ("x/alice_notes.txt", "name"), ("tests/billing", "shape"),
-                              ("mypkg.cli", "shape"), ("deploy.py", "shape"), ("Build", "shape"),
-                              ("../x", "shape"), ("/etc/passwd", "shape"), ("~/x", "shape"),
-                              ("C:foo", "shape"), ("a\\b", "shape"), ("-v", "shape"),
-                              ("a" * 32, "shape"), ("abc1def2ghi3jkl4m", "shape")):
-            self.assertEqual(act.word_check(word, names), verdict, word)
+        for word in ("test", "run-script", "rebase", "build2"):
+            self.assertIs(act.word_check(word, names), True, word)
+        for word in ("alice", "alicetools", "x/alice_notes.txt", "tests/billing", "mypkg.cli",
+                     "deploy.py", "Build", "../x", "/etc/passwd", "~/x", "C:foo", "a\\b", "-v",
+                     "a" * 32, "abc1def2ghi3jkl4m"):
+            self.assertIs(act.word_check(word, names), False, word)
+
+    def test_realpath_root_rechecked(self):
+        """A cwd symlinked into HOME (or an ancestor, or a homes location)
+        finds a root by its logical path; the real root fails the stop rules
+        again, so nothing is sent."""
+        base = temp_base()
+        home = os.path.join(base, "srv", "bob")
+        make_tree(home, [".git/", "Documents/", "code/proj/.git/"])
+        link = os.path.join(base, "work", "link")
+        good = os.path.join(base, "work", "good")
+        os.makedirs(os.path.dirname(link))
+        try:
+            os.symlink(home, link, target_is_directory=True)
+            os.symlink(os.path.join(home, "code", "proj"), good, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            self.skipTest("symlinks unavailable")
+        env = {"USER": "bob", "HOME": home}
+        self.assertIsNone(act.project_root(link, env))
+        self.assertIsNone(act.normalize_path("Documents/taxes.pdf", link, env))
+        self.assertEqual(act.project_root(good, env), os.path.realpath(os.path.join(home, "code", "proj")))
+
+    def test_canon_maps_the_macos_firmlink_alias(self):
+        orig = act._DARWIN, act._real
+        self.addCleanup(lambda: (setattr(act, "_DARWIN", orig[0]), setattr(act, "_real", orig[1])))
+        act._real = lambda p: p
+        act._DARWIN = True
+        self.assertEqual(act._canon("/System/Volumes/Data/Users/bob"), "/Users/bob")
+        self.assertEqual(act._canon("/Users/bob"), "/Users/bob")
+        act._DARWIN = False
+        self.assertEqual(act._canon("/System/Volumes/Data/Users/bob"),
+                         "/System/Volumes/Data/Users/bob")
+
+    def test_walk_checks_fixed_markers_before_any_sln_scan(self):
+        base = temp_base()
+        make_tree(base, ["srv/outer/.git/", "srv/outer/mid/App.sln", "srv/outer/mid/inner/src/",
+                         "srv/top.sln"])
+        start = os.path.join(base, "srv", "outer", "mid", "inner", "src")
+        scanned = []
+        orig = os.scandir
+        os.scandir = lambda d: scanned.append(d) or orig(d)
+        self.addCleanup(setattr, os, "scandir", orig)
+        # The nearer *.sln wins over the farther .git; nothing above .git is scanned.
+        self.assertEqual(act.project_root(start, {}), os.path.join(base, "srv", "outer", "mid"))
+        self.assertNotIn(os.path.join(base, "srv", "outer"), scanned)
+        self.assertNotIn(os.path.join(base, "srv"), scanned)
+        # Re-walking (after the short "no root" cache) does not rescan.
+        before = len(scanned)
+        act._root_cache.clear()
+        act.project_root(start, {})
+        self.assertEqual(len(scanned), before)
+
+    def test_pwd_identity_cached_and_cleared(self):
+        self.assertTrue(hasattr(act._pwd_identity, "cache_clear"))
+        act._pwd_identity()
+        self.assertEqual(act._pwd_identity.cache_info().currsize, 1)
+        act.reset_state()
+        self.assertEqual(act._pwd_identity.cache_info().currsize, 0)
 
     def test_session_cwd_is_lazy(self):
         calls = []
@@ -734,10 +790,9 @@ class Harness(unittest.TestCase):
         orig_breaker = ct_wisdom_live._BREAKER
         ct_wisdom_live._BREAKER = ct_wisdom_live.Breaker()
         self.addCleanup(setattr, ct_wisdom_live, "_BREAKER", orig_breaker)
-        old_cwd = os.environ.get("TERMINAL_CWD")
-        os.environ["TERMINAL_CWD"] = PROJ
-        self.addCleanup(lambda: os.environ.__setitem__("TERMINAL_CWD", old_cwd)
-                        if old_cwd is not None else os.environ.pop("TERMINAL_CWD", None))
+        env_patch = mock.patch.dict(os.environ, {"TERMINAL_CWD": PROJ})
+        env_patch.start()
+        self.addCleanup(env_patch.stop)
         self.calls = []
         self.match_result = ({"entries": [item("f1")], "corrections": []}, None)
         self.deliveries = []

@@ -120,16 +120,8 @@ def build(*cases):
         world.close()
 
 
-class TestActivityTargetVectors(unittest.TestCase):
-    def setUp(self):
-        act.reset_state()
-        self.addCleanup(act.reset_state)
-        # The temp dir's real ancestors must hold no project marker, or a
-        # case without HOME could find a real project above it.
-        probe = os.path.realpath(tempfile.mkdtemp(prefix="ct-activity-probe-"))
-        self.addCleanup(shutil.rmtree, probe, True)
-        if act.project_root(probe, {}) is not None:
-            self.skipTest("a project marker exists above the temp directory")
+class TestVectorFile(unittest.TestCase):
+    """The vector file itself: needs no filesystem world, never skipped."""
 
     def test_vector_file_shape(self):
         cases = load()
@@ -158,6 +150,20 @@ class TestActivityTargetVectors(unittest.TestCase):
             sys.argv = argv
         self.assertEqual(json.loads(out.read_text(encoding="utf-8")), load(),
                          "regenerate tests/fixtures/activity_targets.json")
+
+
+class TestActivityTargetVectors(unittest.TestCase):
+    """Every vector against Hermes's builder, each in a fake filesystem."""
+
+    def setUp(self):
+        act.reset_state()
+        self.addCleanup(act.reset_state)
+        # The temp dir's real ancestors must hold no project marker, or a
+        # case without HOME could find a real project above it.
+        probe = os.path.realpath(tempfile.mkdtemp(prefix="ct-activity-probe-"))
+        self.addCleanup(shutil.rmtree, probe, True)
+        if act.project_root(probe, {}) is not None:
+            self.skipTest("a project marker exists above the temp directory")
 
     def test_every_vector(self):
         for case in load():
@@ -190,7 +196,10 @@ class TestActivityTargetVectors(unittest.TestCase):
             if not other:
                 continue
             with self.subTest(case["name"]):
-                _, (a, b) = build(case, cases[other])
+                _, built = build(case, cases[other])
+                if built is None:
+                    self.skipTest("symlinks unavailable")
+                a, b = built
                 self.assertEqual(act.query_for(a), act.query_for(b))
                 self.assertNotEqual(a.key, b.key)
                 checked += 1

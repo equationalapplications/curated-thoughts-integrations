@@ -3388,5 +3388,115 @@
   ],
   "expected_query": null,
   "expected_line": null
+ },
+ {
+  "name": "realpath: cwd symlink into HOME",
+  "tool": "read_file",
+  "args": {
+   "path": "Documents/taxes.pdf"
+  },
+  "cwd": "/work/link",
+  "env": {
+   "USER": "bob",
+   "HOME": "/Users/bob"
+  },
+  "fs": [
+   "/Users/bob/.git/",
+   "/Users/bob/Documents/",
+   {
+    "symlink": "/work/link",
+    "to": "/Users/bob"
+   }
+  ],
+  "expected_query": null,
+  "expected_line": null
+ },
+ {
+  "name": "realpath: cwd symlink to an ancestor of HOME",
+  "tool": "read_file",
+  "args": {
+   "path": "alice/notes.md"
+  },
+  "cwd": "/work/up",
+  "env": {
+   "USER": "svc",
+   "HOME": "/data/u/alice"
+  },
+  "fs": [
+   "/data/u/.git/",
+   "/data/u/alice/",
+   {
+    "symlink": "/work/up",
+    "to": "/data/u"
+   }
+  ],
+  "expected_query": null,
+  "expected_line": null
+ },
+ {
+  "name": "realpath: cwd symlink to a homes location",
+  "tool": "read_file",
+  "args": {
+   "path": "carol/notes.md"
+  },
+  "cwd": "/work/all",
+  "env": {
+   "USER": "svc",
+   "HOME": "/opt/svc"
+  },
+  "fs": [
+   "/Users/package.json",
+   "/Users/carol/",
+   {
+    "symlink": "/work/all",
+    "to": "/Users"
+   }
+  ],
+  "expected_query": null,
+  "expected_line": null
+ },
+ {
+  "name": "realpath: macOS firmlink-style alias of HOME",
+  "tool": "read_file",
+  "args": {
+   "path": "Documents/taxes.pdf"
+  },
+  "cwd": "/System/Volumes/Data/Users/bob",
+  "env": {
+   "USER": "bob",
+   "HOME": "/Users/bob"
+  },
+  "fs": [
+   "/Users/bob/.git/",
+   "/Users/bob/Documents/",
+   {
+    "symlink": "/System/Volumes/Data",
+    "to": "/"
+   }
+  ],
+  "expected_query": null,
+  "expected_line": null
+ },
+ {
+  "name": "realpath: symlink into a project inside HOME is fine",
+  "tool": "read_file",
+  "args": {
+   "path": "src/a.py"
+  },
+  "cwd": "/work/p",
+  "env": {
+   "USER": "bob",
+   "HOME": "/Users/bob"
+  },
+  "fs": [
+   "/Users/bob/.git/",
+   "/Users/bob/code/proj/.git/",
+   {
+    "symlink": "/work/p",
+    "to": "/Users/bob/code/proj"
+   }
+  ],
+  "expected_query": "src/a.py",
+  "expected_line": "read src/a.py"
  }
 ]
