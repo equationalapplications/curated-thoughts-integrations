@@ -71,23 +71,24 @@ function hermes(tool: string, args: unknown): ActivitySpec | null {
 const ENV = { USER: 'alice', HOME: '/Users/alice' };
 
 /** A real project on disk (P1 needs one): a temp dir holding a `.git` marker. */
-const PROJ = realpathSync(mkdtempSync(nodePath.join(tmpdir(), 'ct-act-proj-')));
+const PROJ = realpathSync.native(mkdtempSync(nodePath.join(tmpdir(), 'ct-act-proj-')));
 mkdirSync(nodePath.join(PROJ, '.git'));
 /** A directory with no marker anywhere up its walk. */
-const NO_ROOT = realpathSync(mkdtempSync(nodePath.join(tmpdir(), 'ct-act-none-')));
+const NO_ROOT = realpathSync.native(mkdtempSync(nodePath.join(tmpdir(), 'ct-act-none-')));
 afterAll(() => {
   rmSync(PROJ, { recursive: true, force: true });
   rmSync(NO_ROOT, { recursive: true, force: true });
 });
 beforeEach(() => resetActivityCaches());
 
-/** realpath of the longest existing prefix, the rest appended. */
+/** realpath (native, like the product: expands Windows 8.3 names) of the longest existing prefix, the rest appended. */
 function realpathOr(p: string): string {
-  const segs = p.split('/');
+  const segs = p.split(/[\\/]/);
   for (let i = segs.length; i > 0; i--) {
-    const head = segs.slice(0, i).join('/') || '/';
+    const head = segs.slice(0, i).join(nodePath.sep) || nodePath.sep;
     try {
-      return [realpathSync(head), ...segs.slice(i)].join('/');
+      // a bare drive ("C:") needs its trailing separator to name the root
+      return nodePath.join(realpathSync.native(i === 1 ? head + nodePath.sep : head), ...segs.slice(i));
     } catch {
       /* shorter prefix */
     }
@@ -304,7 +305,7 @@ describe('activity line builder (hermes 0.6.5 rules; the full contract is activi
       const q = activityQuery(a);
       expect(q, p).not.toMatch(/alice|^\/|\.\./);
       const realTarget = realpathOr(nodePath.join(PROJ, q));
-      expect(realTarget.startsWith(`${PROJ}/`), `${p} → ${q}`).toBe(true);
+      expect(realTarget.startsWith(`${PROJ}${nodePath.sep}`), `${p} → ${q}`).toBe(true);
     }
     expect(sent).toBeGreaterThan(50);
   });

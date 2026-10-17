@@ -72,7 +72,7 @@ class World {
 
   constructor(c: Vector, tmp: string) {
     mkdirSync(tmp, { recursive: true });
-    this.tmp = realpathSync(tmp);
+    this.tmp = realpathSync.native(tmp);
     for (const entry of c.fs) this.create(entry);
   }
 
