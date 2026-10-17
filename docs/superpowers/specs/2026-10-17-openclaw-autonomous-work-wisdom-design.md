@@ -525,6 +525,10 @@ reading had missed:
 9. `resultIds` reuses the adapter's exported `partTexts`.
 10. The dead `deadline` / `now` seam in the activity path is gone.
 
+After the amendments (merged with origin/main @ #66): openclaw 223 tests, core 130, deepseek 290,
+opencode 332, all `tsc` clean, the `ct_ci.py` gates pass; `run_activity.sh` 15/15 again (same three
+queries and blocks) and the AC 9 cache gate cache-safe again.
+
 ## Versioning and docs
 
 - openclaw `0.2.2 → 0.3.0` (`package.json`, `openclaw.plugin.json`, `integration.yaml`), CHANGELOG,
