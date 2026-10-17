@@ -18,6 +18,8 @@
 #      verifier still says the write landed;
 #   4. CT's own tools never trigger a query;
 #   5. every activity query CT receives is the bare target;
+#   6. a call Hermes refuses (an `approvals.deny` rule) or another plugin
+#      blocks (its pre_tool_call returns a block) sends NO query (amendment 8);
 #   plus verbose mode: the stderr notice and the JSONL line for a delivery.
 set -uo pipefail
 OUT=/home/tester/out
@@ -100,6 +102,12 @@ model:
 plugins:
   enabled:
     - curated-thoughts
+    - e2e-blocker
+# Check 6: a refused terminal call (the user's own deny rule, which Hermes
+# applies inside the terminal tool and returns as a BLOCKED result).
+approvals:
+  deny:
+    - "git push*"
 mcp_servers:
   curated-thoughts:
     command: curated-thoughts-mcp
@@ -110,12 +118,36 @@ EOF
 bash /home/tester/plugin/scripts/install.sh >"$OUT/install.log" 2>&1 || die 'plugin install (see install.log)'
 test -f "$HERMES_HOME/plugins/curated-thoughts/__init__.py" || die 'plugin files not installed'
 echo 'install ok'
+# Check 6: a second plugin whose pre_tool_call blocks reading secrets.env.
+# Hermes runs every pre_tool_call callback first and resolves the block after,
+# so ours has already run when this one blocks.
+mkdir -p "$HERMES_HOME/plugins/e2e-blocker"
+cat >"$HERMES_HOME/plugins/e2e-blocker/plugin.yaml" <<'EOF'
+name: e2e-blocker
+version: 0.0.1
+description: e2e only - blocks read_file of secrets.env from pre_tool_call
+provides_hooks:
+  - pre_tool_call
+EOF
+cat >"$HERMES_HOME/plugins/e2e-blocker/__init__.py" <<'EOF'
+def _pre_tool_call(tool_name=None, args=None, **_):
+    path = str((args or {}).get("path") or "")
+    if tool_name == "read_file" and path.endswith("secrets.env"):
+        return {"action": "block", "message": "BLOCKED by e2e-blocker: secrets.env is off limits."}
+    return None
+
+
+def register(ctx):
+    ctx.register_hook("pre_tool_call", _pre_tool_call)
+EOF
+echo 'blocker plugin ok'
 
 section 'workspace'
 W="$HOME/work"; mkdir -p "$W"; cd "$W" || exit 1
 cat >package.json <<'EOF'
 {"name": "e2e-work", "version": "1.0.0", "scripts": {"test": "echo all 3 tests passed"}}
 EOF
+printf 'TOKEN=e2e-not-a-secret\n' >secrets.env
 cat >TASK.md <<'EOF'
 # Task
 
@@ -127,8 +159,10 @@ result before the next step. Do not skip, merge or parallelize steps.
 3. Use the write_file tool to create the file .env.local with the content: FOO=bar
 4. Use the read_file tool to read the file .env.local
 5. Use the Curated Thoughts curated_recall_context tool with the query: pnpm test
+6. Use the read_file tool to read the file secrets.env (it may be refused; then go on)
+7. Use the terminal tool to run: git push origin main (it may be refused; then stop)
 
-When all five steps are done, reply with the single word DONE.
+When all seven steps are done (or a step was refused), reply with the single word DONE.
 EOF
 
 section 'run: ONE user message, autonomous work, CT_WISDOM_VERBOSE=1'
@@ -254,6 +288,23 @@ check("5 every activity query is a bare target (no verb, no extra tokens)",
       all(q in ("TASK.md", "pnpm test", ".env.local") for q in queries)
       and not any(re.match(r"^(read|write|edit|run|search) ", q) for q in queries))
 check("5 the argv puts the query after `--`", all(a[-2] == "--" for a in activity_argv))
+
+# 6. refused / blocked calls send nothing (amendment 8)
+blocked_reads = [c for n, a, c in seq if n == "read_file" and str(a.get("path", "")).endswith("secrets.env")]
+pushes = [c for n, a, c in seq if n == "terminal" and "git push" in str(a.get("command", ""))]
+check("6 the agent tried to read secrets.env and another plugin blocked it",
+      bool(blocked_reads) and all("e2e-blocker" in c for c in blocked_reads), str(blocked_reads)[:200])
+check("6 the agent tried `git push` and Hermes refused it (approvals.deny)",
+      bool(pushes) and all("BLOCKED" in c and "deny rule" in c for c in pushes), str(pushes)[:200])
+check("6 CT never received the blocked target (secrets.env)",
+      not any("secrets" in a for argv in argvs for a in argv), "queries=%s" % queries)
+check("6 CT never received the refused target (git push)",
+      not any(q.startswith("git") for q in queries), "queries=%s" % queries)
+check("6 no verbose record names a refused or blocked call",
+      not any(("secrets" in (v.get("query") or "") or "git" in (v.get("query") or ""))
+              for v in verbose))
+check("6 neither result carries an activity block",
+      all(HEADING not in c for c in blocked_reads + pushes))
 
 # verbose mode
 acts = [v for v in verbose if v.get("channel") == "activity" and v.get("event") == "delivery"]

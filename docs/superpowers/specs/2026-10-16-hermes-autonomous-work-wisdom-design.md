@@ -156,6 +156,9 @@ its public pieces: `match_wisdom`, `has_match_capability`, the shared `_BREAKER`
 
 ### Trigger: prefetch on `pre_tool_call`, deliver in `transform_tool_result`
 
+> Superseded in hermes 0.7.0 by "Amendment 8: approval-gated query": the query now
+> starts in `transform_tool_result`; `pre_tool_call` only claims the step.
+
 - `on_pre_tool_call(**kw)` decides, under one module lock, whether this call starts a CT
   query. It never raises and always returns `None` (a raise would block the tool).
 - The prefetch runs on a daemon thread: `ct_wisdom.discover_ct()` →
@@ -794,6 +797,152 @@ A post-merge review of 0.6.7 found the following:
   string that is sent (`python <top>`). A name in either sends `python` alone. For
   example, `python -m tests.alice_notes` sends `python`, not `python tests`: a name in
   the command line is a signal that the work is about that person.
+  - **Correction (0.7.0):** that example was already true in 0.6.7, whose full-module
+    check gave `python` alone. The check on the sent string was redundant (the sent
+    string is the program plus the module or its top package, both already checked)
+    and is removed in amendment 8.
+
+## Amendment 8: approval-gated query (2026-10-17, hermes 0.7.0)
+
+Supersedes "Trigger: prefetch on `pre_tool_call`" and the budget/breaker bullets of
+"3 s budget and breaker sharing" above. A minor bump, because the timing changes.
+
+### Problem
+
+0.6.x started the CT query in `pre_tool_call`, before Hermes decided whether the call
+may run. A call the user then refused, or another plugin blocked, had already sent its
+bare target to CT and its embedding provider. The OpenCode leg showed that a bare target
+can matter: `secrets.env` alone opened CT's gate at 0.71.
+
+### Verified host order (pin ee8dd6c8, read as data)
+
+The agent loop (`agent/tool_executor.py::_dispatch_authorized_once`) and the direct path
+(`model_tools.py::handle_function_call` → `_pre_dispatch_guards`) run, in this order:
+
+1. tool-request middleware, then the tool-scope check;
+2. **all** `pre_tool_call` callbacks (ours included), in one `invoke_hook` pass
+   (`hermes_cli/plugins.py::_get_pre_tool_call_directive_details`);
+3. only then the directives are resolved: any plugin's `block` wins; an `approve`
+   directive asks the human gate (`_resolve_block_from_details` →
+   `tools.approval.request_tool_approval`), and a denial or timeout blocks;
+4. the pruned-argument check and guardrails (`agent._tool_guardrails.before_call`), then
+   ACP edit approval (`acp_adapter.edit_approval`);
+5. execution. Inside it, `terminal` runs `check_all_command_guards` (hardline floors,
+   the user's `approvals.deny` rules, the dangerous-command prompt, `-q`/cron deny
+   modes), and `write_file`/`patch` run their write guards (sensitive paths, the SSH
+   config approval). A refusal here is **returned as the tool result**, not raised:
+   `terminal` gives `{"output": "", "exit_code": -1, "error": "BLOCKED: …", "status":
+   "blocked"}` (or `"status": "pending_approval"`), file tools give `{"error":
+   "BLOCKED: …"}` or `{"error": "Refusing to write …"}`;
+6. `post_tool_call`, then `transform_tool_result`, for every call that was not blocked
+   in steps 1–4 and did not time out or get cancelled
+   (`_publish_sequential_result`: `if not managed.blocked and not _execution_timed_out`;
+   the direct path returns before the transform on a block).
+
+So `pre_tool_call` cannot know the outcome: approvals and blocks are decided after
+every callback has returned. No hook fires only for approved calls before they execute
+(`pre_approval_request` / `post_approval_response` are observers and fire only for
+flagged calls, so silence there does not mean "approved"). `transform_tool_result` is
+the first point after the decision. It also sees the in-tool refusals of step 5, so it
+must recognize them.
+
+### Design
+
+- **`pre_tool_call` sends nothing.** It builds the activity from the args (for the
+  checks only), skips `empty_id`, `ct_tool`, `no_activity`, `no_ledger`,
+  `breaker_open`, `seen_key` (peek, nothing recorded) as before, and **claims the step
+  slot** for `(session, api_request_id)` with its `tool_call_id`. It records no key and
+  starts nothing. Claiming here keeps 0.6.x's "first call of the step" rule under
+  Hermes's parallel tool batches.
+- **`transform_tool_result` decides and queries.** For the call holding the step claim:
+  1. **Refused** (the result is a JSON object whose `status` is `blocked` or
+     `pending_approval`, or whose `error` is a string starting with `BLOCKED` or
+     `Refusing`): class `refused`. No query; nothing reaches the breaker or verbose
+     mode.
+  2. Unsupported result shape: `unsupported_result`.
+  3. The activity is rebuilt from the transform's `args` (the args that actually ran,
+     after any plugin `modify`); none → `no_activity`.
+  4. No ledger (`no_ledger`) or an open breaker (`breaker_open`).
+  5. The key is admitted now (`seen_key` if another call started it meanwhile).
+  6. The query starts on a worker thread (discover → probe → `ct wisdom match --max 1`,
+     `--exclude` from the ledger at this moment) and the transform waits up to
+     `LIVE_TIMEOUT` (3 s) for it, as OpenCode and OpenClaw do.
+
+  Every skip in 1–5 sends nothing and **releases the step claim**: nothing was spent,
+  so a later sequential call of the same step may claim it. Only a started query (6)
+  uses the step.
+- **Pending claims** are bounded (LRU 256); a claim whose call was blocked in steps 1–4
+  never reaches the transform, so it is evicted, and its key was never recorded.
+
+### Key release (from the DSH review; the core's `finishActivityOutcome.retry`)
+
+A started query that ends without a delivery for any reason other than `zero_hits`
+(CT answered, nothing new) **releases the key**: `budget`, `timeout`, `exit`, `spawn`,
+`parse_error`, `discovery_miss`, `probe_timeout`, `capability_missing`, `no_ledger`
+after the query, `unsupported_result` at splice time, `hook_failed`. A claim of the same
+fact by a parallel call (`claim` returns empty for every candidate) counts as
+`zero_hits`. The step stays
+used, so the retry happens in a later step, never twice in one. `zero_hits` (no match,
+or every hit already in context) keeps the key.
+
+### Budget miss = one breaker failure (the core's `recordActivityBudgetMiss`)
+
+Each started query settles the breaker **exactly once**, under a per-query lock:
+- the worker finishes first: `timeout`/`exit` record one failure, success records a
+  success, anything else records nothing;
+- the transform's 3 s wait runs out first: one failure (`budget`), and the worker's
+  later outcome is ignored for the breaker (a late success no longer resets it, a late
+  timeout is not counted twice).
+A refused or blocked call starts no query, so it counts zero. A Hermes-cancelled or
+timed-out tool never reaches the transform, so it also counts zero.
+
+### Latency trade-off
+
+0.6.x overlapped the CT call with tool execution; the visible delay was
+`max(0, CT latency − tool time)`. Now the transform waits for the whole CT call after the
+tool has run: measured CT latency 0.44–2.07 s (p95 1.22 s), capped at 3 s, plus discovery
+and the capability probe on the first query of the process (both cached afterwards). It
+is paid at most once per model step, and only on a step whose first activity is new for
+the session; every other call passes through at once. That is the cost of never
+sending a refused call's target, the same trade OpenCode (`tool.execute.after`) and
+OpenClaw (the tool-result middleware) made. A user who refuses a call has said "not
+this"; sending its target anyway is the worse failure.
+
+### Other changes in 0.7.0 (0.6.8 review, minor)
+
+- `_python_module` also parses `-m` with an attached module: `-mpytest`, `-umpytest`
+  (`m` ends the flag word; the rest of the word is the module).
+- The redundant name check on the sent string is removed; the full-module check stays.
+  (The only difference: a user name that would span the space between the program and
+  the module, such as a two-word name made of the end of `python` and the start of the
+  package. Each part is still checked against each word.)
+- `_project_package` `stat`s `<top>.py` / `<top>/__init__.py` first and lists the
+  directory only on a hit, to confirm the exact case.
+- `_resolve` computes the homes inside the project root once per root, cached with the
+  root (same key and TTL), instead of on every call.
+
+### Tests
+
+- A call refused by Hermes (terminal `status: blocked`, `pending_approval`, a file
+  tool's `BLOCKED`/`Refusing` error) sends nothing and frees the step; a call another
+  plugin blocks (no transform) sends nothing; a `modify`-ed call sends its final args.
+- `pre_tool_call` alone never runs `ct`.
+- Key release: `budget`/`timeout`/`exit`/`parse_error`/`spawn` free the key (a later
+  step re-queries the same activity), `zero_hits` keeps it; the step stays used.
+- Breaker: a budget miss counts once even when the worker later times out; a late
+  success does not reset it; a refused call counts zero.
+- e2e: Hermes at the pin with a second plugin that blocks `read_file secrets.env` and an
+  `approvals.deny` rule that refuses `git push*`; CT must receive neither target.
+  **Done (2026-10-17): all checks pass**, checks 1–5 unchanged. The agent read
+  `secrets.env` (blocked: `{"error": "BLOCKED by e2e-blocker: …"}`) and ran
+  `git push origin main` (refused: `"status": "blocked"`, the deny-rule message); CT
+  received only `TASK.md`, `pnpm test` and `.env.local`.
+
+### Versioning
+
+hermes `0.6.9 → 0.7.0`. claude-code `0.4.0 → 0.4.1` and docker-agent `0.1.0 → 0.1.1`
+(byte-identical `ct_wisdom_activity.py`): they use only the builder and the renderer,
+so their one behavior change is that `python -mpytest` now sends `python pytest`.
 
 ## Alignment with INTENT.md
 
@@ -827,6 +976,11 @@ A post-merge review of 0.6.7 found the following:
   that cannot be sent safely fails quietly with no query (rule 4). The project-root lookup
   only `stat`s and lists directories on the user's own machine; it writes nothing and runs
   no subprocess, and the brain is still reached only through `ct` (rule 7).
+- **Amendment 8 (approval-gated query):** serves "Why this repo exists" (private,
+  local-first): a call the user refused or a plugin blocked sends nothing. Rule 4 (fail
+  quietly): a budget miss counts once on the shared breaker, a refusal never; the 3 s cap
+  is unchanged. Rule 6: still one query per step. Rule 7: still `ct wisdom match` only.
+  Rule 8: the refusal check reads Hermes's own result envelope, never scores relevance.
 - **Departures:** none. INTENT says every host should reach every step; Hermes now does.
 
 ## Known limitations

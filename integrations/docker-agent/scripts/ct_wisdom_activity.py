@@ -7,20 +7,26 @@ While the agent works on its own between user messages, what it is doing
 (the file it reads or edits, the command it runs, the pattern it searches)
 can trigger one relevant CT fact:
 
-  * `pre_tool_call`: build an activity from the tool's ARGS only (never
-    contents, output, diffs, reasoning or full command lines). If its key is
-    new for the session and no query has started yet for this model step
-    (`api_request_id`), start `ct wisdom match --max 1` on a thread. The query
-    is the bare target (A6 real-gate results): a relative path, a search
-    pattern, or program plus subcommand.
-  * `transform_tool_result` of the same call: join the prefetch within the
-    3 s budget, claim one fact atomically in the in-turn ledger, and splice a
-    marker-first block into the tool result.
+  * `pre_tool_call` SENDS NOTHING (amendment 8: Hermes resolves approvals
+    and other plugins' blocks only after every pre_tool_call callback has
+    returned). It builds an activity from the tool's ARGS only (never
+    contents, output, diffs, reasoning or full command lines) and, if its
+    key is new for the session, claims the model step (`api_request_id`)
+    for this call.
+  * `transform_tool_result` of the claiming call (Hermes let it run): unless
+    the result is Hermes's refusal (`is_refusal`), rebuild the activity from
+    the args that ran, record the key, start `ct wisdom match --max 1` and
+    wait for it within the 3 s budget, claim one fact atomically in the
+    in-turn ledger, and splice a marker-first block into the tool result.
+    The query is the bare target (A6 real-gate results): a relative path, a
+    search pattern, or program plus subcommand.
+  * A started query that delivers nothing for any reason but zero_hits
+    frees its key for a later step; a budget miss is one breaker failure.
 
 Fail-closed classes (no CT call or no delivery, one debug line):
   empty_id, ct_tool, no_activity, no_ledger, breaker_open, seen_key,
-  step_used, discovery_miss, probe_timeout, capability_missing, timeout,
-  spawn, exit, parse_error, budget, zero_hits, unsupported_result,
+  step_used, refused, discovery_miss, probe_timeout, capability_missing,
+  timeout, spawn, exit, parse_error, budget, zero_hits, unsupported_result,
   hook_failed.
 
 Verbose mode (CT_WISDOM_VERBOSE=1, ct_wisdom_verbose) records each delivery
@@ -634,13 +640,19 @@ def project_root(cwd, env=None, start=None):
     `_abs_cwd(cwd, env)` when the caller already has it. Cached (LRU; 30 s,
     or 2 s for "no root") on the raw cwd and HOME / USERPROFILE strings, so
     a hit does no filesystem work; os.path checks only, never a subprocess."""
-    env = _environ(env)
+    return _root_entry(cwd, _environ(env), start)[0]
+
+
+def _root_entry(cwd, env, start=None):
+    """(root, inner): the project root (see project_root) and the homes that
+    lie inside it (computed once per root and cached with it, same key and
+    TTL; `_resolve` never sends a path inside one)."""
     key = (cwd, _env_str(env, "HOME"), _env_str(env, "USERPROFILE"))
-    fresh, root = _root_cache.get(
-        key, lambda r: _ROOT_CACHE_TTL if r else _ROOT_NEGATIVE_TTL)
+    fresh, entry = _root_cache.get(
+        key, lambda e: _ROOT_CACHE_TTL if e[0] else _ROOT_NEGATIVE_TTL)
     if fresh:
-        return root
-    root = None
+        return entry
+    root, inner = None, ()
     start = _abs_cwd(cwd, env) if start is None else start
     if start is not None:
         homes = _homes(env)
@@ -654,8 +666,11 @@ def project_root(cwd, env=None, start=None):
         # real root, against real homes. Failing any, there is no root.
         if root is not None and _blocked(root, homes.real, homes.blocking, homes.user):
             root = None
-    _root_cache.put(key, root)
-    return root
+        if root is not None:
+            inner = tuple(h for h in homes.all if _below(h, root) is not None)
+    entry = (root, inner)
+    _root_cache.put(key, entry)
+    return entry
 
 
 def _digest(text):
@@ -676,7 +691,7 @@ def _resolve(raw, cwd, env, names):
     if path is None or (base is None and not os.path.isabs(path)):
         return None, False, _digest(raw)
     joined = os.path.join(base, path) if base else path
-    root = project_root(cwd, env, start=base) if base else None
+    root, inner = _root_entry(cwd, env, start=base) if base else (None, ())
     if root is None:
         # No realpath needed: nothing is sent, the key only has to differ.
         return None, False, _digest(os.path.normpath(joined))
@@ -687,8 +702,6 @@ def _resolve(raw, cwd, env, names):
         return None, False, local
     # A path inside ANY home that is itself inside the project root (a
     # sandbox HOME included) is never sent: that is someone's home content.
-    homes = _homes(env)
-    inner = [h for h in homes.all if _below(h, root) is not None]
     if any(_same(x, h) or _below(x, h) is not None
            for h in inner for x in (full, os.path.normpath(joined))):
         return None, False, local
@@ -787,12 +800,12 @@ def _listing(directory):
 def _project_package(module, root):
     """The top package of `module` when it is a real package inside the
     project root, else None: a `<top>.py` file, or a `<top>/` directory
-    holding `__init__.py`, at the root or under `src/`. Names are matched
-    case-SENSITIVELY by directory listing, even on case-insensitive
-    filesystems. (Namespace packages, without `__init__.py`, do not count:
-    any folder would qualify and nothing marks them.) Only the top package is
-    ever sent, never a submodule path. Cached per (root, top); "not found"
-    only briefly."""
+    holding `__init__.py`, at the root or under `src/`. Each candidate is
+    `stat`ed first; only on a hit is the exact name confirmed by directory
+    listing (case-SENSITIVE, even on case-insensitive filesystems). (Namespace
+    packages, without `__init__.py`, do not count: any folder would qualify
+    and nothing marks them.) Only the top package is ever sent, never a
+    submodule path. Cached per (root, top); "not found" only briefly."""
     if not root:
         return None
     top = module.split(".", 1)[0]
@@ -801,11 +814,11 @@ def _project_package(module, root):
     if not fresh:
         found = False
         for base in (root, os.path.join(root, "src")):
-            names = _listing(base)
-            if top + ".py" in names and os.path.isfile(os.path.join(base, top + ".py")):
-                found = True
-            elif top in names and "__init__.py" in _listing(os.path.join(base, top)):
-                found = True
+            found = ((os.path.isfile(os.path.join(base, top + ".py"))
+                      and top + ".py" in _listing(base))
+                     or (os.path.isfile(os.path.join(base, top, "__init__.py"))
+                         and top in _listing(base)
+                         and "__init__.py" in _listing(os.path.join(base, top))))
             if found:
                 break
         _module_cache.put((root, top), found)
@@ -815,8 +828,9 @@ def _project_package(module, root):
 def _python_module(rest):
     """The module of `python [flags] -m <module> ...`, or None. Flags are
     parsed alone or combined (`-uB`, `-OO`, `-um`), X/W values attached or
-    separate; any unknown flag, a long option or a non-flag word stops the
-    scan."""
+    separate; `m` takes the rest of its word as the module when there is one
+    (`-mpytest`, `-umpytest`), else the next word. Any unknown flag, a long
+    option or a non-flag word stops the scan."""
     i = 0
     while i < len(rest):
         word = rest[i]
@@ -827,9 +841,9 @@ def _python_module(rest):
         while j < len(chars):
             c = chars[j]
             if c == "m":
-                if j != len(chars) - 1 or i + 1 >= len(rest):
-                    return None
-                return rest[i + 1]
+                if j != len(chars) - 1:
+                    return chars[j + 1:]
+                return rest[i + 1] if i + 1 < len(rest) else None
             if c in _PYTHON_VALUE_CHARS:
                 if j == len(chars) - 1:  # the value is the next word
                     if i + 1 >= len(rest):
@@ -888,13 +902,13 @@ def command_target(command, env=None, names=None, root=None):
     rest = words[1:]
     if is_python:
         module = _python_module(rest)
-        # The name check runs on the full module AND on the exact string
-        # sent: `python -m tests.alice_notes` sends `python` alone.
+        # The name check runs on the full module (the program passed it
+        # already): `python -m tests.alice_notes` sends `python` alone.
         if (module and _MODULE_RE.match(module) and not _credential_shaped(module)
                 and not name_hit(module, names)):
             sent = module if module in _PYTHON_MODULES else _project_package(
                 module, root() if root else None)
-            if sent and not name_hit(program + " " + sent, names):
+            if sent:
                 return program + " " + sent
         return program
     verbs = _SUBCOMMAND_TOOLS.get(program.lower())
@@ -966,8 +980,12 @@ def query_for(activity):
 
 
 class ActivityState:
-    """Per session: recent activity keys (LRU) and model steps that already
-    started a query. One lock; admit() is the whole rate rule."""
+    """Per session: recent activity keys (LRU), the model steps claimed by a
+    call (step id -> tool_call_id) and the steps already reported. One lock.
+
+    Amendment 8: `pre_tool_call` only CLAIMS the step (`claim_step`, which
+    records no key); `transform_tool_result`, after Hermes decided the call
+    may run, records the key (`start_key`) just before the query starts."""
 
     def __init__(self):
         self._lock = threading.Lock()
@@ -983,9 +1001,10 @@ class ActivityState:
         self._sessions.move_to_end(session_id)
         return state
 
-    def admit(self, session_id, api_request_id, key):
-        """None when this call may start the step's query (and records it);
-        else the failure class. A rejected call changes nothing."""
+    def claim_step(self, session_id, api_request_id, key, tool_call_id):
+        """None when this call claims the step (recorded with its
+        tool_call_id; the key is NOT recorded); else the failure class. A
+        rejected call changes nothing but the key's recency."""
         with self._lock:
             keys, steps, _ = self._state(session_id)
             if api_request_id in steps:
@@ -993,16 +1012,41 @@ class ActivityState:
             if key in keys:
                 keys.move_to_end(key)
                 return "seen_key"
-            keys[key] = True
-            while len(keys) > RECENT_KEYS_MAX:
-                keys.popitem(last=False)
-            steps[api_request_id] = True
+            steps[api_request_id] = tool_call_id
             while len(steps) > STEP_IDS_MAX:
                 steps.popitem(last=False)
             return None
 
+    def release_step(self, session_id, api_request_id, tool_call_id):
+        """Free the step, only when `tool_call_id` holds it (nothing was sent,
+        so a later call of the step may claim it)."""
+        with self._lock:
+            state = self._sessions.get(session_id)
+            if state is not None and state[1].get(api_request_id) == tool_call_id:
+                del state[1][api_request_id]
+
+    def start_key(self, session_id, key):
+        """None when the key is new (and records it); else "seen_key"."""
+        with self._lock:
+            keys, _, _ = self._state(session_id)
+            if key in keys:
+                keys.move_to_end(key)
+                return "seen_key"
+            keys[key] = True
+            while len(keys) > RECENT_KEYS_MAX:
+                keys.popitem(last=False)
+            return None
+
+    def release_key(self, session_id, key):
+        """Forget a key whose query never got a genuine answer, so a LATER
+        step can retry it (the step stays used)."""
+        with self._lock:
+            state = self._sessions.get(session_id)
+            if state is not None:
+                state[0].pop(key, None)
+
     def peek(self, session_id, api_request_id, key):
-        """What admit() would answer, without recording anything."""
+        """What claim_step() would answer, without recording anything."""
         with self._lock:
             keys, steps, _ = self._state(session_id)
             if api_request_id in steps:
@@ -1028,7 +1072,7 @@ class ActivityState:
 _STATE = ActivityState()
 
 # ---------------------------------------------------------------------------
-# prefetch
+# step claims (pre_tool_call) and the query (transform_tool_result)
 # ---------------------------------------------------------------------------
 
 _clock = time.monotonic
@@ -1038,9 +1082,14 @@ def _spawn(target):
     threading.Thread(target=target, name="ct-wisdom-activity", daemon=True).start()
 
 
+# The step a call claimed in pre_tool_call; nothing is sent until its
+# transform_tool_result, i.e. until Hermes let the call run.
+_Claim = namedtuple("_Claim", "session_id api_request_id")
+
+
 class _Prefetch:
     __slots__ = ("session_id", "api_request_id", "tool_name", "activity", "query",
-                 "exclude", "deadline", "done", "result", "failure")
+                 "exclude", "deadline", "done", "result", "failure", "lock", "settled")
 
     def __init__(self, session_id, api_request_id, tool_name, activity, exclude):
         self.session_id = session_id
@@ -1053,6 +1102,8 @@ class _Prefetch:
         self.done = threading.Event()
         self.result = None
         self.failure = None
+        self.lock = threading.Lock()
+        self.settled = False
 
 
 _pending = OrderedDict()
@@ -1065,8 +1116,8 @@ def pending_count():
 
 
 def reset_state():
-    """TEST-ONLY: forget keys, steps, pending prefetches, the root, *.sln and
-    homes caches and the pwd lookup."""
+    """TEST-ONLY: forget keys, steps, pending claims, the root, *.sln, homes
+    and module caches and the pwd lookup."""
     _STATE.reset()
     for cache in (_root_cache, _sln_cache, _homes_cache, _module_cache):
         cache.clear()
@@ -1075,9 +1126,23 @@ def reset_state():
         _pending.clear()
 
 
+def _settle(p, outcome):
+    """Record one query's outcome on the shared breaker EXACTLY once:
+    "failure", "success" or None (nothing). Whoever comes first wins: the
+    worker with CT's answer, or the transform when the budget ran out (one
+    failure, the core's recordActivityBudgetMiss); the other is ignored."""
+    with p.lock:
+        if p.settled:
+            return
+        p.settled = True
+    if outcome == "failure":
+        ct_wisdom_live._BREAKER.record_failure()
+    elif outcome == "success":
+        ct_wisdom_live._BREAKER.record_success()
+
+
 def _run_prefetch(p):
-    """Discovery, probe and match for one prefetch (worker thread). Records
-    the outcome on the shared breaker exactly as the user-turn path does."""
+    """Discovery, probe and match for one query (worker thread)."""
     try:
         path, dclass = ct_wisdom.discover_ct()
         if path is None:
@@ -1091,19 +1156,25 @@ def _run_prefetch(p):
             path, p.query, ACTIVITY_MAX_PER_STEP, p.exclude)
         if rclass is not None:
             if rclass in ("timeout", "exit"):
-                ct_wisdom_live._BREAKER.record_failure()
+                _settle(p, "failure")
             elif rclass == "spawn":
                 ct_wisdom.reset_discovery_cache()
                 ct_wisdom_live.reset_capability_cache()
             p.failure = rclass
             return
-        ct_wisdom_live._BREAKER.record_success()
+        _settle(p, "success")
         p.result = result
     except Exception:
         logger.debug("wisdom-activity: prefetch failed", exc_info=True)
         p.failure = "hook_failed"
     finally:
+        _settle(p, None)
         p.done.set()
+
+
+def _wait(p):
+    """Wait for the query within what is left of its budget; True when done."""
+    return p.done.wait(max(0.0, p.deadline - _clock()))
 
 
 def _skip(session_id, failure_class, record=False, **detail):
@@ -1124,7 +1195,7 @@ def _nonempty(value):
 
 def on_pre_tool_call(**kwargs):
     """Hermes `pre_tool_call` callback. Always returns None (never blocks,
-    never modifies args); never raises."""
+    never modifies args); never raises; never sends anything to CT."""
     try:
         _pre_tool_call(kwargs.get("tool_name"), kwargs.get("args"),
                        kwargs.get("session_id"), kwargs.get("tool_call_id"),
@@ -1132,6 +1203,23 @@ def on_pre_tool_call(**kwargs):
     except Exception:
         logger.debug("wisdom-activity: pre hook failed", exc_info=True)
     return None
+
+
+def _blocked_report(session_id, api_request_id, activity, blocked):
+    """A would-be trigger that cannot run (no ledger, open breaker): verbose
+    mode hears of it once per step. Nothing is recorded in the key tracker."""
+    report = (_STATE.peek(session_id, api_request_id, activity.key) is None
+              and _STATE.first_report(session_id, api_request_id))
+    return _skip(session_id, blocked, record=report, query=query_for(activity),
+                 activity=activity.line)
+
+
+def _gate_blocked(session_id):
+    """"no_ledger" | "breaker_open" | None, and the ledger."""
+    ledger = ct_ledger.LEDGER_CACHE.get(session_id)
+    if ledger is None:
+        return "no_ledger", None
+    return ("breaker_open" if ct_wisdom_live._BREAKER.is_open() else None), ledger
 
 
 def _pre_tool_call(tool_name, args, session_id, tool_call_id, api_request_id, task_id=None):
@@ -1142,26 +1230,16 @@ def _pre_tool_call(tool_name, args, session_id, tool_call_id, api_request_id, ta
     activity = activity_for(tool_name, args, task_id=task_id)
     if activity is None or not query_for(activity):
         return _skip(session_id, "no_activity")
-    ledger = ct_ledger.LEDGER_CACHE.get(session_id)
-    blocked = "no_ledger" if ledger is None else (
-        "breaker_open" if ct_wisdom_live._BREAKER.is_open() else None)
+    blocked, _ = _gate_blocked(session_id)
     if blocked is not None:
-        # A would-be trigger that cannot run: verbose mode hears of it once
-        # per step; nothing is recorded in the key tracker.
-        report = (_STATE.peek(session_id, api_request_id, activity.key) is None
-                  and _STATE.first_report(session_id, api_request_id))
-        return _skip(session_id, blocked, record=report, query=query_for(activity),
-                     activity=activity.line)
-    refused = _STATE.admit(session_id, api_request_id, activity.key)
+        return _blocked_report(session_id, api_request_id, activity, blocked)
+    refused = _STATE.claim_step(session_id, api_request_id, activity.key, tool_call_id)
     if refused is not None:
         return _skip(session_id, refused)
-    p = _Prefetch(session_id, api_request_id, tool_name, activity,
-                  sorted(ledger)[:ct_wisdom_live.EXCLUDE_MAX])
     with _pending_lock:
-        _pending[tool_call_id] = p
+        _pending[tool_call_id] = _Claim(session_id, api_request_id)
         while len(_pending) > PENDING_MAX:
             _pending.popitem(last=False)
-    _spawn(lambda: _run_prefetch(p))
     return None
 
 
@@ -1285,30 +1363,94 @@ def on_transform_tool_result(**kwargs):
     None keeps it. Never raises."""
     try:
         return _transform(kwargs.get("result"), kwargs.get("session_id"),
-                          kwargs.get("tool_call_id"))
+                          kwargs.get("tool_call_id"), kwargs.get("tool_name"),
+                          kwargs.get("args"), kwargs.get("task_id"))
     except Exception:
         logger.debug("wisdom-activity: transform failed", exc_info=True)
         return None
 
 
-def _transform(result, session_id, tool_call_id):
+# Hermes's own refusal envelopes (pin ee8dd6c8): the terminal tool's
+# `_error_json(..., status="blocked" | "pending_approval")` for a denied or
+# unanswered approval, a deny rule or a hardline floor; the file tools'
+# `tool_error("BLOCKED: ...")` / `tool_error("Refusing to write ...")`.
+_REFUSED_STATUSES = frozenset({"blocked", "pending_approval"})
+_REFUSED_ERROR_PREFIXES = ("BLOCKED", "Refusing")
+
+
+def is_refusal(result):
+    """True when the tool result is Hermes refusing the call (the call did
+    not run, or ran nothing the user approved): nothing may be sent."""
+    if not isinstance(result, str):
+        return False
+    try:
+        data = json.loads(result)
+    except ValueError:
+        return False
+    if not isinstance(data, dict):
+        return False
+    if data.get("status") in _REFUSED_STATUSES:
+        return True
+    error = data.get("error")
+    return isinstance(error, str) and error.lstrip().startswith(_REFUSED_ERROR_PREFIXES)
+
+
+def _transform(result, session_id, tool_call_id, tool_name=None, args=None, task_id=None):
     if not _nonempty(tool_call_id):
         return None
     with _pending_lock:
-        p = _pending.get(tool_call_id)
-        if p is None or p.session_id != session_id:
+        claim = _pending.get(tool_call_id)
+        if claim is None or claim.session_id != session_id:
             return None
         del _pending[tool_call_id]
-    base = {"query": p.query, "activity": p.activity.line}
+    api_request_id = claim.api_request_id
+
+    def free(failure_class):
+        # Nothing was sent: the step is free for a later call of this step.
+        _STATE.release_step(session_id, api_request_id, tool_call_id)
+        return _skip(session_id, failure_class)
+
+    # Hermes decided by now (approvals, other plugins' blocks, guardrails):
+    # a refusal sends nothing (amendment 8).
+    if is_refusal(result):
+        return free("refused")
     if _splice_mode(result) is None:
-        return _skip(session_id, "unsupported_result", record=True, **base)
-    if not p.done.wait(max(0.0, p.deadline - _clock())):
-        return _skip(session_id, "budget", record=True, **base)
+        return free("unsupported_result")
+    # The args that actually ran (after any plugin `modify`).
+    activity = activity_for(tool_name, args, task_id=task_id)
+    if activity is None or not query_for(activity):
+        return free("no_activity")
+    blocked, ledger = _gate_blocked(session_id)
+    if blocked is not None:
+        _STATE.release_step(session_id, api_request_id, tool_call_id)
+        return _blocked_report(session_id, api_request_id, activity, blocked)
+    refused = _STATE.start_key(session_id, activity.key)
+    if refused is not None:
+        return free(refused)
+    p = _Prefetch(session_id, api_request_id, tool_name, activity,
+                  sorted(ledger)[:ct_wisdom_live.EXCLUDE_MAX])
+    _spawn(lambda: _run_prefetch(p))
+    return _deliver(p, result)
+
+
+def _deliver(p, result):
+    """Join the started query and deliver one fact, or skip. Any non-delivery
+    other than zero_hits releases the key (the step stays used)."""
+    session_id = p.session_id
+    base = {"query": p.query, "activity": p.activity.line}
+
+    def miss(failure_class):
+        _STATE.release_key(session_id, p.activity.key)
+        return _skip(session_id, failure_class, record=True, **base)
+
+    if not _wait(p):
+        _settle(p, "failure")  # a budget miss is one breaker failure
+        return miss("budget")
     if p.failure is not None:
-        return _skip(session_id, p.failure, record=True, **base)
+        return miss(p.failure)
     ledger = ct_ledger.LEDGER_CACHE.get(session_id)
     if ledger is None:
-        return _skip(session_id, "no_ledger", record=True, **base)
+        return miss("no_ledger")
     for item, superseded in render_candidates(
             p.result["entries"], p.result["corrections"], ledger):
         block = render_activity_block(item, superseded, p.activity)
@@ -1316,10 +1458,10 @@ def _transform(result, session_id, tool_call_id):
             continue
         out = splice(result, block)
         if out is None:
-            return _skip(session_id, "unsupported_result", record=True, **base)
+            return miss("unsupported_result")
         claimed = ct_ledger.LEDGER_CACHE.claim(session_id, [item["id"]])
         if claimed is None:
-            return _skip(session_id, "no_ledger", record=True, **base)
+            return miss("no_ledger")
         if not claimed:
             continue  # another tool thread delivered it first
         logger.debug("wisdom-activity: deliver session=%s ids=%s", session_id, item["id"])
@@ -1330,8 +1472,9 @@ def _transform(result, session_id, tool_call_id):
             "tool_name": p.tool_name, "api_request_id": p.api_request_id,
         })
         return out
-    # Nothing new survived: report against the ledger as it is now, including
-    # anything a concurrent tool thread just claimed.
+    # Nothing new survived (CT answered): the key stays seen. Report against
+    # the ledger as it is now, including anything a concurrent tool thread
+    # just claimed.
     after = ct_ledger.LEDGER_CACHE.get(session_id) or ledger
     return _skip(session_id, "zero_hits", record=True, result=p.result,
                  ledger=sorted(after), **base)

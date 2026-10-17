@@ -706,6 +706,9 @@ class TestActivityLine(unittest.TestCase):
                        ("python -X", "python"), ("python -m", "python"),
                        ("git.exe status", "git status"), ("GIT.EXE status", "GIT status"),
                        ("python3.exe -m pytest", "python3 pytest"),
+                       ("python -mpytest", "python pytest"),
+                       ("python3 -umpytest -q", "python3 pytest"),
+                       ("python -mnothere", "python"),
                        ("python3.11.2 -m pytest", None), ("run.ps1", None)):
             self.assertEqual(act.command_target(cmd, {}, frozenset()), q, cmd)
         self.assertIsNone(act._PYTHON_RE.match("python3.11.2"))
@@ -733,7 +736,9 @@ class TestActivityLine(unittest.TestCase):
                              (["-i", "-R", "-x", "-m", "x"], "x"), (["-um", "x"], "x"),
                              (["-BXdev", "-m", "x"], "x"),
                              (["--version", "-m", "x"], None), (["-c", "code", "-m", "x"], None),
-                             (["-Z", "-m", "x"], None), (["-mu", "x"], None), (["-X"], None),
+                             (["-mpytest"], "pytest"), (["-umpytest", "-q"], "pytest"),
+                             (["-BOmhttp.server"], "http.server"), (["-mu", "x"], "u"),
+                             (["-Z", "-m", "x"], None), (["-X"], None),
                              (["-m"], None), (["script.py", "-m", "x"], None), ([], None),
                              (["-", "-m", "x"], None)):
             self.assertEqual(pm(rest), module, rest)
@@ -785,10 +790,49 @@ class TestActivityLine(unittest.TestCase):
         self.assertIsNone(n(".home/Documents/taxes.pdf", repo, env))
 
     def test_blocked_requires_user_homes(self):
-        import inspect
-        for fn in (act._blocked, act._find_root):
-            self.assertIs(inspect.signature(fn).parameters["user"].default,
-                          inspect.Parameter.empty, fn.__name__)
+        """No fail-open default: calling without `user` is an error, and a
+        real user home inside a candidate root blocks it even at a sandbox
+        path, while the same folder as a plain sandbox HOME does not."""
+        base = temp_base()
+        repo = os.path.join(base, "srv", "repo")
+        home = os.path.join(repo, ".home")
+        make_tree(repo, [".git/", ".home/", "src/"])
+        with self.assertRaises(TypeError):
+            act._blocked(repo, [], [home])
+        with self.assertRaises(TypeError):
+            act._find_root(os.path.join(repo, "src"), [], [home])
+        self.assertFalse(act._blocked(repo, [home], [home], []))
+        self.assertTrue(act._blocked(repo, [home], [home], [home]))
+        self.assertEqual(act._find_root(os.path.join(repo, "src"), [home], [home], []), repo)
+        self.assertIsNone(act._find_root(os.path.join(repo, "src"), [home], [home], [home]))
+
+    def test_project_package_stats_before_listing(self):
+        base = temp_base()
+        make_tree(base, ["pkg/__init__.py", "Tests/__init__.py"])
+        listed = []
+        orig = os.listdir
+        os.listdir = lambda p: listed.append(p) or orig(p)
+        self.addCleanup(setattr, os, "listdir", orig)
+        self.assertIsNone(act._project_package("nothere", base))
+        self.assertEqual(listed, [], "a miss lists nothing")
+        self.assertEqual(act._project_package("pkg.sub", base), "pkg")
+        self.assertTrue(listed, "a hit confirms the exact case by listing")
+        if act._OS.case_insensitive:
+            self.assertIsNone(act._project_package("tests", base))
+
+    def test_inner_homes_computed_once_per_root(self):
+        base = temp_base()
+        repo = os.path.join(base, "srv", "repo")
+        make_tree(repo, [".git/", ".home/", "src/"])
+        env = {"USER": "svc", "HOME": os.path.join(repo, ".home")}
+        calls = []
+        orig = act._homes
+        act._homes = lambda e: calls.append(1) or orig(e)
+        self.addCleanup(setattr, act, "_homes", orig)
+        for name in ("a.py", "b.py", "c.py"):
+            self.assertEqual(act.normalize_path("src/" + name, repo, env), "src/" + name)
+        self.assertIsNone(act.normalize_path(".home/x", repo, env))
+        self.assertEqual(len(calls), 1, "homes looked up once for the root and its inner list")
 
     def test_ttl_cache(self):
         now = [0.0]
@@ -931,35 +975,57 @@ class TestActivityState(unittest.TestCase):
     def key(self, tool, path):
         return act.activity_for(tool, {"path": path}, cwd=PROJ).key
 
+    @staticmethod
+    def admit(st, sid, req, key, call="c"):
+        """Claim the step, then start the key (what the two hooks do)."""
+        refused = st.claim_step(sid, req, key, call)
+        return refused if refused is not None else st.start_key(sid, key)
+
     def test_one_start_per_step(self):
         st = act.ActivityState()
-        self.assertIsNone(st.admit("s", "t:api:1", self.key("read_file", "a.py")))
-        self.assertEqual(st.admit("s", "t:api:1", self.key("read_file", "b.py")), "step_used")
-        self.assertIsNone(st.admit("s", "t:api:2", self.key("read_file", "b.py")))
+        self.assertIsNone(self.admit(st, "s", "t:api:1", self.key("read_file", "a.py")))
+        self.assertEqual(self.admit(st, "s", "t:api:1", self.key("read_file", "b.py")),
+                         "step_used")
+        self.assertIsNone(self.admit(st, "s", "t:api:2", self.key("read_file", "b.py")))
 
     def test_seen_key_and_file_fold(self):
         st = act.ActivityState()
-        self.assertIsNone(st.admit("s", "r1", self.key("read_file", "a.py")))
-        self.assertEqual(st.admit("s", "r2", self.key("patch", "a.py")), "seen_key")
-        self.assertEqual(st.admit("s", "r3", self.key("write_file", "a.py")), "seen_key")
+        self.assertIsNone(self.admit(st, "s", "r1", self.key("read_file", "a.py")))
+        self.assertEqual(self.admit(st, "s", "r2", self.key("patch", "a.py")), "seen_key")
+        self.assertEqual(self.admit(st, "s", "r3", self.key("write_file", "a.py")), "seen_key")
         # a rejected key does not consume the step
-        self.assertIsNone(st.admit("s", "r3", self.key("read_file", "c.py")))
+        self.assertIsNone(self.admit(st, "s", "r3", self.key("read_file", "c.py")))
 
     def test_lru_and_sessions(self):
         st = act.ActivityState()
         for i in range(act.RECENT_KEYS_MAX + 1):
-            self.assertIsNone(st.admit("s", "r%d" % i, self.key("read_file", "f%d.py" % i)))
-        self.assertIsNone(st.admit("s", "rx", self.key("read_file", "f0.py")))  # evicted
-        self.assertIsNone(st.admit("other", "r1", self.key("read_file", "f1.py")))
+            self.assertIsNone(self.admit(st, "s", "r%d" % i, self.key("read_file", "f%d.py" % i)))
+        self.assertIsNone(self.admit(st, "s", "rx", self.key("read_file", "f0.py")))  # evicted
+        self.assertIsNone(self.admit(st, "other", "r1", self.key("read_file", "f1.py")))
 
     def test_run_and_search_keys_distinct_from_files(self):
         st = act.ActivityState()
-        self.assertIsNone(st.admit("s", "r1", act.activity_for(
+        self.assertIsNone(self.admit(st, "s", "r1", act.activity_for(
             "terminal", {"command": "make test"}, cwd=PROJ).key))
-        self.assertIsNone(st.admit("s", "r2", act.activity_for(
+        self.assertIsNone(self.admit(st, "s", "r2", act.activity_for(
             "search_files", {"pattern": "make test"}, cwd=PROJ).key))
-        self.assertEqual(st.admit("s", "r3", act.activity_for(
+        self.assertEqual(self.admit(st, "s", "r3", act.activity_for(
             "terminal", {"command": "make test -j4"}, cwd=PROJ).key), "seen_key")
+
+    def test_claim_records_no_key_and_release(self):
+        st = act.ActivityState()
+        k = self.key("read_file", "a.py")
+        self.assertIsNone(st.claim_step("s", "r1", k, "c1"))
+        self.assertIsNone(st.peek("s", "r2", k), "a claim alone records no key")
+        self.assertEqual(st.claim_step("s", "r1", k, "c2"), "step_used")
+        st.release_step("s", "r1", "c2")  # not the owner: nothing changes
+        self.assertEqual(st.claim_step("s", "r1", k, "c3"), "step_used")
+        st.release_step("s", "r1", "c1")
+        self.assertIsNone(st.claim_step("s", "r1", k, "c3"))
+        self.assertIsNone(st.start_key("s", k))
+        self.assertEqual(st.start_key("s", k), "seen_key")
+        st.release_key("s", k)
+        self.assertIsNone(st.start_key("s", k))
 
 
 # ---------------------------------------------------------------------------
@@ -1221,16 +1287,26 @@ class TestFailClosed(Harness):
         self.assertIsNone(self.post(READ_RESULT, call="c2", req="r2", args={"path": "b.py"}))
         self.assertEqual(self.calls, [])
 
-    def test_budget_exceeded(self):
-        ct_ledger.LEDGER_CACHE.put("s1", set())
+    def late_spawn(self):
+        """_spawn that does not run the worker and moves the clock past the
+        budget (so the transform's wait is zero); returns the held targets."""
         started = []
-        act._spawn = lambda target: started.append(target)  # never runs
         now = [100.0]
         orig_clock = act._clock
         act._clock = lambda: now[0]
         self.addCleanup(setattr, act, "_clock", orig_clock)
+
+        def spawn(target):
+            started.append(target)
+            now[0] += ct_wisdom_live.LIVE_TIMEOUT + 0.01
+
+        act._spawn = spawn
+        return started
+
+    def test_budget_exceeded(self):
+        ct_ledger.LEDGER_CACHE.put("s1", set())
+        started = self.late_spawn()
         self.pre()
-        now[0] += ct_wisdom_live.LIVE_TIMEOUT + 0.01
         self.assertIsNone(self.post(READ_RESULT))
         started[0]()  # the late thread finishes: its result is discarded
         self.assertEqual(ct_ledger.LEDGER_CACHE.get("s1"), set())
@@ -1297,6 +1373,221 @@ class TestParallelThreads(Harness):
             t.join()
         self.assertEqual(len(self.calls), 1)
         self.assertEqual(sum(1 for o in outs if o is not None), 1)
+
+
+# ---------------------------------------------------------------------------
+# Amendment 8: approval-gated query, key release, budget miss on the breaker
+# ---------------------------------------------------------------------------
+
+# Hermes's in-tool refusals at the pin (ee8dd6c8): tools/terminal_tool.py
+# (_error_json, status blocked / pending_approval) and the file write guards
+# (tool_error with a BLOCKED / Refusing message).
+REFUSALS = (
+    json.dumps({"output": "", "exit_code": -1, "error": "BLOCKED: this command matches the "
+                "user-defined deny rule 'git push*'.", "status": "blocked"}),
+    json.dumps({"output": "", "exit_code": -1, "error": "BLOCKED: User denied this command.",
+                "status": "blocked", "user_summary": "denied"}),
+    json.dumps({"output": "", "exit_code": -1, "error": "", "status": "pending_approval",
+                "approval_pending": True, "command": "git push", "description": "push"}),
+    json.dumps({"error": "BLOCKED: write to SSH config file(s) (x) denied."}),
+    json.dumps({"error": "Refusing to write to sensitive system path: /etc/hosts"}),
+)
+GIT_PUSH = {"command": "git push origin main"}
+
+
+class CountingBreaker(ct_wisdom_live.Breaker):
+    def __init__(self):
+        super().__init__()
+        self.failures = 0
+        self.successes = 0
+
+    def record_failure(self):
+        self.failures += 1
+        super().record_failure()
+
+    def record_success(self):
+        self.successes += 1
+        super().record_success()
+
+
+class TestApprovalGate(Harness):
+    def setUp(self):
+        super().setUp()
+        self.breaker = CountingBreaker()
+        ct_wisdom_live._BREAKER = self.breaker
+        ct_ledger.LEDGER_CACHE.put("s1", set())
+
+    def test_pre_tool_call_alone_never_runs_ct(self):
+        discovered = []
+        ct_wisdom.discover_ct = lambda env=None: discovered.append(1) or ("/fake/ct", None)
+        self.pre()
+        self.pre(tool="terminal", args=GIT_PUSH, call="c2", req="r2")
+        self.assertEqual((self.calls, discovered, act.pending_count()), ([], [], 2))
+
+    def test_refused_call_sends_nothing_and_frees_the_step(self):
+        for result in REFUSALS:
+            with self.subTest(result=result):
+                act.reset_state()
+                ct_ledger.LEDGER_CACHE.put("s1", set())
+                self.calls.clear()
+                self.deliveries.clear()
+                self.pre(tool="terminal", args=GIT_PUSH)
+                self.assertIsNone(self.post(result, tool="terminal", args=GIT_PUSH))
+                self.assertEqual(self.calls, [])
+                self.assertEqual(self.deliveries, [])
+                # The step is free again: a later call of the same step queries.
+                self.pre(call="c2")
+                self.assertIsNotNone(self.post(READ_RESULT, call="c2"))
+                self.assertEqual([c["text"] for c in self.calls], ["src/x.py"])
+                # The refused key was never recorded: it queries when it runs.
+                self.pre(tool="terminal", args=GIT_PUSH, call="c3", req="r2")
+                self.post("pushed", tool="terminal", args=GIT_PUSH, call="c3", req="r2")
+                self.assertEqual([c["text"] for c in self.calls], ["src/x.py", "git push"])
+        self.assertEqual(self.breaker.failures, 0)
+
+    def test_refusal_shapes(self):
+        for result in REFUSALS:
+            self.assertTrue(act.is_refusal(result), result)
+        for result in (READ_RESULT, "BLOCKED plain text", "{}", json.dumps({"error": "boom"}),
+                       json.dumps({"output": "x", "exit_code": 1, "error": "", "status": "ok"}),
+                       json.dumps({"error": {"BLOCKED": 1}}), "[1]", None, 42):
+            self.assertFalse(act.is_refusal(result), result)
+
+    def test_blocked_call_never_reaching_transform_sends_nothing(self):
+        """A plugin block, the approve gate's denial, guardrails or ACP edit
+        approval stop the call before execution: Hermes runs no transform."""
+        self.pre(tool="terminal", args=GIT_PUSH)
+        self.assertEqual(self.calls, [])
+        # Nothing was recorded for the key: the same activity can query later.
+        self.pre(tool="terminal", args=GIT_PUSH, call="c2", req="r2")
+        self.post("pushed", tool="terminal", args=GIT_PUSH, call="c2", req="r2")
+        self.assertEqual([c["text"] for c in self.calls], ["git push"])
+        self.assertEqual(self.breaker.failures, 0)
+
+    def test_query_uses_the_args_that_ran(self):
+        """A plugin `modify` directive rewrites args after our pre hook."""
+        self.pre(args={"path": "src/x.py"})
+        self.post(READ_RESULT, args={"path": "src/y.py"})
+        self.assertEqual([c["text"] for c in self.calls], ["src/y.py"])
+
+    def test_modified_to_no_activity_frees_the_step(self):
+        self.pre(args={"path": "src/x.py"})
+        self.assertIsNone(self.post(READ_RESULT, args={"path": "/elsewhere/x"}))
+        self.pre(call="c2", args={"path": "src/z.py"})
+        self.post(READ_RESULT, call="c2", args={"path": "src/z.py"})
+        self.assertEqual([c["text"] for c in self.calls], ["src/z.py"])
+
+    def test_breaker_open_at_transform_sends_nothing(self):
+        self.pre()
+        for _ in range(ct_wisdom_live.BREAKER_FAILS):
+            ct_wisdom_live._BREAKER.record_failure()
+        self.assertIsNone(self.post(READ_RESULT))
+        self.assertEqual(self.calls, [])
+
+
+class TestKeyRelease(Harness):
+    def setUp(self):
+        super().setUp()
+        ct_ledger.LEDGER_CACHE.put("s1", set())
+
+    def step(self, req, call, path="src/x.py"):
+        args = {"path": path}
+        self.pre(call=call, req=req, args=args)
+        return self.post(READ_RESULT, call=call, req=req, args=args)
+
+    def assert_released(self, why):
+        self.assertIsNone(self.step("r1", "c1"), why)
+        n = len(self.calls)
+        # The step stays used: another call of r1 does not query.
+        self.assertIsNone(self.step("r1", "c1b", path="src/other.py"), why)
+        self.assertEqual(len(self.calls), n, why)
+        # The key is free: a later step retries the same activity.
+        self.match_result = ({"entries": [item("f1")], "corrections": []}, None)
+        act._spawn = lambda target: target()
+        self.assertIsNotNone(self.step("r2", "c2"), why)
+
+    def test_ct_failures_release_the_key(self):
+        for cls in ("timeout", "exit", "parse_error", "spawn"):
+            with self.subTest(cls=cls):
+                act.reset_state()
+                ct_ledger.LEDGER_CACHE.put("s1", set())
+                ct_wisdom_live._BREAKER = ct_wisdom_live.Breaker()
+                self.match_result = (None, cls)
+                self.assert_released(cls)
+
+    def test_budget_releases_the_key(self):
+        started = []
+        act._spawn = lambda target: started.append(target)
+        orig_wait = act._wait
+        act._wait = lambda p: False  # the budget ran out
+        self.addCleanup(setattr, act, "_wait", orig_wait)
+        self.assertIsNone(self.step("r1", "c1"))
+        act._wait = orig_wait
+        self.assert_released("budget")
+
+    def test_discovery_and_capability_misses_release_the_key(self):
+        orig = ct_wisdom.discover_ct
+        ct_wisdom.discover_ct = lambda env=None: (None, "discovery_miss")
+        self.assertIsNone(self.step("r1", "c1"))
+        ct_wisdom.discover_ct = orig
+        self.assertIsNotNone(self.step("r2", "c2"))
+
+    def test_zero_hits_keeps_the_key(self):
+        ct_ledger.LEDGER_CACHE.put("s1", {"f1"})
+        self.assertIsNone(self.step("r1", "c1"))
+        self.assertIsNone(self.step("r2", "c2"))
+        self.assertEqual(len(self.calls), 1, "seen_key: no second query")
+
+
+class TestBudgetBreaker(Harness):
+    """recordActivityBudgetMiss: a budget miss counts as ONE breaker failure;
+    a refused or never-run call counts zero."""
+
+    def setUp(self):
+        super().setUp()
+        self.breaker = CountingBreaker()
+        ct_wisdom_live._BREAKER = self.breaker
+        ct_ledger.LEDGER_CACHE.put("s1", set())
+        self.started = []
+        act._spawn = lambda target: self.started.append(target)
+        orig_wait = act._wait
+        act._wait = lambda p: False
+        self.addCleanup(setattr, act, "_wait", orig_wait)
+
+    def test_budget_miss_counts_once_even_if_ct_later_times_out(self):
+        self.match_result = (None, "timeout")
+        self.pre()
+        self.assertIsNone(self.post(READ_RESULT))
+        self.assertEqual(self.breaker.failures, 1)
+        self.started[0]()  # the worker's own timeout arrives late
+        self.assertEqual((self.breaker.failures, self.breaker.successes), (1, 0))
+
+    def test_late_success_does_not_reset_the_miss(self):
+        self.pre()
+        self.post(READ_RESULT)
+        self.started[0]()
+        self.assertEqual((self.breaker.failures, self.breaker.successes), (1, 0))
+
+    def test_three_budget_misses_open_the_shared_breaker(self):
+        for i in range(ct_wisdom_live.BREAKER_FAILS):
+            args = {"path": "f%d.py" % i}
+            self.pre(call="c%d" % i, req="r%d" % i, args=args)
+            self.post(READ_RESULT, call="c%d" % i, req="r%d" % i, args=args)
+        self.assertTrue(ct_wisdom_live._BREAKER.is_open())
+
+    def test_worker_first_records_its_own_outcome_once(self):
+        act._wait = lambda p: p.done.wait(0)
+        act._spawn = lambda target: target()
+        self.match_result = (None, "timeout")
+        self.pre()
+        self.post(READ_RESULT)
+        self.assertEqual(self.breaker.failures, 1)
+
+    def test_refused_and_unrun_calls_count_zero(self):
+        self.pre(tool="terminal", args=GIT_PUSH)
+        self.post(REFUSALS[0], tool="terminal", args=GIT_PUSH)
+        self.pre(call="c2", req="r2")  # blocked: no transform
+        self.assertEqual((self.breaker.failures, self.started), (0, []))
 
 
 # ---------------------------------------------------------------------------

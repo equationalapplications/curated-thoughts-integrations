@@ -150,7 +150,9 @@ def _pre_llm_call(**kwargs):
 
 
 def _pre_tool_call(**kwargs):
-    """Start an autonomous-work wisdom prefetch (ct_wisdom_activity).
+    """Claim the model step for an autonomous-work query (ct_wisdom_activity).
+    Nothing is sent here: the query starts in transform_tool_result, after
+    Hermes has decided the call may run.
 
     Always returns None: Hermes treats a raising or blocking pre_tool_call
     callback as a veto and blocks the tool, so nothing here may escape."""

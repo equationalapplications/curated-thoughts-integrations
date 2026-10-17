@@ -5,6 +5,20 @@ All notable changes to this integration. Versions follow SemVer; tags are
 
 ## Unreleased
 
+## 0.1.1 — 2026-10-17
+
+- Shared-builder update (the byte-identical copy of Hermes's
+  `ct_wisdom_activity.py`, hermes 0.7.0). This integration uses only its
+  activity builder and block renderer, so the one behavior change here is:
+  `python -mpytest` and `python -umpytest` (the module attached to `-m`) now
+  send `python pytest`, as `python -m pytest` always did; before, they sent
+  `python` alone. The rest is internal: project packages are `stat`ed before
+  any directory listing, the homes inside a project are computed once per
+  project root, and a redundant second name check on the sent `python
+  <module>` string is gone (the module itself is still checked). The
+  Hermes-only hook changes (the query now starts after Hermes's approval
+  decision) do not run here.
+
 ## 0.1.0 — 2026-10-16
 
 First release, for Docker Agent v1.150.0 (`docker agent run`). Spec:
