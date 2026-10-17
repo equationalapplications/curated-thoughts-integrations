@@ -10,9 +10,8 @@ import { describe, it, expect } from 'vitest';
 import { nodeSpawnFn, spawnOutcomeOf } from '../src/spawn.js';
 
 describe('nodeSpawnFn (real binding, fake binary)', { timeout: 30_000 }, () => {
-  it('passes the argument LIST to a shell-less spawn and captures stdout', async () => {
+  it.skipIf(process.platform === 'win32')('passes the argument LIST to a shell-less spawn and captures stdout', async () => {
     // POSIX-only: needs /bin/sh for the shebang script.
-    if (process.platform === 'win32') return;
     const { mkdtempSync, writeFileSync, chmodSync, rmSync } = await import('node:fs');
     const { tmpdir } = await import('node:os');
     const { join } = await import('node:path');
@@ -34,8 +33,7 @@ describe('nodeSpawnFn (real binding, fake binary)', { timeout: 30_000 }, () => {
     }
   });
 
-  it('times out a hung binary inside the budget and reports timedOut', async () => {
-    if (process.platform === 'win32') return;
+  it.skipIf(process.platform === 'win32')('times out a hung binary inside the budget and reports timedOut', async () => {
     const { mkdtempSync, writeFileSync, chmodSync, rmSync } = await import('node:fs');
     const { tmpdir } = await import('node:os');
     const { join } = await import('node:path');
@@ -97,8 +95,7 @@ describe('nodeSpawnFn abort (real process tree)', { timeout: 30_000 }, () => {
     return { script, grandchild, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
   }
 
-  it('an abort kills the child AND its grandchild and reports aborted', async () => {
-    if (process.platform === 'win32') return;
+  it.skipIf(process.platform === 'win32')('an abort kills the child AND its grandchild and reports aborted', async () => {
     const ct = await hangingCt();
     try {
       const abort = new AbortController();
@@ -117,8 +114,7 @@ describe('nodeSpawnFn abort (real process tree)', { timeout: 30_000 }, () => {
     }
   });
 
-  it('a run that ends normally is not aborted and leaves no abort listener behind', async () => {
-    if (process.platform === 'win32') return;
+  it.skipIf(process.platform === 'win32')('a run that ends normally is not aborted and leaves no abort listener behind', async () => {
     const { getEventListeners } = await import('node:events');
     const ct = await hangingCt();
     try {
@@ -143,8 +139,7 @@ describe('nodeSpawnFn abort (real process tree)', { timeout: 30_000 }, () => {
     expect(getEventListeners(abort.signal, 'abort')).toHaveLength(0);
   });
 
-  it('the timeout kills the grandchild too (one kill path, PR #71 review)', async () => {
-    if (process.platform === 'win32') return;
+  it.skipIf(process.platform === 'win32')('the timeout kills the grandchild too (one kill path, PR #71 review)', async () => {
     const ct = await hangingCt();
     try {
       const pending = nodeSpawnFn()({ command: ct.script, args: ['wisdom', 'match'], timeoutMs: 2000 });
@@ -158,8 +153,7 @@ describe('nodeSpawnFn abort (real process tree)', { timeout: 30_000 }, () => {
     }
   });
 
-  it('an already-aborted signal resolves aborted without spawning (PR #71 review)', async () => {
-    if (process.platform === 'win32') return;
+  it.skipIf(process.platform === 'win32')('an already-aborted signal resolves aborted without spawning (PR #71 review)', async () => {
     const { mkdtempSync, writeFileSync, chmodSync, rmSync, existsSync } = await import('node:fs');
     const { tmpdir } = await import('node:os');
     const { join } = await import('node:path');
@@ -190,8 +184,7 @@ describe('nodeSpawnFn abort (real process tree)', { timeout: 30_000 }, () => {
     expect(out.aborted).toBeUndefined();
   });
 
-  it('an abort after the child already exited reports the real result, not aborted (PR #71 review)', async () => {
-    if (process.platform === 'win32') return;
+  it.skipIf(process.platform === 'win32')('an abort after the child already exited reports the real result, not aborted (PR #71 review)', async () => {
     const { mkdtempSync, writeFileSync, chmodSync, rmSync, existsSync, readFileSync } = await import('node:fs');
     const { tmpdir } = await import('node:os');
     const { join } = await import('node:path');
@@ -227,8 +220,7 @@ describe('nodeSpawnFn abort (real process tree)', { timeout: 30_000 }, () => {
     }
   });
 
-  it('a kill that cannot close the pipes still resolves (escaped descendant holds stdout; PR #71 re-review)', async () => {
-    if (process.platform === 'win32') return;
+  it.skipIf(process.platform === 'win32')('a kill that cannot close the pipes still resolves (escaped descendant holds stdout; PR #71 re-review)', async () => {
     const { mkdtempSync, writeFileSync, chmodSync, rmSync, readFileSync, existsSync } = await import('node:fs');
     const { tmpdir } = await import('node:os');
     const { join } = await import('node:path');
@@ -314,14 +306,15 @@ describe('nodeSpawnFn (every OS)', { timeout: 30_000 }, () => {
       const abort = new AbortController();
       const started = Date.now();
       const pending = nodeSpawnFn(process.env, { killGraceMs: 250 })({
-        command: process.execPath, args: ['-e', child], timeoutMs: mode === 'timeout' ? 1500 : 30_000, signal: abort.signal,
+        command: process.execPath, args: ['-e', child], timeoutMs: mode === 'timeout' ? 3000 : 30_000, signal: abort.signal,
       });
-      if (mode === 'abort') setTimeout(() => abort.abort(), 1000);
+      if (mode === 'abort') setTimeout(() => abort.abort(), 2500);
       const out = await pending;
       expect(Date.now() - started).toBeLessThan(10_000);
       if (mode === 'abort') expect(out.aborted).toBe(true);
       else expect(out.timedOut).toBe(true);
       const pid = Number(out.stdout.trim().split('\n')[0]);
+      expect(pid).toBeGreaterThan(0);
       try { if (pid > 0) process.kill(pid); } catch { /* gone */ }
     }
   });

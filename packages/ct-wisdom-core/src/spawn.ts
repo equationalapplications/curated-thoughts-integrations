@@ -87,8 +87,8 @@ export function nodeSpawnFn(
         return;
       }
       // Bounded accumulation stands in for maxBuffer (async spawn has none):
-      // a runaway binary cannot grow these strings past the same 4 MiB cap
-      // the v1 spawnSync path enforced.
+      // a runaway binary cannot grow the Buffers past a configurable byte cap
+      // (capBytes, default 4 MiB); past it the child is killed (spawnError).
       // Raw Buffers, decoded ONCE at settle (OpenClaw): per-chunk toString
       // would split a multi-byte character across chunk boundaries, and the
       // cap is a true byte count.
