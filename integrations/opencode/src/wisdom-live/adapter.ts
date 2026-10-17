@@ -52,6 +52,7 @@ import { spawn } from 'node:child_process';
 import nodePath from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { discoverCt, invalidateAcceptedPath } from '../wisdom.js';
+import { isObj } from '../obj.js';
 
 /** Exact marker LINE of a live delivery part (identity + provenance). */
 export const LIVE_MARKER = 'source.kind: curated-thoughts/wisdom';
@@ -72,10 +73,6 @@ export interface MemoRecord {
 export interface HistoryRow {
   info?: { role?: unknown; id?: unknown };
   parts?: unknown[];
-}
-
-function isObj(v: unknown): v is Record<string, unknown> {
-  return v !== null && typeof v === 'object' && !Array.isArray(v);
 }
 
 function roleOf(row: unknown): unknown {
@@ -206,6 +203,7 @@ export function nodeSpawnFn(env: NodeJS.ProcessEnv = process.env): SpawnFn {
       let overflow = false;
       const CAP = 4 * 1024 * 1024;
       let timedOut = false;
+      let aborted = false;
       let settled = false;
       const timer = setTimeout(() => {
         timedOut = true;
@@ -223,7 +221,9 @@ export function nodeSpawnFn(env: NodeJS.ProcessEnv = process.env): SpawnFn {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
-        resolve({ code, stdout, stderr, spawnError: spawnError || overflow, timedOut });
+        // Both end paths ('close' and 'error') drop the abort listener.
+        spec.signal?.removeEventListener('abort', onAbort);
+        resolve({ code, stdout, stderr, spawnError: spawnError || overflow, timedOut, ...(aborted ? { aborted: true } : {}) });
       };
       child.on('error', () => finish(null, true));
       function killTree(): void {
@@ -237,11 +237,15 @@ export function nodeSpawnFn(env: NodeJS.ProcessEnv = process.env): SpawnFn {
         }
         child.kill('SIGKILL');
       }
-      // The caller's budget ran out (activity delivery): kill the tree now.
+      // The caller's budget ran out (activity delivery): kill the tree now,
+      // and report the outcome as `aborted` (never a breaker failure).
+      function onAbort(): void {
+        aborted = true;
+        killTree();
+      }
       if (spec.signal) {
-        if (spec.signal.aborted) killTree();
-        else spec.signal.addEventListener('abort', killTree, { once: true });
-        child.on('close', () => spec.signal?.removeEventListener('abort', killTree));
+        if (spec.signal.aborted) onAbort();
+        else spec.signal.addEventListener('abort', onAbort, { once: true });
       }
       child.stdout?.on('data', (chunk: Buffer) => {
         if (stdout.length + chunk.length > CAP) {
@@ -380,10 +384,18 @@ export interface AdapterDeps {
  */
 export const UNPERSISTED_TTL_MS = 60_000;
 
+/** How long a failed `session.get` is remembered before the next try (0.4.1). */
+export const SESSION_FAILURE_TTL_MS = 10_000;
+
 interface Pending {
   at: number;
   /** The tool call whose result carries the id (null: expiry only). */
   callID: string | null;
+}
+
+/** The one expiry rule: `prune` deletes, `buildLedger` only filters. */
+function expired(p: Pending, now: number): boolean {
+  return now - p.at > UNPERSISTED_TTL_MS;
 }
 
 const LRU_MAX = 256;
@@ -417,7 +429,9 @@ export class OpenCodeWisdomAdapter implements HostAdapter {
   private readonly invalidateDiscovery: () => void;
   /** m1 turn cache: the N1 rebuild, read by N3 within the turn. */
   private readonly turns = new Map<string, Ledger>();
-  /** Definitive session kinds (lookup failures are not cached). */
+  /** Recent session.get failures (SESSION_FAILURE_TTL_MS), so a failing host is not asked per tool call. */
+  private readonly kindFailures = new Map<string, number>();
+  /** Definitive session kinds (lookup failures are cached briefly, above). */
   private readonly kinds = new Map<string, { kind: SessionKind; parentID: string | null; directory: string | null }>();
   /** Decision 3 carry-forward: pre-compaction ids, never cleared. */
   private readonly carry = new Map<string, Set<string>>();
@@ -456,6 +470,7 @@ export class OpenCodeWisdomAdapter implements HostAdapter {
   _resetForTests(): void {
     this.turns.clear();
     this.kinds.clear();
+    this.kindFailures.clear();
     this.carry.clear();
     this.delivered.clear();
     this.unpersisted.clear();
@@ -470,13 +485,20 @@ export class OpenCodeWisdomAdapter implements HostAdapter {
   async sessionKind(sessionId: string): Promise<SessionKind> {
     const known = this.kinds.get(sessionId);
     if (known) return known.kind;
+    const failedAt = this.kindFailures.get(sessionId);
+    if (failedAt !== undefined && this.now() - failedAt < SESSION_FAILURE_TTL_MS) return 'child'; // fail-safe
     let info: { parentID?: unknown; directory?: unknown } | null = null;
     try {
       info = await this.fetchSession(sessionId);
     } catch {
-      return 'child'; // fail-safe, not cached: retried next turn
+      lruSet(this.kindFailures, sessionId, this.now());
+      return 'child'; // fail-safe: retried after the short TTL
     }
-    if (!isObj(info)) return 'child';
+    if (!isObj(info)) {
+      lruSet(this.kindFailures, sessionId, this.now());
+      return 'child';
+    }
+    this.kindFailures.delete(sessionId);
     const parentID = typeof info.parentID === 'string' && info.parentID !== '' ? info.parentID : null;
     const kind: SessionKind = parentID === null ? 'parent' : 'child';
     // The session's working directory (SDK Session.directory; tools resolve
@@ -558,14 +580,8 @@ export class OpenCodeWisdomAdapter implements HostAdapter {
     };
     const delivered = this.delivered.get(sessionId) ?? [];
     for (let i = delivered.length - 1; i >= 0; i--) push(delivered[i]!);
-    const pending = this.unpersisted.get(sessionId);
-    if (pending !== undefined) {
-      const now = this.now();
-      for (const [id, p] of pending) {
-        if (now - p.at > UNPERSISTED_TTL_MS) pending.delete(id);
-        else push(id);
-      }
-    }
+    const now = this.now();
+    for (const [id, p] of this.unpersisted.get(sessionId) ?? []) if (!expired(p, now)) push(id);
     let bootSeen = false;
     for (let i = rows.length - 1; i >= 0; i--) {
       const row = rows[i] as HistoryRow;
@@ -622,7 +638,7 @@ export class OpenCodeWisdomAdapter implements HostAdapter {
     }
     const now = this.now();
     for (const [id, p] of pending) {
-      if (seen.has(id) || now - p.at > UNPERSISTED_TTL_MS) {
+      if (seen.has(id) || expired(p, now)) {
         pending.delete(id);
         continue;
       }
@@ -735,7 +751,7 @@ export class OpenCodeWisdomAdapter implements HostAdapter {
       // accepted path: a per-turn probe would add a spawn and up to 3 s of
       // pre-LLM latency on top of the 3 s match budget every turn.
       const probe = await this.spawnFn({ command: path, args: ['wisdom', 'match', '--help'], timeoutMs: 3000, ...(signal ? { signal } : {}) });
-      if (signal?.aborted) return { outcome: 'timeout_or_exit' };
+      if (probe.aborted === true || signal?.aborted) return { outcome: 'aborted' };
       if (probe.spawnError || probe.timedOut) return { outcome: 'spawn' };
       if (probe.code !== 0) {
         this.capabilityAbsent = true; // deterministic absence: latch OFF for the process

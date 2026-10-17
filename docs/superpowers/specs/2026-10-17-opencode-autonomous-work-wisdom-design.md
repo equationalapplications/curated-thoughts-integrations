@@ -274,8 +274,9 @@ children is unchanged.
 - **Budget:** ONE deadline (`TIMEOUT_MS`, 3 s) covers the whole after-hook: the `session.get` and
   `session.messages` fetches and the query. A fetch that does not answer in time fails open (no block). The CT wait
   uses the core's `settleWithin`, now shared with DSH. On expiry it aborts the query: `wisdomMatch` passes an
-  `AbortSignal` to the spawn, and the opencode binding kills the process tree. An aborted query is `budget`, never a
-  breaker failure. A match that has already settled is used even past the deadline. The `before` hook's session
+  `AbortSignal` to the spawn, and the opencode binding kills the process tree. The query is reported as `budget`.
+  Whether a budget miss counts toward the breaker comes from the shared core in a follow-up (0.4.1 amendment 9); an
+  abort from anywhere else never counts. A match that has already settled is used even past the deadline. The `before` hook's session
   lookup is bounded the same way.
 - Every hook catches everything and leaves the tool result untouched on any error.
 
@@ -445,6 +446,42 @@ real gate and ZAI GLM-5.3-FLASH.
 7. `settleWithin(promise, ms, onExpire?)` is exported from `ct-wisdom-core` and used by opencode and deepseek
    (deepseek 0.6.1, no behavior change).
 8. `activityHost` is `Object.create(adapter)` with overrides; the latch-writing methods are bound (tested).
+
+## 0.4.1 amendments (post-merge review of 0.4.0)
+
+Delivery semantics are unchanged (same queries, same blocks, same once-only rule). The changes are robustness and cost:
+
+1. **Start margin.** With ≤ `START_MARGIN_MS` (200 ms) of the budget left before the start, nothing is spawned and
+   neither the key nor the step is admitted.
+2. **Cheap gates first.** Session kind known, capability latch and breaker are checked before the history fetch, so a
+   closed gate costs no fetch. Without a step id, such a skip is reported once per activity key.
+3. **`session.get`.**
+   - A failure is cached for `SESSION_FAILURE_TTL_MS` (10 s); before, every tool call asked again.
+   - The plan-time wait is capped at `PLAN_LOOKUP_MS` (300 ms).
+   - `deliver` reuses the plan's cached lookup and never asks again.
+4. **Spawn hygiene.** The abort listener is removed on `error` as well as on `close`. An aborted spawn reports
+   `aborted: true`, and the core classifies it as the new `MatchOutcome` `'aborted'`, which never counts as a breaker
+   failure (the user-turn path reports it as `budget`).
+5. **`activityHost`** is an explicit delegating object: every HostAdapter method calls the adapter, so nothing is
+   inherited and no method can write a shadowing field.
+6. **Builtin-only placement.** Only builtin tools are planned, so the MCP branches of `canCarry`/`placeBlock` were
+   dead and are dropped: an output must have a string `output`.
+7. **One expiry rule** for `unpersisted`: `prune` deletes, `buildLedger` only filters.
+8. **One shared `isObj`** (`src/obj.ts`).
+9. **Breaker parity.** The rule "a budget miss counts as one breaker failure" (Hermes, OpenClaw) moves into
+   `ct-wisdom-core` in a follow-up, so that every host behaves alike. OpenCode adds no host-side version. An
+   `aborted` outcome from anywhere else (a user or approval abort) never counts (tested).
+
+Tests:
+- start margin;
+- each closed gate makes no fetch;
+- failure TTL and the capped plan wait;
+- one `session.get` per session;
+- `aborted` in classify, `runActivityMatch` and `onUserTurn`;
+- listener removal on close and error;
+- host prototype;
+- MCP-shaped outputs carry nothing;
+- foreign aborts never open the breaker.
 
 ## Versioning and docs
 

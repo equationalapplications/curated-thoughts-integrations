@@ -122,10 +122,13 @@ describe('3. the 3 s budget covers only the match', () => {
     setTimeout(() => ac.abort(), 50);
     const r = await p;
     expect(r.code).toBeNull();
+    expect(r.aborted).toBe(true);
+    expect(r.timedOut).toBe(false);
     const pre = new AbortController();
     pre.abort();
     const r2 = await nodeSpawnFn(process.env)({ command: process.execPath, args: ['-e', ''], timeoutMs: 20_000, signal: pre.signal });
     expect(r2.code).toBeNull();
+    expect(r2.aborted).toBe(true);
   });
 });
 

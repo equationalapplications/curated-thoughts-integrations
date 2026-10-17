@@ -86,7 +86,8 @@ export async function onUserTurn(
   if (attempt.outcome !== 'ok' || !attempt.result) {
     if (attempt.outcome === 'timeout_or_exit') breaker.recordFailure();
     if (attempt.outcome === 'spawn') host.resetDiscoveryAndProbeCaches(); // n3
-    return report({ kind: 'skip', reason: attempt.outcome === 'ok' ? 'parse_error' : attempt.outcome, query, ledgerIds });
+    const reason = attempt.outcome === 'ok' ? 'parse_error' : attempt.outcome === 'aborted' ? 'budget' : attempt.outcome;
+    return report({ kind: 'skip', reason, query, ledgerIds });
   }
   breaker.recordSuccess();
 

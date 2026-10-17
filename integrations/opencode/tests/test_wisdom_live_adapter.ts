@@ -52,6 +52,7 @@ function make(over: Partial<AdapterDeps> & { rows?: Record<string, HistoryRow[]>
       over.fetchSession ??
       (async (id) => (over.parents && id in over.parents ? { parentID: over.parents[id] } : { })),
     spawnFn,
+    ...(over.now ? { now: over.now } : {}),
   });
   return { a, spawns, rows };
 }
@@ -192,11 +193,16 @@ describe('subagent policy (LD7)', () => {
     expect(a.deliveryEnabled({ id: 'never-looked-up' })).toBe(false);
   });
 
-  it('a throwing session lookup is fail-safe (child) and is retried next time', async () => {
+  it('a throwing session lookup is fail-safe (child), cached 10 s, then retried (0.4.1)', async () => {
     let calls = 0;
-    const { a } = make({ fetchSession: async () => { calls++; if (calls === 1) throw new Error('x'); return {}; } });
+    let clock = 1_000;
+    const { a } = make({ now: () => clock, fetchSession: async () => { calls++; if (calls === 1) throw new Error('x'); return {}; } });
     expect(await a.sessionKind('s')).toBe('child');
+    expect(await a.sessionKind('s')).toBe('child'); // within the TTL: no second lookup
+    expect(calls).toBe(1);
+    clock += 10_001;
     expect(await a.sessionKind('s')).toBe('parent');
+    expect(calls).toBe(2);
   });
 
   it('child ledger = child history ∪ parent history (best-effort)', async () => {

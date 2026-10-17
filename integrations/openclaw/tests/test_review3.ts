@@ -153,6 +153,39 @@ describe('4/5. the locate + probe wait is bounded and shared', () => {
   });
 });
 
+describe('6. cross-host breaker rule: one budget expiry = exactly one breaker failure', () => {
+  const seen: string[] = [];
+  const hangAll = (fn: SpawnFn): SpawnFn => async (spec) => {
+    const isActivity = spec.args[0] === 'wisdom' && spec.args.includes('--json') && spec.args[spec.args.indexOf('--max') + 1] === '1';
+    if (isActivity) seen.push(spec.args[spec.args.length - 1]);
+    if (isActivity && hangs > 0) {
+      hangs--;
+      await new Promise<void>((resolve) => spec.signal?.addEventListener('abort', () => resolve()));
+      return { code: null, stdout: '', stderr: '', spawnError: false, timedOut: false, aborted: true };
+    }
+    return fn(spec);
+  };
+  let hangs = 0;
+  const run = async (misses: number) => {
+    hangs = misses;
+    seen.length = 0;
+    const h = setup({ activityBudgetMs: 5 }, hangAll);
+    await h.prompt('r1');
+    for (let n = 1; n <= misses + 1; n++) {
+      h.step('r1', n);
+      await h.tool('r1', 'read', { path: `f${n}.ts` });
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    return [...seen];
+  };
+  it('BREAKER_FAILS - 1 expiries keep the breaker closed (no double count)', async () => {
+    expect(await run(2)).toEqual(['f1.ts', 'f2.ts', 'f3.ts']);
+  });
+  it('BREAKER_FAILS expiries open it: the next step makes no query', async () => {
+    expect(await run(3)).toEqual(['f1.ts', 'f2.ts', 'f3.ts']);
+  });
+});
+
 describe('7. metaRecallIds reads part by part', () => {
   const args = { id: 'mcp:curated-thoughts:curated-thoughts__curated_recall_context' };
   const env = JSON.stringify({ result: { content: [{ type: 'text', text: JSON.stringify({ wiki_entries: [{ id: 'w1' }] }) }] } });

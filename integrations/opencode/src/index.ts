@@ -43,6 +43,7 @@ import { ENV_BRAIN_DIR, resolveBrainPaths } from '../scripts/ct_env.js';
 import { formatStatusBlock, isStatusBlock } from './format.js';
 import { createHealthCache } from './refresh.js';
 import type { HistoryRow } from './wisdom-live/adapter.js';
+import { isObj } from './obj.js';
 import { opencodeVerboseRecorder } from './verbose.js';
 import { createWisdomHooks } from './wisdom-live/hooks.js';
 
@@ -57,10 +58,6 @@ function resolveEnv(options: PluginOptions | undefined): NodeJS.ProcessEnv {
     return { ...process.env, [ENV_BRAIN_DIR]: brainDir };
   }
   return { ...process.env };
-}
-
-function isObj(v: unknown): v is Record<string, unknown> {
-  return v !== null && typeof v === 'object' && !Array.isArray(v);
 }
 
 export const CuratedThoughts: Plugin = async (input, options) => {

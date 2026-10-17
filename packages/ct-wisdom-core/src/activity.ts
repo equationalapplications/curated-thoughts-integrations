@@ -1257,6 +1257,9 @@ export async function runActivityMatch(
       recordActivityBudgetMiss(breaker);
       return { failure: 'budget' };
     }
+    // An abort from anywhere else (the host cancelled the call; outcome
+    // `aborted`) is not CT's failure and never counts against the breaker.
+    if (attempt.outcome === 'aborted') return { failure: 'budget' };
     if (attempt.outcome === 'spawn') {
       host.resetDiscoveryAndProbeCaches();
       return { failure: 'spawn' };

@@ -24,6 +24,7 @@ import {
 } from './adapter.js';
 import { renderWisdom } from '../wisdom.js';
 import { OpenCodeActivity } from './activity.js';
+import { isObj } from '../obj.js';
 
 export type WisdomHooks = Required<
   Pick<Hooks, 'chat.message' | 'tool.execute.before' | 'tool.execute.after' | 'experimental.session.compacting'>
@@ -48,10 +49,6 @@ function wisdomPart(sessionID: string, messageID: string, block: string, markerL
     text: `${block}\n\n${markerLine}`,
     synthetic: true,
   };
-}
-
-function isObj(v: unknown): v is Record<string, unknown> {
-  return v !== null && typeof v === 'object' && !Array.isArray(v);
 }
 
 export function createWisdomHooks(deps: WisdomHooksDeps): {
