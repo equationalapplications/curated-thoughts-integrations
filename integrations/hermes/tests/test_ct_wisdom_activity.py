@@ -90,15 +90,30 @@ class TestActivityLine(unittest.TestCase):
 
     def test_paths(self):
         cwd = "/work/repo"
-        self.assertEqual(act.normalize_path("/work/repo/src/x.py", cwd), "src/x.py")
-        self.assertEqual(act.normalize_path("/Users/alice/other/proj/y.py", cwd), "proj/y.py")
-        self.assertEqual(act.normalize_path("~/notes/z.md", cwd), "notes/z.md")
-        self.assertEqual(act.normalize_path("../../etc/passwd", cwd), "etc/passwd")
-        self.assertEqual(act.normalize_path("a\\b\\c.py", cwd), "a/b/c.py")
-        self.assertEqual(act.normalize_path("./", cwd), None)
-        self.assertEqual(act.normalize_path("", cwd), None)
-        self.assertEqual(act.normalize_path(None, cwd), None)
-        self.assertLessEqual(len(act.normalize_path("d/" * 300 + "f.py", cwd)), act.TARGET_CHARS)
+        env = {"USER": "alice", "HOME": "/Users/alice"}
+        self.assertEqual(act.normalize_path("/work/repo/src/x.py", cwd, env), "src/x.py")
+        # Privacy amendment R2: outside cwd, the basename only.
+        self.assertEqual(act.normalize_path("/Users/alice/other/proj/y.py", cwd, env), "y.py")
+        self.assertEqual(act.normalize_path("~/notes/z.md", cwd, env), "z.md")
+        self.assertEqual(act.normalize_path("~/notes/z.md", "/Users/alice", env), "notes/z.md")
+        self.assertEqual(act.normalize_path("../../etc/passwd", cwd, env), "etc/passwd")
+        self.assertEqual(act.normalize_path("a\\b\\c.py", cwd, env), "a/b/c.py")
+        self.assertEqual(act.normalize_path("./", cwd, env), None)
+        self.assertEqual(act.normalize_path("", cwd, env), None)
+        self.assertEqual(act.normalize_path(None, cwd, env), None)
+        self.assertLessEqual(len(act.normalize_path("d/" * 300 + "f.py", cwd, env)),
+                             act.TARGET_CHARS)
+
+    def test_cwd_validity(self):
+        env = {"USER": "alice", "HOME": "/Users/alice"}
+        for cwd in ("", "/", "/Users", "/home", "/work", "C:/", "C:\\", "C:\\Users", "c:",
+                    "relative/dir", None):
+            with self.subTest(cwd=cwd):
+                self.assertIsNone(act.valid_cwd(cwd, env))
+        self.assertIsNone(act.valid_cwd("/var/lib", {"HOME": "/var/lib/alice"}))
+        self.assertEqual(act.valid_cwd("/Users/alice", env), "/Users/alice")
+        self.assertEqual(act.valid_cwd("/work/repo/", env), "/work/repo")
+        self.assertEqual(act.valid_cwd("C:\\Users\\carol\\proj", {}), "c:/Users/carol/proj")
 
     def test_no_line(self):
         for tool, args in [
@@ -175,6 +190,67 @@ class TestActivityLine(unittest.TestCase):
                 self.assertTrue(after[:1] == [tokens[1]] or after[:2] == ["-m", tokens[1]],
                                 command)
 
+
+    def test_randomized_search_patterns_privacy(self):
+        """Privacy amendment R3: planted secrets, quotes, assignments, absolute
+        paths and user names never reach a search query."""
+        rng = random.Random(20261017)
+        env = {"USER": "zelda", "HOME": "/home/zelda"}
+        safe = ["TODO", "error", "404", "MCP", "tool", "name", "src/billing", "def", "\\w+",
+                "a\u00f1o", "fix", "tests/unit"]
+        nasty = ["password=letmein", 'API_KEY="hunter2pass"', "'q'", "`x`", "a=b", "==",
+                 "sk-ABCDEF1234567890xyz", "ghp_0123456789abcdefABCD", "AKIAABCDEFGHIJKLMNOP",
+                 "a1b2c3d4e5f6g7h8i9j0", "/home/zelda/x", "~/notes", "zelda", "Zelda/notes",
+                 "home/zelda", "C:\\Users\\zelda", "../up", "\\\\srv\\share", "/etc/passwd",
+                 "\u201csmart\u201d"]
+        for _ in range(500):
+            parts = [rng.choice(safe + nasty) for _ in range(rng.randint(1, 5))]
+            pattern = " ".join(parts)
+            for cwd in ("/", "/work/repo", "/home/zelda"):
+                a = act.activity_for("search_files", {"pattern": pattern}, cwd=cwd, env=env)
+                if any(p in nasty for p in parts):
+                    self.assertIsNone(a, pattern)
+                    continue
+                self.assertIsNotNone(a, pattern)
+                query = act.query_for(a)
+                self.assertEqual(query, pattern)
+                for bad in ("=", "'", '"', "`", "zelda", "Zelda", "~", "sk-", "ghp_", "AKIA"):
+                    self.assertNotIn(bad, query, pattern)
+                self.assertFalse(query.startswith("/"), pattern)
+
+    def test_randomized_paths_privacy(self):
+        """Privacy amendment R1/R2: every tool path, under any cwd, drops the
+        user name, and outside a valid cwd keeps the basename only."""
+        rng = random.Random(20261018)
+        env = {"USER": "zelda", "LOGNAME": "zelda", "HOME": "/Users/zelda"}
+        heads = ["/Users/zelda", "/home/zelda", "~", "/", "/work/repo", "C:\\Users\\zelda",
+                 "/srv", "..", "", "Users/zelda", "zelda", "./"]
+        mids = ["clients", "acme", "zelda", "Zelda", "src", "..", ".", "home", "Users",
+                "secret-plans", "d\u00e9j\u00e0"]
+        cwds = ["", "/", "/Users", "/home", "/work", "/work/repo", "/Users/zelda", "C:/",
+                "C:\\Users\\zelda"]
+        for _ in range(1000):
+            segs = [rng.choice(mids) for _ in range(rng.randint(0, 4))]
+            head = rng.choice(heads)
+            sep = "\\" if head.startswith("C:") else "/"
+            raw = sep.join(([head] if head else []) + segs + ["f%d.md" % rng.randint(0, 9)])
+            cwd = rng.choice(cwds)
+            tool = rng.choice(["read_file", "write_file", "patch"])
+            a = act.activity_for(tool, {"path": raw}, cwd=cwd, env=env)
+            if a is None:
+                continue
+            query = act.query_for(a)
+            comps = query.split("/")
+            for comp in comps:
+                self.assertNotEqual(comp.casefold(), "zelda", (raw, cwd, query))
+            self.assertNotIn("~", query, (raw, cwd))
+            self.assertFalse(query.startswith("/"), (raw, cwd))
+            self.assertNotIn(":", query, (raw, cwd))
+            self.assertTrue(a.line.endswith(" " + query), (raw, cwd))
+            under = act.valid_cwd(cwd, env)
+            absolute = raw.startswith(("/", "~", "C:"))
+            if absolute and under is None:
+                self.assertEqual(len(comps), 1, (raw, cwd, query))
 
     def test_credential_shaped_search_pattern_rejected(self):
         for pattern in ("sk-live-abcdef", "find ghp_abcdefghijklmnop1234 here",
@@ -752,6 +828,31 @@ class TestVerboseWiring(Harness):
         self.pre(call="c5", req="r5", tool="mcp__curated-thoughts__curated_recall_context",
                  args={"query": "x"})  # ct_tool
         self.assertEqual(len(self.events()), self.events_before)
+
+    def test_label_and_verbose_use_sanitized_target(self):
+        """Privacy amendment R4: the `_for:` label and the verbose `activity`
+        and `query` fields carry the sanitized target, never the raw path."""
+        os.environ["CT_WISDOM_VERBOSE"] = "1"
+        for name, value in (("USER", "alice"), ("HOME", "/Users/alice")):
+            old = os.environ.get(name)
+            os.environ[name] = value
+            self.addCleanup(lambda n=name, o=old: os.environ.__setitem__(n, o)
+                            if o is not None else os.environ.pop(n, None))
+        ct_ledger.LEDGER_CACHE.put("s1", set())
+        args = {"path": "/Users/alice/clients/acme/contract.md"}
+        self.pre(args=args)
+        out = self.post(READ_RESULT, args=args)
+        block = json.loads(out)[act.ACTIVITY_RESULT_KEY]
+        self.assertIn("_for: read contract.md_", block)
+        self.assertEqual(self.calls[-1]["text"], "contract.md")
+        ev = self.events()
+        self.assertEqual(ev[-1]["query"], "contract.md")
+        self.assertEqual(ev[-1]["activity"], "read contract.md")
+        with open(self.log, encoding="utf-8") as handle:
+            raw = handle.read()
+        for leak in ("alice", "clients", "acme/"):
+            self.assertNotIn(leak, raw)
+            self.assertNotIn(leak, out)
 
     def test_breaker_open_recorded_once_for_a_would_be_trigger(self):
         os.environ["CT_WISDOM_VERBOSE"] = "1"
