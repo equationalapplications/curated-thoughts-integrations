@@ -218,7 +218,7 @@ jobs:
           import json
           d = json.load(open('out.json'))
           names = [c['name'] for c in d['checks']]
-          assert len(names) == 9, names
+          assert len(names) == 10, names
           assert d['exit_code'] == 1, d['exit_code']
           print('checks:', ', '.join(names))
           "

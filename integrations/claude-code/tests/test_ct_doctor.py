@@ -2373,6 +2373,31 @@ class SidecarEnvTests(DoctorTestCase):
         self.assertEqual(r.status, ct_doctor.WARN)
         self.assertIn('"OPENROUTER_API_KEY": "${OPENROUTER_API_KEY:-}"', r.hint)
 
+    def test_allowlist_mode_finds_a_project_scope_entry(self):
+        self.patch_env("CLAUDE_CODE_MCP_ALLOWLIST_ENV", "1")
+        self.brain({"type": "external", "model": "m"})
+        self.write_config({})
+        project = self.fake_home / "proj"
+        project.mkdir()
+        (project / ".mcp.json").write_text(json.dumps({"mcpServers": {"curated-thoughts": {
+            "command": "x", "args": ["--mcp"],
+            "env": {"OPENROUTER_API_KEY": "${OPENROUTER_API_KEY:-}"}}}}))
+        r = ct_doctor.check_sidecar_env(env={"OPENROUTER_API_KEY": self.SECRET}, cwd=str(project))
+        self.assertEqual(r.status, ct_doctor.PASS, r.detail)
+        self.assertIn(".mcp.json", r.detail)
+
+    def test_allowlist_mode_flags_a_different_brain_path(self):
+        self.patch_env("CLAUDE_CODE_MCP_ALLOWLIST_ENV", "1")
+        self.brain({"type": "local", "model": "m"})
+        custom = self.fake_home / "brains" / "work"
+        custom.mkdir(parents=True)
+        self.entry({"CURATED_BRAIN_DIR": str(self.fake_home / "brains" / "other")})
+        r = self.check({"CURATED_BRAIN_DIR": str(custom)})
+        self.assertEqual(r.status, ct_doctor.WARN)
+        self.assertIn("different brain location", r.detail)
+        self.entry({"CURATED_BRAIN_DIR": str(custom)})
+        self.assertEqual(self.check({"CURATED_BRAIN_DIR": str(custom)}).status, ct_doctor.PASS)
+
     def test_allowlist_mode_with_forwarded_key_passes(self):
         self.patch_env("CLAUDE_CODE_MCP_ALLOWLIST_ENV", "true")
         self.brain({"type": "external", "model": "m"})

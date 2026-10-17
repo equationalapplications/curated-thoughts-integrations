@@ -382,6 +382,24 @@ describe('checkSidecarEnv (OpenClaw gives a plugin stdio server only the MCP SDK
     expect(r.hint).toContain(`"CURATED_BRAIN_DIR": ${JSON.stringify(custom)}`);
   });
 
+  it('flags a forwarded brain dir that points elsewhere, accepts a match', () => {
+    brain({ type: 'local', model: 'm' });
+    const custom = join(tmpHome, 'brains', 'work');
+    mkdirSync(custom, { recursive: true });
+    writeFileSync(join(custom, 'config.json'), '{}');
+    const row = (dir: string) => ({ mcp: { servers: { 'curated-thoughts': {
+      command: 'curated-thoughts-mcp', args: ['--mcp'], env: { CURATED_BRAIN_DIR: dir },
+    } } } });
+    openclawConfig(row(join(tmpHome, 'brains', 'other')));
+    const r = check({ CURATED_BRAIN_DIR: custom });
+    expect(r.status).toBe(WARN);
+    expect(r.detail).toContain('different brain location');
+    openclawConfig(row(custom));
+    expect(check({ CURATED_BRAIN_DIR: custom }).status).toBe(PASS);
+    openclawConfig(row('${CURATED_BRAIN_DIR}'));
+    expect(check({ CURATED_BRAIN_DIR: custom }).status).toBe(PASS);
+  });
+
   it('is part of runChecks, right after embedding-backend', () => {
     const order = runChecks().map((r) => r.name);
     expect(order.indexOf('sidecar-env')).toBe(order.indexOf('embedding-backend') + 1);

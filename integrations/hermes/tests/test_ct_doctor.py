@@ -2657,6 +2657,26 @@ class SidecarEnvTests(DoctorTestCase):
         self.assertEqual(r.status, ct_doctor.WARN)
         self.assertIn(f'CURATED_BRAIN_DIR: "{os.path.abspath(str(custom))}"', r.hint)
 
+    def test_forwarded_brain_dir_with_a_different_path_warns(self):
+        self.brain({"type": "local", "model": "m"})
+        custom = self.fake_home / "brains" / "work"
+        custom.mkdir(parents=True)
+        other = self.fake_home / "brains" / "other"
+        self.write_config(self.ENTRY + f'    env:\n      CURATED_BRAIN_DIR: "{other}"\n')
+        r = self.check({"CURATED_BRAIN_DIR": str(custom)})
+        self.assertEqual(r.status, ct_doctor.WARN)
+        self.assertIn("different brain location", r.detail)
+        self.assertIn(f'CURATED_BRAIN_DIR: "{os.path.abspath(str(custom))}"', r.hint)
+
+    def test_forwarded_brain_dir_matching_or_by_reference_passes(self):
+        self.brain({"type": "local", "model": "m"})
+        custom = self.fake_home / "brains" / "work"
+        custom.mkdir(parents=True)
+        for value in (str(custom), "${CURATED_BRAIN_DIR}", "${env:CURATED_BRAIN_DIR}"):
+            self.write_config(self.ENTRY + f"    env: {{CURATED_BRAIN_DIR: '{value}'}}\n")
+            r = self.check({"CURATED_BRAIN_DIR": str(custom)})
+            self.assertEqual(r.status, ct_doctor.PASS, (value, r.detail))
+
     def test_no_entry_defers_to_the_registration_check(self):
         self.external()
         self.write_config("mcp_servers:\n  other:\n    command: x\n")

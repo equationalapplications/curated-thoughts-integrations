@@ -39,7 +39,7 @@ import {
   readFileSync,
   statSync,
 } from 'node:fs';
-import { join, resolve as resolvePath } from 'node:path';
+import { join, normalize as normalizePath, resolve as resolvePath } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { spawnSync } from 'node:child_process';
 
@@ -932,6 +932,26 @@ export function checkSidecarEnv(
     rowEnv && typeof rowEnv === 'object' && !Array.isArray(rowEnv) ? Object.keys(rowEnv) : [],
   );
   const missing = needs.filter((n) => !n.alternatives.some((a) => forwarded.has(a)));
+  // A brain location forwarded with a different literal path sends the
+  // sidecar to another brain; a ${NAME} reference to itself is fine.
+  const envMap = (rowEnv ?? {}) as Record<string, unknown>;
+  const wrongPath = needs.filter((n) => {
+    if (n.kind !== 'path' || missing.includes(n)) return false;
+    const v = envMap[n.name];
+    if (typeof v !== 'string') return true;
+    const ref = /^\$\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}$/.exec(v.trim());
+    if (ref) return ref[1] !== n.name;
+    return normalizePath(v.trim()) !== normalizePath(n.value!);
+  });
+  if (wrongPath.length > 0) {
+    return _warn(
+      name,
+      `the mcp.servers["${OPENCLAW_PLUGIN_ID}"] row in ${cfgPath} sets `
+        + `${wrongPath.map((n) => n.name).join(', ')} to a different brain location than this environment resolves`,
+      'The sidecar would open a different brain from the one the plugin\'s own calls use. Set: '
+        + wrongPath.map((n) => `${n.name}: ${JSON.stringify(n.value)}`).join(', '),
+    );
+  }
   if (missing.length > 0) {
     const envRows = missing.map((n) =>
       `        ${JSON.stringify(n.name)}: ${JSON.stringify(n.kind === 'path' ? n.value : '${' + n.name + '}')}`);

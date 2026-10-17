@@ -33,10 +33,6 @@ per check, each with a fix hint:
    has a `vault_path` that does not exist here.
 6. **Embedding backend** — the configured embedding host responds. WARN/FAIL
    degrades semantic search but the sidecar may still answer.
-   **Sidecar env** (`sidecar-env`) — Hermes passes an MCP server only `PATH`,
-   `HOME` and a few locale variables, so an external embedder's key (or a
-   custom `CURATED_BRAIN_DIR`) must be forwarded in the entry's `env:` as
-   `"${NAME}"`. A WARN prints the exact lines to add; it never shows a value.
 7. **Harness registration** — `mcp_servers.curated-thoughts` present with
    `--mcp` args, and `curated-thoughts` listed under `plugins.enabled` so the
    skills and session-start hook actually load.

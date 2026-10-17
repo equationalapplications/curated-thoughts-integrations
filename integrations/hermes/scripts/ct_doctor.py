@@ -613,14 +613,37 @@ def _is_set(env, name):
     return isinstance(value, str) and bool(value.strip())
 
 
-def check_sidecar_env(brain_paths=None, env=None):
+_ENV_REF = re.compile(r"^\$\{(?:env:)?\s*([A-Za-z_][A-Za-z0-9_]*)\s*(?::-[^}]*)?\}$")
+
+
+def _path_forward_ok(need, forwarded):
+    """True when the entry forwards `need` (a brain location) to the same
+    path this environment resolves: a reference to the same variable, or
+    a literal equal to it. A differently-valued literal sends the sidecar
+    to another brain."""
+    value = forwarded.get(need.name)
+    if not isinstance(value, str):
+        return False
+    value = value.strip()
+    ref = _ENV_REF.match(value)
+    if ref:
+        return ref.group(1) == need.name
+    return os.path.normcase(os.path.normpath(value)) == os.path.normcase(
+        os.path.normpath(need.value)
+    )
+
+
+def check_sidecar_env(brain_paths=None, env=None, cwd=None):
     """(6b) the sidecar's launch env carries what the brain needs.
 
     A host that filters its MCP children's environment drops the embedding
     key (and a non-default brain location) unless the MCP entry forwards it
     by name; recall and wisdom matching then degrade without an error. The
-    host's routing comes from the harness-specific `_sidecar_env_route`.
-    Read-only, and only variable NAMES are ever reported, never values.
+    host's routing comes from the harness-specific `_sidecar_env_route`,
+    which returns the entry's env mapping (name -> configured text); `cwd`
+    is the registration context, as for check 7. Read-only, and only
+    variable NAMES (and brain paths, which are not secrets) are reported,
+    never a key's value.
     """
     merged = _merged_env(env)
     paths = brain_paths or ct_env.resolve_brain_paths(env=merged)
@@ -635,7 +658,7 @@ def check_sidecar_env(brain_paths=None, env=None):
             f"beyond the defaults (embed_profile: {profile})",
         )
     refs = [n for n in needs if n.kind == ct_env.NEED_REF]
-    route = _sidecar_env_route()
+    route = _sidecar_env_route(cwd=cwd)
     if route is None:
         # The host hands its whole environment to the sidecar: the only
         # failure is a key missing from that environment altogether.
@@ -666,6 +689,22 @@ def check_sidecar_env(brain_paths=None, env=None):
             "registration check)",
         )
     missing = [n for n in needs if not any(a in forwarded for a in n.alternatives)]
+    wrong_path = [
+        n for n in needs
+        if n.kind == ct_env.NEED_PATH and n not in missing
+        and not _path_forward_ok(n, forwarded)
+    ]
+    if wrong_path:
+        names = ", ".join(n.name for n in wrong_path)
+        return CheckResult(
+            "sidecar-env",
+            WARN,
+            f"the curated-thoughts entry in {where} sets {names} to a "
+            "different brain location than this environment resolves",
+            "The sidecar would open a different brain from the one the "
+            "plugin's own calls use. "
+            + _sidecar_env_fix(wrong_path),
+        )
     if missing:
         return CheckResult(
             "sidecar-env",
@@ -852,9 +891,20 @@ def _ct_entry_lines(text):
     return body
 
 
-def _forwarded_env_names(body):
-    """Keys of the entry's `env:` mapping (block or flow style)."""
-    names, env_indent = set(), None
+_YAML_PAIR = r"['\"]?([A-Za-z_][A-Za-z0-9_]*)['\"]?\s*:\s*(\"[^\"]*\"|'[^']*'|[^,}#]*)"
+
+
+def _yaml_scalar(text):
+    text = text.strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in "'\"":
+        return text[1:-1]
+    return text
+
+
+def _forwarded_env(body):
+    """The entry's `env:` mapping, name -> configured text (block or flow
+    style). The text is used only for comparison, never printed."""
+    found, env_indent = {}, None
     for line in body:
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
@@ -866,15 +916,16 @@ def _forwarded_env_names(body):
                 env_indent = indent
                 flow = m.group(1).strip()
                 if flow.startswith("{"):
-                    names.update(re.findall(r"[{,]\s*['\"]?([A-Za-z_][A-Za-z0-9_]*)['\"]?\s*:", flow))
-                    return names
+                    for name, value in re.findall(r"[{,]\s*" + _YAML_PAIR, flow):
+                        found[name] = _yaml_scalar(value)
+                    return found
             continue
         if indent <= env_indent:
             break
-        m = re.match(r"['\"]?([A-Za-z_][A-Za-z0-9_]*)['\"]?\s*:", stripped)
+        m = re.match(_YAML_PAIR, stripped)
         if m:
-            names.add(m.group(1))
-    return names
+            found[m.group(1)] = _yaml_scalar(m.group(2))
+    return found
 
 
 def _hermes_dotenv_names():
@@ -890,22 +941,23 @@ def _hermes_dotenv_names():
     return names
 
 
-def _sidecar_env_route():
-    """(6b) how this host routes env to the sidecar.
+def _sidecar_env_route(cwd=None):
+    """(6b) how this host routes env to the sidecar. `cwd` is unused: the
+    Hermes config is a single host file.
 
     Hermes (tools/mcp_tool_config.py::_build_safe_env at the ee8dd6c8 pin)
     passes a stdio MCP server only PATH, HOME, USER, LANG, LC_ALL, TERM,
     SHELL, TMPDIR, XDG_* and names injected by an external secret source,
     plus the entry's own `env:` mapping, whose ${VAR} references it
     resolves from its environment and ~/.hermes/.env (unset ones stay
-    literal). Returns (forwarded names | None when there is no entry,
-    names set in the env file, where).
+    literal). Returns (the entry's env mapping | None when there is no
+    entry, names set in the env file, where).
     """
     text = _read_text_file(HERMES_CONFIG)
     body = _ct_entry_lines(text) if text is not None else None
     if body is None:
         return None, set(), str(HERMES_CONFIG)
-    return _forwarded_env_names(body), _hermes_dotenv_names(), str(HERMES_CONFIG)
+    return _forwarded_env(body), _hermes_dotenv_names(), str(HERMES_CONFIG)
 
 
 def _sidecar_env_fix(needs):
@@ -915,7 +967,7 @@ def _sidecar_env_fix(needs):
         value = n.value if n.kind == ct_env.NEED_PATH else "${" + n.name + "}"
         rows.append(f'      {n.name}: "{value}"')
     return (
-        f"Add to mcp_servers.{MCP_SERVER_KEY} in {HERMES_CONFIG} (merge into "
+        f"Set in mcp_servers.{MCP_SERVER_KEY} of {HERMES_CONFIG} (merge into "
         "an existing env: block):\n"
         "    env:\n" + "\n".join(rows) + "\n"
         "then restart Hermes. Hermes resolves ${NAME} from its environment "
@@ -1271,7 +1323,7 @@ def run_checks(timeout=MCP_TIMEOUT, env=None, cwd=None):
     results.append(check_brain_dir(brain_paths, env=merged))
     results.append(check_vault(brain_paths, env=merged))
     results.append(check_embedding(env=merged))
-    results.append(check_sidecar_env(brain_paths, env=merged))
+    results.append(check_sidecar_env(brain_paths, env=merged, cwd=cwd))
     results.append(_check_registration(cwd=cwd))
     results.append(
         check_import_preflight(
