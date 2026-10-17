@@ -1,0 +1,389 @@
+# Intuitive Wisdom: autonomous-work delivery for DeepSeek Harness — design
+
+**Date:** 2026-10-16 · **Status:** Approved for implementation (user decisions 1–6 binding; autonomous
+brainstorm, no open questions) · **Branch:** `feat/dsh-autonomous-work-wisdom` · **Base:** `origin/main` @ `4388849`
+**Release:** deepseek 0.5.0 → 0.6.0 (second leg after Hermes 0.6.0)
+**Builds on:** [Step-0 investigation](../investigations/2026-10-16-autonomous-work-trigger-step0-investigation.md)
+(DSH section, "Recommended common contract", "A6 results"), the Hermes reference
+[`2026-10-16-hermes-autonomous-work-wisdom-design.md`](2026-10-16-hermes-autonomous-work-wisdom-design.md)
+(`integrations/hermes/scripts/ct_wisdom_activity.py`), the verbose-mode spec
+[`2026-10-16-wisdom-verbose-mode-design.md`](2026-10-16-wisdom-verbose-mode-design.md), and the DSH live leg of
+[`2026-10-09-cross-harness-wisdom-parity-design.md`](2026-10-09-cross-harness-wisdom-parity-design.md).
+
+Tags: **[V]** verified in this session by reading the cited file and line in the pinned
+`@deepseek-ai/*@0.2.0-rc.2` tarballs (read as data in the session scratchpad, never executed, never
+committed). **[U]** unverified or inferred; carried as a limitation or an e2e target.
+
+## Problem
+
+The DSH plugin asks CT for relevant facts once per user turn (the first `agent/pre-step` of a turn).
+An agent that then works on its own for many model steps never gets a fact keyed to what it is doing.
+INTENT's third step, "During autonomous work", asks for that. Hermes shipped it first (0.6.0); this
+spec brings DSH to the same behavior and moves the host-neutral pieces into `ct-wisdom-core` so the
+OpenCode and OpenClaw legs reuse them.
+
+## User decisions (binding, 2026-10-16)
+
+1. **Rate.** At most one CT call per model step, only when the activity key changes (a new file,
+   command or search). No per-message ceiling, no session cap.
+2. **Query = the bare target** (A6: no verb). A relative path for files, the pattern for searches,
+   the program plus the next safe unquoted word for commands. Never flag values, quoted words, URLs,
+   env assignments or credential-shaped tokens. Never contents, output, diffs or the agent's text.
+   Port Hermes's line builder and its randomized secret-safety test exactly; the TS builder lives in
+   `ct-wisdom-core`.
+3. **Subagents** get deliveries too (the shipped adapter never checks for subagents; keep that).
+4. **Scheduled and background runs** are included.
+5. **Size:** 1 fact, ≤ 600 chars per activity delivery.
+6. **CT's own tools never trigger.**
+
+Known limit: concept rules reached only through a path need CT activity mode
+([curated-thoughts#282](https://github.com/equationalapplications/curated-thoughts/issues/282)).
+
+## Pinned host facts (DSH 0.2.0-rc.2)
+
+Sources: `npm pack` of `dsh-agent-loop`, `dsh-agent`, `dsh-tools`, `dsh-llm`, `dsh-session`,
+`dsh-scope`, `dsh-tool-fs`, `dsh-tool-fs-search`, `dsh-tool-bash`, `dsh-tool-bash-persistent`,
+`dsh-tool-pwsh`, `dsh-tool-pwsh-persistent`, `dsh-tool-str-replace-editor`, `dsh-tool-subagent`, all
+`0.2.0-rc.2`, plus the `@deepseek-ai/dsh@0.2.0-rc.2` manifest. Paths are relative to `package/`.
+
+### Trigger and step semantics
+
+- **[V] `agent/pre-step` runs before every model step of a turn.** `turn()` loops
+  `preStep(target, {turn, step})` with `target = "next-turn"` for step 1 and `"next-step"` afterwards
+  (`dsh-agent-loop/lib/index.js:950-1006`). Steps are numbered per turn: `phase.step` resets to 0
+  when the next turn starts (`:1036-1038`).
+- **[V] When step ≥ 2 runs.** After a step the loop breaks only when the step ended the turn
+  (`turnEnds`) **and** the next-step inbox is empty (`:997-1005`). Otherwise it calls `preStep` again,
+  and then breaks only if `turnEnds` is set and the decision carries no messages (`:962`). So a
+  pre-step at step ≥ 2 whose claimed inbox batch is empty can only happen when the turn is going on
+  anyway (a tool step that did not conclude). Appending a message there **never forces an extra model
+  call**. The one case where it could (turn ended, inbox non-empty, a listener stripped the claimed
+  messages to nothing) is excluded by the rule "deliver only if the claimed batch is empty or the
+  decision still carries messages" (below).
+- **[V] Decision messages are persisted once.** In `step()`, `decision.messages` are appended as
+  `user/message` (`surfaceOp: "append"`) on the first attempt only; provider retries do not re-append
+  (`:1048-1062`). The request is then built from `session.deriveMessages()` (`:1262-1277`), so the
+  message is in the model's context for this step and every later one.
+- **[V] Pre-step payload.** `{agent, messages, turn, step, signal}`; `messages` are those removed
+  from the inbox for this step (`dsh-agent/lib/types/runtime-types.d.ts:293-310`). The default
+  decision is `{kind: "enter", messages: claimed (+ runtime context)}` (`dsh-agent-loop/lib/index.js:902-924`).
+- **[V] Where the previous step's tool calls are.** The assistant message of a step is appended
+  before its tools run, and its `content` holds `tool-call` blocks `{type, id, name, arguments}` where
+  `arguments` is the raw JSON string from the model (`dsh-llm/lib/types/types.d.ts:85-92`;
+  `dsh-agent-loop/lib/index.js:1129-1152`). Tool results are `role: "tool"` messages with
+  `source: {kind: "tool", callId}` (`dsh-llm/lib/types/message.d.ts`, `ToolMessageSource`). At pre-step
+  N+1 the last assistant message in `deriveMessages()` is therefore step N's, with all of its calls.
+- **[V] `deriveMessages()` is the model's view.** It walks the session surface; a compaction
+  `replace` deletes the shadowed nodes, and each call returns a fresh array of deep-frozen messages
+  (`dsh-session/lib/types/index.d.ts:285-303`). Rebuilding the ledger from it is exactly INTENT's
+  "context means what the agent can see right now".
+- **[V] `tools/pre-execute`** is a waterfall `(exec, next)` that runs before each dispatch; `exec`
+  carries `callId`, `name`, parsed `arguments`, `agent` and, for transport sub-dispatches (PTC
+  `run_code`), a `parent` token (`dsh-tools/lib/types/index.d.ts:47`, `:216-240`). The loop builds
+  `exec` from the assistant's blocks with `callId: block.id` and `arguments: JSON.parse(block.arguments)`
+  (`dsh-agent-loop/lib/index.js:506-516`). It is the prefetch point.
+
+### Tool names and arguments at the pin
+
+| Tool (package) | Args we read | Verb |
+|---|---|---|
+| `read` (`dsh-tool-fs` `:262`) | `file_path` | read |
+| `write` (`:527`) | `file_path` (never `content`) | write |
+| `edit` (`:675`) | `file_path` (never `old_string`/`new_string`) | edit |
+| `str_replace_editor` (`dsh-tool-str-replace-editor` `:267`) | `command` + `path` (never `file_text`/`old_str`/`new_str`) | `view` → read, `create` → write, `str_replace`/`insert` → edit |
+| `grep` (`dsh-tool-fs-search` `:1090`) | `pattern`, `path` (never `include`) | search |
+| `glob` (`:782`) | `pattern`, `path` | search |
+| `bash` (`dsh-tool-bash` `:488`, `dsh-tool-bash-persistent` `:337`) | `command` (never `description`/`workdir`) | run |
+| `pwsh` (`dsh-tool-pwsh` `:458`, `dsh-tool-pwsh-persistent` `:342`) | `command` | run |
+
+All [V] at the cited lines. Every other tool (`read_image`, web, todo, subagent, MCP tools, …) gives
+no activity. MCP tools are named `<server>__<tool>`; CT's are `curated-thoughts__curated_*`
+[V existing `RECALL_TOOL_SUFFIX` path, live e2e].
+
+### Scope: subagents and background agents
+
+- **[V] Untagged listeners receive every agent.** `scopeTarget` "admits untagged listeners globally,
+  and admits tagged listeners for a matching key or any of its ancestors"
+  (`dsh-scope/lib/index.js:315-341`, `scopeTarget`). The plugin's `apply()` context is loaded from the bundle patch at
+  the root and carries no scope tag [U: inferred from the patch loader; the shipped live delivery
+  already reaches subagents on that basis, investigation A5].
+- **[V] Subagents are full agents** with their own id and session log (`parentAgent`,
+  `origin: 'subagent'`, `dsh-agent/lib/types/index.d.ts:51-68`; created with `parent: exec.agent`,
+  `dsh-tool-subagent/lib/index.js:490-520`). Our session key is `agent.id`, so each child has its own
+  ledger, key tracker and step slots. Nothing in the path checks `parentAgent` or `origin`
+  (decision 3). Background jobs and scheduled prompts run the same agent loop, so nothing checks them
+  either (decision 4) [U: no scheduled-run surface was exercised].
+
+## Design
+
+### Overview
+
+```
+tools/pre-execute (each root tool call)          agent/pre-step, step ≥ 2
+  └─ planStep(agent, its assistant message)        ├─ user-turn path ran in this call? → nothing
+       (idempotent per step)                       ├─ claimed batch non-empty but decision empty → nothing
+                                                   ├─ planStep(agent, last assistant message)
+planStep:                                          │    (reuses the prefetch, or plans now)
+  ├─ no deriveMessages      → no_ledger            ├─ no query planned → nothing
+  ├─ for each call in model order:                 ├─ await ≤ remaining 3 s budget → budget
+  │    CT tool → skip; no activity → skip          ├─ failure → skip (breaker as live)
+  │    tracker.admit(agent, step, key):            ├─ fresh ledger from deriveMessages()
+  │      seen_key → next call; step_used → stop    ├─ first candidate not in ledger, rendered
+  │      admitted → this call is the trigger       │    marker-first, ≤ 600 chars → zero_hits
+  ├─ breaker open → breaker_open (no query)        └─ append {id: randomUUID(), role:'user',
+  └─ start `ct wisdom match --max 1 -- <target>`        source:{kind:'curated-thoughts-wisdom-activity'},
+     exclude = ledger now (newest first, ≤ 256)         content:[{type:'text', text: block}]}
+                                                      + update the turn's N3 ledger cache
+```
+
+### Activity builder (shared, `ct-wisdom-core/src/activity.ts`)
+
+A byte-for-byte behavioral port of `ct_wisdom_activity.py`'s builder. Host adapters map their tool
+calls to a neutral spec; the core does the rest.
+
+```ts
+type ActivitySpec =
+  | { verb: 'read' | 'write' | 'edit'; path: unknown }
+  | { verb: 'search'; pattern: unknown; path?: unknown }
+  | { verb: 'run'; command: unknown };
+interface Activity { verb; target; key; line; query }   // Hermes's Activity namedtuple
+buildActivity(spec, cwd?): Activity | null
+activityQuery(activity): string                          // the bare target
+```
+
+- **Paths** (`normalizePath`): `\` → `/`, `posix.normalize`; a relative path is kept (leading `./`
+  dropped); an absolute or `~` path under `cwd` becomes relative to it; any other absolute path keeps
+  its last two components; leading `..` are dropped; Windows drive letters are dropped; capped at 200
+  chars by keeping the tail and cutting at the next `/`.
+- **Self-trigger guard:** a target with a control character, `ct-fact:` or `## Curated Thoughts —`
+  gives no activity.
+- **Commands** (`commandTarget`), exactly Hermes's rules: tokenize like Python
+  `shlex.split(posix=False)` (whitespace split, quotes **kept**, a quoted word at a token start ends at
+  its closing quote; an unterminated quote falls back to a plain whitespace split); stop at the first
+  token containing any of ``;|&<>()` ``; drop leading `NAME=value` assignments; the program is the
+  basename of the first word and must be word-shaped (`^[A-Za-z0-9._][A-Za-z0-9._/-]{0,39}$`) and not
+  credential-shaped (a key prefix such as `sk-`, `ghp_`, `xox`, `AKIA`, `eyJ`, …, or ≥ 16 chars with
+  ≥ 3 digits); free-text programs (`echo`, `export`, `env`, `sudo`, `ssh`, `curl`, `wget`, …) give only
+  the program; a flag right after the program ends the target at the program (a flag's value is never
+  sent), except `python[N.M] -m <module>`; the second word must pass the same shape test.
+- **Search:** the pattern (no activity if any word is credential-shaped), capped at 200; the key and
+  label add ` in <path>` when a path is given; the query is the pattern alone.
+- **Key:** `(verb class, target)`, where read/write/edit fold into `file`.
+- **Query:** `stripForged(target).trim()`, capped at `ACTIVITY_QUERY_CHARS = 300`. The verb stays in
+  the key and the visible `_for: <line>_` label, never in the query.
+- `isCtTool(name)`: contains `curated-thoughts`/`curated_thoughts`, or the last `__`/`.` segment starts
+  with `curated_` (Hermes `is_ct_tool`).
+
+### Key tracker and the rate rule (shared `ActivityTracker`)
+
+Per session: the last 32 keys (LRU), the last 16 step ids that started a query, the last 16 step ids
+already reported to verbose mode; sessions LRU 256. `admit(session, step, key)` returns
+`'step_used'` if the step already started a query, `'seen_key'` (refreshing it) if the key is recent,
+else records both and returns `null`. A rejected call changes nothing. `peek` answers without
+recording; `firstReport` is true once per step.
+
+On DSH the **step id is the assistant message id** of the step whose tool calls form the activity.
+`tools/pre-execute` and the next pre-step both resolve it from `deriveMessages()`, so they agree
+without any turn/step bookkeeping, and a resumed process starts a fresh tracker (the log ledger then
+dedups). `planStep` walks the step's tool calls in model order and stops at the first admitted one
+(Hermes: "the first call with a new key wins"; the others stay unseen and can trigger later).
+
+### Query, prefetch and the 3 s budget
+
+- **Prefetch** at `tools/pre-execute` for root calls only (`exec.parent === undefined`) whose `callId`
+  is a tool-call block of the **last** assistant message. The listener calls `planStep`, starts the
+  match without awaiting it, and returns `next()` unchanged; it never throws and never alters the
+  tool decision. A plan is stored per `agentId#messageId` (bounded LRU of 64) and is idempotent: the
+  second call of the same step sees the stored plan.
+- **Match:** `runActivityMatch(host, activity, exclude, breaker)` (core). Capability latched absent →
+  `capability_missing`; `spawn` → reset discovery/probe caches; `timeout_or_exit` → breaker failure;
+  ok → breaker success; ok without a result → `parse_error`. It uses the adapter's `wisdomMatch`, so
+  the same capability probe and `ct wisdom match --json --max 1 --exclude=… -- <query>` argv as live.
+  The breaker is the **same** instance the user-turn path uses (rule 4: three failures pause both).
+- **Budget:** `deadline = plan start + TIMEOUT_MS (3 s)`. Pre-step awaits the match for
+  `max(0, deadline − now)`; a match that already settled is used even past the deadline (it costs
+  nothing). Running out is class `budget` (not a breaker failure; the match records its own outcome).
+- If no prefetch happened (a tool path that skips `pre-execute`), pre-step plans and awaits itself
+  within the same budget.
+
+### Channel: a persisted user-role message in the next step
+
+The block, marker first (same as Hermes so truncation can never show a fact without its marker):
+
+```
+## Curated Thoughts — relevant to this step
+_for: read src/billing/invoice.ts_
+
+<!-- ct-fact:<id> --> **<title>** (provenance: <provenance>)
+<text, truncated with … to fit>
+```
+
+- One fact (`ACTIVITY_MAX_PER_STEP = 1`), total ≤ `ACTIVITY_MAX_BLOCK_CHARS = 600`. A correction
+  renders the same with ` — supersedes ct-fact:<old>` and is a candidate only when it supersedes an id
+  in the ledger. Corrections come first, then entries not in the ledger; the first candidate that fits
+  is delivered. Titles, text, provenance and the label pass through `stripForged`.
+- Delivered as `{id: randomUUID(), role: 'user', source: {kind: 'curated-thoughts-wisdom-activity'},
+  content: [{type: 'text', text: block}]}` appended to `decision.messages` (the 0.4.1 lesson: a
+  `user/message` without a non-empty string `id` and `role: 'user'` makes the stored session
+  unresumable). Its own `source.kind` lets logs, tests and verbose mode tell it from the user-turn
+  message (`curated-thoughts-wisdom`).
+- It is persisted once in the session log, enters context after the prior request prefix (cache-safe;
+  the system prompt is untouched, rule 2) and replays on `--session-id` resume.
+
+**Self-trigger guard (structural).** The activity query is built only from tool-call arguments; the
+user-turn query only from the claimed inbox batch, which never holds our messages (ours go straight
+into the decision, not the inbox). A marker-hygiene test enforces both, and the target guard above
+covers block text copied into a tool argument.
+
+### Ledger and exactly-once (rule 1)
+
+- **Source of truth: the session log.** At pre-step the ledger is rebuilt from a fresh
+  `deriveMessages()` (user and tool roles) plus the agent's bootstrap memo ids, the same
+  `rebuildLedger` the user-turn path uses. It already holds the previous step's tool results (CT
+  recalls' markers), every earlier activity and user-turn message, and nothing compacted away.
+- **N3 cache.** The user-turn path caches its ledger for the `tools/post-execute` recall dedup. After
+  an activity delivery the cache is replaced by `fresh ledger ∪ {delivered id}` (the message is not
+  in the log until the step starts), so a CT recall later in the turn stubs the fact instead of showing
+  it again.
+- **Ordering:** pre-step for one agent is serial, so there is no in-step race; parent and child are
+  separate agents with separate logs. The user-turn path (first pre-step of a turn) and the activity
+  path (step ≥ 2, never in the same call) cannot both deliver into one decision.
+- **At most once.** If an outer pre-step listener later rejects or replaces our decision, the message
+  is never persisted and the fact simply may arrive later; nothing records it elsewhere, so it can't be
+  shown twice.
+
+### Fail-closed cases
+
+Each means "no CT call or no delivery", one `debug` log line, and an unchanged decision.
+
+| Class | Where | Verbose record? |
+|---|---|---|
+| `empty_id` (no agent id or message id) | plan | no |
+| `ct_tool` (decision 6) | plan | no |
+| `no_activity` (tool not in the map, or args give no safe line) | plan | no |
+| `seen_key`, `step_used` | plan | no |
+| `no_ledger` (no `deriveMessages`) | plan | yes, once per step, for a would-be trigger |
+| `breaker_open` | plan | yes, once per step, for a would-be trigger |
+| `capability_missing`, `spawn`, `timeout_or_exit`, `parse_error` | match | yes |
+| `budget` | pre-step | yes |
+| `zero_hits` → `deduped` / `no_match` / `gate_uncalibrated` | pre-step | yes |
+| `would_extend_turn` (claimed batch non-empty, decision empty) | pre-step | yes |
+| `hook_failed` (unexpected exception, caught) | either | no |
+
+### Verbose mode (channel `activity`)
+
+`VerboseTurn` gains two optional fields, `channel` (overrides the recorder's channel) and `activity`
+(the label, e.g. `read src/x.ts`); `buildRecord` copies them in the same order as the Python twin
+(`query`, then `activity`). DSH reports every activity delivery and every recorded skip above with
+`channel: 'activity'`, `query` (the bare target CT received), `activity`, `result`, `ledgerIds`,
+`deliveredIds`, `block`. The notice reads `Curated Thoughts wisdom: delivered 1 fact (… chars) …
+[activity]` on the plugin's named logger, and the JSONL line goes to `$DSH_HOME/logs/ct-wisdom-verbose.jsonl`.
+With verbose off nothing is written and the decision bytes are identical (tested). Other hosts are
+unaffected: both fields are optional and absent on their records.
+
+### What does NOT change
+
+- The user-turn path (first pre-step of a turn, 2 facts / 1200 chars) and its block bytes.
+- The session-start wisdom section and health context (rule 2).
+- `tools/post-execute` recall dedup, except that its turn cache learns activity ids.
+- OpenCode and OpenClaw behavior: they gain nothing they call; the core additions are new exports and
+  two optional verbose fields.
+
+## Shared core API added (for the OpenCode and OpenClaw legs)
+
+From `@equational-applications/ct-wisdom-core`:
+
+- constants `ACTIVITY_MAX_PER_STEP`, `ACTIVITY_MAX_BLOCK_CHARS`, `ACTIVITY_QUERY_CHARS`,
+  `ACTIVITY_TARGET_CHARS`, `ACTIVITY_LABEL_CHARS`, `ACTIVITY_RECENT_KEYS_MAX`,
+  `ACTIVITY_STEP_IDS_MAX`, `ACTIVITY_SESSIONS_MAX`, `ACTIVITY_HEADING`;
+- `ActivitySpec`, `Activity`, `buildActivity`, `activityQuery`, `normalizePath`, `commandTarget`,
+  `shellWords`, `isCtTool`, `credentialShaped`;
+- `ActivityTracker` (`admit`, `peek`, `firstReport`, `reset`); the "step id" is whatever the host's
+  coalescing unit is (DSH: assistant message id; OpenCode/OpenClaw: the in-flight window id);
+- `activityCandidates(result, ledger)`, `renderActivityBlock(item, superseded, activity)`,
+  `selectActivityDelivery(result, ledger, activity)`;
+- `runActivityMatch(host, activity, exclude, breaker)`;
+- `VerboseTurn.channel?` and `VerboseTurn.activity?`.
+
+## Alignment with INTENT.md
+
+- **Goal "During autonomous work":** this is that step for DSH. Host event (`agent/pre-step` at step
+  ≥ 2, prefetched at `tools/pre-execute`), query text (the bare target), frequency (once per model step
+  on key change) and channel (a persisted user-role message) answer INTENT's four open questions for
+  this host.
+- **Rule 1 (at most once):** marker on every fact, marker first; the ledger is rebuilt from the
+  model-visible session log at every trigger; the N3 cache learns activity ids; no second record of a
+  delivery exists that could replay it.
+- **Rule 2 (never edit the system prompt):** delivery is an appended user message; the system prompt
+  and its cached prefix are untouched.
+- **Rule 3 (no superseded fact):** CT filters superseded entries; corrections ride only when they
+  supersede an id in context.
+- **Rule 4 (fail quietly):** every listener catches everything; the pre-execute listener never changes
+  the tool decision; 3 s budget; the shared breaker.
+- **Rule 5 (provenance):** the block shows CT's provenance label.
+- **Rule 6 (keep it small):** 1 fact, ≤ 600 chars per delivery (decision 5), no session cap.
+- **Rule 7 (read only):** `ct wisdom match` only.
+- **Rule 8 (relevance is CT's):** the builder renders the action and never scores, expands or ranks.
+- **User decisions:** 1 → "Key tracker and the rate rule"; 2 → "Activity builder" and the
+  secret-safety tests; 3 and 4 → "Scope"; 5 → constants and "Channel"; 6 → `ct_tool`.
+- **Departures:** none. Where DSH differs from Hermes on purpose: the channel is a user-role message in
+  the next step instead of a tool-result splice (DSH has a per-step channel and the investigation
+  recommends it), the step id is the assistant message id instead of `api_request_id`, and the ledger
+  is the log at every trigger instead of an in-turn cache.
+
+## Known limitations
+
+1. **Concept rules via paths** need CT activity mode (curated-thoughts#282). No query expansion here.
+2. **One trigger per step:** other new keys in the same step stay unseen and can trigger later.
+3. **Delivery is one step later** than the work that triggered it (the fact arrives with the next
+   model request, which is when the model can first use it).
+4. **Process-local tracker:** a resumed session may query a key again; the ledger still dedups.
+5. **PTC sub-dispatches** (`run_code` inner calls) are not model tool calls and give no activity.
+6. **[U]** the root-scope assumption for the plugin context (subagent delivery) and scheduled runs
+   are inferred, not exercised live in this PR.
+
+## Testing
+
+Vitest, in `packages/ct-wisdom-core/tests/activity.test.ts` and `integrations/deepseek/tests/`:
+
+- **Line builder + secret safety** (core): Hermes's 29 cases and no-line cases ported verbatim, path
+  rules, CT tool names, secret args never in the line or query, the 500-iteration randomized command
+  test with the same nasty-token pool and assertions (≤ 2 tokens, no `=@:$'"|&;<>`, no key prefixes,
+  every token one of the command's own leading words, the second word is the one right after the
+  program), credential-shaped search patterns, own-text guard, caps.
+- **Key tracker and rate** (core + DSH): one start per step, file fold, LRU, sessions, run vs search
+  keys; on DSH, two calls of one step make one CT call, a later step with the same key makes none, a
+  new key in a later step makes one, prefetch and pre-step share one plan.
+- **Exactly-once randomized** (DSH): 200 sessions mixing user turns, multi-step activity steps with
+  random tool calls, CT recalls (N3), compaction and resume in a new adapter/process (log carried
+  over, memory dropped), random corrections and a fake CT that ignores `--exclude` half the time; no
+  fact is ever visible twice in the derived context.
+- **Fail-closed:** every class in the table, listeners never throw, the pre-execute decision is
+  passed through unchanged, the would-extend-turn guard.
+- **Marker hygiene:** the marker precedes the title in every block; activity queries never contain
+  `ct-fact:`, the heading or block text; the user-turn query ignores activity messages; activity
+  markers are found by the ledger rebuild.
+- **Verbose:** off → nothing written and byte-identical decisions; on → one `activity` record per
+  delivery with query, activity label and fact id, skips after a query recorded, rate/filter skips not.
+- **Backward compatibility:** the core, opencode and openclaw suites stay green.
+
+**Live e2e** (`integrations/deepseek/tests/e2e`, real-gate mode `CT_E2E_REAL_GATE=1`): one user
+message makes the agent do several tool steps (bash `pnpm test` twice, write then read `.env.local`,
+a CT recall). Checks, mirroring Hermes: (1) an activity message arrives, exactly once per fact, with
+its marker; (2) a later step with the same key neither re-queries nor re-delivers; (3) the activity
+message is an identified user-role message and the session resumes with `--session-id`; (4) CT's own
+tools never trigger a query; (5) every activity query is the bare target; plus verbose (the logger
+notice and the JSONL line). Real CT gate (OpenRouter `qwen/qwen3-embedding-4b`), ZAI GLM-5.3-FLASH,
+keys by name at run time only, logs grepped for both keys afterwards.
+
+## Versioning and docs
+
+- deepseek `0.5.0 → 0.6.0` (`package.json`, `integration.yaml`), CHANGELOG, README (Intuitive Wisdom
+  section and limitations), README table via `tools/ct_ci.py readme`.
+- opencode / openclaw: a patch bump with a "no behavior change" note only if the policy gate requires
+  it for the core change.
+
+## Out of scope
+
+- The Claude Code, OpenCode and OpenClaw autonomous legs (they reuse the core API above).
+- CT activity mode, batch form or fast path (investigation "CT-side support").
