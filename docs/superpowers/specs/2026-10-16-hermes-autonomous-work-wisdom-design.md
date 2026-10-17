@@ -799,9 +799,10 @@ A post-merge review of 0.6.7 found the following:
   example, `python -m tests.alice_notes` sends `python`, not `python tests`: a name in
   the command line is a signal that the work is about that person.
   - **Correction (0.7.0):** that example was already true in 0.6.7, whose full-module
-    check gave `python` alone. The check on the sent string was redundant (the sent
-    string is the program plus the module or its top package, both already checked)
-    and is removed in amendment 8.
+    check gave `python` alone. Both checks stay: the one on the sent string also
+    catches a multi-word name that shows up only once the program and the module are
+    joined (the parts alone pass). Amendment 8 first removed it as redundant; the
+    PR #72 re-review restored it.
 
 ## Amendment 8: approval-gated query (2026-10-17, hermes 0.7.0)
 
@@ -855,19 +856,23 @@ must recognize them.
 - **`transform_tool_result` decides, claims and queries.** For every call (it receives
   `api_request_id` like `pre_tool_call` did: both read `tool_hook_ids(agent, …)` /
   `_CallIds.hook_kwargs()` at the pin):
-  1. `empty_id` (session, tool call or `api_request_id` empty), `ct_tool`.
-  2. **Refused** (`is_refusal`, see "Refusal check"): class `refused`. No query;
-     nothing reaches the breaker or verbose mode.
+  1. `empty_id` (session, tool call or `api_request_id` empty), `ct_tool`, then a pure
+     peek: `step_used` if the step already started its query (the common case for the
+     other calls of a step, decided before any parsing).
+  2. The result is parsed once. **Refused** (`is_refusal`, see "Refusal check"): class
+     `refused`. No query; nothing reaches the breaker or verbose mode.
   3. Unsupported result shape: `unsupported_result`.
   4. The activity is built from the transform's `args` (the args that actually ran,
      after any plugin `modify`); none → `no_activity`.
-  5. No ledger (`no_ledger`) or an open breaker (`breaker_open`).
+  5. No ledger (`no_ledger`), an open breaker (`breaker_open`), or a ct remembered as
+     unusable (`ct_unavailable`, see "Unusable ct").
   6. **The step and the key are claimed together**, atomically
      (`ActivityState.start`): `step_used` if this `(session, api_request_id)` already
      started a query, `seen_key` if the key is recent.
   7. The query starts on a worker thread (discover → probe → `ct wisdom match --max 1`,
      `--exclude` from the ledger at this moment) and the transform waits up to
-     `LIVE_TIMEOUT` (3 s) for it, as OpenCode and OpenClaw do.
+     `LIVE_TIMEOUT` (3 s) for it, as OpenCode and OpenClaw do. If the thread cannot
+     start, the step and the key are both freed (`spawn_failed`).
 
   Every skip in 1–6 records nothing, so a later call of the same step may still
   start the step's query. Only a started query (7) uses the step: still one query per
@@ -900,6 +905,22 @@ transform's timeout path re-checks "done" under the same lock:
 - the wait runs out first and the query was **cold** (discovery or the probe ran inside
   this budget): class `budget` for delivery, but the transform records nothing; the
   worker's own outcome settles the breaker when it finishes.
+- after any budget miss the key stays held while the worker runs and is freed when it
+  finishes (nothing was delivered), so one activity never has two queries in flight.
+- a probe timeout (`ct --help` during discovery, or `ct wisdom match --help`) is a
+  breaker failure: a hung ct is a sick CT.
+
+### Unusable ct
+
+A worker that ends `discovery_miss` (no Curated Thoughts `ct`, e.g. chart-testing's
+`ct` first on PATH), `capability_missing` (no `wisdom match`) or `probe_timeout` marks ct
+unusable for `CT_UNUSABLE_PAUSE` (= `BREAKER_PAUSE`, 300 s) while `PATH` is unchanged.
+Until then the transform skips with `ct_unavailable` before claiming anything, so a
+broken or absent ct costs at most one wait (≤ 3 s) per pause, then goes quiet. A `PATH`
+change retries at once. The key of the failed query is still freed: during the pause
+nothing queries, and after it the activity may be tried again. `ct_wisdom.discover_ct`
+itself does not memoize a miss (its docstring said it did; fixed); the memo lives in the
+activity module so the shared live path is unchanged.
 A refused or blocked call starts no query, so it counts zero. A Hermes-cancelled or
 timed-out tool never reaches the transform, so it also counts zero.
 
@@ -919,10 +940,11 @@ this"; sending its target anyway is the worse failure.
 
 - `_python_module` also parses `-m` with an attached module: `-mpytest`, `-umpytest`
   (`m` ends the flag word; the rest of the word is the module).
-- The redundant name check on the sent string is removed; the full-module check stays.
-  (The only difference: a user name that would span the space between the program and
-  the module, such as a two-word name made of the end of `python` and the start of the
-  package. Each part is still checked against each word.)
+- The name check on the sent string stays (first removed here as redundant, then
+  restored in the PR #72 re-review): a user name that spans the space between the
+  program and the module, such as a two-word name made of the end of `python` and the
+  start of the package, passes the per-part checks and is caught only on the joined
+  string. One extra `name_hit` call per `python -m` command.
 - `_project_package` `stat`s `<top>.py` / `<top>/__init__.py` first and lists the
   directory only on a hit, to confirm the exact case.
 - `_resolve` computes the homes inside the project root once per root, cached with the
@@ -940,6 +962,15 @@ this"; sending its target anyway is the worse failure.
   the worker's late outcome settles it. A worker that finishes just as the wait runs
   out is delivered, with no budget failure.
 - `peek` is pure: it creates no session and refreshes no key.
+- A stuck probe or discovery is one breaker failure, then later steps skip without
+  starting a worker; a discovery miss or `capability_missing` is remembered (no
+  breaker failure) until the pause ends or `PATH` changes.
+- After a cold budget miss no second worker starts for the same key; the key is freed
+  when the late worker finishes.
+- A spawn failure frees the step and the key.
+- A used step skips before the activity is built; the result is parsed once.
+- `python -m pytest` with a name that appears only in `python pytest` sends `python`.
+- No test uses a `pre_tool_call` stand-in any more.
 - Key release: `budget`/`timeout`/`exit`/`parse_error`/`spawn` free the key (a later
   step re-queries the same activity), `zero_hits` keeps it; the step stays used.
 - Breaker: a budget miss counts once even when the worker later times out; a late
@@ -991,7 +1022,30 @@ Same version (0.7.0 is unreleased). Each change and why:
 6. **`peek` is pure.** The `seen_key` check that used to run in `pre_tool_call` moved
    the key to the front of the LRU; that check is gone, and `peek` (used for the
    once-per-step verbose report) no longer creates a session or touches recency.
-7. `command_target`'s docstring no longer describes the removed second name check.
+7. `command_target`'s docstring fixed (superseded by update 2, item 7: the check on
+   the sent string is back).
+
+### Amendment 8 update 2 (PR #72 re-review, 2026-10-17)
+
+Same version. Each change and why:
+
+1. **A ct that never warms up.** Under update 1, a hung `ct --help` or `ct wisdom match
+   --help` made every step wait the full 3 s (each miss cold, so nothing recorded) and
+   the breaker never opened. Now a probe timeout is a breaker failure, and the failure
+   is remembered (see "Unusable ct").
+2. **No usable ct.** A discovery miss and `capability_missing` are remembered the same
+   way, so a host without a Curated Thoughts `ct` stops spawning discovery and probe
+   subprocesses on every step. `discover_ct`'s docstring no longer claims a memo.
+3. **Refusal check** reads more wording (rejected, cancelled by / operation cancelled),
+   Hermes's own `status` / `error_type` / `error_message` kwargs, and nested or
+   JSON-string errors (see "Refusal check").
+4. **Key in flight.** After a budget miss the key stays held until the worker
+   finishes, so a later step cannot start a second query for the same activity.
+5. **Spawn failure** frees the step and the key.
+6. **Cost:** a used step is decided by a peek before any parsing; the result is parsed
+   once and shared by the refusal check, the splice mode and the splice.
+7. **Name check on the sent string restored** (see the correction under privacy
+   amendment 7).
 
 Not changed: splitting the Hermes hooks out of the shared builder module, so that
 claude-code and docker-agent stop shipping a byte-identical copy of the hook code
@@ -999,14 +1053,24 @@ they never run. That is a separate refactor.
 
 ### Refusal check (`is_refusal`)
 
-Matched case-insensitively on the result envelope, never on tool output fields:
+Matched case-insensitively on the result envelope, never on tool output fields
+(`output`, `content`, `stdout`, `stderr`, …):
 - `status` in `blocked`, `pending_approval`, `approval_required`, `denied`, `rejected`,
   `refused`, `cancelled`/`canceled`, `not_approved`;
 - `"approved": false` or `"approval_pending": true`;
-- `error` or `message` (or a plain-text result) starting `blocked`, `refusing`,
-  `denied`, `command denied`, `access denied` or `not approved`, or containing "not
-  approved", "did not approve", "denied by", "user denied", "was not run" or "not
-  executed".
+- `error`, `message`, `reason`, `detail` or `error_message` starting `blocked`,
+  `refusing`, `denied`, `command denied`, `access denied`, `not approved`, `rejected`,
+  `cancelled`/`canceled`, or containing "not approved", "did not approve", "denied by",
+  "user denied", "was not run", "not executed", "rejected", "cancelled by"/"canceled
+  by", "user cancelled" or "operation cancelled" (and the `canceled` spellings). These
+  fields are also read when nested (`{"error": {"message": …}}`, up to 3 levels) or
+  when they hold a JSON-object string; the same envelope rules apply inside;
+- Hermes's transform kwargs: `status` in the list above, `error_message` with the
+  wording above, or an `error_type` containing block, denied, deny, reject, refus,
+  approval or cancel (at the pin Hermes derives them from the result's `error`, so
+  they mostly repeat it);
+- a plain-text result: only its leading wording (the prefixes above), since the rest
+  is tool output.
 
 [V] Sources at the pin: `tools/terminal_tool.py` (`_error_json` with `status="blocked"`
 / `"pending_approval"`, the fallback "Command denied: …"), `tools/approval.py` and
@@ -1065,9 +1129,11 @@ so their one behavior change is that `python -mpytest` now sends `python pytest`
   no subprocess, and the brain is still reached only through `ct` (rule 7).
 - **Amendment 8 (approval-gated query):** serves "Why this repo exists" (private,
   local-first): a call the user refused or a plugin blocked sends nothing. Rule 4 (fail
-  quietly): a warm budget miss counts once on the shared breaker, a cold-start miss or a
-  refusal never, so a slow first start cannot silence wisdom while CT is healthy; the
-  3 s cap is unchanged; with no `pre_tool_call` hook the plugin can never block a tool.
+  quietly): a warm budget miss or a hung probe counts once on the shared breaker, a
+  cold-start miss or a refusal never, so a slow first start cannot silence wisdom while
+  CT is healthy; a broken or absent ct costs at most one 3 s wait per 5-minute pause,
+  then goes quiet; the 3 s cap is unchanged; with no `pre_tool_call` hook the plugin can
+  never block a tool.
   Rule 6: still one query per step (claimed atomically in the transform). Rule 7: still
   `ct wisdom match` only, and no warm-up call. Rule 8: the refusal check reads Hermes's
   own result envelope (status and error wording), never scores relevance.

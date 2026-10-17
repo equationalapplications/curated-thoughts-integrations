@@ -14,12 +14,13 @@ heading format below is load-bearing: `## <version> — <date>`.
   `python -mpytest` and `python -umpytest` (the module attached to `-m`) now
   send `python pytest`, as `python -m pytest` always did; before, they sent
   `python` alone. The rest is internal: project packages are `stat`ed before
-  any directory listing, the homes inside a project are computed once per
-  project root, and a redundant second name check on the sent `python
-  <module>` string is gone (the module itself is still checked). The
-  Hermes-only hook changes (the query now starts after Hermes's approval
-  decision, the step is claimed in `transform_tool_result`, a broader
-  refusal check, the cold-start budget rule) do not run here.
+  any directory listing, and the homes inside a project are computed once
+  per project root. The `discover_ct` docstring in the shared `ct_wisdom.py`
+  no longer claims that a discovery miss is memoized (it never was; no
+  behavior change). The Hermes-only hook changes (the query starts after
+  Hermes's approval decision, the step is claimed in
+  `transform_tool_result`, a broader refusal check, the cold-start budget
+  rule, remembering an unusable `ct`) do not run here.
 
 ## 0.4.0 — 2026-10-17
 

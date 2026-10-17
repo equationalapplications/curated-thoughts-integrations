@@ -25,7 +25,10 @@ format below is load-bearing: `## <version> — <date>`.
   and `cancelled`, `"approved": false` and `"approval_pending": true`, an
   error or message starting `BLOCKED`, `Refusing`, `Denied` or `Command
   denied`, and wording like "not approved", "denied by", "user denied" and
-  "was not run". A refused call leaves the step free for the next call.
+  "was not run", "rejected", "cancelled by user" and "operation cancelled",
+  also in nested or JSON-string errors and in the status and error details
+  Hermes passes to the hook. Output fields are never read. A refused call
+  leaves the step free for the next call.
 - **Timing change:** the query no longer overlaps the tool's run, so a step
   whose first activity is new waits for Curated Thoughts after the tool
   finishes (typically 0.4–2 s, never more than 3 s), at most once per model
@@ -47,10 +50,16 @@ format below is load-bearing: `## <version> — <date>`.
   arrives just as the wait runs out is delivered, not dropped.
 - `python -mpytest` and `python -umpytest` (the module attached to `-m`) are
   parsed like `python -m pytest`.
+- If `ct` is missing, is not Curated Thoughts, lacks `wisdom match`, or its
+  `--help` probe hangs, the autonomous-work path remembers that for 5
+  minutes (or until PATH changes) and skips at once instead of waiting on
+  every step. A hung probe also counts as a breaker failure.
+- After a query runs past the 3 s wait, the same activity is not queried
+  again until that query has finished.
 - Internal: project packages are `stat`ed before any directory listing; the
-  homes inside a project are computed once per project root; a redundant
-  second name check on the sent `python <module>` string is removed (the
-  module itself is still checked).
+  homes inside a project are computed once per project root; the result is
+  parsed once per call, and the other calls of a step are passed through
+  before any parsing.
 - **Correction to 0.6.8:** its entry said `python -m tests.alice_notes` "now
   sends `python` alone, not `python tests`". 0.6.7 already sent `python`
   alone there (its check on the full module caught the name); 0.6.8 changed
