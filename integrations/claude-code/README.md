@@ -106,7 +106,9 @@ copies of the Hermes core (`scripts/ct_wisdom_live.py`, `ct_wisdom.py`,
 |------|--------------|
 | `SessionStart` | Appends a `## Curated Thoughts — relevant memory` block (top 3 wiki entries for the project) after the status section, and records its fact ids in the plugin's data dir. |
 | `UserPromptSubmit` | On each genuine user turn, asks `ct wisdom match` for up to 2 relevant facts not yet in context (no per-session cap; corrections to a fact already shown also flow) and appends them as `additionalContext`. The system prompt is never touched. |
-| `PostToolUse` (`curated_recall_context`) | A recalled wiki entry the session already has is replaced by a one-line `already in context` stub. |
+| `PostToolUse` (`curated_recall_context`) | A recalled wiki entry already in that agent's context is replaced by a one-line `already in context` stub. |
+| `PostToolBatch` | **During autonomous work**: once per model step, when the agent moves to a new file, command or search, asks `ct wisdom match` for 1 relevant fact (at most 600 chars) using only the bare target (a project-relative path, a search pattern, or a program plus a known subcommand; never file contents, tool output or the agent's words), and appends it after the step's tool results under `## Curated Thoughts — relevant to this step`. Works in subagents too. CT's own tools never trigger it. |
+| `PostToolUse` / `PostToolUseFailure` (`Read`, `Write`, `Edit`, `MultiEdit`, `NotebookEdit`, `Bash`, `Grep`, `Glob`) | Records which tool calls really ran, so a call you denied never becomes a query. |
 
 **Exactly once.** The record of what this session has seen lives in
 `${CLAUDE_PLUGIN_DATA}/wisdom/` (Claude Code creates it; it survives plugin
@@ -116,9 +118,15 @@ unreadable state means no delivery, never a repeat.
 **When it stays quiet**, deliberately:
 
 - **Resumed sessions** (`--resume`, `--continue`, `/resume`) and **forks** get
-  no live delivery for the rest of their life. What they already contain
+  no live or autonomous-work delivery for the rest of their life, subagents included. What they already contain
   cannot be known without the transcript. The status section still renders.
-- **Subagents** never get live delivery or stubs. Only the main thread does.
+- **Subagents** get autonomous-work facts (not per-message ones; they have no user turns).
+  The main thread and its subagents share one record, so a fact reaches at
+  most one context of the session tree.
+- **Files outside a project** (no `.git`, `package.json`, `pyproject.toml`, ...
+  above the working directory) give no autonomous-work query; an empty
+  `.curated-thoughts-project` file opts a folder in. Commands send only the
+  program and, for tools such as `git` or `pnpm`, a known subcommand.
 - **Not a user turn.** Background-agent reports and other harness-generated
   prompts (anything that opens with an envelope tag such as
   `<agent-message …>`) are skipped.
@@ -129,6 +137,16 @@ unreadable state means no delivery, never a repeat.
 `/compact` keeps delivering and does not repeat a fact the session already
 had. `/clear` starts a fresh session.
 
+**Autonomous-work limits.** A path reaches facts that name the file or
+command; a rule about a concept reached only through a path does not yet
+(CT activity mode, curated-thoughts#282). Only the first new file, command
+or search of a step queries. Each file, command or search tool call starts
+one short hook process (no CT call), and a step that queries waits for one
+`ct wisdom match` (a 9 s budget in all, usually under 3 s once the `ct`
+location is cached in `${CLAUDE_PLUGIN_DATA}/wisdom/ct.json`). A step that
+ends the turn drops its fact. See the
+[spec](../../docs/superpowers/specs/2026-10-17-claude-code-autonomous-work-wisdom-design.md).
+
 **Requirements.** Curated Thoughts ≥ 3.3.0 with `ct` on `PATH` (or in the
 platform install location), and Python 3.9+. Managed deployments that set
 `allowManagedHooksOnly` disable plugin hooks, and Intuitive Wisdom with them.
@@ -136,7 +154,8 @@ platform install location), and Python 3.9+. Managed deployments that set
 ### Verbose mode
 
 Set `CT_WISDOM_VERBOSE=1` in the environment you start `claude` from to see
-what each turn's wisdom delivery added, or why it added nothing. The hook
+what each turn's (and each autonomous step's) wisdom delivery added, or why it
+added nothing. The hook
 then returns a top-level `systemMessage`, which Claude Code shows in the
 transcript ("… says: Curated Thoughts wisdom: delivered 2 facts …", with the
 block) and does not send to the model; `additionalContext` is unchanged. Each

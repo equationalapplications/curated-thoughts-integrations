@@ -33,6 +33,39 @@
             "timeout": 10
           }
         ]
+      },
+      {
+        "matcher": "Read|Write|Edit|MultiEdit|NotebookEdit|Bash|Grep|Glob",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/ct_wisdom_cc.py\" || python \"${CLAUDE_PLUGIN_ROOT}/hooks/ct_wisdom_cc.py\"",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "matcher": "Read|Write|Edit|MultiEdit|NotebookEdit|Bash|Grep|Glob",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/ct_wisdom_cc.py\" || python \"${CLAUDE_PLUGIN_ROOT}/hooks/ct_wisdom_cc.py\"",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PostToolBatch": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/ct_wisdom_cc.py\" || python \"${CLAUDE_PLUGIN_ROOT}/hooks/ct_wisdom_cc.py\"",
+            "timeout": 15
+          }
+        ]
       }
     ]
   }
