@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.4.5 — 2026-10-17
+
+- Internal: the pre-flight census tests get a 20 s timeout (they ran past 5 s on Windows CI). No behavior change.
+
 ## 0.4.4 — 2026-10-17
 
 - **Fix: a `ct` that hangs past the activity budget now counts against the breaker.** The miss is charged when the budget runs out, not when the query settles (which a hung child never did), so a `ct` that keeps hanging pauses CT after three misses, as on DSH and Hermes.
