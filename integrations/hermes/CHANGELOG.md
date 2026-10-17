@@ -6,6 +6,36 @@ format below is load-bearing: `## <version> — <date>`.
 
 ## Unreleased
 
+## 0.6.4 — 2026-10-16
+
+- **Privacy fix, part 3.** A further review of 0.6.3 found that the
+  autonomous-work activity query (sent to CT and its embedding provider, and
+  shown in the `_for:` label and the verbose log) could still carry private
+  data. Upgrade from any 0.6.x. What 0.6.3 could still send:
+  - **Another user's home-directory name when `HOME=/`** (`nobody`, `daemon`,
+    many containers): with the cwd at `/home`, `/home/bob/secret.txt` was sent
+    as `bob/secret.txt`, because every cwd counted as "inside HOME".
+  - **A bare drive letter**: `\\?\C:\`, `/C:/` and `/mnt/c:` were sent as
+    `C:` / `c:`.
+
+  Now:
+  - A cwd counts only at depth 2 or more, when it is not a `/Users/<x>` or
+    `/home/<x>` directory and is neither HOME nor above it. A HOME of `/` or
+    `/root` counts as no HOME.
+  - No sent path component may contain `:`.
+  - A private name is `USER`, `LOGNAME` or `USERNAME`, or HOME's / USERPROFILE's
+    basename only when it sits directly under `/Users`, `/home` or `C:\Users`.
+    Service accounts stay exempt. `HOME=/github/home` no longer hides `home`,
+    and `HOME=/opt/build` no longer hides `build`.
+  - If any sent component, search word, program or subcommand contains your
+    user name, the whole activity is dropped. Before, only that component was
+    dropped, so `src/sample.py` with `USER=sam` was sent as the misleading `src`.
+  - Names under 3 chars are private again, matched only as a whole component or
+    word (`jo/notes.md` gives nothing; `src/join.py` is fine).
+  - The cwd prefix is compared case- and Unicode-insensitively, so
+    `/Users/alice/proj/src/x.py` under cwd `/Users/alice/Proj` is `src/x.py`.
+  - The session cwd is looked up only for file and search tools.
+
 ## 0.6.3 — 2026-10-16
 
 - **Privacy fix, part 2: the 0.6.2 fix was incomplete.** After 0.6.2 shipped, a

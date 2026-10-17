@@ -239,7 +239,7 @@
     "expected_line": null
   },
   {
-    "name": "R2: user name inside a relative path",
+    "name": "R2/A3: user name inside a relative path gives nothing",
     "tool": "read_file",
     "args": {
       "path": "alice/drafts/plan.md"
@@ -249,11 +249,11 @@
       "USER": "alice",
       "HOME": "/Users/alice"
     },
-    "expected_query": "drafts/plan.md",
-    "expected_line": "read drafts/plan.md"
+    "expected_query": null,
+    "expected_line": null
   },
   {
-    "name": "R2: Users/<name> inside a relative path",
+    "name": "R2/A3: Users/<name> inside a relative path gives nothing",
     "tool": "read_file",
     "args": {
       "path": "Users/alice/plan.md"
@@ -263,11 +263,11 @@
       "USER": "alice",
       "HOME": "/Users/alice"
     },
-    "expected_query": "plan.md",
-    "expected_line": "read plan.md"
+    "expected_query": null,
+    "expected_line": null
   },
   {
-    "name": "R2: home/<name> inside a relative path",
+    "name": "R2/A3: home/<name> inside a relative path gives nothing",
     "tool": "patch",
     "args": {
       "path": "home/bob/plan.md",
@@ -279,8 +279,8 @@
       "USER": "bob",
       "HOME": "/home/bob"
     },
-    "expected_query": "plan.md",
-    "expected_line": "edit plan.md"
+    "expected_query": null,
+    "expected_line": null
   },
   {
     "name": "R2: home not followed by a name is kept",
@@ -297,7 +297,7 @@
     "expected_line": "read home/plan.md"
   },
   {
-    "name": "R2: user name compared case-insensitively",
+    "name": "R2/A3: user name compared case-insensitively",
     "tool": "read_file",
     "args": {
       "path": "Alice/plan.md"
@@ -307,11 +307,11 @@
       "USER": "alice",
       "HOME": "/Users/alice"
     },
-    "expected_query": "plan.md",
-    "expected_line": "read plan.md"
+    "expected_query": null,
+    "expected_line": null
   },
   {
-    "name": "R2: LOGNAME counts as the user name",
+    "name": "R2/A3: LOGNAME counts as the user name",
     "tool": "read_file",
     "args": {
       "path": "dave/x.md"
@@ -320,11 +320,11 @@
     "env": {
       "LOGNAME": "dave"
     },
-    "expected_query": "x.md",
-    "expected_line": "read x.md"
+    "expected_query": null,
+    "expected_line": null
   },
   {
-    "name": "R2: USERNAME counts as the user name",
+    "name": "R2/A3: USERNAME counts as the user name",
     "tool": "read_file",
     "args": {
       "path": "carol/x.md"
@@ -334,11 +334,11 @@
       "USERNAME": "carol",
       "USERPROFILE": "C:\\Users\\carol"
     },
-    "expected_query": "x.md",
-    "expected_line": "read x.md"
+    "expected_query": null,
+    "expected_line": null
   },
   {
-    "name": "R2: basename of HOME counts as the user name",
+    "name": "R2/A3: basename of HOME under /home counts as the user name",
     "tool": "read_file",
     "args": {
       "path": "erin/x.md"
@@ -348,11 +348,11 @@
       "USER": "svc",
       "HOME": "/home/erin"
     },
-    "expected_query": "x.md",
-    "expected_line": "read x.md"
+    "expected_query": null,
+    "expected_line": null
   },
   {
-    "name": "R2: leading .. then user name",
+    "name": "R2/A3: leading .. then user name",
     "tool": "read_file",
     "args": {
       "path": "../alice/x.py"
@@ -362,8 +362,8 @@
       "USER": "alice",
       "HOME": "/Users/alice"
     },
-    "expected_query": "x.py",
-    "expected_line": "read x.py"
+    "expected_query": null,
+    "expected_line": null
   },
   {
     "name": "R2: leading .. dropped",
@@ -394,7 +394,7 @@
     "expected_line": "read año.md"
   },
   {
-    "name": "R2: unicode user name in NFD form",
+    "name": "R2/A3: unicode user name in NFD form",
     "tool": "read_file",
     "args": {
       "path": "josé/plan.md"
@@ -404,8 +404,8 @@
       "USER": "josé",
       "HOME": "/Users/josé"
     },
-    "expected_query": "plan.md",
-    "expected_line": "read plan.md"
+    "expected_query": null,
+    "expected_line": null
   },
   {
     "name": "R2: Windows path under cwd",
@@ -831,7 +831,7 @@
     "expected_line": "search TODO in acme"
   },
   {
-    "name": "R4: search path that sanitizes to nothing",
+    "name": "R4/A3: search path naming the user gives nothing",
     "tool": "search_files",
     "args": {
       "pattern": "TODO",
@@ -842,8 +842,8 @@
       "USER": "bob",
       "HOME": "/home/bob"
     },
-    "expected_query": "TODO",
-    "expected_line": "search TODO"
+    "expected_query": null,
+    "expected_line": null
   },
   {
     "name": "keep: command",
@@ -930,7 +930,7 @@
     "expected_line": "run deploy"
   },
   {
-    "name": "R2: user name in subcommand path",
+    "name": "R2/A3: user name in subcommand path",
     "tool": "terminal",
     "args": {
       "command": "cat alice/notes.txt"
@@ -940,11 +940,11 @@
       "USER": "alice",
       "HOME": "/Users/alice"
     },
-    "expected_query": "cat",
-    "expected_line": "run cat"
+    "expected_query": null,
+    "expected_line": null
   },
   {
-    "name": "R2: .. subcommand path",
+    "name": "R2/A3: user name in a .. subcommand path",
     "tool": "terminal",
     "args": {
       "command": "pytest ../Users/alice/t.py"
@@ -954,11 +954,11 @@
       "USER": "alice",
       "HOME": "/Users/alice"
     },
-    "expected_query": "pytest",
-    "expected_line": "run pytest"
+    "expected_query": null,
+    "expected_line": null
   },
   {
-    "name": "R2: user name as subcommand",
+    "name": "R2/A3: user name as subcommand",
     "tool": "terminal",
     "args": {
       "command": "finger alice"
@@ -968,8 +968,8 @@
       "USER": "alice",
       "HOME": "/Users/alice"
     },
-    "expected_query": "finger",
-    "expected_line": "run finger"
+    "expected_query": null,
+    "expected_line": null
   },
   {
     "name": "R2: user name as program",
@@ -1336,7 +1336,7 @@
     "expected_line": "search TODO in secrets"
   },
   {
-    "name": "0.6.3 R2: name inside a file name",
+    "name": "A3: name inside a file name gives nothing",
     "tool": "read_file",
     "args": {
       "path": "notes/alice.txt"
@@ -1346,8 +1346,8 @@
       "USER": "alice",
       "HOME": "/Users/alice"
     },
-    "expected_query": "notes",
-    "expected_line": "read notes"
+    "expected_query": null,
+    "expected_line": null
   },
   {
     "name": "0.6.3 R2: name-dash file",
@@ -1378,7 +1378,7 @@
     "expected_line": null
   },
   {
-    "name": "0.6.3 R2: name inside, case and NFC",
+    "name": "A3: name inside, case and NFC, gives nothing",
     "tool": "read_file",
     "args": {
       "path": "docs/José_plan.md"
@@ -1388,11 +1388,11 @@
       "USER": "josé",
       "HOME": "/Users/josé"
     },
-    "expected_query": "docs",
-    "expected_line": "read docs"
+    "expected_query": null,
+    "expected_line": null
   },
   {
-    "name": "0.6.3 R2: name inside a dir before Users",
+    "name": "A3: name inside a dir gives nothing",
     "tool": "read_file",
     "args": {
       "path": "Users/alice.old/x.md"
@@ -1402,11 +1402,11 @@
       "USER": "alice",
       "HOME": "/Users/alice"
     },
-    "expected_query": "x.md",
-    "expected_line": "read x.md"
+    "expected_query": null,
+    "expected_line": null
   },
   {
-    "name": "0.6.3 R2: name inside a subcommand",
+    "name": "A3: name inside a subcommand gives nothing",
     "tool": "terminal",
     "args": {
       "command": "cat alice_notes.txt"
@@ -1416,11 +1416,11 @@
       "USER": "alice",
       "HOME": "/Users/alice"
     },
-    "expected_query": "cat",
-    "expected_line": "run cat"
+    "expected_query": null,
+    "expected_line": null
   },
   {
-    "name": "0.6.3 R2: short names are not private",
+    "name": "A3: a short name matches an exact component",
     "tool": "read_file",
     "args": {
       "path": "al/x.md"
@@ -1430,8 +1430,8 @@
       "USER": "al",
       "HOME": "/home/al"
     },
-    "expected_query": "al/x.md",
-    "expected_line": "read al/x.md"
+    "expected_query": null,
+    "expected_line": null
   },
   {
     "name": "0.6.3 service: USER=node",
@@ -1561,5 +1561,443 @@
     "expected_query": "TODO",
     "expected_line": "search TODO in docs",
     "key_distinct_from": "0.6.3 key: search in a vs b"
+  },
+  {
+    "name": "A3: HOME=/ and cwd /home",
+    "tool": "read_file",
+    "args": {
+      "path": "/home/bob/secret.txt"
+    },
+    "cwd": "/home",
+    "env": {
+      "USER": "nobody",
+      "HOME": "/"
+    },
+    "expected_query": "secret.txt",
+    "expected_line": "read secret.txt"
+  },
+  {
+    "name": "A3: HOME=/ and cwd /home/bob",
+    "tool": "read_file",
+    "args": {
+      "path": "/home/bob/acme/secret.txt"
+    },
+    "cwd": "/home/bob",
+    "env": {
+      "USER": "nobody",
+      "HOME": "/"
+    },
+    "expected_query": "secret.txt",
+    "expected_line": "read secret.txt"
+  },
+  {
+    "name": "A3: HOME=/ and a deep cwd counts",
+    "tool": "read_file",
+    "args": {
+      "path": "/srv/app/src/x.py"
+    },
+    "cwd": "/srv/app",
+    "env": {
+      "USER": "nobody",
+      "HOME": "/"
+    },
+    "expected_query": "src/x.py",
+    "expected_line": "read src/x.py"
+  },
+  {
+    "name": "A3: HOME=/ and cwd /Users",
+    "tool": "read_file",
+    "args": {
+      "path": "/Users/dana/plans/q3.md"
+    },
+    "cwd": "/Users",
+    "env": {
+      "USER": "nobody",
+      "HOME": "/"
+    },
+    "expected_query": "q3.md",
+    "expected_line": "read q3.md"
+  },
+  {
+    "name": "A3: HOME=/root (depth 1) is no HOME",
+    "tool": "read_file",
+    "args": {
+      "path": "/root/app/src/x.py"
+    },
+    "cwd": "/root/app",
+    "env": {
+      "USER": "root",
+      "HOME": "/root"
+    },
+    "expected_query": "src/x.py",
+    "expected_line": "read src/x.py"
+  },
+  {
+    "name": "A3: \\\\?\\C:\\ gives nothing",
+    "tool": "read_file",
+    "args": {
+      "path": "\\\\?\\C:\\"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USERNAME": "carol",
+      "USERPROFILE": "C:\\Users\\carol"
+    },
+    "expected_query": null,
+    "expected_line": null
+  },
+  {
+    "name": "A3: /C:/ gives nothing",
+    "tool": "read_file",
+    "args": {
+      "path": "/C:/"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USERNAME": "carol",
+      "USERPROFILE": "C:\\Users\\carol"
+    },
+    "expected_query": null,
+    "expected_line": null
+  },
+  {
+    "name": "A3: /mnt/c: gives nothing",
+    "tool": "read_file",
+    "args": {
+      "path": "/mnt/c:"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USER": "alice",
+      "HOME": "/Users/alice"
+    },
+    "expected_query": null,
+    "expected_line": null
+  },
+  {
+    "name": "A3: /mnt/c:/x.md keeps the basename",
+    "tool": "read_file",
+    "args": {
+      "path": "/mnt/c:/x.md"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USER": "alice",
+      "HOME": "/Users/alice"
+    },
+    "expected_query": "x.md",
+    "expected_line": "read x.md"
+  },
+  {
+    "name": "A3: colon component in a relative path dropped",
+    "tool": "read_file",
+    "args": {
+      "path": "docs/foo:bar/x.md"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USER": "alice",
+      "HOME": "/Users/alice"
+    },
+    "expected_query": "docs/x.md",
+    "expected_line": "read docs/x.md"
+  },
+  {
+    "name": "A3: colon component under cwd dropped",
+    "tool": "read_file",
+    "args": {
+      "path": "/work/repo/a:b/x.md"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USER": "alice",
+      "HOME": "/Users/alice"
+    },
+    "expected_query": "x.md",
+    "expected_line": "read x.md"
+  },
+  {
+    "name": "A3: \\\\?\\ long path is basename",
+    "tool": "read_file",
+    "args": {
+      "path": "\\\\?\\C:\\Users\\carol\\proj\\a.py"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USERNAME": "carol",
+      "USERPROFILE": "C:\\Users\\carol"
+    },
+    "expected_query": "a.py",
+    "expected_line": "read a.py"
+  },
+  {
+    "name": "A3: HOME=/github/home does not make 'home' private",
+    "tool": "read_file",
+    "args": {
+      "path": "home/plan.md"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USER": "runner",
+      "HOME": "/github/home"
+    },
+    "expected_query": "home/plan.md",
+    "expected_line": "read home/plan.md"
+  },
+  {
+    "name": "A3: HOME=/opt/build does not make 'build' private",
+    "tool": "read_file",
+    "args": {
+      "path": "build/out.txt"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USER": "ci",
+      "HOME": "/opt/build"
+    },
+    "expected_query": "build/out.txt",
+    "expected_line": "read build/out.txt"
+  },
+  {
+    "name": "A3: HOME outside /home is not a name source",
+    "tool": "read_file",
+    "args": {
+      "path": "jenkins/x.md"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USER": "ci",
+      "HOME": "/var/lib/jenkins"
+    },
+    "expected_query": "jenkins/x.md",
+    "expected_line": "read jenkins/x.md"
+  },
+  {
+    "name": "A3: USER is always a name source",
+    "tool": "read_file",
+    "args": {
+      "path": "coder/x.md"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USER": "coder",
+      "HOME": "/workspace/coder"
+    },
+    "expected_query": null,
+    "expected_line": null
+  },
+  {
+    "name": "A3: USERPROFILE under C:\\Users is a name source",
+    "tool": "read_file",
+    "args": {
+      "path": "erin/x.md"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USERPROFILE": "C:\\Users\\erin"
+    },
+    "expected_query": null,
+    "expected_line": null
+  },
+  {
+    "name": "A3: USERPROFILE elsewhere is not",
+    "tool": "read_file",
+    "args": {
+      "path": "erin/x.md"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USERPROFILE": "D:\\Profiles\\erin"
+    },
+    "expected_query": "erin/x.md",
+    "expected_line": "read erin/x.md"
+  },
+  {
+    "name": "A3: /USERS/<name> any case",
+    "tool": "read_file",
+    "args": {
+      "path": "dana/x.md"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "HOME": "/USERS/Dana"
+    },
+    "expected_query": null,
+    "expected_line": null
+  },
+  {
+    "name": "A3: service account in USER stays exempt",
+    "tool": "terminal",
+    "args": {
+      "command": "docker build"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USER": "docker",
+      "HOME": "/home/docker"
+    },
+    "expected_query": "docker build",
+    "expected_line": "run docker build"
+  },
+  {
+    "name": "A3: src/sample.py with USER=sam",
+    "tool": "read_file",
+    "args": {
+      "path": "src/sample.py"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USER": "sam"
+    },
+    "expected_query": null,
+    "expected_line": null
+  },
+  {
+    "name": "A3: notes/alice.txt",
+    "tool": "read_file",
+    "args": {
+      "path": "notes/alice.txt"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USER": "alice",
+      "HOME": "/Users/alice"
+    },
+    "expected_query": null,
+    "expected_line": null
+  },
+  {
+    "name": "A3: name in a search word",
+    "tool": "search_files",
+    "args": {
+      "pattern": "TODO samples"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USER": "sam"
+    },
+    "expected_query": null,
+    "expected_line": null
+  },
+  {
+    "name": "A3: name in the program",
+    "tool": "terminal",
+    "args": {
+      "command": "alice-deploy now"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USER": "alice",
+      "HOME": "/Users/alice"
+    },
+    "expected_query": null,
+    "expected_line": null
+  },
+  {
+    "name": "A3: jo/notes.md with USER=jo",
+    "tool": "read_file",
+    "args": {
+      "path": "jo/notes.md"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USER": "jo"
+    },
+    "expected_query": null,
+    "expected_line": null
+  },
+  {
+    "name": "A3: src/join.py with USER=jo",
+    "tool": "read_file",
+    "args": {
+      "path": "src/join.py"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USER": "jo"
+    },
+    "expected_query": "src/join.py",
+    "expected_line": "read src/join.py"
+  },
+  {
+    "name": "A3: short name as a search word",
+    "tool": "search_files",
+    "args": {
+      "pattern": "jo TODO"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USER": "jo"
+    },
+    "expected_query": null,
+    "expected_line": null
+  },
+  {
+    "name": "A3: short name inside a search word is fine",
+    "tool": "search_files",
+    "args": {
+      "pattern": "join TODO"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USER": "jo"
+    },
+    "expected_query": "join TODO",
+    "expected_line": "search join TODO"
+  },
+  {
+    "name": "A3: short name as a subcommand",
+    "tool": "terminal",
+    "args": {
+      "command": "finger jo"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USER": "jo"
+    },
+    "expected_query": null,
+    "expected_line": null
+  },
+  {
+    "name": "A3: cwd case differs from the path",
+    "tool": "read_file",
+    "args": {
+      "path": "/Users/alice/proj/src/x.py"
+    },
+    "cwd": "/Users/alice/Proj",
+    "env": {
+      "USER": "alice",
+      "HOME": "/Users/alice"
+    },
+    "expected_query": "src/x.py",
+    "expected_line": "read src/x.py"
+  },
+  {
+    "name": "A3: original case of the relative part kept",
+    "tool": "read_file",
+    "args": {
+      "path": "/work/repo/Src/X.py"
+    },
+    "cwd": "/work/Repo",
+    "env": {
+      "USER": "alice",
+      "HOME": "/Users/alice"
+    },
+    "expected_query": "Src/X.py",
+    "expected_line": "read Src/X.py"
+  },
+  {
+    "name": "A3: NFD path under an NFC cwd",
+    "tool": "read_file",
+    "args": {
+      "path": "/work/café/docs/a.md"
+    },
+    "cwd": "/work/café",
+    "env": {
+      "USER": "alice",
+      "HOME": "/Users/alice"
+    },
+    "expected_query": "docs/a.md",
+    "expected_line": "read docs/a.md"
   }
 ]
