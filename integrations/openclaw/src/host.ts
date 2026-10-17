@@ -42,9 +42,27 @@ export interface TurnPrepareEvent {
 
 /** `AgentToolResultMiddlewareEvent` subset. */
 export interface ToolResultEvent {
+  toolCallId?: unknown;
   toolName?: unknown;
+  /** Validated (or hook-adjusted) tool parameters; only the target is read. */
+  args?: unknown;
+  /** The agent workspace dir the file tools resolve against (live-verified). */
+  cwd?: unknown;
   isError?: unknown;
   result?: unknown;
+}
+
+/** `model_call_started` event subset (observe-only; no prompt content). */
+export interface ModelCallEvent {
+  runId?: unknown;
+  /** `<runId>:model:<n>` — one per model call (the activity step id). */
+  callId?: unknown;
+}
+
+/** `model_call_started` hook ctx subset. */
+export interface ModelCallCtx {
+  runId?: unknown;
+  sessionKey?: unknown;
 }
 
 /** `AgentToolResultMiddlewareContext` subset. */
