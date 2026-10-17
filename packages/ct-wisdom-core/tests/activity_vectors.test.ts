@@ -169,7 +169,7 @@ afterEach(() => {
 describe('shared activity-target vectors (Hermes parity, privacy amendments 4 and 5)', () => {
   it('the vector file has the documented shape', () => {
     const cases = load();
-    expect(cases.length).toBeGreaterThanOrEqual(267);
+    expect(cases.length).toBeGreaterThanOrEqual(290);
     const names = cases.map((c) => c.name);
     expect(new Set(names).size).toBe(names.length);
     const fields = ['name', 'tool', 'args', 'cwd', 'env', 'fs', 'expected_query', 'expected_line'];

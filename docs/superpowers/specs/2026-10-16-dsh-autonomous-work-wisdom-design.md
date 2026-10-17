@@ -447,6 +447,16 @@ rule; opencode and openclaw get patch bumps for it.
   the query (guarantee 2 keeps the superseded one out), and it is delivered like any fact. Rendering
   differences that remain from before (TS lists every `supersedes` id in a correction's title and puts
   entries before corrections; Hermes lists only ids in context, corrections first) change no ids.
+- **Line builder synced to hermes 0.6.8** ("Privacy amendment 7"): only `.exe` is stripped
+  (`extname`, case-insensitive; `.bat` / `.cmd` / `.com` / `.ps1` are scripts and send nothing); a path
+  inside any home that lies within the project root sends nothing (the sandbox exception stays for
+  root-finding only); `blocked` / `findRoot` take the user homes as a required argument; interpreter
+  flags are parsed alone, combined or attached (`-uB`, `-OO`, `-um`, `-Xdev`, `-Wignore`; any unknown
+  flag, a long option or `-c` stops the scan); the interpreter pattern is
+  `^python([0-9]{1,2}(\.[0-9]{1,3})?)?$`; a project package is a real one (`<top>.py` or
+  `<top>/__init__.py`, matched case-sensitively by directory listing), cached 30 s found / 2 s not; the
+  name check runs on the full module and on the sent string. The core suite runs all 290 shared
+  vectors. Only the line builder changed, so the real-gate e2e at `5ae2c60` (75/0) stands.
 - **Line builder synced to hermes 0.6.7** ("Privacy amendment 6"): `python -m` sends a known module as
   listed, else only the top package and only when it exists at the root or under `src/` (cached per
   root and top); every home blocks its ancestors again, except a sandbox HOME inside a root (not a real

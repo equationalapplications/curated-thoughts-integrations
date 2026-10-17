@@ -20,7 +20,7 @@
  */
 
 import { createHash } from 'node:crypto';
-import { lstatSync, opendirSync, readlinkSync, realpathSync, statSync } from 'node:fs';
+import { lstatSync, opendirSync, readdirSync, readlinkSync, realpathSync, statSync } from 'node:fs';
 import { homedir, userInfo } from 'node:os';
 import nodePath from 'node:path';
 import { performance } from 'node:perf_hooks';
@@ -89,12 +89,14 @@ const KEY_PREFIXES = ['sk-', 'sk_', 'pk_', 'rk_', 'ghp_', 'gho_', 'ghs_', 'ghu_'
 const OPERATOR_CHARS = new Set([';', '|', '&', '<', '>', '(', ')', '`']);
 // eslint-disable-next-line no-control-regex
 const CONTROL_RE = /[\x00-\x1f\x7f]/;
-const PYTHON_RE = /^python(\d+(\.\d+)?)?$/;
-/** Interpreter flags skipped before `-m`; the second set takes a value. */
-const PYTHON_FLAGS = new Set(['-u', '-B', '-O', '-OO', '-E', '-s', '-S', '-I', '-q', '-b', '-bb', '-d', '-v', '-P']);
-const PYTHON_VALUE_FLAGS = new Set(['-X', '-W']);
-/** Windows executable suffixes stripped from the program (`git.exe` is `git`). */
-const EXE_SUFFIXES = ['.exe', '.cmd', '.bat', '.com'];
+const PYTHON_RE = /^python([0-9]{1,2}(\.[0-9]{1,3})?)?$/;
+/**
+ * Interpreter flags (`python [flags] -m module`): single letters, alone or
+ * combined (`-uB`, `-OO`); X and W take a value, attached (`-Xdev`) or as
+ * the next word. Any other flag stops the scan (the program alone).
+ */
+const PYTHON_FLAG_CHARS = new Set([...'bBdEiIOPqRsSuvx']);
+const PYTHON_VALUE_CHARS = new Set(['X', 'W']);
 const DRIVE_RE = /^[A-Za-z]:$/;
 
 /** True for Curated Thoughts' own tools (decision 6: never a trigger). */
@@ -668,14 +670,14 @@ function sandboxHome(home: string, root: string, user: string[]): boolean {
 }
 
 /** A stop directory, any home in `homes`, or any ancestor of a home in `blocking` (sandbox HOMEs aside). */
-function blocked(directory: string, homes: string[], blocking: string[], user: string[] = []): boolean {
+function blocked(directory: string, homes: string[], blocking: string[], user: string[]): boolean {
   if (stopDir(directory)) return true;
   if (homes.some((h) => same(directory, h))) return true;
   return blocking.some((h) => below(h, directory) !== null && !sandboxHome(h, directory, user));
 }
 
 /** Nearest ancestor-or-self of `start` holding a marker, stopping at the first blocked directory. */
-function findRoot(start: string, homes: string[], blockingHomes: string[], user: string[] = []): string | null {
+function findRoot(start: string, homes: string[], blockingHomes: string[], user: string[]): string | null {
   const chain: string[] = [];
   let directory = start;
   while (!blocked(directory, homes, blockingHomes, user)) {
@@ -761,6 +763,11 @@ function resolvePath(raw0: string, cwd: unknown, env: ActivityEnv, names: Set<st
   const local = digest(full ?? joinedPy);
   const rel = full ? below(full, root) : null;
   if (!rel || rel.length === 0) return [null, false, local];
+  // A path inside ANY home that is itself inside the project root (a
+  // sandbox HOME included) is never sent: that is someone's home content.
+  const inner = homesOf(env).all.filter((h) => below(h, root) !== null);
+  const forms = [full, normp(joinedPy)].filter((x): x is string => !!x);
+  if (inner.some((h) => forms.some((x) => same(x, h) || below(x, h) !== null))) return [null, false, local];
   const target = rel.join('/');
   if (cpLen(target) > ACTIVITY_TARGET_CHARS) return [null, false, local];
   if (nameHit(target, names)) return [null, true, local];
@@ -783,11 +790,21 @@ export function wordCheck(word: string, names: Set<string>, verbsOf?: ReadonlySe
     && !credentialShaped(word) && !nameHit(word, names);
 }
 
+function listing(directory: string): Set<string> {
+  try {
+    return new Set(readdirSync(directory));
+  } catch {
+    return new Set();
+  }
+}
+
 /**
- * The top package of `module` when it resolves inside the project root (a
- * package directory or a `.py` file at the root or under `src/`), else null.
- * Only the top package is ever sent, never a submodule path. Cached per
- * (root, top).
+ * The top package of `module` when it is a real package inside the project
+ * root, else null: a `<top>.py` file, or a `<top>/` directory holding
+ * `__init__.py`, at the root or under `src/`. Names are matched
+ * case-SENSITIVELY by directory listing, even on case-insensitive
+ * filesystems; namespace packages do not count. Only the top package is ever
+ * sent. Cached per (root, top): 30 s when found, 2 s when not.
  */
 function projectPackage(module: string, root: string | null): string | null {
   if (!root) return null;
@@ -796,24 +813,56 @@ function projectPackage(module: string, root: string | null): string | null {
   const now = performance.now();
   const hit = lruGet(moduleCache, key);
   let found: boolean;
-  if (hit !== undefined && now - hit.at < ROOT_CACHE_TTL_MS) {
+  if (hit !== undefined && now - hit.at < (hit.found ? ROOT_CACHE_TTL_MS : ROOT_NEGATIVE_TTL_MS)) {
     found = hit.found;
   } else {
-    found = [root, nodePath.join(root, 'src')].some((base) => {
-      try {
-        if (statSync(nodePath.join(base, top)).isDirectory()) return true;
-      } catch {
-        /* absent */
+    found = false;
+    for (const base of [root, nodePath.join(root, 'src')]) {
+      const names = listing(base);
+      if (names.has(`${top}.py`)) {
+        try {
+          if (statSync(nodePath.join(base, `${top}.py`)).isFile()) found = true;
+        } catch {
+          /* gone */
+        }
       }
-      try {
-        return statSync(nodePath.join(base, `${top}.py`)).isFile();
-      } catch {
-        return false;
-      }
-    });
+      if (!found && names.has(top) && listing(nodePath.join(base, top)).has('__init__.py')) found = true;
+      if (found) break;
+    }
     lruSet(moduleCache, key, { at: now, found }, MODULE_CACHE_MAX);
   }
   return found ? top : null;
+}
+
+/**
+ * The module of `python [flags] -m <module> ...`, or null. Flags are parsed
+ * alone or combined (`-uB`, `-OO`, `-um`), X/W values attached or separate;
+ * any unknown flag, a long option or a non-flag word stops the scan.
+ */
+function pythonModule(rest: string[]): string | null {
+  let i = 0;
+  while (i < rest.length) {
+    const word = rest[i];
+    if (!word.startsWith('-') || word.startsWith('--') || word.length < 2) return null;
+    const chars = [...word.slice(1)];
+    for (let j = 0; j < chars.length; j++) {
+      const c = chars[j];
+      if (c === 'm') {
+        if (j !== chars.length - 1 || i + 1 >= rest.length) return null;
+        return rest[i + 1];
+      }
+      if (PYTHON_VALUE_CHARS.has(c)) {
+        if (j === chars.length - 1) {
+          if (i + 1 >= rest.length) return null;
+          i += 1; // the value is the next word
+        }
+        break; // an attached value ends this word
+      }
+      if (!PYTHON_FLAG_CHARS.has(c)) return null;
+    }
+    i += 1;
+  }
+  return null;
 }
 
 /**
@@ -913,22 +962,19 @@ export function commandTarget(
   if (words.length === 0) return null;
   let program = words[0];
   if ([...'/\\:~'].some((ch) => program.includes(ch))) return null;
-  if (EXE_SUFFIXES.some((x) => program.toLowerCase().endsWith(x))) program = program.slice(0, -4);
+  const suffix = nodePath.extname(program);
+  if (suffix.toLowerCase() === '.exe') program = program.slice(0, -suffix.length); // only .exe: .bat/.cmd/.com/.ps1 are scripts
   const isPython = PYTHON_RE.test(program);
   if (!(isPython || PROGRAM_RE.test(program))) return null;
   if (credentialShaped(program) || nameHit(program, nm)) return null;
-  let rest = words.slice(1);
+  const rest = words.slice(1);
   if (isPython) {
-    while (rest.length > 0 && (PYTHON_FLAGS.has(rest[0]) || (PYTHON_VALUE_FLAGS.has(rest[0]) && rest.length > 1))) {
-      rest = PYTHON_VALUE_FLAGS.has(rest[0]) ? rest.slice(2) : rest.slice(1);
-    }
-    if (rest[0] === '-m' && rest.length > 1) {
-      const module = rest[1];
-      if (MODULE_RE.test(module) && !credentialShaped(module) && !nameHit(module, nm)) {
-        if (PYTHON_MODULES.has(module)) return `${program} ${module}`;
-        const top = projectPackage(module, root ? root() : null);
-        if (top) return `${program} ${top}`;
-      }
+    const module = pythonModule(rest);
+    // The name check runs on the full module AND on the exact string sent:
+    // `python -m tests.alice_notes` sends `python` alone.
+    if (module && MODULE_RE.test(module) && !credentialShaped(module) && !nameHit(module, nm)) {
+      const sent = PYTHON_MODULES.has(module) ? module : projectPackage(module, root ? root() : null);
+      if (sent && !nameHit(`${program} ${sent}`, nm)) return `${program} ${sent}`;
     }
     return program;
   }

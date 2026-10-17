@@ -217,12 +217,25 @@ describe('activity line builder (hermes 0.6.5 rules; the full contract is activi
     expect(act('terminal', { command: 'python -m billing.cli' })!.query).toBe('python');
     mkdirSync(nodePath.join(PROJ, 'src', 'billing'), { recursive: true });
     resetActivityCaches();
-    expect(act('terminal', { command: 'python -m billing.cli' })!.query).toBe('python billing'); // 0.6.7: top package only
+    // 0.6.8: a namespace folder (no __init__.py) is not a package
+    expect(act('terminal', { command: 'python -m billing.cli' })!.query).toBe('python');
+    writeFileSync(nodePath.join(PROJ, 'src', 'billing', '__init__.py'), '');
+    resetActivityCaches();
+    expect(act('terminal', { command: 'python -m billing.cli' })!.query).toBe('python billing'); // top package only
+    expect(act('terminal', { command: 'python -m Billing.cli' })!.query).toBe('python'); // exact case only
     expect(act('terminal', { command: 'python -u -X dev -W error -m billing.acme_merger' })!.query).toBe('python billing');
-    expect(act('terminal', { command: 'python -u -m pytest' })!.query).toBe('python pytest');
-    expect(act('terminal', { command: 'python3.11.2 -m pytest' })).toBeNull(); // not an interpreter name: a dotted program
+    expect(act('terminal', { command: 'python -uB -Xdev -Wignore -m pytest' })!.query).toBe('python pytest');
+    expect(act('terminal', { command: 'python -um pytest' })!.query).toBe('python pytest');
+    expect(act('terminal', { command: 'python -c x -m pytest' })!.query).toBe('python'); // -c stops the scan
+    expect(act('terminal', { command: 'python --version -m pytest' })!.query).toBe('python'); // long option stops
+    expect(act('terminal', { command: 'python -m billing.alice_notes' })!.query).toBe('python'); // name in the module
+    expect(act('terminal', { command: 'python3.11.2 -m pytest' })).toBeNull(); // not an interpreter name
+    expect(act('terminal', { command: 'python311 -m pytest' })!.query).toBe('python311'); // an ordinary program
     expect(act('terminal', { command: 'git.exe status' })!.query).toBe('git status');
-    expect(act('terminal', { command: 'deploy.ps1' })).toBeNull();
+    expect(act('terminal', { command: 'GIT.EXE status' })!.query).toBe('GIT status');
+    for (const command of ['deploy.ps1', 'build.bat x', 'run.cmd', 'tool.com']) {
+      expect(act('terminal', { command }), command).toBeNull(); // only .exe is stripped
+    }
     writeFileSync(nodePath.join(PROJ, 'tool.py'), '');
     expect(act('terminal', { command: 'python -m tool' })!.query).toBe('python tool');
     expect(act('terminal', { command: 'python -m tool' }, NO_ROOT)!.query).toBe('python'); // no root: not sent
