@@ -5,6 +5,7 @@
  * test_wisdom_fixtures.ts).
  */
 
+import { tmpdir } from 'node:os';
 import { describe, it, expect, vi } from 'vitest';
 
 import {
@@ -13,6 +14,8 @@ import {
   isRecallToolName,
   type AdapterDeps,
 } from '../src/wisdom-live/adapter.js';
+import { DshActivity } from '../src/wisdom-live/activity.js';
+import { Breaker } from '@equational-applications/ct-wisdom-core';
 import type {
   Ledger,
   SpawnFn,
@@ -111,20 +114,33 @@ describe('adapter abort plumbing', { timeout: 30_000 }, () => {
     return { script, grandchild, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
   }
 
-  it('a host cancel linked to the budget signal kills the child (adapter linkCancel; PR #71 re-review)', async () => {
+  it('a plan cancel("abandoned") kills a real hanging ct child and its grandchild (activity level; no breaker failure)', async () => {
     if (process.platform === 'win32') return;
     const ct = await hangingCt();
     try {
-      const a = new DshWisdomAdapter({ env: { ...process.env }, discover: () => ({ path: ct.script, failure: null }), invalidateDiscovery: () => {} });
-      const budget = new AbortController();
-      const cancel = new AbortController();
-      a.linkCancel(budget.signal, cancel.signal);
-      const pending = a.wisdomMatch('pnpm test', 1, [], budget.signal);
+      const a = new DshWisdomAdapter({ env: { ...process.env }, discover: () => ({ path: ct.script, failure: null }) });
+      const breaker = new Breaker();
+      const activity = new DshActivity({ adapter: a, breaker, env: { USER: 'alice', HOME: '/Users/alice' } });
+      const mk = (n: number) => {
+        const callId = `call-${n}`;
+        const log = [
+          { id: `u${n}`, role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'task' }] },
+          {
+            id: `a${n}`, role: 'assistant', source: { kind: 'model', provider: 'p', model: 'm' },
+            content: [{ type: 'tool-call', id: callId, name: 'bash', arguments: JSON.stringify({ command: `pnpm test${n}` }) }],
+          },
+        ];
+        return { callId, agent: { id: 'agent-1', session: { deriveMessages: () => [...log], header: { cwd: tmpdir() } } } };
+      };
+      const one = mk(1);
+      activity.prefetch({ callId: one.callId, name: 'bash', arguments: { command: 'pnpm test1' }, agent: one.agent });
       const gpid = await ct.grandchild();
-      cancel.abort();
-      expect((await pending).outcome).toBe('aborted');
-      expect(budget.signal.aborted).toBe(false);
+      expect(alive(gpid)).toBe(true);
+      // A newer step replaces the slot: the first plan is abandoned.
+      const two = mk(2);
+      activity.prefetch({ callId: two.callId, name: 'bash', arguments: { command: 'pnpm test2' }, agent: two.agent });
       expect(await waitFor(() => !alive(gpid), 3000)).toBe(true);
+      expect(breaker.isOpen()).toBe(false);
     } finally {
       ct.cleanup();
     }

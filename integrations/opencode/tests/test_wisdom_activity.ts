@@ -16,6 +16,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   ACTIVITY_HEADING,
+  Breaker,
   createVerboseRecorder,
   type SpawnFn,
   type SpawnOutcome,
@@ -64,7 +65,7 @@ interface SimOptions {
    * CT answer for an activity query (`--max 1`). 'hang' runs until the call
    * is aborted (then exits after `killDelayMs`): the budget path.
    */
-  answer?: (query: string) => Entry[] | 'hang' | 'timeout' | 'aborted';
+  answer?: (query: string) => Entry[] | 'hang' | 'hang_forever' | 'timeout' | 'aborted';
   killDelayMs?: number;
   /** The activity budget (default 3 s). */
   budgetMs?: number;
@@ -116,6 +117,7 @@ function makeSim(opts: SimOptions = {}) {
           else spec.signal?.addEventListener('abort', exit, { once: true });
         });
       }
+      if (a === 'hang_forever') return new Promise(() => {}); // never closes, even when killed
       if (a === 'timeout') return { code: null, stdout: '', stderr: '', spawnError: false, timedOut: true };
       if (a === 'aborted') return { code: null, stdout: '', stderr: '', spawnError: false, timedOut: false, aborted: true };
       return done(JSON.stringify({ entries: a, corrections: [] }));
@@ -206,6 +208,8 @@ function makeSim(opts: SimOptions = {}) {
     historyFetches: () => historyFetches,
     sessionFetches: () => sessionFetches,
     adapter: built.adapter,
+    /** The session's breaker (the activity path's own accessor). */
+    breakerOf: (session: string) => (built.activity as unknown as { breakerFor: (id: string) => Breaker }).breakerFor(session),
   };
 }
 
@@ -656,6 +660,21 @@ describe('0.4.1 polish (post-merge review of 0.4.0)', () => {
     const sim = makeSim({ answer: () => [] });
     for (const command of ['a', 'b', 'c']) await sim.step('P', [{ tool: 'bash', args: { command } }]);
     expect(sim.sessionFetches()).toBe(1);
+  });
+});
+
+describe('a ct that hangs past the budget (never settles, ignores the kill)', () => {
+  it('the miss is charged when the budget runs out, not when the query settles: the breaker opens on the third', async () => {
+    const sim = makeSim({ answer: () => 'hang_forever', budgetMs: 300 });
+    const breaker = sim.breakerOf('P');
+    // Two earlier misses (the breaker is per session, and a session runs one
+    // query at a time, so they stand in for two earlier steps).
+    breaker.recordFailure();
+    breaker.recordFailure();
+    expect(breaker.isOpen()).toBe(false);
+    await sim.step('P', [{ tool: 'bash', args: { command: 'git status' } }]);
+    expect(sim.queries()).toEqual(['git status']);
+    expect(breaker.isOpen()).toBe(true); // the child never settled; the core charged at cancel time
   });
 });
 

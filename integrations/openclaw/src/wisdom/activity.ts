@@ -244,17 +244,17 @@ export class OpenClawActivity {
       // nowhere else. A refused start frees the key (the step stays used).
       claimed = { stepId, key: activity.key };
       this.tracker.admit(sessionKey, stepId, activity.key);
-      const abort = new AbortController();
-      const start = startActivity(this.adapter, session, activity, this.breaker, abort.signal);
+      const start = startActivity(this.adapter, session, activity, this.breaker);
       if (start.failure !== null) {
         this.tracker.releaseKey(sessionKey, activity.key);
         claimed = null;
         return skipOncePerStep(start.failure);
       }
-      // On expiry: kill the abandoned ct child. The core then reports
-      // `budget` (never a success) and counts the miss as one breaker
-      // failure (recordActivityBudgetMiss), the same on every host.
-      const match = await settleWithin(start.match, this.budgetMs, () => abort.abort());
+      // On expiry `start.cancel('budget')` kills the abandoned ct child and
+      // the core charges the miss as one breaker failure right then (a child
+      // that never closes still counts), the same on every host. The query
+      // then reports `budget`, never a success.
+      const match = await settleWithin(start.match, this.budgetMs, () => start.cancel('budget'));
       // The core re-gates on a FRESH ledger (results that arrived while we
       // waited included), selects one fact, updates the N3 cache and reports.
       const outcome = finishActivityOutcome(this.adapter, session, activity, match);

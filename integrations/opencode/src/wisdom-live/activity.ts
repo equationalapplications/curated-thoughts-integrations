@@ -311,8 +311,7 @@ export class OpenCodeActivity {
     // Too little budget left to answer (0.4.1): no spawn, nothing admitted.
     if (left() <= START_MARGIN_MS) return this.debug(sessionID, 'budget');
     this.host.setView(sessionID, view.ledger);
-    const abort = new AbortController();
-    const start = startActivity(this.host, session, activity, this.breakerFor(sessionID), abort.signal);
+    const start = startActivity(this.host, session, activity, this.breakerFor(sessionID));
     if (start.failure !== null) {
       this.debug(sessionID, start.failure);
       if (this.tracker.firstReport(sessionID, step)) {
@@ -322,13 +321,11 @@ export class OpenCodeActivity {
     }
     this.tracker.admit(sessionID, step, activity.key);
     hold(start.match);
-    // On expiry the ct child is killed (abort); the query reports `budget`.
-    // The shared core counts that miss as ONE breaker failure
-    // (recordActivityBudgetMiss: one failure per miss on every host; DSH
-    // charges it host-side and clears it when the child had already
-    // answered), never here; an `aborted` outcome from anywhere else never
-    // counts.
-    const match = await settleWithin(start.match, left(), () => abort.abort());
+    // On expiry `start.cancel('budget')` kills the ct child and the core
+    // charges the miss as ONE breaker failure right then (a child that never
+    // closes still counts); the query reports `budget`. An `aborted` outcome
+    // from anywhere else never counts.
+    const match = await settleWithin(start.match, left(), () => start.cancel('budget'));
     // No second fetch: ids that can join the context during the query are
     // recorded in memory (adapter `refresh`).
     this.host.setView(sessionID, view.refresh());

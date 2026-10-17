@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Fix: a `ct` that hangs past the activity budget now counts against the breaker.** The miss is charged when the budget runs out, not when the query settles (which a hung child never did), so three misses pause CT as on DSH and Hermes.
+
 ## 0.3.2 — 2026-10-17
 
 - **Fix: no more hang when a killed `ct` never closes its output** (Windows, or a child process that escaped its process group). The spawn binding now lives in the shared core: one kill path, a 250 ms grace for the output to close once `ct` has exited (for any reason, so a background helper holding the output open no longer turns a finished call into a timeout), no signal to a child that never started or already exited, output capped with no gap after the cap, and a call aborted before it starts spawns nothing. Unlike the old OpenClaw binding, a child that already exited is never signalled (its process-group id may have been reused), so a background helper it started can outlive a killed call.

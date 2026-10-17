@@ -9,6 +9,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   ActivityTracker,
+  finishActivityOutcome,
   BREAKER_FAILS,
   Breaker,
   EMPTY_LEDGER,
@@ -217,6 +218,14 @@ describe('the aborted outcome (opencode 0.4.1 review)', () => {
     const h = host({ wisdomMatch: async () => ({ outcome: 'aborted' }) });
     for (let i = 0; i < 5; i++) expect(await onUserTurn(h, { id: 's' }, 'question', breaker)).toBeNull();
     expect(breaker.isOpen()).toBe(false);
+  });
+});
+
+describe('finishActivityOutcome with a cancelled match', () => {
+  it('delivers nothing and lets the key retry in a later step', () => {
+    const outcome = finishActivityOutcome(host(), { id: 's' }, activity, { failure: 'cancelled' });
+    expect(outcome.block).toBeNull();
+    expect(outcome.retry).toBe(true);
   });
 });
 
