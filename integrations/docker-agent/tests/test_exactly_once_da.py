@@ -21,7 +21,7 @@ import re
 import threading
 import unittest
 
-from _support import BASE_MESSAGES, Env, FakeCT, fact, patched
+from _support import BASE_MESSAGES, PROJECT, Env, FakeCT, fact, patched
 
 import ct_wisdom
 import ct_wisdom_da as da
@@ -55,7 +55,7 @@ class Host:
 
     def request(self, sid, history, iteration):
         out = da.handle({"hook_event_name": "before_llm_call", "session_id": sid,
-                         "cwd": "/work/proj/app", "iteration": iteration,
+                         "cwd": PROJECT, "iteration": iteration,
                          "messages": history}, self.env)
         msgs = out["hook_specific_output"]["updated_messages"] if out else history
         ids = visible_ids(msgs)
@@ -77,7 +77,7 @@ class Host:
             name, args, cat, resp = "write_file", {"path": self.rng.choice(PATHS), "content": "c"}, \
                 "filesystem", '{"bytes_written": 1}'
         return {"hook_event_name": "tool_response_transform", "session_id": sid,
-                "cwd": "/work/proj/app", "tool_name": name, "tool_use_id": "c%d" % i,
+                "cwd": PROJECT, "tool_name": name, "tool_use_id": "c%d" % i,
                 "tool_input": args, "tool_category": cat, "tool_response": resp}
 
     def batch(self, sid, n):

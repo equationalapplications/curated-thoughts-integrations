@@ -103,6 +103,7 @@ class HostContractTests(unittest.TestCase):
         """Run the binary once; returns (request bodies, stdout)."""
         work = self.root / name
         work.mkdir(exist_ok=True)
+        (work / ".git").mkdir(exist_ok=True)  # a project root: activity targets apply
         (work / "src").mkdir(exist_ok=True)
         (work / "src" / "a.py").write_text("print('a')\n", encoding="utf-8")
         script_path, record, port_file = work / "script.json", work / "requests.jsonl", work / "port"

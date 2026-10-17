@@ -7,6 +7,7 @@ binary, brain or network is touched. Stdlib only.
 
 from __future__ import annotations
 
+import atexit
 import contextlib
 import os
 import shutil
@@ -25,6 +26,17 @@ for _p in (str(SCRIPTS), str(HOOKS)):
 import ct_wisdom  # noqa: E402
 import ct_wisdom_da  # noqa: E402
 import ct_wisdom_live  # noqa: E402
+
+# A real project directory (hermes 0.6.5: activity targets need a project
+# root marker on disk). Every payload's cwd defaults to it.
+PROJECT = os.path.realpath(tempfile.mkdtemp(prefix="ct-da-project-"))
+atexit.register(shutil.rmtree, PROJECT, True)
+os.makedirs(os.path.join(PROJECT, ".git"))
+for _rel in ("src/a.py", "src/b.py", "src/billing/invoice.py", "README.md", "README",
+             "docs/x.md", "Makefile", "a/b.py", "x.py", "f1", "f2", "f3", "f4", "f5",
+             "f6", "f7", "x", "fleet.md"):
+    os.makedirs(os.path.dirname(os.path.join(PROJECT, _rel)), exist_ok=True)
+    open(os.path.join(PROJECT, _rel), "a").close()
 
 
 def fact(fid, title=None, text=None, provenance="stated", supersedes=None, score=0.8):
@@ -121,7 +133,7 @@ BASE_MESSAGES = [
 ]
 
 
-def llm(sid, messages=None, iteration=1, cwd="/work/proj/app", agent="root"):
+def llm(sid, messages=None, iteration=1, cwd=PROJECT, agent="root"):
     msgs = [dict(m) for m in (messages if messages is not None else BASE_MESSAGES)]
     if messages is None:
         msgs.append({"role": "user", "content": "hello"})
@@ -131,12 +143,12 @@ def llm(sid, messages=None, iteration=1, cwd="/work/proj/app", agent="root"):
 
 
 def prompt(sid, text, event="user_prompt_submit"):
-    return {"hook_event_name": event, "session_id": sid, "cwd": "/work/proj/app",
+    return {"hook_event_name": event, "session_id": sid, "cwd": PROJECT,
             "agent_name": "root", "prompt": text}
 
 
 def tool(sid, name="read_file", args=None, response="file text\n", category="filesystem",
-         error=False, cwd="/work/proj/app", use_id="call_1"):
+         error=False, cwd=PROJECT, use_id="call_1"):
     payload = {"hook_event_name": "tool_response_transform", "session_id": sid, "cwd": cwd,
                "agent_name": "root", "tool_name": name, "tool_use_id": use_id,
                "tool_input": args if args is not None else {"path": "src/a.py"},
