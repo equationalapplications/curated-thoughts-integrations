@@ -313,7 +313,7 @@ v("pw_dir outside a homes location still blocks its ancestors", "read_file", rd(
 v("cmd: python -m a test submodule sends the top package only", "terminal",
   run("python -m tests.acme_merger_due_diligence"), "python tests", fs=PFS + [P + "/tests/__init__.py"])
 v("cmd: python -m a deep src submodule", "terminal", run("python -m app.clients.acme"), "python app",
-  fs=PFS + [P + "/src/app/clients/acme.py"])
+  fs=PFS + [P + "/src/app/__init__.py", P + "/src/app/clients/acme.py"])
 v("cmd: python -m a known module is sent as listed", "terminal", run("python3 -m http.server"), "python3 http.server")
 for name, cmd, q in (("-u before -m", "python -u -m pytest", "python pytest"),
                      ("-X opt before -m", "python -X dev -m pytest -q", "python pytest"),
@@ -322,8 +322,8 @@ for name, cmd, q in (("-u before -m", "python -u -m pytest", "python pytest"),
                      ("a script after flags", "python -u deploy.py", "python"),
                      ("python3.11.2 is not an interpreter name", "python3.11.2 -m pytest", None),
                      ("pythonista is not python", "pythonista -m pytest", "pythonista"),
-                     ("git.exe", "git.exe status", "git status"), ("npm.cmd", "npm.cmd test", "npm test"),
-                     ("make.bat", "make.bat build", "make build"), ("tool.com", "tool.com run", "tool"),
+                     ("git.exe", "git.exe status", "git status"), ("npm.cmd is a script", "npm.cmd test", None),
+                     ("make.bat is a script", "make.bat build", None), ("tool.com is not stripped", "tool.com run", None),
                      ("script.ps1 is still a script", "deploy.ps1 now", None),
                      ("a path to an .exe", "C:\\tools\\git.exe status", None)):
     v("cmd: " + name, "terminal", run(cmd), q)
@@ -342,6 +342,40 @@ for sub in ("home", "sub/.home", "build/home"):
       env={"USER": "svc", "HOME": "/srv/repo/" + sub}, fs=["/srv/repo/.git/"])
 v("home: a real user home inside a root still blocks it", "read_file", rd("src/x.py"), None, cwd="/srv/repo",
   env={"USER": "svc", "HOME": "/srv/repo/.home"}, fs=["/srv/repo/.git/"], system_home="/srv/repo/.home")
+
+# ---- 0.6.8 (Privacy amendment 7) ----
+for name, cmd, q in (("GIT.EXE uppercase", "GIT.EXE status", "GIT status"), ("git.exe.bak", "git.exe.bak status", None),
+                     ("-Xdev attached", "python -Xdev -m pytest", "python pytest"),
+                     ("-Wignore attached", "python -Wignore -m pytest", "python pytest"),
+                     ("-uB combined", "python -uB -m pytest", "python pytest"), ("-OO", "python -OO -m pip", "python pip"),
+                     ("-i -R -x", "python -i -R -x -m pytest", "python pytest"),
+                     ("-um combined", "python -um pytest", "python pytest"),
+                     ("--version stops the scan", "python --version -m pytest", "python"),
+                     ("-c stops the scan", "python -c 'import x' -m pytest", "python"),
+                     ("unknown flag stops the scan", "python -Z -m pytest", "python"),
+                     ("-X without a value", "python -X", "python"),
+                     ("fullwidth digit is not python", "python\uff13 -m pytest", None),
+                     ("three digits is not an interpreter name", "python311 -m pytest", "python311"),
+                     ("python3.11", "python3.11 -m pytest", "python3.11 pytest")):
+    v("cmd: " + name, "terminal", run(cmd), q)
+v("cmd: a package dir without __init__.py is not a package", "terminal", run("python -m mypkg"), "python",
+  fs=PFS + [P + "/mypkg/x.py"])
+v("cmd: the package name is matched case-sensitively", "terminal", run("python -m tests"), "python",
+  fs=PFS + [P + "/Tests/__init__.py"])
+v("cmd: a name in the full module sends python alone", "terminal", run("python -m tests.alice_notes"), "python",
+  fs=PFS + [P + "/tests/__init__.py"])
+v("cmd: a name in the top package sends python alone", "terminal", run("python -m alice_tools.x"), "python",
+  fs=PFS + [P + "/alice_tools/__init__.py"])
+# files inside any home that is inside the project root are never sent
+SBX = {"USER": "svc", "HOME": "/srv/repo/.home"}
+v("sandbox: a document in the sandbox HOME", "read_file", rd(".home/Documents/taxes.pdf"), None, cwd="/srv/repo",
+  env=SBX, fs=["/srv/repo/.git/", "/srv/repo/.home/Documents/"])
+v("sandbox: credentials in the sandbox HOME", "read_file", rd("/srv/repo/.home/.aws/credentials"), None, cwd="/srv/repo",
+  env=SBX, fs=["/srv/repo/.git/", "/srv/repo/.home/.aws/"])
+v("sandbox: a search path in the sandbox HOME is dropped", "search_files", srch("TODO", ".home/notes"), "TODO",
+  line="search TODO", cwd="/srv/repo", env=SBX, fs=["/srv/repo/.git/"])
+v("sandbox: project files outside it are still sent", "read_file", rd("src/x.py"), "src/x.py", cwd="/srv/repo",
+  env=SBX, fs=["/srv/repo/.git/", "/srv/repo/.home/"])
 
 names = [c["name"] for c in V]
 assert len(names) == len(set(names)), [n for n in names if names.count(n) > 1]
