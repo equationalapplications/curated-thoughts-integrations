@@ -658,3 +658,28 @@ describe('0.4.1 polish (post-merge review of 0.4.0)', () => {
     expect(sim.sessionFetches()).toBe(1);
   });
 });
+
+describe('cross-host breaker rule (core recordActivityBudgetMiss, openclaw 0.3.1)', () => {
+  const FAILS = 3; // BREAKER_FAILS
+  const commands = ['git status', 'git log', 'git diff', 'npm test', 'npm run'];
+
+  it(`${FAILS - 1} budget expiries do not open the breaker (no double count)`, async () => {
+    let n = 0;
+    const sim = makeSim({ answer: () => (n++ < FAILS - 1 ? 'hang' : []), budgetMs: 300 });
+    for (const command of commands.slice(0, FAILS)) {
+      await sim.step('P', [{ tool: 'bash', args: { command } }]);
+      await tick();
+    }
+    expect(sim.queries()).toEqual(commands.slice(0, FAILS));
+  });
+
+  it(`${FAILS} budget expiries open it (each counts once): the next step makes no query`, async () => {
+    let n = 0;
+    const sim = makeSim({ answer: () => (n++ < FAILS ? 'hang' : []), budgetMs: 300 });
+    for (const command of commands.slice(0, FAILS + 1)) {
+      await sim.step('P', [{ tool: 'bash', args: { command } }]);
+      await tick();
+    }
+    expect(sim.queries()).toEqual(commands.slice(0, FAILS));
+  });
+});

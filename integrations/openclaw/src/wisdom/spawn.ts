@@ -25,7 +25,7 @@ export function nodeSpawnFn(envOrGetter: NodeJS.ProcessEnv | (() => NodeJS.Proce
     new Promise((resolve) => {
       const env = typeof envOrGetter === 'function' ? envOrGetter() : envOrGetter;
       if (spec.signal?.aborted) {
-        resolve({ code: null, stdout: '', stderr: '', spawnError: false, timedOut: true });
+        resolve({ code: null, stdout: '', stderr: '', spawnError: false, timedOut: false, aborted: true });
         return;
       }
       let child: ReturnType<typeof spawn>;
@@ -69,8 +69,12 @@ export function nodeSpawnFn(envOrGetter: NodeJS.ProcessEnv | (() => NodeJS.Proce
         timedOut = true;
         killTree();
       }, spec.timeoutMs);
+      // An abort is its own outcome (`aborted`, core 0.4.1 contract): the
+      // core decides what it means (a budget miss is one breaker failure,
+      // any other abort none), never the timeout class.
+      let aborted = false;
       const onAbort = (): void => {
-        timedOut = true;
+        aborted = true;
         killTree();
       };
       spec.signal?.addEventListener('abort', onAbort, { once: true });
@@ -85,6 +89,7 @@ export function nodeSpawnFn(envOrGetter: NodeJS.ProcessEnv | (() => NodeJS.Proce
           stderr: Buffer.concat(err).toString('utf8'),
           spawnError: spawnError || overflow,
           timedOut,
+          ...(aborted ? { aborted: true } : {}),
         });
       };
       child.on('error', () => finish(null, true));

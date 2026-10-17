@@ -529,6 +529,41 @@ After the amendments (merged with origin/main @ #66): openclaw 223 tests, core 1
 opencode 332, all `tsc` clean, the `ct_ci.py` gates pass; `run_activity.sh` 15/15 again (same three
 queries and blocks) and the AC 9 cache gate cache-safe again.
 
+## Post-merge review amendments (openclaw 0.3.1)
+
+1. **[regression] The run ledger holds only ids NEW in the run.** 0.3.0's `cacheLedger` copied the
+   whole rebuilt ledger (snapshot, drained, bootstrap) into the run ledger, so a session whose history
+   carried more than `EXCLUDE_MAX` (256) ids overflowed at once, went blind, and lost both N3 and
+   activity for good. The snapshot's own ids (scan ∪ drained ∪ bootstrap) are now computed once per
+   snapshot and kept apart; `noteRunIds` skips them and `rebuildLedger` unions them at read time.
+   Overflow now means more than 256 new ids in one run. Regression test: a 300-id history.
+2. **Idempotent middleware.** A second pass over the same tool result (another module instance's
+   middleware) is a no-op: the result we return carries a non-enumerable
+   `Symbol.for('curated-thoughts.openclaw.processed-result')` flag, and processed
+   `sessionKey#runId#toolCallId` keys are remembered in the shared state. **Not done: the
+   "only one instance registers the middleware" guard.** The live probe showed the host serving the
+   middleware from the *first* module instance and the hooks from the *third*; a guard that registers
+   only once would match that, but nothing verifies which registration the gateway runtime consults,
+   and a wrong guess would silently disable N3 and activity entirely. With the per-result marker,
+   several registrations are harmless, so every instance keeps registering.
+3. Retryable outcomes free only the key (`releaseKey`); the step stays used.
+4. The first-use locate + probe wait is bounded (`READY_WAIT_MS = 2 s`, apart from the 3 s match
+   budget, the probe gets the abort signal); still unknown → `probe_pending`, the step is not
+   claimed (a sibling that claimed meanwhile is re-checked before claiming).
+5. `wisdomMatch` waits on the shared in-flight `ready()` instead of probing again.
+6. **Breaker on budget, in the core (controller decision).** `runActivityMatch` counts an aborted
+   (budget) match as one breaker failure through the new `recordActivityBudgetMiss(breaker)`, and
+   never records a success for it; an abort from anywhere else (outcome `aborted`, opencode 0.4.1)
+   counts nothing. The OpenClaw host no longer counts it itself; the spawn binding now reports an
+   abort as `aborted`. Tests on both bindings (OpenClaw here, OpenCode in its suite): `BREAKER_FAILS
+   − 1` expiries keep the breaker closed, `BREAKER_FAILS` open it (a double count fails the first).
+   DeepSeek Harness passes no signal, so its budget misses do not reach this rule; a host that
+   cannot abort calls `recordActivityBudgetMiss` itself on expiry (not changed for DSH here).
+7. `metaRecallIds` reads part by part; "unreadable" only when no part yields an envelope and some
+   part is not JSON.
+8. The state key carries the package version (`plugin-state@<version>`).
+9. An unexpected throw after the claim releases the key and the step.
+
 ## Versioning and docs
 
 - openclaw `0.2.2 → 0.3.0` (`package.json`, `openclaw.plugin.json`, `integration.yaml`), CHANGELOG,

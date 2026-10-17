@@ -9,8 +9,10 @@ import { describe, expect, it } from 'vitest';
 
 import {
   ActivityTracker,
+  BREAKER_FAILS,
   Breaker,
   EMPTY_LEDGER,
+  recordActivityBudgetMiss,
   classify,
   onUserTurn,
   runActivityMatch,
@@ -77,25 +79,35 @@ describe('abort support', () => {
     expect(seen).toEqual([ac.signal]);
   });
 
-  it('an aborted activity match is `budget`, never a breaker failure', async () => {
+  it('an aborted activity match is `budget` and counts ONE breaker failure (never a success)', async () => {
+    // Controller decision (post-merge review of openclaw 0.3.0): a budget
+    // miss counts as one failure on every host, like a Hermes live timeout.
     const breaker = new Breaker();
     const ac = new AbortController();
     const h = host({
       wisdomMatch: async (_q, _m, _e, signal) => {
         await new Promise<void>((r) => signal?.addEventListener('abort', () => r()));
-        return { outcome: 'timeout_or_exit' };
+        // even a host that reports ok after the kill is not a success
+        return { outcome: 'ok', result: { entries: [], corrections: [] } };
       },
     });
     const pending = runActivityMatch(h, activity, [], breaker, ac.signal);
     ac.abort();
     expect(await pending).toEqual({ failure: 'budget' });
-    for (let i = 0; i < 5; i++) {
+    expect(breaker.isOpen()).toBe(false); // one miss of BREAKER_FAILS
+    for (let i = 1; i < BREAKER_FAILS; i++) {
       const again = new AbortController();
       const p = runActivityMatch(h, activity, [], breaker, again.signal);
       again.abort();
       await p;
     }
-    expect(breaker.isOpen()).toBe(false);
+    expect(breaker.isOpen()).toBe(true);
+  });
+
+  it('recordActivityBudgetMiss is the one rule hosts without a signal call', () => {
+    const breaker = new Breaker();
+    for (let i = 0; i < BREAKER_FAILS; i++) recordActivityBudgetMiss(breaker);
+    expect(breaker.isOpen()).toBe(true);
   });
 
   it('startActivity forwards the signal to the host', async () => {

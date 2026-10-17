@@ -1223,6 +1223,20 @@ export interface ActivityMatch {
  * the same breaker bookkeeping as the user-turn path (the breaker is SHARED:
  * three failures pause both paths). Never throws.
  */
+/**
+ * The one budget-miss rule: an activity match that ran past the host's
+ * budget counts as one failure of the shared breaker. `runActivityMatch`
+ * applies it to an aborted match; a host that cannot abort its match calls
+ * it on expiry instead (never both for one miss).
+ */
+export function recordActivityBudgetMiss(breaker: Breaker): void {
+  try {
+    breaker.recordFailure();
+  } catch {
+    /* fail quietly */
+  }
+}
+
 export async function runActivityMatch(
   host: HostAdapter,
   activity: Activity,
@@ -1235,9 +1249,17 @@ export async function runActivityMatch(
     const attempt = signal
       ? await host.wisdomMatch(activityQuery(activity), ACTIVITY_MAX_PER_STEP, exclude, signal)
       : await host.wisdomMatch(activityQuery(activity), ACTIVITY_MAX_PER_STEP, exclude);
-    // The caller's budget ran out and killed the child: not CT's failure, so
-    // the breaker does not count it (the same rule as `budget` elsewhere).
-    if (signal?.aborted || attempt.outcome === 'aborted') return { failure: 'budget' };
+    // The caller's budget ran out and killed the child. Never a success; it
+    // counts as ONE breaker failure on every host (controller decision after
+    // the openclaw 0.3.0 review, matching Hermes, where a live timeout is a
+    // failure): a CT that keeps missing the budget pauses both paths.
+    if (signal?.aborted) {
+      recordActivityBudgetMiss(breaker);
+      return { failure: 'budget' };
+    }
+    // An abort from anywhere else (the host cancelled the call; outcome
+    // `aborted`) is not CT's failure and never counts against the breaker.
+    if (attempt.outcome === 'aborted') return { failure: 'budget' };
     if (attempt.outcome === 'spawn') {
       host.resetDiscoveryAndProbeCaches();
       return { failure: 'spawn' };
