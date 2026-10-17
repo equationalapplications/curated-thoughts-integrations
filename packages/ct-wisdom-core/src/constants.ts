@@ -40,3 +40,36 @@ export const FACT_ID_RE = /^[A-Za-z0-9._:-]{1,128}$/;
 
 /** Scan pattern: a fact id directly following the `ct-fact:` token. */
 export const SCAN_RE = /ct-fact:([A-Za-z0-9._:-]{1,128})/g;
+
+// ─────────────────────────────────────────────────────────────────────────
+// Autonomous-work ("activity") delivery — frozen like the live constants
+// (spec 2026-10-16-dsh-autonomous-work-wisdom-design.md; Hermes parity,
+// ct_wisdom_activity.py). User decision 5: 1 fact, ≤ 600 chars.
+// ─────────────────────────────────────────────────────────────────────────
+
+/** Max facts in one activity delivery. */
+export const ACTIVITY_MAX_PER_STEP = 1;
+
+/** Max characters of one rendered activity block. */
+export const ACTIVITY_MAX_BLOCK_CHARS = 600;
+
+/** Max characters of an activity query (the bare target). */
+export const ACTIVITY_QUERY_CHARS = 300;
+
+/** Max characters of one activity target (path, pattern or command words). */
+export const ACTIVITY_TARGET_CHARS = 200;
+
+/** Max characters of the visible `_for: <line>_` label. */
+export const ACTIVITY_LABEL_CHARS = 120;
+
+/** Recent activity keys kept per session (LRU). */
+export const ACTIVITY_RECENT_KEYS_MAX = 32;
+
+/** Recent step ids kept per session (LRU) for the once-per-step rule. */
+export const ACTIVITY_STEP_IDS_MAX = 16;
+
+/** Sessions the activity tracker keeps (LRU). */
+export const ACTIVITY_SESSIONS_MAX = 256;
+
+/** Heading of an activity block (distinct from the user-turn heading). */
+export const ACTIVITY_HEADING = '## Curated Thoughts — relevant to this step';
