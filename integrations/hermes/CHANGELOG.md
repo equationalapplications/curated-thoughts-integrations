@@ -6,6 +6,68 @@ format below is load-bearing: `## <version> — <date>`.
 
 ## Unreleased
 
+## 0.6.5 — 2026-10-16
+
+- **Privacy redesign: file paths are sent only inside a project.** 0.6.2 through
+  0.6.4 tried to clean up any path. Each review found a new layout that slipped
+  through. What 0.6.4 could still send to CT and its embedding provider (and
+  show in the `_for:` label and the verbose log):
+  - **Another user's folder names under WSL**, with the cwd at `/mnt/c/Users`
+    or `/mnt/c`: `/mnt/c/Users/Bob/secret.txt` was sent as `Bob/secret.txt`.
+  - **Other users' home folders when `HOME=/`** with `/var/home`, `/nfs/home`
+    or `/export/home` layouts (`bob/secret.txt`).
+  - **Paths that climb out of the project**: `../../bob/secret.txt` was sent as
+    `bob/secret.txt`.
+  - **Your name** when it has a space (`John Smith`, in `john_smith.md`), when it
+    is short and part of a file name (`jo.md`, `jo-notes`), or when it is only
+    your home folder's name under a layout like `/nfs/home/alice` with no `USER`
+    set.
+
+  Now:
+  - A file path is sent only if it resolves (following symlinks) inside the
+    **project root**, and it is sent relative to that root. The root is the
+    nearest folder at or above the session's working directory holding `.git`,
+    `.hg`, `pyproject.toml`, `package.json`, `Cargo.toml`, `go.mod`, `pom.xml`,
+    `build.gradle`, `Gemfile`, `composer.json`, a `*.sln` or
+    `.curated-thoughts-project`.
+  - Some folders are never a project root, and the search stops at them:
+    - your home folder (from `HOME`, `USERPROFILE`, `~` or the system account,
+      so a dotfiles repo there counts even with `HOME` unset) and anything
+      above it;
+    - `/` itself;
+    - the folders that hold users' homes (`/home`, `/Users`, `C:\Users`,
+      `D:\Profiles`, `/var/home`, `/nfs/home`, `/export/home`, `/data/home`,
+      `/mnt/<letter>/Users`) and anyone's home inside them (so
+      `C:\Users\Alice` with a `package.json` is not a project, but
+      `C:\Users\Alice\code\proj` is);
+    - WSL's `/mnt` and `/mnt/<letter>`.
+
+    Other top-level folders can be projects, so wisdom works in `/app` or
+    `/workspace` containers. These rules are checked on the working directory
+    as given and again on the project root's real path, so a symlinked or
+    aliased working directory that leads into your home folder (for example
+    `/work/link -> /Users/bob`, or macOS's `/System/Volumes/Data/Users/bob`)
+    finds no project.
+  - Anything outside a project root is not sent at all, not even its file name,
+    and neither is a path longer than 200 characters (it is never cut). Paths
+    are compared case-insensitively only on macOS and Windows.
+  - **Commands send only the program plus a plain subcommand word** (`npm test`,
+    `git rebase`, `npm run-script`), never a path, a dot or a file name.
+    `pytest tests/billing` sends `pytest`, `python deploy.py` sends `python`,
+    and `cat Bob/secret.txt` sends `cat`. In 0.6.0–0.6.4 the word after the
+    program could be a relative path, so it could name a folder outside the
+    project.
+  - Nothing that names you is sent. That covers `USER`, `LOGNAME`, `USERNAME`
+    and the system account name, plus your home folder's name when it sits
+    in a `Users`, `home` or `Profiles` folder (so `HOME=/config` does not
+    hide `config`). It catches names with spaces, and short names as a whole
+    word. Any punctuation separates words, so `jo–notes.md` counts. Service
+    accounts (`root`, `node`, `runner`, …) are still exempt.
+  - **Behavior change:** files outside a project get no autonomous-work wisdom.
+    To opt a folder in, add an empty `.curated-thoughts-project` file to it.
+  - Search patterns keep the 0.6.3 allowlist. A search `path` outside the
+    project is left out of the label.
+
 ## 0.6.4 — 2026-10-16
 
 - **Privacy fix, part 3.** A further review of 0.6.3 found that the

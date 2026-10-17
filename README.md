@@ -10,7 +10,7 @@ common architecture.
 
 | Harness | Directory | Status | Version |
 |---------|-----------|--------|---------|
-| [Hermes Agent](https://github.com/NousResearch/hermes-agent) | [`integrations/hermes/`](integrations/hermes/) | implemented | [0.6.4](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=hermes) |
+| [Hermes Agent](https://github.com/NousResearch/hermes-agent) | [`integrations/hermes/`](integrations/hermes/) | implemented | [0.6.5](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=hermes) |
 | DeepSeek Harness | [`integrations/deepseek/`](integrations/deepseek/) | implemented | [0.5.1](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=deepseek) |
 | OpenCode | [`integrations/opencode/`](integrations/opencode/) | implemented | [0.3.0](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=opencode) |
 | OpenClaw | [`integrations/openclaw/`](integrations/openclaw/) | implemented | [0.2.1](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=openclaw) |
@@ -117,11 +117,30 @@ keyed to what the agent is doing:
   Curated Thoughts' own tools never trigger it.
 - **What is sent to Curated Thoughts:** only the bare target, for example
   `src/billing/invoice.py`, `pnpm test` or a search pattern. For shell
-  commands that is the program plus the unquoted word right after it,
-  never a flag's value or the rest of the command line. The one exception
-  is `python -m <module>`, which sends the module name (`python3 pytest`). Credential-shaped search
-  patterns are not sent at all. File contents, tool output, diffs
-  and the agent's own words are never sent.
+  commands that is the program name (letters, digits and `._+-` only, not
+  key-shaped, not naming you, or nothing is sent) plus the word right after
+  it, but only when that word is a plain lowercase verb such as `test`,
+  `rebase` or `run-script` that is not key-shaped and does not name you. It
+  is never a path, a file name, a flag's value or the rest of the command
+  line, so `pytest tests/billing` sends `pytest`. The one
+  exception is `python -m <module>`, which sends the module name
+  (`python3 pytest`).
+  File contents, tool output, diffs and the agent's own words are never sent.
+- **Privacy (since hermes 0.6.5):** a file path is sent only when it is
+  inside a project (the nearest folder above the session's working
+  directory holding `.git`, `.hg`, `pyproject.toml`, `package.json`,
+  `Cargo.toml`, `go.mod`, `pom.xml`, `build.gradle`, `Gemfile`,
+  `composer.json`, a `*.sln` or `.curated-thoughts-project`). It is never your
+  home folder or above it, anyone's home folder itself (`/home/<x>`,
+  `C:\Users\<x>`), `/`, `/home`-style folders or a WSL drive root.
+  Container folders such as `/app` and `/workspace` work. The path is sent
+  only relative to that project, and only up to 200 characters. Files outside
+  a project get no autonomous-work wisdom. Nothing naming you (`USER`,
+  `LOGNAME`, `USERNAME`, your system account, your home folder's name) is
+  ever sent. A search
+  pattern is sent only if it is plain words (letters, digits, `_ . -`, at
+  most 6 words and 80 chars) with no key-shaped or auth word. To opt a
+  folder in without a build file, add an empty `.curated-thoughts-project`.
 - **Delivered as:** at most 1 fact in at most 600 characters, added to that
   tool's result under `## Curated Thoughts — relevant to this step`, with
   the same `ct-fact` marker and at-most-once rule as every other delivery.
