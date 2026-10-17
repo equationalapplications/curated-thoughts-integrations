@@ -34,6 +34,7 @@ import {
   finishActivityOutcome,
   isCtTool,
   lruSet,
+  recordActivityBudgetMiss,
   reportActivity,
   settleWithin,
   startActivity,
@@ -184,12 +185,12 @@ interface Plan {
   activity: Activity;
   deadline: number;
   promise: Promise<ActivityMatch>;
-  /** Aborted on budget expiry: kills the `ct` child (the core counts the miss once). */
-  abort: AbortController;
   /**
-   * Aborted when the plan is abandoned (slot replaced or evicted, a turn
-   * the host would not extend): kills the child too, but is no budget miss
-   * and no breaker failure (adapter `linkCancel`).
+   * Kills the `ct` child (adapter `linkCancel`): on budget expiry, and when
+   * the plan is abandoned (slot replaced or evicted, a turn the host would
+   * not extend). The core never sees it aborted, so a cancel is no breaker
+   * failure by itself; an expiry that really killed the query counts once
+   * (deliver, recordActivityBudgetMiss).
    */
   cancel: AbortController;
   consumed: boolean;
@@ -286,11 +287,7 @@ export class DshActivity {
   /** Store a slot; a replaced slot or the LRU-evicted one is abandoned. */
   private storeSlot(agentId: string, slot: AgentSlot): void {
     this.abandon(agentId, this.slots.get(agentId));
-    if (!this.slots.has(agentId) && this.slots.size >= ACTIVITY_SESSIONS_MAX) {
-      const oldest = this.slots.keys().next();
-      if (!oldest.done) this.abandon(oldest.value, this.slots.get(oldest.value));
-    }
-    lruSet(this.slots, agentId, slot, ACTIVITY_SESSIONS_MAX);
+    lruSet(this.slots, agentId, slot, ACTIVITY_SESSIONS_MAX, (id, evicted) => this.abandon(id, evicted));
   }
 
   private slotFor(agentId: string, messageId: string): AgentSlot | null {
@@ -349,17 +346,20 @@ export class DshActivity {
     if (activity === null) return null;
     const session = { id: agentId };
     this.publish(agentId, messages);
-    const abort = new AbortController();
+    // The core gets a signal it never sees aborted: it is only the key the
+    // adapter finds `cancel` by (linkCancel), so the host decides what a
+    // kill costs the breaker.
+    const coreSignal = new AbortController().signal;
     const cancel = new AbortController();
-    this.adapter.linkCancel(abort.signal, cancel.signal);
-    const start = startActivity(this.adapter, session, activity, this.breaker, abort.signal);
+    this.adapter.linkCancel(coreSignal, cancel.signal);
+    const start = startActivity(this.adapter, session, activity, this.breaker, coreSignal);
     if (start.failure !== null) {
       this.debug(agentId, start.failure);
       reportActivity(this.adapter, session, activity, { kind: 'skip', reason: start.failure });
       return null;
     }
     this.tracker.admit(agentId, step.messageId, activity.key);
-    slot.plan = { activity, deadline: this.now() + TIMEOUT_MS, promise: start.match, abort, cancel, consumed: false };
+    slot.plan = { activity, deadline: this.now() + TIMEOUT_MS, promise: start.match, cancel, consumed: false };
     return slot.plan;
   }
 
@@ -436,10 +436,17 @@ export class DshActivity {
         this.release(agentId, plan);
         return null;
       }
-      // On expiry: kill the abandoned `ct` child. The core then reports
-      // `budget` and counts the miss as ONE breaker failure
-      // (recordActivityBudgetMiss), the same on every host.
-      const match = await settleWithin(plan.promise, Math.max(0, plan.deadline - this.now()), () => plan.abort.abort());
+      // On expiry: kill the abandoned `ct` child. If the kill really stopped
+      // the query (outcome `budget`), the miss counts as ONE breaker failure
+      // (recordActivityBudgetMiss, the shared rule). A child that had
+      // already answered keeps its result (the binding reports it, not
+      // `aborted`), so a query that made it in time is never charged.
+      const match = await settleWithin(plan.promise, Math.max(0, plan.deadline - this.now()), () => {
+        plan.cancel.abort();
+        void plan.promise.then((late) => {
+          if (late.failure === 'budget') recordActivityBudgetMiss(this.breaker);
+        });
+      });
       // The core re-checks every gate against the log the model sees now
       // (tool results of the step included), selects and reports.
       this.publish(agentId, messages);

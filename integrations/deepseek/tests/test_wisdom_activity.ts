@@ -648,6 +648,56 @@ describe('budget expiry aborts the query (core recordActivityBudgetMiss)', () =>
     expect(breaker.failuresRecorded).toBe(1);
   });
 
+  it('an expiry that finds the child already answered charges no budget miss (PR #71 re-review)', async () => {
+    let now = 1000;
+    const breaker = new CountingBreaker();
+    const turns: VerboseTurn[] = [];
+    const s = setup(undefined, { now: () => now, breaker, recordVerbose: (t) => turns.push(t) });
+    // Like the real binding when the child exited with an answer but 'close'
+    // is still pending: the kill keeps the real result, never `aborted`.
+    const signals: AbortSignal[] = [];
+    const inner = (s.adapter as unknown as { spawnFn: SpawnFn }).spawnFn;
+    (s.adapter as unknown as { spawnFn: SpawnFn }).spawnFn = (spec) => {
+      if (spec.args[2] === '--help') return inner(spec);
+      if (spec.signal) signals.push(spec.signal);
+      return new Promise((resolve) => spec.signal?.addEventListener('abort', () => resolve({
+        code: 0, stdout: JSON.stringify({ entries: [fact('f1')], corrections: [] }), stderr: '', spawnError: false, timedOut: false,
+      }), { once: true }));
+    };
+    s.step([['bash', { command: 'pnpm test' }]]);
+    await flush();
+    now += 3001;
+    expect(await s.pre()).toBeNull(); // past the budget: not delivered
+    expect(signals[0]!.aborted).toBe(true); // the child was still killed
+    await flush();
+    expect(breaker.failuresRecorded).toBe(0);
+    expect(turns.map((t) => [t.kind, t.reason])).toEqual([['skip', 'budget']]);
+  });
+
+  it('a ct that cannot start when the budget runs out is class spawn, never a budget miss', async () => {
+    let now = 1000;
+    const breaker = new CountingBreaker();
+    const s = setup(undefined, { now: () => now, breaker });
+    let resets = 0;
+    const reset = s.adapter.resetDiscoveryAndProbeCaches.bind(s.adapter);
+    s.adapter.resetDiscoveryAndProbeCaches = () => { resets++; reset(); };
+    const inner = (s.adapter as unknown as { spawnFn: SpawnFn }).spawnFn;
+    (s.adapter as unknown as { spawnFn: SpawnFn }).spawnFn = (spec) => {
+      if (spec.args[2] === '--help') return inner(spec);
+      // The binding's invariant: ENOENT is spawnError and never `aborted`.
+      return new Promise((resolve) => spec.signal?.addEventListener('abort', () => resolve({
+        code: null, stdout: '', stderr: '', spawnError: true, timedOut: false,
+      }), { once: true }));
+    };
+    s.step([['bash', { command: 'pnpm test' }]]);
+    await flush();
+    now += 3001;
+    expect(await s.pre()).toBeNull();
+    await flush();
+    expect(breaker.failuresRecorded).toBe(0);
+    expect(resets).toBe(1);
+  });
+
   it('a match that settles within the budget is never aborted', async () => {
     const breaker = new CountingBreaker();
     const s = setup(undefined, { breaker });

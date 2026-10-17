@@ -8,9 +8,10 @@
   stopped. The pre-step aborts it on expiry and the `ct` child is killed
   (on macOS and Linux its whole process group, so anything it started goes
   too; on Windows the direct child), the capability probe included, so it
-  no longer keeps running in the background. The miss counts as exactly one
-  failure toward the five-minute failure pause (the shared core rule
-  `recordActivityBudgetMiss`, the same on every host). The activity can
+  no longer keeps running in the background. A miss that the kill really
+  stopped counts as exactly one failure toward the five-minute failure pause
+  (the shared core rule `recordActivityBudgetMiss`); a child that had
+  already answered keeps its result and is not charged. The activity can
   still trigger again at a later step; the step that missed keeps its one
   query (the key is freed, the step is not).
 - Fixed: a query nobody will use is stopped too, without counting as a
@@ -19,12 +20,20 @@
   the turn. Its activity can trigger again later.
 - Fixed: the `ct wisdom match --help` capability check runs once per `ct`
   path instead of before every query, so the query gets the whole 3 s
-  budget. A `ct` that cannot start clears that cache and is never counted
-  as a budget miss.
+  budget. A failed query re-checks it next time, so a `ct` that loses
+  `wisdom match` in place is switched off after one failure. A `ct` that
+  cannot start clears that cache and discovery's remembered path (a moved
+  `ct` is found again without a restart); it is classed as a start failure,
+  not a budget miss.
 - Fixed: a `ct` child that already exited when the budget ran out keeps its
   real result; an already-expired budget starts no child at all; and a `ct`
   that failed to start is never signalled (signalling a child with no
-  process id would have hit the harness's own process group).
+  process id would have hit the harness's own process group). A killed
+  `ct` whose pipes stay open (Windows, or a descendant that left the
+  process group) no longer hangs the query: it settles shortly after the
+  child exits.
+- Internal: `lruSet` in `ct-wisdom-core` takes an optional `onEvict`
+  callback (no behavior change for other hosts).
 
 ## 0.6.1 — 2026-10-17
 

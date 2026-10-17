@@ -32,11 +32,12 @@ import {
   type MatchOutcome,
   type SessionRef,
   type SpawnFn,
+  type SpawnOutcome,
   type VerboseTurn,
   type WisdomMatchResult,
 } from '@equational-applications/ct-wisdom-core';
 import { spawn } from 'node:child_process';
-import { discoverCt } from '../wisdom.js';
+import { discoverCt, invalidateAcceptedPath } from '../wisdom.js';
 
 /** One v1 memo record: the rendered block plus the fact ids it delivered. */
 export interface MemoRecord {
@@ -76,6 +77,35 @@ export function userMessageText(message: unknown): string {
 // `aborted: true` unless the child had already exited or never started.
 // ─────────────────────────────────────────────────────────────────────────
 
+/**
+ * The binding's one outcome normalization: a binary that could not start
+ * and a capped runaway are spawn errors and never `aborted` (the core's
+ * classify checks `aborted` first), so ENOENT is never mistaken for an
+ * abort. Every other layer relies on this invariant.
+ */
+export function spawnOutcomeOf(raw: {
+  code: number | null;
+  stdout: string;
+  stderr: string;
+  spawnError: boolean;
+  overflow: boolean;
+  timedOut: boolean;
+  aborted: boolean;
+}): SpawnOutcome {
+  const spawnError = raw.spawnError || raw.overflow;
+  const out: SpawnOutcome = { code: raw.code, stdout: raw.stdout, stderr: raw.stderr, spawnError, timedOut: raw.timedOut };
+  if (raw.aborted && !spawnError) out.aborted = true;
+  return out;
+}
+
+/**
+ * After a kill, how long to wait for 'close' once the child has exited. A
+ * kill cannot always close the pipes (Windows kills only the direct child;
+ * a descendant that left the process group keeps stdout open), and a
+ * promise that never settles would leak the plan and skip the budget miss.
+ */
+const KILL_GRACE_MS = 250;
+
 export function nodeSpawnFn(env: NodeJS.ProcessEnv = process.env): SpawnFn {
   return (spec) =>
     new Promise((resolve) => {
@@ -114,6 +144,19 @@ export function nodeSpawnFn(env: NodeJS.ProcessEnv = process.env): SpawnFn {
       let timedOut = false;
       let aborted = false;
       let settled = false;
+      let killed = false;
+      let exitCode: number | null = null;
+      let exited = false;
+      let grace: ReturnType<typeof setTimeout> | undefined;
+      /** Killed and exited: give 'close' a short grace, then settle anyway. */
+      function armGrace(): void {
+        if (grace !== undefined || settled) return;
+        grace = setTimeout(() => {
+          child.stdout?.destroy();
+          child.stderr?.destroy();
+          finish(exitCode, false);
+        }, KILL_GRACE_MS);
+      }
       /**
        * The one kill path (timeout, abort, overflow). POSIX: the process
        * group (negative pid), falling back to the direct child when the
@@ -124,6 +167,8 @@ export function nodeSpawnFn(env: NodeJS.ProcessEnv = process.env): SpawnFn {
       function killTree(): void {
         const pid = child.pid;
         if (typeof pid !== 'number' || pid <= 0) return;
+        killed = true;
+        if (exited) armGrace();
         if (process.platform !== 'win32') {
           try {
             process.kill(-pid, 'SIGKILL');
@@ -142,14 +187,17 @@ export function nodeSpawnFn(env: NodeJS.ProcessEnv = process.env): SpawnFn {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
-        // Both end paths ('close' and 'error') drop the abort listener.
+        if (grace !== undefined) clearTimeout(grace);
+        // Every end path ('close', 'error', the kill grace) drops the abort listener.
         spec.signal?.removeEventListener('abort', onAbort);
-        // A binary that could not start is a spawn error even when an abort
-        // landed first (the core classifies `aborted` before `spawnError`).
-        const wasAborted = aborted && !spawnError;
-        resolve({ code, stdout, stderr, spawnError: spawnError || overflow, timedOut, ...(wasAborted ? { aborted: true } : {}) });
+        resolve(spawnOutcomeOf({ code, stdout, stderr, spawnError, overflow, timedOut, aborted }));
       };
       child.on('error', () => finish(null, true));
+      child.on('exit', (code) => {
+        exited = true;
+        exitCode = code;
+        if (killed) armGrace();
+      });
       // The caller's budget ran out (activity delivery, `spec.signal`): kill
       // the tree now and report `aborted`, which the core classifies as its
       // own outcome (OpenCode / OpenClaw parity). A child that already
@@ -286,6 +334,8 @@ export interface AdapterDeps {
   discover?: () => { path: string | null; failure: string | null };
   /** Injected clock for the breaker (tests). */
   now?: () => number;
+  /** Injected discovery invalidation (tests); defaults to the v1 module's accepted-path reset. */
+  invalidateDiscovery?: () => void;
   /** Verbose-mode recorder; set only when CT_WISDOM_VERBOSE is on. */
   recordVerbose?: (turn: VerboseTurn) => void;
 }
@@ -304,6 +354,7 @@ export class DshWisdomAdapter implements HostAdapter {
   private readonly spawnFn: SpawnFn;
   private readonly discover: () => { path: string | null; failure: string | null };
   private readonly now: () => number;
+  private readonly invalidateDiscovery: () => void;
   private readonly turns = new Map<string, TurnState>();
   private capabilityAbsent = false;
   /** The ct path whose `wisdom match --help` probe passed (probe once per path). */
@@ -317,6 +368,7 @@ export class DshWisdomAdapter implements HostAdapter {
     this.spawnFn = deps.spawnFn ?? nodeSpawnFn(deps.env);
     this.discover = deps.discover ?? (() => discoverCt(deps.env));
     this.now = deps.now ?? (() => Date.now());
+    this.invalidateDiscovery = deps.invalidateDiscovery ?? invalidateAcceptedPath;
   }
 
   /** TEST-ONLY: drop all turn caches. */
@@ -425,20 +477,6 @@ export class DshWisdomAdapter implements HostAdapter {
     query: string,
     max: number,
     exclude: string[],
-    signal?: AbortSignal,
-  ): Promise<{ outcome: MatchOutcome; result?: WisdomMatchResult }> {
-    const res = await this.matchOnce(query, max, exclude, signal);
-    // n3: a binary that cannot start drops the probe cache and the latch
-    // here, not only in the core: the core checks its budget signal first
-    // and would skip its own reset when the budget ran out meanwhile.
-    if (res.outcome === 'spawn') this.resetDiscoveryAndProbeCaches();
-    return res;
-  }
-
-  private async matchOnce(
-    query: string,
-    max: number,
-    exclude: string[],
     budget?: AbortSignal,
   ): Promise<{ outcome: MatchOutcome; result?: WisdomMatchResult }> {
     if (this.capabilityAbsent) return { outcome: 'timeout_or_exit' };
@@ -450,14 +488,12 @@ export class DshWisdomAdapter implements HostAdapter {
       // exits 0 (Hermes ct_wisdom_live.has_match_capability parity), once
       // per accepted path (OpenCode parity): a per-call probe would spend a
       // second spawn out of the same 3 s budget on every query.
-      const probe = await this.spawnChecked({
+      const probe = await this.spawnFn({
         command: path,
         args: ['wisdom', 'match', '--help'],
         timeoutMs: 3000,
         ...(signal ? { signal } : {}),
       });
-      // A binary that cannot start is class `spawn`, even if an abort
-      // landed meanwhile (never a budget miss on its own).
       if (probe.spawnError) return { outcome: 'spawn' };
       // Aborted mid-probe (the activity budget ran out, or the plan was
       // cancelled): decide nothing about the capability.
@@ -471,34 +507,33 @@ export class DshWisdomAdapter implements HostAdapter {
       }
       this.probedPath = path;
     }
-    return coreWisdomMatch(path, query, max, exclude, this.spawnChecked, signal);
+    const res = await coreWisdomMatch(path, query, max, exclude, this.spawnFn, signal);
+    // A failed match re-probes on the next call: a ct that lost `wisdom
+    // match` in place (a downgrade at the same path) then latches quietly
+    // instead of charging the breaker on every query. This failure itself
+    // still counts once: an exit code cannot tell "unknown command" from
+    // any other usage error reliably.
+    if (res.outcome === 'timeout_or_exit') this.probedPath = null;
+    return res;
   }
 
   /**
-   * The injected spawn with one normalization: a binary that could not
-   * start is a spawn error, never `aborted` (the core's classify checks
-   * `aborted` first), so ENOENT is never mistaken for a budget miss.
-   */
-  private readonly spawnChecked: SpawnFn = async (spec) => {
-    const out = await this.spawnFn(spec);
-    if (out.spawnError && out.aborted === true) {
-      const { aborted: _aborted, ...rest } = out;
-      return rest;
-    }
-    return out;
-  };
-
-  /**
    * Host-side cancels (activity.ts: a plan whose slot was replaced or
-   * evicted, a turn the host would not extend), keyed by the budget signal
-   * the core passes to `wisdomMatch`. A cancel kills the child exactly like
-   * the budget does, but the core sees its budget signal still un-aborted,
-   * so the outcome is `aborted` and never a breaker failure: it says
-   * nothing about CT.
+   * evicted, a turn the host would not extend, the budget expiry), keyed by
+   * the signal the core passes to `wisdomMatch`. A cancel kills the child,
+   * but the core sees its own signal still un-aborted, so the outcome is
+   * `aborted` and never a breaker failure on its own.
+   *
+   * This side channel depends on ct-wisdom-core handing `wisdomMatch` the
+   * SAME AbortSignal object the host gave `startActivity` (runActivityMatch
+   * passes it through untouched). If the core ever wraps or replaces that
+   * signal, the lookup misses and a cancel stops killing the child; the
+   * host test "a host cancel linked to the budget signal kills the child"
+   * catches that. The clean fix is a `cancel` parameter in the core.
    */
   private readonly cancels = new WeakMap<AbortSignal, AbortSignal>();
 
-  /** Link a host cancel signal to the budget signal handed to the core. */
+  /** Link a host cancel signal to the signal handed to the core. */
   linkCancel(budget: AbortSignal, cancel: AbortSignal): void {
     this.cancels.set(budget, cancel);
   }
@@ -549,10 +584,19 @@ export class DshWisdomAdapter implements HostAdapter {
     return { ...parsed.outer, result: JSON.stringify(parsed.inner) + trailer };
   }
 
-  /** n3: a spawn-class failure drops the capability latch and the probe cache. */
+  /**
+   * n3 (the core calls this on a spawn-class outcome): drop the capability
+   * latch, the probe cache and discovery's accepted path, so a ct that moved
+   * mid-process is found again (OpenCode parity).
+   */
   resetDiscoveryAndProbeCaches(): void {
     this.capabilityAbsent = false;
     this.probedPath = null;
+    try {
+      this.invalidateDiscovery();
+    } catch {
+      /* fail quietly */
+    }
   }
 
   wisdomMatchAbsent(): boolean {
