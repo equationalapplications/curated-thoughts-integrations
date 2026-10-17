@@ -4,7 +4,7 @@
  * log), the record goes to $OPENCLAW_STATE_DIR/logs. The before_prompt_build
  * result (prependContext / prependSystemContext) is byte-identical on or off.
  */
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -75,5 +75,51 @@ describe('OpenClaw verbose mode', () => {
       throw new Error('logger down');
     });
     expect(failing).toEqual(bare);
+  });
+});
+
+describe('OpenClaw verbose mode: activity channel', () => {
+  async function activitySession(env: Record<string, string>, onInfo?: (m: string) => void) {
+    const project = mkdtempSync(join(tmpdir(), 'ocl-vact-'));
+    mkdirSync(join(project, '.git'));
+    const ct = new FakeCt();
+    ct.poolFor = (q, max) => (max === 1 && q === 'a.ts' ? [{ id: 'wa', title: 'A rule', text: 'About a.ts.' }] : []);
+    const api = boot(ct, { env });
+    if (onInfo) api.logger.info = onInfo as never;
+    await api.hook('before_prompt_build')({ prompt: 'p', messages: [] }, userCtx({ runId: 'r1', trigger: 'cron' }));
+    const outs: unknown[] = [];
+    for (const [n, path] of [[1, 'a.ts'], [2, 'b.ts'], [3, 'a.ts']] as const) {
+      api.hook('model_call_started')({ runId: 'r1', callId: `r1:model:${n}` }, { runId: 'r1', sessionKey: 'agent:main:main' });
+      outs.push(await api.middleware[0].handler(
+        { toolCallId: `t${n}`, toolName: 'read', args: { path }, cwd: project, isError: false, result: { content: [{ type: 'text', text: 'body' }] } },
+        { runtime: 'openclaw', sessionKey: 'agent:main:main', runId: 'r1' },
+      ));
+    }
+    return outs;
+  }
+
+  it('off: tool results byte-identical, nothing logged', async () => {
+    const state = mkdtempSync(join(tmpdir(), 'ocl-'));
+    const infos: string[] = [];
+    const off = await activitySession({ CT_WISDOM_VERBOSE: '0', OPENCLAW_STATE_DIR: state }, (m) => infos.push(m));
+    expect(JSON.stringify(off)).toBe(JSON.stringify(await activitySession({})));
+    expect(JSON.stringify(off)).toContain('ct-fact:wa');
+    expect(infos).toEqual([]);
+    expect(existsSync(join(state, 'logs', 'ct-wisdom-verbose.jsonl'))).toBe(false);
+  });
+
+  it('on: identical results; one `activity` record per query outcome, none for rate skips', async () => {
+    const state = mkdtempSync(join(tmpdir(), 'ocl-'));
+    const infos: string[] = [];
+    const on = await activitySession({ CT_WISDOM_VERBOSE: '1', OPENCLAW_STATE_DIR: state, ANTHROPIC_API_KEY: SECRET }, (m) => infos.push(m));
+    expect(JSON.stringify(on)).toBe(JSON.stringify(await activitySession({})));
+    const lines = readFileSync(join(state, 'logs', 'ct-wisdom-verbose.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l) as Record<string, unknown>);
+    // a.ts delivered, b.ts no_match; the repeated a.ts is a rate skip (not recorded)
+    expect(lines.map((l) => [l.channel, l.event, l.query, l.activity])).toEqual([
+      ['activity', 'delivery', 'a.ts', 'read a.ts'],
+      ['activity', 'skip', 'b.ts', 'read b.ts'],
+    ]);
+    expect(infos[0]).toMatch(/delivered 1 fact[\s\S]*\[activity\]/);
+    expect(JSON.stringify(lines)).not.toContain(SECRET);
   });
 });

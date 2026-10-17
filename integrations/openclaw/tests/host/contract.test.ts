@@ -99,6 +99,34 @@ describe.skipIf(!built)('OpenClaw shape contract (pin %s)'.replace('%s', compat.
     for (const f of fields('ToolResultEvent')) expect(compat.middlewareEventFields).toContain(f);
     for (const f of fields('ToolResultCtx')) expect(compat.middlewareContextFields).toContain(f);
     for (const f of fields('NextTurnInjection')) expect(compat.nextTurnInjectionFields).toContain(f);
+    for (const f of fields('ModelCallEvent')) expect(compat.modelCallStartedEventFields).toContain(f);
+    for (const f of fields('ModelCallCtx')) expect(compat.modelCallContextFields).toContain(f);
+  });
+
+  it('autonomous work: model_call_started is registered (observe-only, no grant needed); before_tool_call is not', async () => {
+    const { recorded } = await loadAndRegister();
+    const names = recorded.hooks.map((h) => h.name);
+    expect(names).toContain('model_call_started');
+    expect(compat.conversationAccessHooks).not.toContain('model_call_started');
+    // before_tool_call runs before every approval and a throwing one blocks the tool
+    expect(names).not.toContain('before_tool_call');
+    expect(compat.beforeToolCallPrecedesApproval).toBeTruthy();
+    expect(compat.middlewareRewritePersisted).toBeTruthy();
+    // compaction during a run blinds the run ledger (review of PR #67)
+    expect(names).toEqual(expect.arrayContaining(['before_compaction', 'after_compaction']));
+    expect(compat.compactionHooks).toBeTruthy();
+  });
+
+  it('the meta-tool name the activity path recognises is the recorded one', async () => {
+    const { META_TOOL } = await import(pathToFileURL(join(ROOT, 'lib', 'src', 'wisdom', 'activity.js')).href);
+    expect(compat.metaToolName.startsWith(`${META_TOOL}:`)).toBe(true);
+  });
+
+  it('the activity channel stays within the recorded middleware result limits', async () => {
+    const { MIDDLEWARE_MAX_BLOCKS } = await import(pathToFileURL(join(ROOT, 'lib', 'src', 'wisdom', 'activity.js')).href);
+    const core = await import(pathToFileURL(join(ROOT, 'lib', 'ct-wisdom-core', 'index.js')).href);
+    expect(MIDDLEWARE_MAX_BLOCKS).toBe(compat.middlewareMaxContentBlocks);
+    expect(core.ACTIVITY_MAX_BLOCK_CHARS).toBeLessThan(compat.middlewareMaxTextChars);
   });
 
   it('the recall matcher accepts names the pin projects for the manifest MCP server', async () => {
