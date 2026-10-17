@@ -47,15 +47,14 @@ def load():
 
 
 class World:
-    """A fake filesystem under one temp directory, which models `/`. Several
-    cases may share one world (their `fs` entries are merged)."""
+    """One case's fake filesystem under a directory that models `/`."""
 
-    def __init__(self, *cases):
-        self.tmp = os.path.realpath(tempfile.mkdtemp(prefix="ct-activity-"))
+    def __init__(self, case, tmp):
+        os.makedirs(tmp)
+        self.tmp = os.path.realpath(tmp)
         self.symlinks_ok = True
-        for case in cases:
-            for entry in case["fs"]:
-                self.create(entry)
+        for entry in case["fs"]:
+            self.create(entry)
 
     def create(self, entry):
         if isinstance(entry, dict):
@@ -93,8 +92,8 @@ class World:
         # root, so a walk never leaves it), and the process identity (pwd /
         # expanduser) comes from the case, never from the machine.
         tmp = self.tmp
-        identity = ([case["system_user"]] if case.get("system_user") else [],
-                    [self.map(case["system_home"])] if case.get("system_home") else [])
+        home = [self.map(case["system_home"])] if case.get("system_home") else []
+        identity = ([case["system_user"]] if case.get("system_user") else [], home, home)
         saved = act._fs_root, act._system_identity
         act._fs_root = lambda d: d == tmp or not d.startswith(tmp + os.sep)
         act._system_identity = lambda: identity
@@ -110,14 +109,22 @@ class World:
 
 
 def build(*cases):
-    """Build every case in ONE world; returns (world, [activity, ...])."""
-    world = World(*cases)
+    """Build each case in its own world, one after the other, at the SAME
+    path under one temp dir: no cross-talk between their `fs` lists, and
+    keys (digests of full paths) stay comparable. Returns (world,
+    [activity, ...]), or (world, None) when symlinks are unavailable."""
+    parent = tempfile.mkdtemp(prefix="ct-activity-")
+    built = []
     try:
-        if not world.symlinks_ok:
-            return world, None
-        return world, [world.build(case) for case in cases]
+        for case in cases:
+            world = World(case, os.path.join(parent, "w"))
+            if not world.symlinks_ok:
+                return world, None
+            built.append(world.build(case))
+            world.close()
+        return world, built
     finally:
-        world.close()
+        shutil.rmtree(parent, ignore_errors=True)
 
 
 class TestVectorFile(unittest.TestCase):
@@ -193,10 +200,11 @@ class TestActivityTargetVectors(unittest.TestCase):
             if not other:
                 continue
             with self.subTest(case["name"]):
-                _, built = build(case, cases[other])
+                _, built = build(case, cases[other], case)
                 if built is None:
                     self.skipTest("symlinks unavailable")
-                a, b = built
+                a, b, again = built
+                self.assertEqual(a.key, again.key, "keys are comparable across worlds")
                 self.assertEqual(act.query_for(a), act.query_for(b))
                 self.assertNotEqual(a.key, b.key)
                 checked += 1

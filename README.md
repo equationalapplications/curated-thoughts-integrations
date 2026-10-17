@@ -10,7 +10,7 @@ common architecture.
 
 | Harness | Directory | Status | Version |
 |---------|-----------|--------|---------|
-| [Hermes Agent](https://github.com/NousResearch/hermes-agent) | [`integrations/hermes/`](integrations/hermes/) | implemented | [0.6.5](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=hermes) |
+| [Hermes Agent](https://github.com/NousResearch/hermes-agent) | [`integrations/hermes/`](integrations/hermes/) | implemented | [0.6.6](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=hermes) |
 | DeepSeek Harness | [`integrations/deepseek/`](integrations/deepseek/) | implemented | [0.6.0](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=deepseek) |
 | OpenCode | [`integrations/opencode/`](integrations/opencode/) | implemented | [0.3.1](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=opencode) |
 | OpenClaw | [`integrations/openclaw/`](integrations/openclaw/) | implemented | [0.2.2](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=openclaw) |
@@ -127,14 +127,17 @@ On Hermes:
   Curated Thoughts' own tools never trigger it.
 - **What is sent to Curated Thoughts:** only the bare target, for example
   `src/billing/invoice.py`, `pnpm test` or a search pattern. For shell
-  commands that is the program name (letters, digits and `._+-` only, not
-  key-shaped, not naming you, or nothing is sent) plus the word right after
-  it, but only when that word is a plain lowercase verb such as `test`,
-  `rebase` or `run-script` that is not key-shaped and does not name you. It
-  is never a path, a file name, a flag's value or the rest of the command
-  line, so `pytest tests/billing` sends `pytest`. The one
-  exception is `python -m <module>`, which sends the module name
-  (`python3 pytest`).
+  commands (since hermes 0.6.6) that is the bare program name, and nothing
+  at all for a script or a path (`./acme_export.sh`, `/opt/x/tool`). Only
+  well-known tools with subcommands (`git`, `npm`, `pnpm`, `cargo`,
+  `docker`, `kubectl`, `make`, …) also send their subcommand, and only a
+  known verb (`git rebase`, `npm test`, `make build`). Every other program
+  is sent alone, so `rm divorce-papers` sends `rm` and
+  `pytest tests/billing` sends `pytest`. `python -m <module>` sends the
+  module only for well-known modules (`pytest`, `pip`, `http.server`, …;
+  `python3 -m pytest` sends `python3 pytest`) or a package inside the
+  project (`python -m mypkg.cli` sends `python mypkg.cli`). Nothing naming
+  you is sent.
   File contents, tool output, diffs and the agent's own words are never sent.
 - **Privacy (since hermes 0.6.5):** a file path is sent only when it is
   inside a project (the nearest folder above the session's working

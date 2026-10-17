@@ -54,7 +54,7 @@ def temp_base():
 # that needs one uses this temp project (never the checkout, so the suite
 # also runs from outside it).
 PROJ = temp_base()
-make_tree(PROJ, [".git/"])
+make_tree(PROJ, [".git/", "mypkg/__init__.py"])
 
 
 # ---------------------------------------------------------------------------
@@ -77,7 +77,7 @@ CASES = [
      "run python", "python"),
     ("terminal", {"command": "curl -H 'Authorization: Bearer x' https://h"}, "run curl", "curl"),
     ("terminal", {"command": "git commit -m 'msg SECRET'"}, "run git commit", "git commit"),
-    ("terminal", {"command": "/usr/local/bin/python3 -m pytest"},
+    ("terminal", {"command": "python3 -m pytest"},
      "run python3 pytest", "python3 pytest"),
     ("terminal", {"command": "pytest tests/test_x.py"},
      "run pytest", "pytest"),
@@ -104,7 +104,7 @@ class TestActivityLine(unittest.TestCase):
     def setUp(self):
         # The process identity (pwd, expanduser) never leaks into these tests.
         orig = act._system_identity
-        act._system_identity = lambda: ([], [])
+        act._system_identity = lambda: ([], [], [])
         self.addCleanup(setattr, act, "_system_identity", orig)
         act.reset_state()
         self.addCleanup(act.reset_state)
@@ -473,9 +473,9 @@ class TestActivityLine(unittest.TestCase):
         self.assertEqual(act.user_names({"HOME": "/opt/app-root/src"}), frozenset())
         self.assertEqual(act.user_names({"HOME": "/Users/Dana"}), frozenset({"dana"}))
         self.assertEqual(act.user_names({"USERPROFILE": "C:\\Users\\Erin"}), frozenset({"erin"}))
-        act._system_identity = lambda: (["zed"], ["/home/quinn", "/opt/svc"])
+        act._system_identity = lambda: (["zed"], ["/home/quinn", "/opt/svc"], ["/opt/svc"])
         self.assertEqual(act.user_names({}), frozenset({"zed", "quinn"}))
-        act._system_identity = lambda: (["runner"], ["/home/runner"])
+        act._system_identity = lambda: (["runner"], ["/home/runner"], ["/home/runner"])
         self.assertEqual(act.user_names({}), frozenset())
 
     def test_tokenizer_splits_on_any_non_alphanumeric(self):
@@ -492,11 +492,11 @@ class TestActivityLine(unittest.TestCase):
         self.assertEqual(act._git_bash("/srv/x", windows=True), "/srv/x")
 
     def test_case_folding_only_where_case_insensitive(self):
-        orig = act._CASE_INSENSITIVE
-        self.addCleanup(setattr, act, "_CASE_INSENSITIVE", orig)
-        act._CASE_INSENSITIVE = True
+        orig = act._OS
+        self.addCleanup(setattr, act, "_OS", orig)
+        act._OS = orig._replace(case_insensitive=True)
         self.assertEqual(act._below("/w/PROJ/Src/X.py", "/w/proj"), ["Src", "X.py"])
-        act._CASE_INSENSITIVE = False
+        act._OS = orig._replace(case_insensitive=False)
         self.assertIsNone(act._below("/w/PROJ/Src/X.py", "/w/proj"))
         # NFC is normalized everywhere.
         self.assertEqual(act._below("/w/cafe\u0301/a.md", "/w/caf\u00e9"), ["a.md"])
@@ -507,7 +507,7 @@ class TestActivityLine(unittest.TestCase):
         base = temp_base()
         home = os.path.join(base, "srv", "me")
         make_tree(home, [".git/", "notes/", "code/proj/.git/"])
-        act._system_identity = lambda: ([], [home])
+        act._system_identity = lambda: ([], [home], [home])
         self.assertIsNone(act.project_root(os.path.join(home, "notes"), {}))
         proj = os.path.join(home, "code", "proj")
         self.assertEqual(act.project_root(proj, {}), proj)
@@ -580,9 +580,9 @@ class TestActivityLine(unittest.TestCase):
         calls.clear()
         self.assertEqual(act.project_root(a, {}), a)
         self.assertEqual(calls, [], "a cache hit resolves nothing")
-        orig_max = act._ROOT_CACHE_MAX
-        act._ROOT_CACHE_MAX = 2
-        self.addCleanup(setattr, act, "_ROOT_CACHE_MAX", orig_max)
+        orig_max = act._root_cache.maxsize
+        act._root_cache.maxsize = 2
+        self.addCleanup(setattr, act._root_cache, "maxsize", orig_max)
         act.project_root(b, {})
         act.project_root(a, {})  # hit: moves a to the end
         act.project_root(os.path.join(base, "srv"), {})  # evicts b, not a
@@ -611,6 +611,84 @@ class TestActivityLine(unittest.TestCase):
                              cwd=PROJ, env=env)
         self.assertEqual((a.line, b.line), ("search TODO", "search TODO"))
         self.assertNotEqual(a.key, b.key)
+
+    def test_subcommand_tools_table(self):
+        """Privacy amendment 5: only listed tools send a subcommand, and only
+        a listed verb; every verb is a plain word."""
+        for tool in ("npx", "pytest", "rm", "cat", "cd", "less", "mkdir", "cp", "mv", "vim"):
+            self.assertNotIn(tool, act._SUBCOMMAND_TOOLS, tool)
+        for tool, verbs in act._SUBCOMMAND_TOOLS.items():
+            for verb in verbs:
+                self.assertRegex(verb, act._SUBCOMMAND_RE, (tool, verb))
+        for tool in ("make", "just", "rake"):
+            self.assertEqual(act._SUBCOMMAND_TOOLS[tool], act._MAKE_TARGETS)
+        self.assertTrue(act.word_check("test", set(), act._MAKE_TARGETS))
+        self.assertFalse(act.word_check("deploy-prod", set(), act._MAKE_TARGETS))
+
+    def test_python_module_root_lookup_is_lazy(self):
+        calls = []
+        orig = act.session_cwd
+
+        def counting(task_id=None):
+            calls.append(task_id)
+            return PROJ
+
+        act.session_cwd = counting
+        self.addCleanup(setattr, act, "session_cwd", orig)
+        a = act.activity_for("terminal", {"command": "python -m pytest"}, env={}, task_id="t")
+        self.assertEqual((a.query, calls), ("python pytest", []))
+        a = act.activity_for("terminal", {"command": "python -m mypkg"}, env={}, task_id="t")
+        self.assertEqual((a.query, calls), ("python mypkg", ["t"]))
+        a = act.activity_for("terminal", {"command": "python -m nothere"}, env={}, task_id="t")
+        self.assertEqual(a.query, "python")
+
+    def test_sandbox_home_does_not_block_the_root_above(self):
+        """A HOME that is not a real user home (not in a homes location, not
+        pw_dir) blocks only itself, so a sandbox HOME inside a repo does not
+        hide the repo. pw_dir blocks its ancestors wherever it is."""
+        base = temp_base()
+        repo = os.path.join(base, "srv", "repo")
+        make_tree(repo, [".git/", ".home/x/"])
+        env = {"USER": "svc", "HOME": os.path.join(repo, ".home")}
+        self.assertEqual(act.normalize_path("src/x.py", repo, env), "src/x.py")
+        self.assertIsNone(act.project_root(os.path.join(repo, ".home", "x"), env))
+        act.reset_state()
+        act._system_identity = lambda: ([], [os.path.join(repo, ".home")],
+                                        [os.path.join(repo, ".home")])
+        self.assertIsNone(act.normalize_path("src/x.py", repo, env))
+
+    def test_homes_cached(self):
+        calls = []
+        orig = act._canon
+
+        def counting(path):
+            calls.append(path)
+            return orig(path)
+
+        act._canon = counting
+        self.addCleanup(setattr, act, "_canon", orig)
+        env = {"HOME": os.path.join(temp_base(), "Users", "z")}
+        act._homes(env)
+        first = len(calls)
+        self.assertGreater(first, 0)
+        act._homes(env)
+        self.assertEqual(len(calls), first, "a homes cache hit resolves nothing")
+
+    def test_ttl_cache(self):
+        now = [0.0]
+        orig = act._root_clock
+        act._root_clock = lambda: now[0]
+        self.addCleanup(setattr, act, "_root_clock", orig)
+        cache = act._TTLCache(2)
+        cache.put("a", 1)
+        cache.put("b", None)
+        self.assertEqual(cache.get("a", 5), (True, 1))
+        self.assertEqual(cache.get("b", lambda v: 1 if v is None else 5), (True, None))
+        now[0] = 2
+        self.assertEqual(cache.get("b", lambda v: 1 if v is None else 5), (False, None))
+        self.assertEqual(cache.get("a", lambda v: 1 if v is None else 5), (True, 1))
+        cache.put("c", 3)  # evicts the least recently used ("b")
+        self.assertEqual(sorted(cache), ["a", "c"])
 
     def test_word_check(self):
         names = {"alice"}
@@ -642,13 +720,13 @@ class TestActivityLine(unittest.TestCase):
         self.assertEqual(act.project_root(good, env), os.path.realpath(os.path.join(home, "code", "proj")))
 
     def test_canon_maps_the_macos_firmlink_alias(self):
-        orig = act._DARWIN, act._real
-        self.addCleanup(lambda: (setattr(act, "_DARWIN", orig[0]), setattr(act, "_real", orig[1])))
+        orig = act._OS, act._real
+        self.addCleanup(lambda: (setattr(act, "_OS", orig[0]), setattr(act, "_real", orig[1])))
         act._real = lambda p: p
-        act._DARWIN = True
+        act._OS = orig[0]._replace(darwin=True)
         self.assertEqual(act._canon("/System/Volumes/Data/Users/bob"), "/Users/bob")
         self.assertEqual(act._canon("/Users/bob"), "/Users/bob")
-        act._DARWIN = False
+        act._OS = orig[0]._replace(darwin=False)
         self.assertEqual(act._canon("/System/Volumes/Data/Users/bob"),
                          "/System/Volumes/Data/Users/bob")
 
