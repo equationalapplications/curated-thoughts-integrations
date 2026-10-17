@@ -14,13 +14,18 @@ format below is load-bearing: `## <version> — <date>`.
   decisions only after every plugin's `pre_tool_call` has returned, so a
   call you then refused (or another plugin blocked) had already sent its
   target (for example `secrets.env` or `git push`) to Curated Thoughts and
-  its embedding provider. Now `pre_tool_call` sends nothing: it only
-  reserves the model step. The query starts in `transform_tool_result`,
-  which Hermes runs only for a call it let run, and not when the result is
-  Hermes's own refusal (a denied or unanswered approval, an
-  `approvals.deny` rule, a blocked write: `"status": "blocked"` /
-  `"pending_approval"`, or an error starting `BLOCKED` / `Refusing`). A
-  refused call also frees the step for the next call.
+  its embedding provider. Now the plugin registers no `pre_tool_call` hook
+  at all. Everything happens in `transform_tool_result`, which Hermes runs
+  only for a call it let run: the model step is claimed there, just before
+  the query starts, so a call Hermes blocks before it runs never uses the
+  step. No query starts when the result is Hermes's own refusal: a denied,
+  unanswered or required approval, an `approvals.deny` rule, a blocked
+  write. The check is case-insensitive. It matches the statuses `blocked`,
+  `pending_approval`, `approval_required`, `denied`, `rejected`, `refused`
+  and `cancelled`, `"approved": false` and `"approval_pending": true`, an
+  error or message starting `BLOCKED`, `Refusing`, `Denied` or `Command
+  denied`, and wording like "not approved", "denied by", "user denied" and
+  "was not run". A refused call leaves the step free for the next call.
 - **Timing change:** the query no longer overlaps the tool's run, so a step
   whose first activity is new waits for Curated Thoughts after the tool
   finishes (typically 0.4–2 s, never more than 3 s), at most once per model
@@ -35,7 +40,11 @@ format below is load-bearing: `## <version> — <date>`.
 - A budget miss now counts as exactly one failure of the shared breaker
   (three pause both wisdom paths for 5 minutes), as on every other host. A
   late success no longer resets it and a late CT timeout is not counted
-  twice. A refused or blocked call counts zero.
+  twice. A refused or blocked call counts zero. A miss on a cold process
+  (finding `ct` and probing `ct wisdom match --help` ran inside the same
+  3 s) is not counted: the query's own outcome counts when it finishes, so
+  a slow first start cannot pause wisdom while CT is healthy. A result that
+  arrives just as the wait runs out is delivered, not dropped.
 - `python -mpytest` and `python -umpytest` (the module attached to `-m`) are
   parsed like `python -m pytest`.
 - Internal: project packages are `stat`ed before any directory listing; the

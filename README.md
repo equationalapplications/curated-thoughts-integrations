@@ -122,7 +122,7 @@ DeepSeek Harness, OpenCode and OpenClaw use the TypeScript port in
 
 | Host | Trigger | Delivered as |
 |------|---------|--------------|
-| Hermes | `pre_tool_call` reserves the model step and sends nothing; `transform_tool_result` (the call ran: approvals and other plugins' blocks are decided) queries and delivers, never for a call Hermes refused | spliced into that tool's result |
+| Hermes | `transform_tool_result` only (the call ran: approvals and other plugins' blocks are decided) claims the model step, queries and delivers, never for a call Hermes refused | spliced into that tool's result |
 | DeepSeek Harness | `tools/pre-execute` starts the query, the next `agent/pre-step` (step 2 and later) delivers | a user message persisted in the session log (source kind `curated-thoughts-wisdom-activity`), before the next model step |
 | [Docker Agent](integrations/docker-agent/README.md#intuitive-wisdom) | `tool_response_transform` queries and delivers (`read_file`, `write_file`, `edit_file`, `search_files_content`, `shell`; one query per model step, counted by `before_llm_call`) | spliced into that tool's result, marker first |
 | [OpenCode](integrations/opencode/README.md#intuitive-wisdom) | `tool.execute.before` plans; `tool.execute.after` (the call ran, so it was approved) queries and delivers (`read`, `write`, `edit`, `grep`, `glob`, `bash`; one query per model step, the step read from the persisted tool part) | appended to that tool's result, marker first; subagents included |
@@ -265,7 +265,7 @@ sidecar in the agent's MCP config, ships the shared doctor as
 Hermes skills tree. It is the reference implementation of Intuitive Wisdom:
 the bootstrap block is a system-prompt section memoized per session,
 live delivery runs from the `pre_llm_call` hook, and autonomous-work
-delivery reserves the step in `pre_tool_call` and queries in `transform_tool_result`, after Hermes has let the call run. Without Curated Thoughts,
+delivery claims the step and queries in `transform_tool_result`, after Hermes has let the call run. Without Curated Thoughts,
 or with an unreachable brain, both blocks are simply absent. The edge cases
 of restored sessions and the 256-session memo window are listed under 0.3.0
 in its [CHANGELOG](integrations/hermes/CHANGELOG.md).

@@ -18,7 +18,8 @@ heading format below is load-bearing: `## <version> — <date>`.
   project root, and a redundant second name check on the sent `python
   <module>` string is gone (the module itself is still checked). The
   Hermes-only hook changes (the query now starts after Hermes's approval
-  decision) do not run here.
+  decision, the step is claimed in `transform_tool_result`, a broader
+  refusal check, the cold-start budget rule) do not run here.
 
 ## 0.4.0 — 2026-10-17
 

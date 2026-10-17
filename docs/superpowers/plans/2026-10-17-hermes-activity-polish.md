@@ -62,3 +62,20 @@ Spec: `docs/superpowers/specs/2026-10-16-hermes-autonomous-work-wisdom-design.md
 
 - `python -m unittest discover -s tests` in hermes, claude-code, docker-agent;
   `tests/tools`; ruff; the policy gates. Commit, push, PR, wait for CI.
+
+## Task 7: PR #72 review fixes (spec "Amendment 8 update")
+
+Each fix writes its failing test first (`test_ct_wisdom_activity.py`):
+
+- Step claimed in the transform: a call blocked before it runs (no transform) does not
+  hold the step; the plugin registers no `pre_tool_call` (`TestRegistration`, CI's stub
+  host check). Code: `ActivityState.start` (step and key in one lock) replaces
+  `claim_step` / `release_step` / `start_key`; the pending-claim map is gone.
+- Cold-start budget: `_ct_warm()` (reads the discovery and probe caches); a cold miss
+  records nothing and the worker's outcome settles the breaker.
+- Settle race: the worker publishes, marks done and settles under the query lock;
+  `_budget_ran_out` re-checks done under it and uses a ready result.
+- `is_refusal`: case-insensitive statuses and wording (`MORE_REFUSALS`), output fields
+  ignored.
+- `peek` is pure (no session creation, no recency change).
+- e2e blocker message without a refusal prefix; `command_target` docstring.
