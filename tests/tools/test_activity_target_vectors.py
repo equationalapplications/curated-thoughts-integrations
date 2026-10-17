@@ -158,12 +158,9 @@ class TestActivityTargetVectors(unittest.TestCase):
     def setUp(self):
         act.reset_state()
         self.addCleanup(act.reset_state)
-        # The temp dir's real ancestors must hold no project marker, or a
-        # case without HOME could find a real project above it.
-        probe = os.path.realpath(tempfile.mkdtemp(prefix="ct-activity-probe-"))
-        self.addCleanup(shutil.rmtree, probe, True)
-        if act.project_root(probe, {}) is not None:
-            self.skipTest("a project marker exists above the temp directory")
+        # No probe of the real filesystem is needed: every world treats its
+        # temp dir as `/` and anything outside it as a filesystem root, so a
+        # walk never leaves it (World.build patches _fs_root).
 
     def test_every_vector(self):
         for case in load():
