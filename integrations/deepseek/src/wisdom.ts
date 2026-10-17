@@ -226,11 +226,14 @@ export function discoverCt(
   return { path: null, failure: null };
 }
 
-/** PRIVATE production invalidation (Task 5 spawn path); the reset below is TEST-ONLY. */
-function invalidateAcceptedPath(): void {
+/**
+ * Production invalidation (the v1 spawn path and the live adapter's
+ * spawn-class reset): forget the accepted ct path ONLY, so the next call
+ * re-walks discovery. Never the governor; the reset below is TEST-ONLY.
+ */
+export function invalidateAcceptedPath(): void {
   acceptedCtPath = null;
 }
-void invalidateAcceptedPath;
 
 // ── Task 4: retry budget + circuit breaker ─────────────────────────────────
 // ≤2 attempts per agent id, ≥60 s cooldown between them; process-wide breaker
@@ -395,7 +398,7 @@ export type RecallDeps = {
 //   recordFailure returned true (budget just spent) -> ('', true) — memoize '' now
 //   'cooldown'/'spent'/'breaker_open' verdict -> ('', false) — no spawn, no memo write
 //   ok -> (renderBlock(entries), true) + recordSuccess
-// spawn calls the PRIVATE invalidateAcceptedPath() (acceptedCtPath = null ONLY —
+// spawn calls invalidateAcceptedPath() (acceptedCtPath = null ONLY —
 // Opus cycle-7 M1: NEVER resetDiscoveryCachesForTests, which also resets the
 // governor and would dissolve the breaker/budget, un-bounding the stall).
 // recordSuccess is called on every non-budgeted, non-breaker outcome (closes a

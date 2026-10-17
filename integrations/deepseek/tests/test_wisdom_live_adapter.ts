@@ -10,6 +10,7 @@ import { describe, it, expect, vi } from 'vitest';
 import {
   DshWisdomAdapter,
   nodeSpawnFn,
+  spawnOutcomeOf,
   userMessageText,
   isRecallToolName,
   type AdapterDeps,
@@ -72,7 +73,7 @@ describe('userMessageText', () => {
   });
 });
 
-describe('nodeSpawnFn (real binding, fake binary)', () => {
+describe('nodeSpawnFn (real binding, fake binary)', { timeout: 30_000 }, () => {
   it('passes the argument LIST to a shell-less spawn and captures stdout', async () => {
     // POSIX-only: needs /bin/sh for the shebang script.
     if (process.platform === 'win32') return;
@@ -117,6 +118,259 @@ describe('nodeSpawnFn (real binding, fake binary)', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('nodeSpawnFn abort (real process tree)', { timeout: 30_000 }, () => {
+  const alive = (pid: number): boolean => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  const waitFor = async (cond: () => boolean, ms: number): Promise<boolean> => {
+    const end = Date.now() + ms;
+    while (Date.now() < end) {
+      if (cond()) return true;
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    return cond();
+  };
+
+  /** A fake ct whose `--help` exits 0 and whose match forks a grandchild and hangs. */
+  async function hangingCt() {
+    const { mkdtempSync, writeFileSync, chmodSync, rmSync, readFileSync, existsSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const dir = mkdtempSync(join(tmpdir(), 'ct-spawn-abort-'));
+    const pidFile = join(dir, 'grandchild.pid');
+    const script = join(dir, 'ct');
+    writeFileSync(
+      script,
+      '#!/bin/sh\n'
+        + 'case "$*" in *--help*) exit 0;; esac\n'
+        + `sleep 30 &\necho $! > '${pidFile}'\nwait\n`,
+    );
+    chmodSync(script, 0o755);
+    const grandchild = async (): Promise<number> => {
+      await waitFor(() => existsSync(pidFile) && readFileSync(pidFile, 'utf8').trim() !== '', 5000);
+      return Number(readFileSync(pidFile, 'utf8').trim());
+    };
+    return { script, grandchild, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
+  }
+
+  it('an abort kills the child AND its grandchild and reports aborted', async () => {
+    if (process.platform === 'win32') return;
+    const ct = await hangingCt();
+    try {
+      const abort = new AbortController();
+      const started = Date.now();
+      const pending = nodeSpawnFn()({ command: ct.script, args: ['wisdom', 'match'], timeoutMs: 30_000, signal: abort.signal });
+      const gpid = await ct.grandchild();
+      expect(alive(gpid)).toBe(true);
+      abort.abort();
+      const out = await pending;
+      expect(out.aborted).toBe(true);
+      expect(out.timedOut).toBe(false);
+      expect(Date.now() - started).toBeLessThan(10_000);
+      expect(await waitFor(() => !alive(gpid), 3000)).toBe(true);
+    } finally {
+      ct.cleanup();
+    }
+  });
+
+  it('a run that ends normally is not aborted and leaves no abort listener behind', async () => {
+    if (process.platform === 'win32') return;
+    const { getEventListeners } = await import('node:events');
+    const ct = await hangingCt();
+    try {
+      const abort = new AbortController();
+      const pending = nodeSpawnFn()({ command: ct.script, args: ['--help'], timeoutMs: 3000, signal: abort.signal });
+      expect(getEventListeners(abort.signal, 'abort')).toHaveLength(1);
+      const out = await pending;
+      expect(out.code).toBe(0);
+      expect(out.aborted).toBeUndefined();
+      expect(getEventListeners(abort.signal, 'abort')).toHaveLength(0); // removed on 'close'
+      abort.abort(); // a later abort is a no-op
+    } finally {
+      ct.cleanup();
+    }
+  });
+
+  it('a binary that cannot start ends on the error path with no abort listener left', async () => {
+    const { getEventListeners } = await import('node:events');
+    const abort = new AbortController();
+    const out = await nodeSpawnFn()({ command: '/nonexistent/ct-binary', args: [], timeoutMs: 3000, signal: abort.signal });
+    expect(out.spawnError).toBe(true);
+    expect(getEventListeners(abort.signal, 'abort')).toHaveLength(0);
+  });
+
+  it('the timeout kills the grandchild too (one kill path, PR #71 review)', async () => {
+    if (process.platform === 'win32') return;
+    const ct = await hangingCt();
+    try {
+      const pending = nodeSpawnFn()({ command: ct.script, args: ['wisdom', 'match'], timeoutMs: 2000 });
+      const gpid = await ct.grandchild();
+      expect(gpid).toBeGreaterThan(0);
+      const out = await pending;
+      expect(out.timedOut).toBe(true);
+      expect(await waitFor(() => !alive(gpid), 3000)).toBe(true);
+    } finally {
+      ct.cleanup();
+    }
+  });
+
+  it('an already-aborted signal resolves aborted without spawning (PR #71 review)', async () => {
+    if (process.platform === 'win32') return;
+    const { mkdtempSync, writeFileSync, chmodSync, rmSync, existsSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const dir = mkdtempSync(join(tmpdir(), 'ct-spawn-pre-abort-'));
+    const touched = join(dir, 'ran');
+    const script = join(dir, 'ct');
+    writeFileSync(script, `#!/bin/sh\ntouch '${touched}'\n`);
+    chmodSync(script, 0o755);
+    try {
+      const abort = new AbortController();
+      abort.abort();
+      const out = await nodeSpawnFn()({ command: script, args: [], timeoutMs: 3000, signal: abort.signal });
+      expect(out.aborted).toBe(true);
+      expect(out.spawnError).toBe(false);
+      await new Promise((r) => setTimeout(r, 200));
+      expect(existsSync(touched)).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('a binary that cannot start is a spawn error, not an abort, even if the abort lands first (PR #71 review)', async () => {
+    const abort = new AbortController();
+    const pending = nodeSpawnFn()({ command: '/nonexistent/ct-binary', args: [], timeoutMs: 3000, signal: abort.signal });
+    abort.abort(); // before the async ENOENT 'error' event
+    const out = await pending;
+    expect(out.spawnError).toBe(true);
+    expect(out.aborted).toBeUndefined();
+  });
+
+  it('an abort after the child already exited reports the real result, not aborted (PR #71 review)', async () => {
+    if (process.platform === 'win32') return;
+    const { mkdtempSync, writeFileSync, chmodSync, rmSync, existsSync, readFileSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const dir = mkdtempSync(join(tmpdir(), 'ct-spawn-exited-'));
+    let stray = 0;
+    const script = join(dir, 'ct');
+    // Exits 0 at once, but a background grandchild keeps stdout open, so
+    // 'close' has not fired yet when the abort lands.
+    const exiting = join(dir, 'exiting');
+    const strayPid = join(dir, 'stray.pid');
+    writeFileSync(script, `#!/bin/sh\nprintf '{"entries": []}'\nsleep 30 &\necho $! > '${strayPid}'\ntouch '${exiting}'\nexit 0\n`);
+    chmodSync(script, 0o755);
+    try {
+      const abort = new AbortController();
+      const started = Date.now();
+      const pending = nodeSpawnFn()({ command: script, args: [], timeoutMs: 30_000, signal: abort.signal });
+      const end = Date.now() + 10_000;
+      while (!existsSync(exiting) && Date.now() < end) await new Promise((r) => setTimeout(r, 25));
+      await new Promise((r) => setTimeout(r, 300)); // the child's exit is reaped
+      abort.abort();
+      const out = await pending;
+      expect(out.aborted).toBeUndefined();
+      expect(out.code).toBe(0);
+      expect(out.stdout).toBe('{"entries": []}');
+      expect(Date.now() - started).toBeLessThan(20_000); // settled by the grace, not the straggler
+      // The leader was already reaped: nothing is signalled (no -pid of a
+      // reaped leader), so the straggler is still alive.
+      stray = Number(readFileSync(strayPid, 'utf8').trim());
+      expect(alive(stray)).toBe(true);
+    } finally {
+      try { if (stray > 0) process.kill(stray, 'SIGKILL'); } catch { /* gone */ }
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('a kill that cannot close the pipes still resolves (escaped descendant holds stdout; PR #71 re-review)', async () => {
+    if (process.platform === 'win32') return;
+    const { mkdtempSync, writeFileSync, chmodSync, rmSync, readFileSync, existsSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const dir = mkdtempSync(join(tmpdir(), 'ct-spawn-escaped-'));
+    const pidFile = join(dir, 'escaped.pid');
+    const script = join(dir, 'ct');
+    // The descendant leaves the process group (setpgrp) and keeps stdout
+    // open, so the group kill cannot make 'close' fire.
+    writeFileSync(script, `#!/bin/sh\nperl -e 'setpgrp(0,0); open(F, ">", $ARGV[0]); print F $$; close F; exec "sleep", "30"' '${pidFile}' &\nwait\n`);
+    chmodSync(script, 0o755);
+    let escaped = 0;
+    try {
+      for (const mode of ['abort', 'timeout'] as const) {
+        rmSync(pidFile, { force: true });
+        const abort = new AbortController();
+        const started = Date.now();
+        const pending = nodeSpawnFn()({ command: script, args: [], timeoutMs: mode === 'timeout' ? 1500 : 30_000, signal: abort.signal });
+        await waitFor(() => existsSync(pidFile) && readFileSync(pidFile, 'utf8').trim() !== '', 5000);
+        escaped = Number(readFileSync(pidFile, 'utf8').trim());
+        if (mode === 'abort') abort.abort();
+        const out = await pending;
+        expect(Date.now() - started).toBeLessThan(10_000);
+        if (mode === 'abort') expect(out.aborted).toBe(true);
+        else expect(out.timedOut).toBe(true);
+        try { process.kill(escaped, 'SIGKILL'); } catch { /* gone */ }
+      }
+    } finally {
+      try { if (escaped > 0) process.kill(escaped, 'SIGKILL'); } catch { /* gone */ }
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('a host cancel linked to the budget signal kills the child (adapter linkCancel; PR #71 re-review)', async () => {
+    if (process.platform === 'win32') return;
+    const ct = await hangingCt();
+    try {
+      const a = new DshWisdomAdapter({ env: { ...process.env }, discover: () => ({ path: ct.script, failure: null }), invalidateDiscovery: () => {} });
+      const budget = new AbortController();
+      const cancel = new AbortController();
+      a.linkCancel(budget.signal, cancel.signal);
+      const pending = a.wisdomMatch('pnpm test', 1, [], budget.signal);
+      const gpid = await ct.grandchild();
+      cancel.abort();
+      expect((await pending).outcome).toBe('aborted');
+      expect(budget.signal.aborted).toBe(false);
+      expect(await waitFor(() => !alive(gpid), 3000)).toBe(true);
+    } finally {
+      ct.cleanup();
+    }
+  });
+
+  it('DshWisdomAdapter.wisdomMatch passes the signal: abort → outcome aborted, capability not latched', async () => {
+    if (process.platform === 'win32') return;
+    const ct = await hangingCt();
+    try {
+      const a = new DshWisdomAdapter({ env: { ...process.env }, discover: () => ({ path: ct.script, failure: null }) });
+      const abort = new AbortController();
+      const pending = a.wisdomMatch('pnpm test', 1, [], abort.signal);
+      const gpid = await ct.grandchild();
+      abort.abort();
+      expect((await pending).outcome).toBe('aborted');
+      expect(a.wisdomMatchAbsent()).toBe(false);
+      expect(await waitFor(() => !alive(gpid), 3000)).toBe(true);
+    } finally {
+      ct.cleanup();
+    }
+  });
+});
+
+describe('spawnOutcomeOf (one normalization in the binding)', () => {
+  const base = { code: null, stdout: '', stderr: '', timedOut: false };
+  it('a failed start or an overflow is a spawn error, never aborted', () => {
+    expect(spawnOutcomeOf({ ...base, spawnError: true, overflow: false, aborted: true })).toEqual({ ...base, spawnError: true });
+    expect(spawnOutcomeOf({ ...base, spawnError: false, overflow: true, aborted: true })).toEqual({ ...base, spawnError: true });
+  });
+  it('a plain abort reports aborted; nothing else carries the key', () => {
+    expect(spawnOutcomeOf({ ...base, spawnError: false, overflow: false, aborted: true })).toEqual({ ...base, spawnError: false, aborted: true });
+    expect(spawnOutcomeOf({ ...base, code: 0, spawnError: false, overflow: false, aborted: false })).toEqual({ ...base, code: 0, spawnError: false });
   });
 });
 
@@ -243,6 +497,109 @@ describe('capability probe + wisdomMatch', () => {
   it('discovery miss → spawn class (n3 retry next turn)', async () => {
     const { a } = adapter({ discover: () => ({ path: null, failure: null }) });
     expect((await a.wisdomMatch('q', 2, [])).outcome).toBe('spawn');
+  });
+
+  it('probes the capability once per resolved ct path, not on every call (PR #71 review)', async () => {
+    const { a, spawns } = adapter();
+    await a.wisdomMatch('q1', 1, []);
+    await a.wisdomMatch('q2', 1, []);
+    await a.wisdomMatch('q3', 1, []);
+    expect(spawns.filter((s) => s.args[2] === '--help')).toHaveLength(1);
+    expect(spawns.filter((s) => s.args[2] === '--json')).toHaveLength(3);
+  });
+
+  it('re-probes after a discovery reset and when the resolved path changes', async () => {
+    let path = '/bin/ct';
+    const { a, spawns } = adapter({ discover: () => ({ path, failure: null }) });
+    const helps = () => spawns.filter((s) => s.args[2] === '--help').map((s) => s.command);
+    await a.wisdomMatch('q', 1, []);
+    a.resetDiscoveryAndProbeCaches();
+    await a.wisdomMatch('q', 1, []);
+    path = '/opt/ct';
+    await a.wisdomMatch('q', 1, []);
+    await a.wisdomMatch('q', 1, []);
+    expect(helps()).toEqual(['/bin/ct', '/bin/ct', '/opt/ct']);
+    a._resetForTests();
+    await a.wisdomMatch('q', 1, []);
+    expect(helps()).toHaveLength(4);
+  });
+
+  it('a spawn-class reset also invalidates discovery, so a moved ct is found again (PR #71 re-review)', async () => {
+    let invalidations = 0;
+    const { a, spawns } = adapter({ invalidateDiscovery: () => { invalidations++; } });
+    await a.wisdomMatch('q', 1, []);
+    a.resetDiscoveryAndProbeCaches();
+    expect(invalidations).toBe(1);
+    await a.wisdomMatch('q', 1, []);
+    expect(spawns.filter((x) => x.args[2] === '--help')).toHaveLength(2);
+  });
+
+  it('a match that exits non-zero drops the probe cache: an in-place downgrade latches on the next call (PR #71 re-review)', async () => {
+    let downgraded = false;
+    const seen: string[][] = [];
+    const spawnFn: SpawnFn = (spec) => {
+      seen.push(spec.args);
+      if (spec.args[2] === '--help') return Promise.resolve(spawnOutcome({ code: downgraded ? 2 : 0 }));
+      if (downgraded) return Promise.resolve(spawnOutcome({ code: 2, stderr: "invalid choice: 'match'" }));
+      return Promise.resolve(spawnOutcome({ stdout: '{"entries": [], "corrections": []}' }));
+    };
+    const { a } = adapter({ spawnFn });
+    expect((await a.wisdomMatch('q', 1, [])).outcome).toBe('ok');
+    downgraded = true;
+    expect((await a.wisdomMatch('q', 1, [])).outcome).toBe('timeout_or_exit'); // one failure
+    expect(a.wisdomMatchAbsent()).toBe(false);
+    expect((await a.wisdomMatch('q', 1, [])).outcome).toBe('timeout_or_exit'); // re-probed: latched
+    expect(a.wisdomMatchAbsent()).toBe(true);
+    const n = seen.length;
+    await a.wisdomMatch('q', 1, []);
+    expect(seen.length).toBe(n); // latched: no spawn at all
+  });
+
+  it('slow probes are charged to the breaker and never re-walk discovery (PR #71 third review)', async () => {
+    const { Breaker, BREAKER_FAILS, buildActivity, runActivityMatch } = await import('@equational-applications/ct-wisdom-core');
+    let invalidations = 0;
+    let probes = 0;
+    const spawnFn: SpawnFn = (spec) => {
+      if (spec.args[2] === '--help') probes++;
+      return Promise.resolve(spawnOutcome({ code: null, timedOut: true }));
+    };
+    // Discovery's accepted path stays cached unless it is invalidated; an
+    // invalidation makes the next call re-run the blocking spawnSync walk.
+    const { a } = adapter({ spawnFn, invalidateDiscovery: () => { invalidations++; } });
+    const breaker = new Breaker();
+    const activity = buildActivity({ verb: 'run', command: 'pnpm test' }, null, {})!;
+    for (let i = 0; i < 20; i++) {
+      if (breaker.isOpen()) continue;
+      await runActivityMatch(a, activity, [], breaker);
+    }
+    expect(probes).toBe(BREAKER_FAILS); // then the breaker pauses everything
+    expect(invalidations).toBe(0); // no blocking discovery re-walk
+    expect(breaker.isOpen()).toBe(true);
+  });
+
+  it('a probe that passed is cached even when the abort lands right after it (PR #71 third review)', async () => {
+    const abort = new AbortController();
+    let helps = 0;
+    const spawnFn: SpawnFn = (spec) => {
+      if (spec.args[2] === '--help') {
+        helps++;
+        abort.abort(); // lands after the probe answered
+        return Promise.resolve(spawnOutcome({}));
+      }
+      return Promise.resolve(spawnOutcome({ stdout: '{"entries": [], "corrections": []}' }));
+    };
+    const { a } = adapter({ spawnFn });
+    expect((await a.wisdomMatch('q', 1, [], abort.signal)).outcome).toBe('aborted');
+    await a.wisdomMatch('q', 1, []);
+    expect(helps).toBe(1);
+  });
+
+  it('a probe spawn error with an aborted signal is class spawn, not aborted', async () => {
+    const spawnFn: SpawnFn = () => Promise.resolve({ ...spawnOutcome({ code: null, spawnError: true }), aborted: true });
+    const { a } = adapter({ spawnFn });
+    const abort = new AbortController();
+    abort.abort();
+    expect((await a.wisdomMatch('q', 1, [], abort.signal)).outcome).toBe('spawn');
   });
 });
 
