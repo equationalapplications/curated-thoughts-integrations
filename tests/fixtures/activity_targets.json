@@ -2907,7 +2907,7 @@
   "expected_line": "run python"
  },
  {
-  "name": "cmd: python -m a project package",
+  "name": "cmd: python -m a project package sends the top package only",
   "tool": "terminal",
   "args": {
    "command": "python -m mypkg.cli --key v"
@@ -2921,8 +2921,8 @@
    "/Users/alice/code/proj/.git/",
    "/Users/alice/code/proj/mypkg/__init__.py"
   ],
-  "expected_query": "python mypkg.cli",
-  "expected_line": "run python mypkg.cli"
+  "expected_query": "python mypkg",
+  "expected_line": "run python mypkg"
  },
  {
   "name": "cmd: python -m a src-layout package",
@@ -4083,5 +4083,469 @@
   "expected_query": null,
   "expected_line": null,
   "system_home": "/opt/svc"
+ },
+ {
+  "name": "cmd: python -m a test submodule sends the top package only",
+  "tool": "terminal",
+  "args": {
+   "command": "python -m tests.acme_merger_due_diligence"
+  },
+  "cwd": "/Users/alice/code/proj",
+  "env": {
+   "USER": "alice",
+   "HOME": "/Users/alice"
+  },
+  "fs": [
+   "/Users/alice/code/proj/.git/",
+   "/Users/alice/code/proj/tests/__init__.py"
+  ],
+  "expected_query": "python tests",
+  "expected_line": "run python tests"
+ },
+ {
+  "name": "cmd: python -m a deep src submodule",
+  "tool": "terminal",
+  "args": {
+   "command": "python -m app.clients.acme"
+  },
+  "cwd": "/Users/alice/code/proj",
+  "env": {
+   "USER": "alice",
+   "HOME": "/Users/alice"
+  },
+  "fs": [
+   "/Users/alice/code/proj/.git/",
+   "/Users/alice/code/proj/src/app/clients/acme.py"
+  ],
+  "expected_query": "python app",
+  "expected_line": "run python app"
+ },
+ {
+  "name": "cmd: python -m a known module is sent as listed",
+  "tool": "terminal",
+  "args": {
+   "command": "python3 -m http.server"
+  },
+  "cwd": "/Users/alice/code/proj",
+  "env": {
+   "USER": "alice",
+   "HOME": "/Users/alice"
+  },
+  "fs": [
+   "/Users/alice/code/proj/.git/"
+  ],
+  "expected_query": "python3 http.server",
+  "expected_line": "run python3 http.server"
+ },
+ {
+  "name": "cmd: -u before -m",
+  "tool": "terminal",
+  "args": {
+   "command": "python -u -m pytest"
+  },
+  "cwd": "/Users/alice/code/proj",
+  "env": {
+   "USER": "alice",
+   "HOME": "/Users/alice"
+  },
+  "fs": [
+   "/Users/alice/code/proj/.git/"
+  ],
+  "expected_query": "python pytest",
+  "expected_line": "run python pytest"
+ },
+ {
+  "name": "cmd: -X opt before -m",
+  "tool": "terminal",
+  "args": {
+   "command": "python -X dev -m pytest -q"
+  },
+  "cwd": "/Users/alice/code/proj",
+  "env": {
+   "USER": "alice",
+   "HOME": "/Users/alice"
+  },
+  "fs": [
+   "/Users/alice/code/proj/.git/"
+  ],
+  "expected_query": "python pytest",
+  "expected_line": "run python pytest"
+ },
+ {
+  "name": "cmd: -W opt before -m",
+  "tool": "terminal",
+  "args": {
+   "command": "python3 -W ignore -B -m unittest"
+  },
+  "cwd": "/Users/alice/code/proj",
+  "env": {
+   "USER": "alice",
+   "HOME": "/Users/alice"
+  },
+  "fs": [
+   "/Users/alice/code/proj/.git/"
+  ],
+  "expected_query": "python3 unittest",
+  "expected_line": "run python3 unittest"
+ },
+ {
+  "name": "cmd: -I -s -E -q -O",
+  "tool": "terminal",
+  "args": {
+   "command": "python -I -s -E -q -O -m pip list"
+  },
+  "cwd": "/Users/alice/code/proj",
+  "env": {
+   "USER": "alice",
+   "HOME": "/Users/alice"
+  },
+  "fs": [
+   "/Users/alice/code/proj/.git/"
+  ],
+  "expected_query": "python pip",
+  "expected_line": "run python pip"
+ },
+ {
+  "name": "cmd: a script after flags",
+  "tool": "terminal",
+  "args": {
+   "command": "python -u deploy.py"
+  },
+  "cwd": "/Users/alice/code/proj",
+  "env": {
+   "USER": "alice",
+   "HOME": "/Users/alice"
+  },
+  "fs": [
+   "/Users/alice/code/proj/.git/"
+  ],
+  "expected_query": "python",
+  "expected_line": "run python"
+ },
+ {
+  "name": "cmd: python3.11.2 is not an interpreter name",
+  "tool": "terminal",
+  "args": {
+   "command": "python3.11.2 -m pytest"
+  },
+  "cwd": "/Users/alice/code/proj",
+  "env": {
+   "USER": "alice",
+   "HOME": "/Users/alice"
+  },
+  "fs": [
+   "/Users/alice/code/proj/.git/"
+  ],
+  "expected_query": null,
+  "expected_line": null
+ },
+ {
+  "name": "cmd: pythonista is not python",
+  "tool": "terminal",
+  "args": {
+   "command": "pythonista -m pytest"
+  },
+  "cwd": "/Users/alice/code/proj",
+  "env": {
+   "USER": "alice",
+   "HOME": "/Users/alice"
+  },
+  "fs": [
+   "/Users/alice/code/proj/.git/"
+  ],
+  "expected_query": "pythonista",
+  "expected_line": "run pythonista"
+ },
+ {
+  "name": "cmd: git.exe",
+  "tool": "terminal",
+  "args": {
+   "command": "git.exe status"
+  },
+  "cwd": "/Users/alice/code/proj",
+  "env": {
+   "USER": "alice",
+   "HOME": "/Users/alice"
+  },
+  "fs": [
+   "/Users/alice/code/proj/.git/"
+  ],
+  "expected_query": "git status",
+  "expected_line": "run git status"
+ },
+ {
+  "name": "cmd: npm.cmd",
+  "tool": "terminal",
+  "args": {
+   "command": "npm.cmd test"
+  },
+  "cwd": "/Users/alice/code/proj",
+  "env": {
+   "USER": "alice",
+   "HOME": "/Users/alice"
+  },
+  "fs": [
+   "/Users/alice/code/proj/.git/"
+  ],
+  "expected_query": "npm test",
+  "expected_line": "run npm test"
+ },
+ {
+  "name": "cmd: make.bat",
+  "tool": "terminal",
+  "args": {
+   "command": "make.bat build"
+  },
+  "cwd": "/Users/alice/code/proj",
+  "env": {
+   "USER": "alice",
+   "HOME": "/Users/alice"
+  },
+  "fs": [
+   "/Users/alice/code/proj/.git/"
+  ],
+  "expected_query": "make build",
+  "expected_line": "run make build"
+ },
+ {
+  "name": "cmd: tool.com",
+  "tool": "terminal",
+  "args": {
+   "command": "tool.com run"
+  },
+  "cwd": "/Users/alice/code/proj",
+  "env": {
+   "USER": "alice",
+   "HOME": "/Users/alice"
+  },
+  "fs": [
+   "/Users/alice/code/proj/.git/"
+  ],
+  "expected_query": "tool",
+  "expected_line": "run tool"
+ },
+ {
+  "name": "cmd: script.ps1 is still a script",
+  "tool": "terminal",
+  "args": {
+   "command": "deploy.ps1 now"
+  },
+  "cwd": "/Users/alice/code/proj",
+  "env": {
+   "USER": "alice",
+   "HOME": "/Users/alice"
+  },
+  "fs": [
+   "/Users/alice/code/proj/.git/"
+  ],
+  "expected_query": null,
+  "expected_line": null
+ },
+ {
+  "name": "cmd: a path to an .exe",
+  "tool": "terminal",
+  "args": {
+   "command": "C:\\tools\\git.exe status"
+  },
+  "cwd": "/Users/alice/code/proj",
+  "env": {
+   "USER": "alice",
+   "HOME": "/Users/alice"
+  },
+  "fs": [
+   "/Users/alice/code/proj/.git/"
+  ],
+  "expected_query": null,
+  "expected_line": null
+ },
+ {
+  "name": "home: custom HOME under a project root blocks it",
+  "tool": "read_file",
+  "args": {
+   "path": "/d/work/home/Documents/taxes.pdf"
+  },
+  "cwd": "/d/work/tools",
+  "env": {
+   "USER": "al",
+   "HOME": "/d/work/home",
+   "USERPROFILE": "/Users/al"
+  },
+  "fs": [
+   "/d/work/.git/"
+  ],
+  "expected_query": null,
+  "expected_line": null
+ },
+ {
+  "name": "home: custom HOME blocks it for relative paths too",
+  "tool": "read_file",
+  "args": {
+   "path": "../home/Documents/taxes.pdf"
+  },
+  "cwd": "/d/work/tools",
+  "env": {
+   "USER": "al",
+   "HOME": "/d/work/home",
+   "USERPROFILE": "/Users/al"
+  },
+  "fs": [
+   "/d/work/.git/"
+  ],
+  "expected_query": null,
+  "expected_line": null
+ },
+ {
+  "name": "home: custom HOME blocks even a project file elsewhere in the root",
+  "tool": "read_file",
+  "args": {
+   "path": "README.md"
+  },
+  "cwd": "/d/work",
+  "env": {
+   "USER": "al",
+   "HOME": "/d/work/home"
+  },
+  "fs": [
+   "/d/work/.git/"
+  ],
+  "expected_query": null,
+  "expected_line": null
+ },
+ {
+  "name": "home: sandbox HOME .nix-home inside the repo",
+  "tool": "read_file",
+  "args": {
+   "path": "src/x.py"
+  },
+  "cwd": "/srv/repo",
+  "env": {
+   "USER": "svc",
+   "HOME": "/srv/repo/.nix-home"
+  },
+  "fs": [
+   "/srv/repo/.git/"
+  ],
+  "expected_query": "src/x.py",
+  "expected_line": "read src/x.py"
+ },
+ {
+  "name": "home: sandbox HOME .cache/home inside the repo",
+  "tool": "read_file",
+  "args": {
+   "path": "src/x.py"
+  },
+  "cwd": "/srv/repo",
+  "env": {
+   "USER": "svc",
+   "HOME": "/srv/repo/.cache/home"
+  },
+  "fs": [
+   "/srv/repo/.git/"
+  ],
+  "expected_query": "src/x.py",
+  "expected_line": "read src/x.py"
+ },
+ {
+  "name": "home: sandbox HOME tmp/home inside the repo",
+  "tool": "read_file",
+  "args": {
+   "path": "src/x.py"
+  },
+  "cwd": "/srv/repo",
+  "env": {
+   "USER": "svc",
+   "HOME": "/srv/repo/tmp/home"
+  },
+  "fs": [
+   "/srv/repo/.git/"
+  ],
+  "expected_query": "src/x.py",
+  "expected_line": "read src/x.py"
+ },
+ {
+  "name": "home: sandbox HOME .sandbox inside the repo",
+  "tool": "read_file",
+  "args": {
+   "path": "src/x.py"
+  },
+  "cwd": "/srv/repo",
+  "env": {
+   "USER": "svc",
+   "HOME": "/srv/repo/.sandbox"
+  },
+  "fs": [
+   "/srv/repo/.git/"
+  ],
+  "expected_query": "src/x.py",
+  "expected_line": "read src/x.py"
+ },
+ {
+  "name": "home: HOME home inside the repo is not a sandbox",
+  "tool": "read_file",
+  "args": {
+   "path": "src/x.py"
+  },
+  "cwd": "/srv/repo",
+  "env": {
+   "USER": "svc",
+   "HOME": "/srv/repo/home"
+  },
+  "fs": [
+   "/srv/repo/.git/"
+  ],
+  "expected_query": null,
+  "expected_line": null
+ },
+ {
+  "name": "home: HOME sub/.home inside the repo is not a sandbox",
+  "tool": "read_file",
+  "args": {
+   "path": "src/x.py"
+  },
+  "cwd": "/srv/repo",
+  "env": {
+   "USER": "svc",
+   "HOME": "/srv/repo/sub/.home"
+  },
+  "fs": [
+   "/srv/repo/.git/"
+  ],
+  "expected_query": null,
+  "expected_line": null
+ },
+ {
+  "name": "home: HOME build/home inside the repo is not a sandbox",
+  "tool": "read_file",
+  "args": {
+   "path": "src/x.py"
+  },
+  "cwd": "/srv/repo",
+  "env": {
+   "USER": "svc",
+   "HOME": "/srv/repo/build/home"
+  },
+  "fs": [
+   "/srv/repo/.git/"
+  ],
+  "expected_query": null,
+  "expected_line": null
+ },
+ {
+  "name": "home: a real user home inside a root still blocks it",
+  "tool": "read_file",
+  "args": {
+   "path": "src/x.py"
+  },
+  "cwd": "/srv/repo",
+  "env": {
+   "USER": "svc",
+   "HOME": "/srv/repo/.home"
+  },
+  "fs": [
+   "/srv/repo/.git/"
+  ],
+  "expected_query": null,
+  "expected_line": null,
+  "system_home": "/srv/repo/.home"
  }
 ]

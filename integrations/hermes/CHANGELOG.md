@@ -6,6 +6,26 @@ format below is load-bearing: `## <version> — <date>`.
 
 ## Unreleased
 
+## 0.6.7 — 2026-10-17
+
+- **Privacy fix.** What 0.6.6 could still send to CT and its embedding
+  provider (and show in the `_for:` label and the verbose log):
+  - **Python submodule names.** `python -m tests.acme_merger_due_diligence`
+    sent the full dotted name. Now only the top package of a project module
+    is sent (`python tests`). Well-known modules such as `pytest` and
+    `http.server` are sent as before.
+  - **Home-relative paths under a custom HOME with a project above it.** On
+    Windows with `HOME=D:\work\home` and a repo at `D:\work`,
+    `D:\work\home\Documents\taxes.pdf` was sent as `home/Documents/taxes.pdf`.
+    Every home folder (`HOME`, `USERPROFILE`, `~`, the system account's home)
+    again blocks the folders above it. The one exception is a sandbox `HOME`
+    at a dot-folder directly in the project (`.home`, `.nix-home`) or at
+    `.cache/home` or `tmp/home`, which is not a real user home.
+- `git.exe status` (and `.cmd`, `.bat`, `.com`) is now sent as `git status`.
+- `python -u -m pytest`, `python -X dev -m pytest` and other interpreter
+  flags before `-m` are skipped, so the module is found.
+- `python3.11.2` is no longer taken for an interpreter name.
+
 ## 0.6.6 — 2026-10-17
 
 - **Privacy fix: commands send only a bare program and known verbs.** 0.6.5
