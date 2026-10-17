@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, writeFileSync, mkdirSync, chmodSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, writeFileSync, mkdirSync, chmodSync, rmSync, readdirSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -85,7 +85,7 @@ describe.skipIf(!built)('cmdCheck', () => {
     // it failed with `spawnSync node ENOENT` so we resolve to the running
     // Node binary by absolute path. (Plan-bug pattern #5.)
     const out = spawnSync(process.execPath, [COMPILED_DOCTOR, 'check', '--json'], {
-      env: { ...process.env, HOME: tmpHome, USERPROFILE: tmpHome, PATH: '' },
+      env: { ...process.env, HOME: tmpHome, USERPROFILE: tmpHome, CURATED_BRAIN_DIR: join(tmpHome, 'brain'), PATH: '' },
       encoding: 'utf8',
     });
     const parsed = JSON.parse(out.stdout);
@@ -403,5 +403,55 @@ describe('checkSidecarEnv (OpenClaw gives a plugin stdio server only the MCP SDK
   it('is part of runChecks, right after embedding-backend', () => {
     const order = runChecks().map((r) => r.name);
     expect(order.indexOf('sidecar-env')).toBe(order.indexOf('embedding-backend') + 1);
+  });
+});
+
+// --------------------------------------------------------------------------
+// Isolation guard (live-brain incident, 2026-10-17): the doctor probes the CT
+// sidecar, which opens the brain under HOME. A test that spawns the doctor
+// must therefore say `HOME:` in the same call. This scans every tests/*.ts
+// source: for each spawn/execFile call whose text mentions the doctor
+// (DOCTOR_RE), the balanced call text must contain `HOME:`. Parens inside
+// string literals are not parsed (the scan is deliberately simple).
+// --------------------------------------------------------------------------
+
+describe('test isolation guard: doctor spawns override HOME', () => {
+  const DOCTOR_RE = /ct_doctor\.js|libDoctor|COMPILED_DOCTOR/;
+  const CALL_RE = /\b(?:spawnSync|execFileSync)\(/g;
+  const testsDir = dirname(fileURLToPath(import.meta.url));
+
+  function callTexts(src: string): string[] {
+    const out: string[] = [];
+    for (const m of src.matchAll(CALL_RE)) {
+      let depth = 1;
+      let i = m.index! + m[0].length;
+      while (i < src.length && depth > 0) {
+        if (src[i] === '(') depth += 1;
+        else if (src[i] === ')') depth -= 1;
+        i += 1;
+      }
+      out.push(src.slice(m.index!, i));
+    }
+    return out;
+  }
+
+  it('every doctor spawn in tests/*.ts passes an explicit HOME:', () => {
+    const offenders: string[] = [];
+    let doctorCalls = 0;
+    for (const f of readdirSync(testsDir).filter((n) => n.endsWith('.ts'))) {
+      for (const call of callTexts(readFileSync(join(testsDir, f), 'utf8'))) {
+        if (!DOCTOR_RE.test(call)) continue;
+        doctorCalls += 1;
+        if (!/\bHOME:/.test(call)) offenders.push(`${f}: ${call.split('\n')[0]}`);
+      }
+    }
+    expect(doctorCalls, 'the scan should find the doctor spawns').toBeGreaterThan(0);
+    expect(offenders).toEqual([]);
+  });
+
+  it('the scanner flags a doctor call without HOME: (self-check)', () => {
+    const bad = callTexts("spawn" + "Sync(process.execPath, [libDoctor, 'check'], { env: { ...process.env } });");
+    expect(bad).toHaveLength(1);
+    expect(DOCTOR_RE.test(bad[0]!) && !/\bHOME:/.test(bad[0]!)).toBe(true);
   });
 });

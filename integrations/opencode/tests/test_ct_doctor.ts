@@ -7,11 +7,11 @@
  * the doctor's global-config reads are hermetic.
  */
 
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { afterAll, describe, expect, it } from 'vitest';
 
 import {
@@ -685,8 +685,13 @@ describe('CLI', () => {
           encoding: 'utf8',
           env: {
             ...process.env,
+            HOME: home,
+            USERPROFILE: home,
             XDG_CONFIG_HOME: join(home, '.config'),
             CURATED_BRAIN_DIR: join(home, 'brain'),
+            // Empty PATH: no installed sidecar is discoverable via PATH, so no
+            // real curated-thoughts-mcp is spawned (process.execPath is absolute).
+            PATH: '',
           },
         },
       );
@@ -701,9 +706,66 @@ describe('CLI', () => {
   });
 
   it('prints help for an unknown subcommand without crashing', () => {
-    const res = spawnSync(process.execPath, [libDoctor, 'bogus'], { encoding: 'utf8' });
+    const home = makeHome();
+    const res = spawnSync(process.execPath, [libDoctor, 'bogus'], {
+      encoding: 'utf8',
+      env: { ...process.env, HOME: home, USERPROFILE: home, CURATED_BRAIN_DIR: join(home, 'brain') },
+    });
     expect(res.error ?? null).toBeNull();
     expect(res.status).toBe(0);
     expect(res.stdout).toContain('Usage');
+    cleanupHome(home);
+  });
+});
+
+// --------------------------------------------------------------------------
+// Isolation guard (live-brain incident, 2026-10-17): the doctor probes the CT
+// sidecar, which opens the brain under HOME. A test that spawns the doctor
+// must therefore say `HOME:` (or call the isolatedEnv helper) in the same call. This scans every tests/*.ts
+// source: for each spawn/execFile call whose text mentions the doctor
+// (DOCTOR_RE), the balanced call text must contain `HOME:`. Parens inside
+// string literals are not parsed (the scan is deliberately simple).
+// --------------------------------------------------------------------------
+
+describe('test isolation guard: doctor spawns override HOME', () => {
+  const DOCTOR_RE = /ct_doctor\.js|libDoctor|COMPILED_DOCTOR/;
+  // `isolatedEnv(` is test_archive.ts's helper, which sets HOME/CURATED_BRAIN_DIR.
+  const HOME_OK_RE = /\bHOME:|\bisolatedEnv\(/;
+  const CALL_RE = /\b(?:spawnSync|execFileSync)\(/g;
+  const testsDir = dirname(fileURLToPath(import.meta.url));
+
+  function callTexts(src: string): string[] {
+    const out: string[] = [];
+    for (const m of src.matchAll(CALL_RE)) {
+      let depth = 1;
+      let i = m.index! + m[0].length;
+      while (i < src.length && depth > 0) {
+        if (src[i] === '(') depth += 1;
+        else if (src[i] === ')') depth -= 1;
+        i += 1;
+      }
+      out.push(src.slice(m.index!, i));
+    }
+    return out;
+  }
+
+  it('every doctor spawn in tests/*.ts passes an explicit HOME:', () => {
+    const offenders: string[] = [];
+    let doctorCalls = 0;
+    for (const f of readdirSync(testsDir).filter((n) => n.endsWith('.ts'))) {
+      for (const call of callTexts(readFileSync(join(testsDir, f), 'utf8'))) {
+        if (!DOCTOR_RE.test(call)) continue;
+        doctorCalls += 1;
+        if (!HOME_OK_RE.test(call)) offenders.push(`${f}: ${call.split('\n')[0]}`);
+      }
+    }
+    expect(doctorCalls, 'the scan should find the doctor spawns').toBeGreaterThan(0);
+    expect(offenders).toEqual([]);
+  });
+
+  it('the scanner flags a doctor call without HOME: (self-check)', () => {
+    const bad = callTexts("spawn" + "Sync(process.execPath, [libDoctor, 'check'], { env: { ...process.env } });");
+    expect(bad).toHaveLength(1);
+    expect(DOCTOR_RE.test(bad[0]!) && !/\bHOME:/.test(bad[0]!)).toBe(true);
   });
 });
