@@ -639,6 +639,11 @@ describe('clean-room JSON output (Step 5.8)', () => {
     try {
       const env: NodeJS.ProcessEnv = {
         PATH: join(home, 'empty-bin'),
+        // findSidecar also checks fixed paths and mcpToolsList spawns with
+        // {...process.env, ...env}: a scratch HOME keeps any found sidecar
+        // away from the real home and brain.
+        HOME: home,
+        USERPROFILE: home,
         CURATED_BRAIN_DIR: join(home, 'no-brain'),
         XDG_CONFIG_HOME: join(home, '.config'),
       };
@@ -689,8 +694,9 @@ describe('CLI', () => {
             USERPROFILE: home,
             XDG_CONFIG_HOME: join(home, '.config'),
             CURATED_BRAIN_DIR: join(home, 'brain'),
-            // Empty PATH: no installed sidecar is discoverable via PATH, so no
-            // real curated-thoughts-mcp is spawned (process.execPath is absolute).
+            // Brain safety comes from the scratch HOME and CURATED_BRAIN_DIR
+            // above. PATH='' only avoids slow sidecar probes via PATH (fixed
+            // candidate paths still apply); process.execPath is absolute.
             PATH: '',
           },
         },
@@ -707,14 +713,17 @@ describe('CLI', () => {
 
   it('prints help for an unknown subcommand without crashing', () => {
     const home = makeHome();
-    const res = spawnSync(process.execPath, [libDoctor, 'bogus'], {
-      encoding: 'utf8',
-      env: { ...process.env, HOME: home, USERPROFILE: home, CURATED_BRAIN_DIR: join(home, 'brain') },
-    });
-    expect(res.error ?? null).toBeNull();
-    expect(res.status).toBe(0);
-    expect(res.stdout).toContain('Usage');
-    cleanupHome(home);
+    try {
+      const res = spawnSync(process.execPath, [libDoctor, 'bogus'], {
+        encoding: 'utf8',
+        env: { ...process.env, HOME: home, USERPROFILE: home, CURATED_BRAIN_DIR: join(home, 'brain') },
+      });
+      expect(res.error ?? null).toBeNull();
+      expect(res.status).toBe(0);
+      expect(res.stdout).toContain('Usage');
+    } finally {
+      cleanupHome(home);
+    }
   });
 });
 
@@ -725,6 +734,8 @@ describe('CLI', () => {
 // source: for each spawn/execFile call whose text mentions the doctor
 // (DOCTOR_RE), the balanced call text must contain `HOME:`. Parens inside
 // string literals are not parsed (the scan is deliberately simple).
+// Known limits: not string-aware; it checks for HOME: only (not USERPROFILE or
+// CURATED_BRAIN_DIR); and this guard is copied into each host suite.
 // --------------------------------------------------------------------------
 
 describe('test isolation guard: doctor spawns override HOME', () => {
@@ -733,6 +744,11 @@ describe('test isolation guard: doctor spawns override HOME', () => {
   const HOME_OK_RE = /\bHOME:|\bisolatedEnv\(/;
   const CALL_RE = /\b(?:spawnSync|execFileSync)\(/g;
   const testsDir = dirname(fileURLToPath(import.meta.url));
+
+  /** The guard's one predicate: a doctor call without an explicit HOME override. */
+  function violates(call: string): boolean {
+    return DOCTOR_RE.test(call) && !HOME_OK_RE.test(call);
+  }
 
   function callTexts(src: string): string[] {
     const out: string[] = [];
@@ -756,7 +772,7 @@ describe('test isolation guard: doctor spawns override HOME', () => {
       for (const call of callTexts(readFileSync(join(testsDir, f), 'utf8'))) {
         if (!DOCTOR_RE.test(call)) continue;
         doctorCalls += 1;
-        if (!HOME_OK_RE.test(call)) offenders.push(`${f}: ${call.split('\n')[0]}`);
+        if (violates(call)) offenders.push(`${f}: ${call.split('\n')[0]}`);
       }
     }
     expect(doctorCalls, 'the scan should find the doctor spawns').toBeGreaterThan(0);
@@ -766,6 +782,8 @@ describe('test isolation guard: doctor spawns override HOME', () => {
   it('the scanner flags a doctor call without HOME: (self-check)', () => {
     const bad = callTexts("spawn" + "Sync(process.execPath, [libDoctor, 'check'], { env: { ...process.env } });");
     expect(bad).toHaveLength(1);
-    expect(DOCTOR_RE.test(bad[0]!) && !/\bHOME:/.test(bad[0]!)).toBe(true);
+    expect(violates(bad[0]!)).toBe(true);
+    expect(violates("spawn" + "Sync(process.execPath, [libDoctor], { env: { HOME: h } });")).toBe(false);
+    expect(violates("spawn" + "Sync(process.execPath, [libDoctor], { env: isolatedEnv() });")).toBe(false);
   });
 });

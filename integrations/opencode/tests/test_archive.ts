@@ -249,8 +249,9 @@ describe('the unpacked archive runs with no node_modules (the real user situatio
 
   it('node lib/scripts/ct_doctor.js check runs; only the pre-flight check degrades without better-sqlite3', (ctx) => {
     requireArchive(ctx);
-    // Empty PATH + absolute node: no installed sidecar is discoverable, so the
-    // doctor cannot spawn a real curated-thoughts-mcp (fast, and brain-safe).
+    // Brain safety comes from the scratch HOME and CURATED_BRAIN_DIR in
+    // isolatedEnv(). PATH='' only avoids slow sidecar probes via PATH (fixed
+    // candidate paths still apply); node is spawned by absolute path.
     const proc = spawnSync(process.execPath, [join(unpacked, 'lib', 'scripts', 'ct_doctor.js'), 'check'], {
       cwd: unpacked,
       encoding: 'utf8',

@@ -268,12 +268,19 @@ describe('checkImportPreflight', () => {
 // source: for each spawn/execFile call whose text mentions the doctor
 // (DOCTOR_RE), the balanced call text must contain `HOME:`. Parens inside
 // string literals are not parsed (the scan is deliberately simple).
+// Known limits: not string-aware; it checks for HOME: only (not USERPROFILE or
+// CURATED_BRAIN_DIR); and this guard is copied into each host suite.
 // --------------------------------------------------------------------------
 
 describe('test isolation guard: doctor spawns override HOME', () => {
   const DOCTOR_RE = /ct_doctor\.js|libDoctor|COMPILED_DOCTOR/;
   const CALL_RE = /\b(?:spawnSync|execFileSync)\(/g;
   const testsDir = dirname(fileURLToPath(import.meta.url));
+
+  /** The guard's one predicate: a doctor call without an explicit HOME override. */
+  function violates(call: string): boolean {
+    return DOCTOR_RE.test(call) && !/\bHOME:/.test(call);
+  }
 
   function callTexts(src: string): string[] {
     const out: string[] = [];
@@ -297,7 +304,7 @@ describe('test isolation guard: doctor spawns override HOME', () => {
       for (const call of callTexts(readFileSync(join(testsDir, f), 'utf8'))) {
         if (!DOCTOR_RE.test(call)) continue;
         doctorCalls += 1;
-        if (!/\bHOME:/.test(call)) offenders.push(`${f}: ${call.split('\n')[0]}`);
+        if (violates(call)) offenders.push(`${f}: ${call.split('\n')[0]}`);
       }
     }
     expect(doctorCalls, 'the scan should find the doctor spawns').toBeGreaterThan(0);
@@ -307,6 +314,7 @@ describe('test isolation guard: doctor spawns override HOME', () => {
   it('the scanner flags a doctor call without HOME: (self-check)', () => {
     const bad = callTexts("spawn" + "Sync(process.execPath, [libDoctor, 'check'], { env: { ...process.env } });");
     expect(bad).toHaveLength(1);
-    expect(DOCTOR_RE.test(bad[0]!) && !/\bHOME:/.test(bad[0]!)).toBe(true);
+    expect(violates(bad[0]!)).toBe(true);
+    expect(violates("spawn" + "Sync(process.execPath, [libDoctor], { env: { HOME: h } });")).toBe(false);
   });
 });
