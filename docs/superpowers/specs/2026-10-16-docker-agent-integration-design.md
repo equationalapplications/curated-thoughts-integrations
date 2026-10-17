@@ -258,8 +258,8 @@ Hermes call with the same meaning, passing only the listed args, and handed to t
 
 Every other tool (including `transfer_task`, `read_multiple_files`, MCP tools) has no activity.
 
-**Privacy rules:** exactly the Hermes rules, from the vendored copy, so the Hermes spec's
-"Privacy amendment" governs (the cwd counts only when it is deep enough and not the home or a
+**Privacy rules:** exactly the Hermes rules, from the vendored copy (hermes 0.6.3), so the Hermes spec's
+"Privacy amendment" and "Privacy amendment 2" (search patterns on an allowlist) govern (the cwd counts only when it is deep enough and not the home or a
 system root; paths outside it reduce to a basename; user-name components are dropped; unsafe
 search patterns send nothing; the `_for:` label and the verbose `activity` field use the
 sanitized target). When Hermes changes those rules, the parity gate forces the re-copy and the
