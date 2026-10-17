@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.6.5 — 2026-10-17
+
+- Internal: the e2e harness builds with `pnpm run` (newer pnpm rejects `pnpm -s`), and the pre-flight census tests get a 20 s timeout (they ran past 5 s on Windows CI). No behavior change.
+
 ## 0.6.4 — 2026-10-17
 
 - Internal: activity cancel goes through the shared core's `cancel` (the adapter's side channel is gone). No behavior change.

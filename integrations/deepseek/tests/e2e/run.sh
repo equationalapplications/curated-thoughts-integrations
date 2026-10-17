@@ -39,10 +39,11 @@ mkdir -p "$ctx/dist"
 # install.sh vendoring fallback) because the release tarball is integration-
 # scoped — packages/ is not part of it, so the monorepo-relative file: dep is
 # rewritten to the vendored copy at install time.
-(cd "$PKG/../../packages/ct-wisdom-core" && pnpm -s build)
+# (`pnpm run`, not `pnpm -s`: newer pnpm releases reject the -s shorthand.)
+(cd "$PKG/../../packages/ct-wisdom-core" && pnpm run build >/dev/null)
 mkdir -p "$PKG/lib/ct-wisdom-core"
 cp -R "$PKG/../../packages/ct-wisdom-core/lib/." "$PKG/lib/ct-wisdom-core/"
-(cd "$PKG" && pnpm -s build)
+(cd "$PKG" && pnpm run build >/dev/null)
 VERSION="$(node -p "require('$PKG/package.json').version")"
 (cd "$REPO" && python3 tools/ct_ci.py package --tag "deepseek-v$VERSION" --out "$ctx/dist" >/dev/null)
 cp "$HERE/e2e.sh" "$HERE/zai-settings.yaml" "$ctx/dist/"

@@ -52,7 +52,7 @@ afterEach(() => {
   rmSync(tmpDir, { recursive: true, force: true });
 });
 
-describe('censusSourceRefs', () => {
+describe('censusSourceRefs', { timeout: 20_000 }, () => {
   it('returns no damage when the table is empty', () => {
     const c = censusSourceRefs(dbPath);
     expect(c.error).toBeNull();
