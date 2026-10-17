@@ -164,7 +164,10 @@ def discover_ct(env=None):
       (path, None)          — accepted (cached process-wide after first accept)
       (None, "probe_timeout") — a candidate's identity probe timed out
                                 (NOT memoized — next render retries)
-      (None, None)          — deterministic discovery miss (memoized)
+      (None, None)          — deterministic discovery miss (NOT memoized
+                              here: every call searches again; the
+                              autonomous-work path remembers a miss for a
+                              cooldown, ct_wisdom_activity.CT_UNUSABLE_PAUSE)
     """
     global _accepted_ct_path
     # Cache check under the lock; the probe runs outside it so a slow first

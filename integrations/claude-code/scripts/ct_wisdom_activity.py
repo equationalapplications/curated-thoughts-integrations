@@ -20,16 +20,21 @@ can trigger one relevant CT fact:
     target (A6 real-gate results): a relative path, a search pattern, or
     program plus subcommand.
   * A started query that delivers nothing for any reason but zero_hits
-    frees its key for a later step. A budget miss is one breaker failure
-    when discovery and the capability probe were already cached (the match
-    had the whole budget); on a cold process the worker's own outcome
-    settles the breaker instead.
+    frees its key for a later step (after a budget miss, only once its
+    worker has finished, so one activity never has two queries in flight).
+    A budget miss is one breaker failure when discovery and the capability
+    probe were already cached (the match had the whole budget); on a cold
+    process the worker's own outcome settles the breaker instead.
+  * A ct that cannot be used (no Curated Thoughts `ct` found, no `wisdom
+    match`, or a `--help` probe that timed out) is remembered for
+    CT_UNUSABLE_PAUSE while PATH is unchanged: later steps skip at once
+    instead of waiting. A probe timeout is also one breaker failure.
 
 Fail-closed classes (no CT call or no delivery, one debug line):
-  empty_id, ct_tool, no_activity, no_ledger, breaker_open, seen_key,
-  step_used, refused, discovery_miss, probe_timeout, capability_missing,
-  timeout, spawn, exit, parse_error, budget, zero_hits, unsupported_result,
-  hook_failed.
+  empty_id, ct_tool, no_activity, no_ledger, breaker_open, ct_unavailable,
+  seen_key, step_used, refused, discovery_miss, probe_timeout,
+  capability_missing, timeout, spawn, spawn_failed, exit, parse_error,
+  budget, zero_hits, unsupported_result, hook_failed.
 
 Verbose mode (CT_WISDOM_VERBOSE=1, ct_wisdom_verbose) records each delivery
 and each query that delivered nothing with channel "activity"; per-call rate
@@ -873,9 +878,9 @@ def command_target(command, env=None, names=None, root=None):
     - `python [flags] -m <module>` (`_python_module` parses the flags) sends
       a known module as listed, or only the TOP package of a real package
       inside the project root (`root()`, called only then). The full module
-      must pass the name check, which checks each of its parts; the sent
-      string is built only from the program and that module, so it is not
-      checked again.
+      must pass the name check, and so must the exact sent string
+      (`python <module>`): a multi-word name can show up only once the
+      program and the module are joined.
     A name in a subcommand or module sends the program alone."""
     command = _clean_target(command) if isinstance(command, str) else None
     if command is None:
@@ -910,7 +915,7 @@ def command_target(command, env=None, names=None, root=None):
                 and not name_hit(module, names)):
             sent = module if module in _PYTHON_MODULES else _project_package(
                 module, root() if root else None)
-            if sent:
+            if sent and not name_hit(program + " " + sent, names):
                 return program + " " + sent
         return program
     verbs = _SUBCOMMAND_TOOLS.get(program.lower())
@@ -1023,6 +1028,14 @@ class ActivityState:
                 keys.popitem(last=False)
             return None
 
+    def release(self, session_id, api_request_id, key):
+        """Undo start(): free the step and the key (the query never started)."""
+        with self._lock:
+            state = self._sessions.get(session_id)
+            if state is not None:
+                state[0].pop(key, None)
+                state[1].pop(api_request_id, None)
+
     def release_key(self, session_id, key):
         """Forget a key whose query never got a genuine answer, so a LATER
         step can retry it (the step stays used)."""
@@ -1072,6 +1085,32 @@ def _spawn(target):
     threading.Thread(target=target, name="ct-wisdom-activity", daemon=True).start()
 
 
+# A ct that cannot be used is remembered this long (while PATH is unchanged),
+# so a broken or absent ct costs at most one wait per pause, then goes quiet.
+CT_UNUSABLE_PAUSE = ct_wisdom_live.BREAKER_PAUSE
+_UNUSABLE_CLASSES = frozenset({"discovery_miss", "probe_timeout", "capability_missing"})
+_unusable = {}
+_unusable_lock = threading.Lock()
+
+
+def _ct_unusable():
+    """The remembered reason ct cannot be used, or None (expired, or PATH
+    changed: a new ct may be reachable)."""
+    with _unusable_lock:
+        if not _unusable:
+            return None
+        if _clock() >= _unusable["until"] or _unusable["path"] != os.environ.get("PATH"):
+            _unusable.clear()
+            return None
+        return _unusable["reason"]
+
+
+def _mark_unusable(reason):
+    with _unusable_lock:
+        _unusable.update(until=_clock() + CT_UNUSABLE_PAUSE,
+                         path=os.environ.get("PATH"), reason=reason)
+
+
 def _ct_warm():
     """True when discovery and the capability probe are both cached, so the
     whole budget goes to `ct wisdom match` (finding 1: on a cold process the
@@ -1087,7 +1126,7 @@ def _ct_warm():
 class _Prefetch:
     __slots__ = ("session_id", "api_request_id", "tool_name", "activity", "query",
                  "exclude", "deadline", "warm", "done", "result", "failure", "lock",
-                 "settled")
+                 "settled", "abandoned")
 
     def __init__(self, session_id, api_request_id, tool_name, activity, exclude, warm):
         self.session_id = session_id
@@ -1103,6 +1142,7 @@ class _Prefetch:
         self.failure = None
         self.lock = threading.Lock()
         self.settled = False
+        self.abandoned = False
 
 
 def reset_state():
@@ -1112,6 +1152,8 @@ def reset_state():
     for cache in (_root_cache, _sln_cache, _homes_cache, _module_cache):
         cache.clear()
     _pwd_identity.cache_clear()
+    with _unusable_lock:
+        _unusable.clear()
 
 
 def _record_breaker(outcome):
@@ -1130,21 +1172,32 @@ def _finish(p, result, failure, outcome):
         p.done.set()
         record = None if p.settled else outcome
         p.settled = True
+        abandoned = p.abandoned
     _record_breaker(record)
+    if failure in _UNUSABLE_CLASSES:
+        _mark_unusable(failure)
+    if abandoned:
+        # The transform gave up on this query and delivered nothing: the key
+        # is free again only now, so the activity never has two in flight.
+        _STATE.release_key(p.session_id, p.activity.key)
 
 
 def _run_prefetch(p):
     """Discovery, probe and match for one query (worker thread). Outcome for
-    the breaker: timeout/exit a failure, an answer a success, else nothing."""
+    the breaker: a probe timeout (`ct --help` or `ct wisdom match --help`)
+    or a match timeout/exit is a failure, an answer a success, anything else
+    nothing."""
     result, failure, outcome = None, None, None
     try:
         path, dclass = ct_wisdom.discover_ct()
         if path is None:
             failure = dclass or "discovery_miss"
+            outcome = "failure" if failure == "probe_timeout" else None
             return
         capable = ct_wisdom_live.has_match_capability(path)
         if not capable:
             failure = "probe_timeout" if capable is None else "capability_missing"
+            outcome = "failure" if capable is None else None
             return
         answer, rclass = ct_wisdom_live.match_wisdom(
             path, p.query, ACTIVITY_MAX_PER_STEP, p.exclude)
@@ -1175,10 +1228,13 @@ def _budget_ran_out(p):
     breaker). Else True; a warm query then records ONE budget failure (the
     core's recordActivityBudgetMiss) and the worker's later outcome is
     ignored. A cold query (discovery or probe ran in this budget) records
-    nothing here: the worker's own outcome settles the breaker later."""
+    nothing here: the worker's own outcome settles the breaker later. Either
+    way the query is marked abandoned: its worker frees the key when it
+    finishes."""
     with p.lock:
         if p.done.is_set():
             return False
+        p.abandoned = True
         record = None
         if p.warm and not p.settled:
             p.settled = True
@@ -1273,25 +1329,40 @@ def render_activity_block(item, superseded, activity):
     return head + body
 
 
-def _splice_mode(result):
-    """'object' | 'text' | None (unsupported: no delivery)."""
+_NOT_JSON = object()
+_UNPARSED = object()
+
+
+def _parse(result):
+    """The tool result parsed once: its JSON value, or _NOT_JSON."""
+    if not isinstance(result, str):
+        return _NOT_JSON
+    try:
+        return json.loads(result)
+    except ValueError:
+        return _NOT_JSON
+
+
+def _splice_mode(result, data=_UNPARSED):
+    """'object' | 'text' | None (unsupported: no delivery). `data` is the
+    already parsed result, when the caller has it."""
     if not isinstance(result, str):
         return None
-    try:
-        data = json.loads(result)
-    except ValueError:
+    if data is _UNPARSED:
+        data = _parse(result)
+    if data is _NOT_JSON:
         return "text"
     if isinstance(data, dict) and ACTIVITY_RESULT_KEY not in data:
         return "object"
     return None
 
 
-def splice(result, block):
+def splice(result, block, mode=None):
     """The tool result with `block` added, or None. A JSON object gets one
     key spliced in before its closing brace (original bytes kept, so Hermes's
     own parsers, e.g. the write verifier, still work); plain text gets the
-    block appended."""
-    mode = _splice_mode(result)
+    block appended. `mode` is _splice_mode(result) when already known."""
+    mode = mode or _splice_mode(result)
     if mode == "text":
         return result + "\n\n" + block
     if mode != "object":
@@ -1342,7 +1413,8 @@ def on_transform_tool_result(**kwargs):
         return _transform(kwargs.get("result"), kwargs.get("session_id"),
                           kwargs.get("tool_call_id"), kwargs.get("tool_name"),
                           kwargs.get("args"), kwargs.get("task_id"),
-                          kwargs.get("api_request_id"))
+                          kwargs.get("api_request_id"), kwargs.get("status"),
+                          kwargs.get("error_type"), kwargs.get("error_message"))
     except Exception:
         logger.debug("wisdom-activity: transform failed", exc_info=True)
         return None
@@ -1358,16 +1430,27 @@ def on_transform_tool_result(**kwargs):
 #   - the file tools' `tool_error("BLOCKED: ...")` / `tool_error("Refusing to
 #     write ...")` (write guards, protected and SSH-config writes);
 #   - other tools' "Blocked: ..." and "did not approve ... was NOT run", and
-#     the generic statuses denied / rejected / refused / cancelled.
-# The error / message fields and plain-text results are checked; tool OUTPUT
-# fields are not (a command that ran may print "Permission denied").
+#     the generic statuses / wording denied, rejected, refused, cancelled;
+#   - the `status` / `error_type` / `error_message` kwargs Hermes passes to
+#     transform_tool_result (derived from the result's `error` at the pin).
+# Only envelope fields are read: `status`, `approved`, `approval_pending`,
+# and `error` / `message` / `reason` / `detail` / `error_message`, also when
+# nested or holding a JSON-object string. Tool OUTPUT fields are never read
+# (a command that ran may print "Permission denied"); a plain-text result is
+# matched on its prefix only.
 _REFUSED_STATUSES = frozenset({
     "blocked", "pending_approval", "approval_required", "denied", "rejected",
     "refused", "cancelled", "canceled", "not_approved"})
 _REFUSED_PREFIXES = ("blocked", "refusing", "denied", "command denied", "access denied",
-                     "not approved")
+                     "not approved", "rejected", "cancelled", "canceled")
 _REFUSED_PHRASES = ("not approved", "did not approve", "denied by", "user denied",
-                    "was not run", "not executed")
+                    "was not run", "not executed", "rejected", "cancelled by",
+                    "canceled by", "user cancelled", "user canceled",
+                    "operation cancelled", "operation canceled")
+_REFUSED_ERROR_TYPE_WORDS = ("block", "denied", "deny", "reject", "refus", "approval",
+                             "cancel")
+_ENVELOPE_TEXT_KEYS = ("error", "message", "reason", "detail", "error_message")
+_REFUSAL_DEPTH = 3
 
 
 def _refusal_text(text):
@@ -1377,44 +1460,80 @@ def _refusal_text(text):
     return low.startswith(_REFUSED_PREFIXES) or any(p in low for p in _REFUSED_PHRASES)
 
 
-def is_refusal(result):
-    """True when the tool result is Hermes refusing the call (the call did
-    not run, or ran nothing the user approved): nothing may be sent. Leans
-    closed: a false positive only skips one delivery."""
+def _refused_status(status):
+    return isinstance(status, str) and status.strip().lower() in _REFUSED_STATUSES
+
+
+def _refusal_value(value, depth=0):
+    """An envelope value (dict, or error text that may hold a JSON object)."""
+    if depth > _REFUSAL_DEPTH:
+        return False
+    if isinstance(value, str):
+        if _refusal_text(value):
+            return True
+        text = value.strip()
+        if not text.startswith("{"):
+            return False
+        try:
+            value = json.loads(text)
+        except ValueError:
+            return False
+    if not isinstance(value, dict):
+        return False
+    if _refused_status(value.get("status")):
+        return True
+    if value.get("approved") is False or value.get("approval_pending") is True:
+        return True
+    return any(_refusal_value(value.get(k), depth + 1) for k in _ENVELOPE_TEXT_KEYS
+               if k in value)
+
+
+def _refused(result, data, status=None, error_type=None, error_message=None):
+    if _refused_status(status) or _refusal_text(error_message):
+        return True
+    if isinstance(error_type, str) and any(
+            w in error_type.lower() for w in _REFUSED_ERROR_TYPE_WORDS):
+        return True
     if not isinstance(result, str):
         return False
-    try:
-        data = json.loads(result)
-    except ValueError:
-        return _refusal_text(result)  # plain text: only its own wording
-    if not isinstance(data, dict):
-        return False
-    status = data.get("status")
-    if isinstance(status, str) and status.strip().lower() in _REFUSED_STATUSES:
-        return True
-    if data.get("approved") is False or data.get("approval_pending") is True:
-        return True
-    return _refusal_text(data.get("error")) or _refusal_text(data.get("message"))
+    if data is _NOT_JSON:  # plain text: its own leading wording only
+        return result.lstrip().lower().startswith(_REFUSED_PREFIXES)
+    return isinstance(data, dict) and _refusal_value(data)
+
+
+def is_refusal(result, status=None, error_type=None, error_message=None):
+    """True when the tool result (or Hermes's status / error kwargs for it)
+    is Hermes refusing the call (the call did not run, or ran nothing the
+    user approved): nothing may be sent. Leans closed: a false positive only
+    skips one delivery."""
+    return _refused(result, _parse(result), status, error_type, error_message)
 
 
 def _transform(result, session_id, tool_call_id, tool_name=None, args=None, task_id=None,
-               api_request_id=None):
+               api_request_id=None, status=None, error_type=None, error_message=None):
     if not (_nonempty(session_id) and _nonempty(tool_call_id) and _nonempty(api_request_id)):
         return _skip(session_id, "empty_id")
     if is_ct_tool(tool_name):
         return _skip(session_id, "ct_tool")
+    # Cheapest first: most calls of a step pass through here.
+    if _STATE.peek(session_id, api_request_id, None) == "step_used":
+        return _skip(session_id, "step_used")
+    data = _parse(result)
     # Hermes decided by now (approvals, other plugins' blocks, guardrails):
     # a refusal sends nothing (amendment 8). Nothing is recorded, so the step
     # stays free for a later call of the same step.
-    if is_refusal(result):
+    if _refused(result, data, status, error_type, error_message):
         return _skip(session_id, "refused")
-    if _splice_mode(result) is None:
+    mode = _splice_mode(result, data)
+    if mode is None:
         return _skip(session_id, "unsupported_result")
     # The args that actually ran (after any plugin `modify`).
     activity = activity_for(tool_name, args, task_id=task_id)
     if activity is None or not query_for(activity):
         return _skip(session_id, "no_activity")
     blocked, ledger = _gate_blocked(session_id)
+    if blocked is None and _ct_unusable() is not None:
+        blocked = "ct_unavailable"
     if blocked is not None:
         return _blocked_report(session_id, api_request_id, activity, blocked)
     refused = _STATE.start(session_id, api_request_id, activity.key)
@@ -1422,13 +1541,20 @@ def _transform(result, session_id, tool_call_id, tool_name=None, args=None, task
         return _skip(session_id, refused)
     p = _Prefetch(session_id, api_request_id, tool_name, activity,
                   sorted(ledger)[:ct_wisdom_live.EXCLUDE_MAX], _ct_warm())
-    _spawn(lambda: _run_prefetch(p))
-    return _deliver(p, result)
+    try:
+        _spawn(lambda: _run_prefetch(p))
+    except Exception:
+        # No thread, no query: nothing was sent, so free the step and the key.
+        logger.debug("wisdom-activity: could not start the query", exc_info=True)
+        _STATE.release(session_id, api_request_id, activity.key)
+        return _skip(session_id, "spawn_failed")
+    return _deliver(p, result, mode)
 
 
-def _deliver(p, result):
+def _deliver(p, result, mode=None):
     """Join the started query and deliver one fact, or skip. Any non-delivery
-    other than zero_hits releases the key (the step stays used)."""
+    other than zero_hits releases the key (the step stays used); after a
+    budget miss the worker releases it when it finishes."""
     session_id = p.session_id
     base = {"query": p.query, "activity": p.activity.line}
 
@@ -1437,7 +1563,7 @@ def _deliver(p, result):
         return _skip(session_id, failure_class, record=True, **base)
 
     if not _wait(p) and _budget_ran_out(p):
-        return miss("budget")
+        return _skip(session_id, "budget", record=True, **base)
     if p.failure is not None:
         return miss(p.failure)
     ledger = ct_ledger.LEDGER_CACHE.get(session_id)
@@ -1448,7 +1574,7 @@ def _deliver(p, result):
         block = render_activity_block(item, superseded, p.activity)
         if not block:
             continue
-        out = splice(result, block)
+        out = splice(result, block, mode)
         if out is None:
             return miss("unsupported_result")
         claimed = ct_ledger.LEDGER_CACHE.claim(session_id, [item["id"]])
