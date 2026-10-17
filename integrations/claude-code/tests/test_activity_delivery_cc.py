@@ -88,7 +88,7 @@ class Base(unittest.TestCase):
         self._patch(ct_wisdom_live, "match_wisdom", self._match)
         self._patch(ct_wisdom, "recall_wiki",
                     lambda p, q: ([("T" + f, "body " + f, f) for f in self.boot], None))
-        ct_wisdom_activity.reset_state()
+        ct_wisdom_activity.reset_caches()
 
     def _patch(self, mod, name, value):
         orig = getattr(mod, name)
@@ -584,7 +584,7 @@ class VerboseTests(Base):
         for verbose in ("", "1"):
             sid = "verbose-%s" % (verbose or "off")
             env = dict(self.env, CT_WISDOM_VERBOSE=verbose)
-            ct_wisdom_activity.reset_state()
+            ct_wisdom_activity.reset_caches()
             cc.session_start({"session_id": sid, "hook_event_name": "SessionStart",
                               "source": "startup", "cwd": PROJECT}, env=env)
             c = call(use_id="toolu_v_" + (verbose or "off"))

@@ -104,7 +104,7 @@ class BindingTests(unittest.TestCase):
         bare = os.path.realpath(tempfile.mkdtemp(prefix="ct-cc-noroot-"))
         self.addCleanup(shutil.rmtree, bare, True)
         open(os.path.join(bare, "x.py"), "w").close()
-        ct_wisdom_activity.reset_state()
+        ct_wisdom_activity.reset_caches()
         self.assertIsNone(line("Read", {"file_path": os.path.join(bare, "x.py")}, cwd=bare))
 
     def test_untranslated_args_never_reach_the_builder(self):
@@ -246,12 +246,12 @@ class SharedVectorTests(unittest.TestCase):
         saved = ct_wisdom_activity._fs_root, ct_wisdom_activity._system_identity
         ct_wisdom_activity._fs_root = lambda d: d == tmp or not d.startswith(tmp + os.sep)
         ct_wisdom_activity._system_identity = lambda: identity
-        ct_wisdom_activity.reset_state()
+        ct_wisdom_activity.reset_caches()
         try:
             return act.activity_for(tool_name, args, cwd, env)
         finally:
             ct_wisdom_activity._fs_root, ct_wisdom_activity._system_identity = saved
-            ct_wisdom_activity.reset_state()
+            ct_wisdom_activity.reset_caches()
 
     def test_every_vector(self):
         cases = json.loads(VECTORS.read_text(encoding="utf-8"))

@@ -6,7 +6,7 @@
 # Spec: docs/superpowers/specs/2026-10-16-docker-agent-integration-design.md
 id: docker-agent
 name: Curated Thoughts for Docker Agent
-version: 0.1.2
+version: 0.1.3
 language: python
 status: implemented
 requires_sidecar: ">=2.5"

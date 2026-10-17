@@ -2,6 +2,7 @@
 """Tests for ct_wisdom_activity.py — autonomous-work wisdom delivery (Hermes).
 
 Spec: docs/superpowers/specs/2026-10-16-hermes-autonomous-work-wisdom-design.md
+      docs/superpowers/specs/2026-10-17-hermes-activity-delivery-split-design.md
 
 Run: python3 -m unittest tests.test_ct_wisdom_activity -v
 """
@@ -27,15 +28,16 @@ sys.path.insert(0, str(HERE.parent / "scripts"))
 import ct_ledger  # noqa: E402
 import ct_wisdom  # noqa: E402
 import ct_wisdom_activity as act  # noqa: E402
+import ct_wisdom_activity_delivery as dlv  # noqa: E402
 import ct_wisdom_live  # noqa: E402
 import ct_wisdom_verbose  # noqa: E402
 
-ORIGINAL_SEAM = act._record_activity_delivery
+ORIGINAL_SEAM = dlv._record_activity_delivery
 
 
 class HarnessFree:
     """The real _ct_warm, captured before any Harness stub replaces it."""
-    real_ct_warm = staticmethod(getattr(act, "_ct_warm", lambda: None))
+    real_ct_warm = staticmethod(getattr(dlv, "_ct_warm", lambda: None))
 
 
 def make_tree(base, entries):
@@ -111,8 +113,8 @@ class TestActivityLine(unittest.TestCase):
         orig = act._system_identity
         act._system_identity = lambda: ([], [], [])
         self.addCleanup(setattr, act, "_system_identity", orig)
-        act.reset_state()
-        self.addCleanup(act.reset_state)
+        dlv.reset_state()
+        self.addCleanup(dlv.reset_state)
 
     def test_cases(self):
         for tool, args, line, query in CASES:
@@ -165,7 +167,7 @@ class TestActivityLine(unittest.TestCase):
         # HOME and its ancestors are never a root, and the search stops there.
         make_tree(home, [".git/", "notes/"])
         make_tree(base, ["Users/package.json"])
-        act.reset_state()
+        dlv.reset_state()
         self.assertIsNone(act.project_root(home, env))
         self.assertIsNone(act.project_root(os.path.join(home, "notes"), env))
         self.assertEqual(act.project_root(proj, env), proj)
@@ -181,8 +183,8 @@ class TestActivityLine(unittest.TestCase):
         orig = act._fixed_marker
         act._fixed_marker = lambda directory: True
         self.addCleanup(setattr, act, "_fixed_marker", orig)
-        act.reset_state()
-        self.addCleanup(act.reset_state)
+        dlv.reset_state()
+        self.addCleanup(dlv.reset_state)
         top = os.path.realpath(os.sep)
         self.assertIsNone(act.project_root(top, {"HOME": top}))
         for name in ("home", "Users", "mnt"):
@@ -196,8 +198,8 @@ class TestActivityLine(unittest.TestCase):
         base = temp_base()
         d = os.path.join(base, "srv", "late")
         make_tree(d, ["src/"])
-        act.reset_state()
-        self.addCleanup(act.reset_state)
+        dlv.reset_state()
+        self.addCleanup(dlv.reset_state)
         import subprocess
 
         def no_subprocess(*a, **k):
@@ -219,7 +221,7 @@ class TestActivityLine(unittest.TestCase):
         orig_clock = act._root_clock
         act._root_clock = lambda: now[0]
         self.addCleanup(setattr, act, "_root_clock", orig_clock)
-        act.reset_state()
+        dlv.reset_state()
         self.assertEqual(act.project_root(d, {}), d)
         make_tree(base, ["srv/late2/"])
         d2 = os.path.join(base, "srv", "late2")
@@ -357,8 +359,8 @@ class TestActivityLine(unittest.TestCase):
         orig_root = act._fs_root
         act._fs_root = lambda d: d == base or not d.startswith(base + os.sep)
         self.addCleanup(setattr, act, "_fs_root", orig_root)
-        act.reset_state()
-        self.addCleanup(act.reset_state)
+        dlv.reset_state()
+        self.addCleanup(dlv.reset_state)
         envs = [{"USER": "zelda", "HOME": home}, {"USERNAME": "zelda", "HOME": base},
                 {"LOGNAME": "zelda"}, {"USER": "zelda", "HOME": base + os.sep}]
         heads = [proj, home, base, other, "~", "~/code/proj", "..", "../..", "", ".",
@@ -658,7 +660,7 @@ class TestActivityLine(unittest.TestCase):
         env = {"USER": "svc", "HOME": os.path.join(repo, ".home")}
         self.assertEqual(act.normalize_path("src/x.py", repo, env), "src/x.py")
         self.assertIsNone(act.project_root(os.path.join(repo, ".home", "x"), env))
-        act.reset_state()
+        dlv.reset_state()
         act._system_identity = lambda: ([], [os.path.join(repo, ".home")],
                                         [os.path.join(repo, ".home")])
         self.assertIsNone(act.normalize_path("src/x.py", repo, env))
@@ -700,7 +702,7 @@ class TestActivityLine(unittest.TestCase):
         env = {"USERPROFILE": os.path.join(work, ".winhome")}
         act._system_identity = lambda: ([], [], [])  # no pwd (Windows)
         self.assertIsNone(act.project_root(os.path.join(work, "tools"), env))
-        act.reset_state()
+        dlv.reset_state()
         act._system_identity = lambda: ([], [], ["/elsewhere/me"])  # pwd exists
         self.assertEqual(act.project_root(os.path.join(work, "tools"), env),
                          os.path.realpath(work))
@@ -797,7 +799,7 @@ class TestActivityLine(unittest.TestCase):
         act._git_bash = lambda p, windows=None: (
             os.path.join(base, *p.split("/")[1:]) if p.startswith("/d/") else p)
         self.addCleanup(setattr, act, "_git_bash", orig)
-        act.reset_state()
+        dlv.reset_state()
         env = {"USER": "al", "HOME": "/d/work/.home"}
         self.assertEqual(n("src/x.py", repo, env), "src/x.py")
         self.assertIsNone(n(".home/Documents/taxes.pdf", repo, env))
@@ -926,7 +928,7 @@ class TestActivityLine(unittest.TestCase):
         self.assertTrue(hasattr(act._pwd_identity, "cache_clear"))
         act._pwd_identity()
         self.assertEqual(act._pwd_identity.cache_info().currsize, 1)
-        act.reset_state()
+        dlv.reset_state()
         self.assertEqual(act._pwd_identity.cache_info().currsize, 0)
 
     def test_session_cwd_is_lazy(self):
@@ -994,14 +996,14 @@ class TestActivityState(unittest.TestCase):
         return st.start(sid, req, key)
 
     def test_one_start_per_step(self):
-        st = act.ActivityState()
+        st = dlv.ActivityState()
         self.assertIsNone(self.admit(st, "s", "t:api:1", self.key("read_file", "a.py")))
         self.assertEqual(self.admit(st, "s", "t:api:1", self.key("read_file", "b.py")),
                          "step_used")
         self.assertIsNone(self.admit(st, "s", "t:api:2", self.key("read_file", "b.py")))
 
     def test_seen_key_and_file_fold(self):
-        st = act.ActivityState()
+        st = dlv.ActivityState()
         self.assertIsNone(self.admit(st, "s", "r1", self.key("read_file", "a.py")))
         self.assertEqual(self.admit(st, "s", "r2", self.key("patch", "a.py")), "seen_key")
         self.assertEqual(self.admit(st, "s", "r3", self.key("write_file", "a.py")), "seen_key")
@@ -1009,14 +1011,14 @@ class TestActivityState(unittest.TestCase):
         self.assertIsNone(self.admit(st, "s", "r3", self.key("read_file", "c.py")))
 
     def test_lru_and_sessions(self):
-        st = act.ActivityState()
+        st = dlv.ActivityState()
         for i in range(act.RECENT_KEYS_MAX + 1):
             self.assertIsNone(self.admit(st, "s", "r%d" % i, self.key("read_file", "f%d.py" % i)))
         self.assertIsNone(self.admit(st, "s", "rx", self.key("read_file", "f0.py")))  # evicted
         self.assertIsNone(self.admit(st, "other", "r1", self.key("read_file", "f1.py")))
 
     def test_run_and_search_keys_distinct_from_files(self):
-        st = act.ActivityState()
+        st = dlv.ActivityState()
         self.assertIsNone(self.admit(st, "s", "r1", act.activity_for(
             "terminal", {"command": "make test"}, cwd=PROJ).key))
         self.assertIsNone(self.admit(st, "s", "r2", act.activity_for(
@@ -1025,7 +1027,7 @@ class TestActivityState(unittest.TestCase):
             "terminal", {"command": "make test -j4"}, cwd=PROJ).key), "seen_key")
 
     def test_start_records_step_and_key_and_release_key(self):
-        st = act.ActivityState()
+        st = dlv.ActivityState()
         k = self.key("read_file", "a.py")
         self.assertIsNone(st.start("s", "r1", k))
         self.assertEqual(st.peek("s", "r1", k), "step_used")
@@ -1036,10 +1038,10 @@ class TestActivityState(unittest.TestCase):
 
     def test_peek_is_pure(self):
         """Finding 6: a peek records nothing, not even session or key recency."""
-        st = act.ActivityState()
+        st = dlv.ActivityState()
         k = self.key("read_file", "a.py")
         self.assertIsNone(st.start("s", "r1", k))
-        for i in range(act.SESSIONS_MAX + 1):
+        for i in range(dlv.SESSIONS_MAX + 1):
             self.assertIsNone(st.peek("other%d" % i, "r1", k))
         self.assertEqual(st.peek("s", "r2", k), "seen_key", "peeks evicted a real session")
         keys = [self.key("read_file", "f%d.py" % i) for i in range(act.RECENT_KEYS_MAX)]
@@ -1065,9 +1067,9 @@ class Harness(unittest.TestCase):
     """Fakes CT (discovery, probe, match) and runs prefetches synchronously."""
 
     def setUp(self):
-        act.reset_state()
+        dlv.reset_state()
         ct_ledger.LEDGER_CACHE.clear()
-        self.addCleanup(act.reset_state)
+        self.addCleanup(dlv.reset_state)
         self.addCleanup(ct_ledger.LEDGER_CACHE.clear)
         orig_breaker = ct_wisdom_live._BREAKER
         ct_wisdom_live._BREAKER = ct_wisdom_live.Breaker()
@@ -1087,16 +1089,16 @@ class Harness(unittest.TestCase):
             (ct_wisdom, "discover_ct", lambda env=None: ("/fake/ct", None)),
             (ct_wisdom_live, "has_match_capability", lambda p: True),
             (ct_wisdom_live, "match_wisdom", fake_match),
-            (act, "_spawn", lambda target: target()),
-            (act, "_record_activity_delivery", lambda event: self.deliveries.append(event)),
-            (act, "_ct_warm", lambda: True),
+            (dlv, "_spawn", lambda target: target()),
+            (dlv, "_record_activity_delivery", lambda event: self.deliveries.append(event)),
+            (dlv, "_ct_warm", lambda: True),
         ]:
             orig = getattr(mod, name)
             setattr(mod, name, value)
             self.addCleanup(setattr, mod, name, orig)
 
     def post(self, result, tool="read_file", args=None, sid="s1", call="c1", req="t:api:1"):
-        return act.on_transform_tool_result(
+        return dlv.on_transform_tool_result(
             tool_name=tool, args={"path": "src/x.py"} if args is None else args,
             result=result, task_id="", session_id=sid, tool_call_id=call, turn_id="t",
             api_request_id=req, duration_ms=5, status="ok", error_type=None,
@@ -1161,8 +1163,8 @@ class TestDelivery(Harness):
     def test_non_activity_tool_skips_as_no_activity(self):
         ct_ledger.LEDGER_CACHE.put("s1", set())
         classes = []
-        orig = act._skip
-        act._skip = lambda sid, cls, *a, **k: classes.append(cls) or orig(sid, cls, *a, **k)
+        orig = dlv._skip
+        dlv._skip = lambda sid, cls, *a, **k: classes.append(cls) or orig(sid, cls, *a, **k)
         self.addCleanup(setattr, act, "_skip", orig)
         self.assertIsNone(self.post(json.dumps({"output": "", "exit_code": 0, "error": None}),
                                     tool="web_search", args={"query": "q"}))
@@ -1172,8 +1174,8 @@ class TestDelivery(Harness):
     def test_unhashable_tool_name_skips_as_no_activity(self):
         ct_ledger.LEDGER_CACHE.put("s1", set())
         classes = []
-        orig = act._skip
-        act._skip = lambda sid, cls, *a, **k: classes.append(cls) or orig(sid, cls, *a, **k)
+        orig = dlv._skip
+        dlv._skip = lambda sid, cls, *a, **k: classes.append(cls) or orig(sid, cls, *a, **k)
         self.addCleanup(setattr, act, "_skip", orig)
         for tool in (["x"], {"a": 1}):
             with self.subTest(tool=tool):
@@ -1197,7 +1199,7 @@ class TestDelivery(Harness):
         for result in ('[1, 2]', '"str"', '42', {"multimodal": True},
                        json.dumps({"content": "x", act.ACTIVITY_RESULT_KEY: "x"})):
             with self.subTest(result=result):
-                act.reset_state()
+                dlv.reset_state()
                 ct_ledger.LEDGER_CACHE.put("s1", set())
                 self.assertIsNone(self.post(result))
                 self.assertEqual(ct_ledger.LEDGER_CACHE.get("s1"), set())
@@ -1346,15 +1348,15 @@ class TestFailClosed(Harness):
         budget (so the transform's wait is zero); returns the held targets."""
         started = []
         now = [100.0]
-        orig_clock = act._clock
-        act._clock = lambda: now[0]
+        orig_clock = dlv._clock
+        dlv._clock = lambda: now[0]
         self.addCleanup(setattr, act, "_clock", orig_clock)
 
         def spawn(target):
             started.append(target)
             now[0] += ct_wisdom_live.LIVE_TIMEOUT + 0.01
 
-        act._spawn = spawn
+        dlv._spawn = spawn
         return started
 
     def test_budget_exceeded(self):
@@ -1377,7 +1379,7 @@ class TestFailClosed(Harness):
         self.assertIsNone(self.post(READ_RESULT))
 
     def test_transform_never_raises(self):
-        self.assertIsNone(act.on_transform_tool_result())
+        self.assertIsNone(dlv.on_transform_tool_result())
         ct_ledger.LEDGER_CACHE.put("s1", set())
         orig = act.splice
         act.splice = lambda r, b: (_ for _ in ()).throw(RuntimeError("boom"))
@@ -1397,7 +1399,7 @@ class TestParallelThreads(Harness):
 
     def test_eight_threads_one_step(self):
         ct_ledger.LEDGER_CACHE.put("s1", set())
-        act._spawn = lambda target: threading.Thread(target=target, daemon=True).start()
+        dlv._spawn = lambda target: threading.Thread(target=target, daemon=True).start()
         outs = [None] * 8
         barrier = threading.Barrier(8)
 
@@ -1494,7 +1496,7 @@ class TestApprovalGate(Harness):
     def test_refused_call_sends_nothing_and_frees_the_step(self):
         for result in REFUSALS:
             with self.subTest(result=result):
-                act.reset_state()
+                dlv.reset_state()
                 ct_ledger.LEDGER_CACHE.put("s1", set())
                 self.calls.clear()
                 self.deliveries.clear()
@@ -1515,7 +1517,7 @@ class TestApprovalGate(Harness):
         for result in REFUSALS + MORE_REFUSALS:
             for tool in ("terminal", "read_file", "write_file", "patch", "search_files"):
                 with self.subTest(tool=tool, result=result):
-                    self.assertFalse(act.proves_ran(tool, act._parse(result)))
+                    self.assertFalse(dlv.proves_ran(tool, act._parse(result)))
 
     def test_blocked_call_never_reaching_transform_sends_nothing(self):
         """A plugin block, the approve gate's denial, guardrails or ACP edit
@@ -1559,13 +1561,13 @@ class TestKeyRelease(Harness):
         self.assertEqual(len(self.calls), n, why)
         # The key is free: a later step retries the same activity.
         self.match_result = ({"entries": [item("f1")], "corrections": []}, None)
-        act._spawn = lambda target: target()
+        dlv._spawn = lambda target: target()
         self.assertIsNotNone(self.step("r2", "c2"), why)
 
     def test_ct_failures_release_the_key(self):
         for cls in ("timeout", "exit", "parse_error", "spawn"):
             with self.subTest(cls=cls):
-                act.reset_state()
+                dlv.reset_state()
                 ct_ledger.LEDGER_CACHE.put("s1", set())
                 ct_wisdom_live._BREAKER = ct_wisdom_live.Breaker()
                 self.match_result = (None, cls)
@@ -1573,12 +1575,12 @@ class TestKeyRelease(Harness):
 
     def test_budget_releases_the_key(self):
         started = []
-        act._spawn = lambda target: started.append(target)
-        orig_wait = act._wait
-        act._wait = lambda p: False  # the budget ran out
+        dlv._spawn = lambda target: started.append(target)
+        orig_wait = dlv._wait
+        dlv._wait = lambda p: False  # the budget ran out
         self.addCleanup(setattr, act, "_wait", orig_wait)
         self.assertIsNone(self.step("r1", "c1"))
-        act._wait = orig_wait
+        dlv._wait = orig_wait
         started.pop()()  # the abandoned worker finishes: only now is the key free
         self.assert_released("budget")
 
@@ -1586,15 +1588,15 @@ class TestKeyRelease(Harness):
         """The key is freed; the miss itself is remembered for
         CT_UNUSABLE_PAUSE (TestUnusableCt), so the retry comes after it."""
         now = [500.0]
-        orig_clock = act._clock
-        act._clock = lambda: now[0]
+        orig_clock = dlv._clock
+        dlv._clock = lambda: now[0]
         self.addCleanup(setattr, act, "_clock", orig_clock)
         orig = ct_wisdom.discover_ct
         ct_wisdom.discover_ct = lambda env=None: (None, "discovery_miss")
         self.assertIsNone(self.step("r1", "c1"))
         ct_wisdom.discover_ct = orig
         self.assertIsNone(self.step("r2", "c2"), "still remembered as unusable")
-        now[0] += act.CT_UNUSABLE_PAUSE + 1
+        now[0] += dlv.CT_UNUSABLE_PAUSE + 1
         self.assertIsNotNone(self.step("r3", "c3"))
 
     def test_zero_hits_keeps_the_key(self):
@@ -1614,9 +1616,9 @@ class TestBudgetBreaker(Harness):
         ct_wisdom_live._BREAKER = self.breaker
         ct_ledger.LEDGER_CACHE.put("s1", set())
         self.started = []
-        act._spawn = lambda target: self.started.append(target)
-        orig_wait = act._wait
-        act._wait = lambda p: False
+        dlv._spawn = lambda target: self.started.append(target)
+        orig_wait = dlv._wait
+        dlv._wait = lambda p: False
         self.addCleanup(setattr, act, "_wait", orig_wait)
 
     def test_budget_miss_counts_once_even_if_ct_later_times_out(self):
@@ -1638,8 +1640,8 @@ class TestBudgetBreaker(Harness):
         self.assertTrue(ct_wisdom_live._BREAKER.is_open())
 
     def test_worker_first_records_its_own_outcome_once(self):
-        act._wait = lambda p: p.done.wait(0)
-        act._spawn = lambda target: target()
+        dlv._wait = lambda p: p.done.wait(0)
+        dlv._spawn = lambda target: target()
         self.match_result = (None, "timeout")
         self.post(READ_RESULT)
         self.assertEqual(self.breaker.failures, 1)
@@ -1648,7 +1650,7 @@ class TestBudgetBreaker(Harness):
         """Finding 1: on a cold process the 3 s wait also covers discovery and
         the capability probe. A miss then says nothing about CT's health: the
         transform records nothing and the worker's own outcome settles."""
-        act._ct_warm = lambda: False
+        dlv._ct_warm = lambda: False
         for i in range(ct_wisdom_live.BREAKER_FAILS):
             args = {"path": "f%d.py" % i}
             before = (self.breaker.failures, self.breaker.successes)
@@ -1661,13 +1663,13 @@ class TestBudgetBreaker(Harness):
         self.assertEqual((self.breaker.failures, self.breaker.successes), (1, 2))
         self.assertFalse(ct_wisdom_live._BREAKER.is_open())
         # The cold miss freed its key: a later step retries it.
-        act._spawn = lambda target: target()
-        act._wait = lambda p: p.done.wait(0)
+        dlv._spawn = lambda target: target()
+        dlv._wait = lambda p: p.done.wait(0)
         self.match_result = ({"entries": [item("f1")], "corrections": []}, None)
         self.assertIsNotNone(self.post(READ_RESULT, call="c9", req="r9", args={"path": "f0.py"}))
 
     def test_warm_flag_reads_the_discovery_and_probe_caches(self):
-        real = HarnessFree.real_ct_warm  # the Harness stubs act._ct_warm
+        real = HarnessFree.real_ct_warm  # the Harness stubs dlv._ct_warm
         orig_path = ct_wisdom._accepted_ct_path
         self.addCleanup(setattr, ct_wisdom, "_accepted_ct_path", orig_path)
         self.addCleanup(ct_wisdom_live.reset_capability_cache)
@@ -1690,7 +1692,7 @@ class TestBudgetBreaker(Harness):
         def wait_then_finish(p):
             self.started.pop()()  # the worker wins the race
             return False          # ...but the wait already reported a timeout
-        act._wait = wait_then_finish
+        dlv._wait = wait_then_finish
         out = self.post(READ_RESULT)
         self.assertIsNotNone(out)
         self.assertEqual(ct_ledger.scan_ids(out), ["f1"])
@@ -1700,7 +1702,7 @@ class TestBudgetBreaker(Harness):
         def wait_then_finish(p):
             self.started.pop()()
             return False
-        act._wait = wait_then_finish
+        dlv._wait = wait_then_finish
         self.match_result = (None, "timeout")
         self.assertIsNone(self.post(READ_RESULT))
         self.assertEqual((self.breaker.failures, self.breaker.successes), (1, 0))
@@ -1719,7 +1721,7 @@ class TestMarkerHygiene(Harness):
     def delivered_block(self):
         ct_ledger.LEDGER_CACHE.put("s1", set())
         out = self.post(READ_RESULT)
-        act.reset_state()
+        dlv.reset_state()
         return out, json.loads(out)[act.ACTIVITY_RESULT_KEY]
 
     def test_activity_query_never_carries_block(self):
@@ -1799,7 +1801,7 @@ class TestRegistration(unittest.TestCase):
         for mod, name, value in [
             (ct_tool_dedup, "on_transform_tool_result",
              lambda **k: calls.append("dedup") or ("D" if k.get("tool_name") == "ct" else None)),
-            (act, "on_transform_tool_result", lambda **k: calls.append("act") or "A"),
+            (dlv, "on_transform_tool_result", lambda **k: calls.append("act") or "A"),
         ]:
             orig = getattr(mod, name)
             setattr(mod, name, value)
@@ -1814,7 +1816,7 @@ class TestVerboseWiring(Harness):
 
     def setUp(self):
         super().setUp()
-        act._record_activity_delivery = ORIGINAL_SEAM  # undo the Harness stub
+        dlv._record_activity_delivery = ORIGINAL_SEAM  # undo the Harness stub
         self.tmp = tempfile.mkdtemp()
         self.log = os.path.join(self.tmp, "v.jsonl")
         self.notices = []
@@ -1842,7 +1844,7 @@ class TestVerboseWiring(Harness):
             os.environ["CT_WISDOM_VERBOSE"] = "1"
         else:
             os.environ.pop("CT_WISDOM_VERBOSE", None)
-        act.reset_state()
+        dlv.reset_state()
         ct_ledger.LEDGER_CACHE.put("s1", set())
         args = {"path": "src/x.py", "content": "SECRET_CONTENT_VALUE"}
         return self.post(json.dumps({"bytes_written": 3}), tool="write_file", args=args)
@@ -1951,8 +1953,8 @@ class TestUnusableCt(Harness):
         ct_wisdom_live._BREAKER = self.breaker
         ct_ledger.LEDGER_CACHE.put("s1", set())
         self.now = [1000.0]
-        orig_clock = act._clock
-        act._clock = lambda: self.now[0]
+        orig_clock = dlv._clock
+        dlv._clock = lambda: self.now[0]
         self.addCleanup(setattr, act, "_clock", orig_clock)
         self.discovered = []
         self.probed = []
@@ -1983,12 +1985,12 @@ class TestUnusableCt(Harness):
         self.assertIsNone(self.step(1))
         self.assertEqual(self.breaker.failures, 1)
         spawned = []
-        act._spawn = lambda target: spawned.append(target)
+        dlv._spawn = lambda target: spawned.append(target)
         for n in range(2, 6):
             self.assertIsNone(self.step(n))
         self.assertEqual((spawned, len(self.probed)), ([], 1), "later steps must not wait")
-        self.now[0] += act.CT_UNUSABLE_PAUSE + 1
-        act._spawn = lambda target: target()
+        self.now[0] += dlv.CT_UNUSABLE_PAUSE + 1
+        dlv._spawn = lambda target: target()
         self.probe_answer = True
         self.assertIsNotNone(self.step(9), "retried after the pause")
 
@@ -2001,10 +2003,10 @@ class TestUnusableCt(Harness):
     def test_cold_hang_then_probe_timeout_goes_quiet(self):
         """The transform gave up (cold), the worker's probe then timed out:
         the next steps skip at once."""
-        act._ct_warm = lambda: False
+        dlv._ct_warm = lambda: False
         held = []
-        act._spawn = lambda target: held.append(target)
-        act._wait = lambda p: False
+        dlv._spawn = lambda target: held.append(target)
+        dlv._wait = lambda p: False
         self.probe_answer = None
         self.assertIsNone(self.step(1))
         held.pop()()
@@ -2046,7 +2048,7 @@ class TestReview3(TestUnusableCt):
         self.assertIsNone(self.step(1))
         self.assertEqual(self.breaker.failures, 0)
         self.assertEqual(sorted(self.resets), ["reset_capability_cache", "reset_discovery_cache"])
-        self.assertIsNone(act._ct_unusable())
+        self.assertIsNone(dlv._ct_unusable())
         self.probe_answer = True
         self.assertIsNotNone(self.step(2), "the next step tries again")
 
@@ -2063,10 +2065,10 @@ class TestReview3(TestUnusableCt):
 
     def test_one_cold_probe_in_flight(self):
         """5: while a cold probe runs, another cold step does not spawn one."""
-        act._ct_warm = lambda: False
+        dlv._ct_warm = lambda: False
         held = []
-        act._spawn = lambda target: held.append(target)
-        act._wait = lambda p: False
+        dlv._spawn = lambda target: held.append(target)
+        dlv._wait = lambda p: False
         self.assertIsNone(self.step(1))
         self.assertIsNone(self.step(2))
         self.assertEqual(len(held), 1, "a second cold probe started")
@@ -2077,20 +2079,20 @@ class TestReview3(TestUnusableCt):
     def test_exception_after_start_frees_the_key(self):
         """4: anything raising after the claim (constructor, warm check,
         render, ledger claim) leaves neither step nor key held."""
-        for name in ("_Prefetch", "_ct_warm", "render_activity_block"):
+        for mod, name in ((dlv, "_Prefetch"), (dlv, "_ct_warm"), (act, "render_activity_block")):
             with self.subTest(name=name):
-                act.reset_state()
+                dlv.reset_state()
                 ct_ledger.LEDGER_CACHE.put("s1", set())
-                orig = getattr(act, name)
+                orig = getattr(mod, name)
 
                 def boom(*a, **k):
                     raise RuntimeError("boom")
 
-                setattr(act, name, boom)
+                setattr(mod, name, boom)
                 self.assertIsNone(self.step(1, path="same.py"))
-                setattr(act, name, orig)
+                setattr(mod, name, orig)
                 self.assertIsNotNone(self.step(2, path="same.py"), name)
-        act.reset_state()
+        dlv.reset_state()
         ct_ledger.LEDGER_CACHE.put("s1", set())
         with mock.patch.object(ct_ledger.LEDGER_CACHE, "claim", side_effect=RuntimeError):
             self.assertIsNone(self.step(1, path="same.py"))
@@ -2102,17 +2104,17 @@ class TestReview3(TestUnusableCt):
         for err in ("User declined to run this command", "Approval timed out after 60s",
                     "Not allowed: path is outside the sandbox",
                     "Timed out waiting for approval"):
-            self.assertFalse(act.proves_ran("terminal", {"error": err}), err)
-            self.assertFalse(act.proves_ran("terminal", {"message": err}), err)
+            self.assertFalse(dlv.proves_ran("terminal", {"error": err}), err)
+            self.assertFalse(dlv.proves_ran("terminal", {"message": err}), err)
             # Output wording is never read: a command that ran and printed it sends.
-            self.assertTrue(act.proves_ran("terminal", {"output": err, "exit_code": 0,
+            self.assertTrue(dlv.proves_ran("terminal", {"output": err, "exit_code": 0,
                                                         "error": None}), err)
 
     def test_comment_and_docstring(self):
         """8, 9."""
         source = Path(act.__file__).read_text(encoding="utf-8")
         self.assertNotIn("The name check runs on the full module (the program passed it", source)
-        self.assertIn("ct_unavailable", act._blocked_report.__doc__)
+        self.assertIn("ct_unavailable", dlv._blocked_report.__doc__)
 
 
 class TestKeyInFlight(Harness):
@@ -2122,11 +2124,11 @@ class TestKeyInFlight(Harness):
     def setUp(self):
         super().setUp()
         ct_ledger.LEDGER_CACHE.put("s1", set())
-        act._ct_warm = lambda: False
+        dlv._ct_warm = lambda: False
         self.held = []
-        act._spawn = lambda target: self.held.append(target)
-        orig_wait = act._wait
-        act._wait = lambda p: False
+        dlv._spawn = lambda target: self.held.append(target)
+        orig_wait = dlv._wait
+        dlv._wait = lambda p: False
         self.addCleanup(setattr, act, "_wait", orig_wait)
 
     def test_no_second_query_while_the_first_is_in_flight(self):
@@ -2138,8 +2140,8 @@ class TestKeyInFlight(Harness):
         self.match_result = (None, "timeout")
         self.post(READ_RESULT, call="c1", req="r1")
         self.held.pop()()
-        act._spawn = lambda target: target()
-        act._wait = lambda p: p.done.wait(0)
+        dlv._spawn = lambda target: target()
+        dlv._wait = lambda p: p.done.wait(0)
         self.match_result = ({"entries": [item("f1")], "corrections": []}, None)
         self.assertIsNotNone(self.post(READ_RESULT, call="c2", req="r2"))
 
@@ -2152,9 +2154,9 @@ class TestSpawnFailure(Harness):
         def boom(target):
             raise RuntimeError("can't start new thread")
 
-        act._spawn = boom
+        dlv._spawn = boom
         self.assertIsNone(self.post(READ_RESULT, call="c1"))
-        act._spawn = lambda target: target()
+        dlv._spawn = lambda target: target()
         self.assertIsNotNone(self.post(READ_RESULT, call="c2"), "same step, same key")
 
 
@@ -2197,7 +2199,7 @@ class TestRefusalReview2(unittest.TestCase):
                     "Cancelled by user", "Operation cancelled", "operation canceled",
                     "request was rejected"):
             for key in ("error", "message"):
-                self.assertFalse(act.proves_ran("read_file", {key: err}), (key, err))
+                self.assertFalse(dlv.proves_ran("read_file", {key: err}), (key, err))
 
     def test_nested_and_json_string_errors(self):
         for result in (
@@ -2207,7 +2209,7 @@ class TestRefusalReview2(unittest.TestCase):
                 {"error": json.dumps({"error": "Refusing to write"})},
                 {"error": {"error": {"message": "not approved"}}}):
             for tool in ("terminal", "read_file", "write_file", "patch", "search_files"):
-                self.assertFalse(act.proves_ran(tool, result), (tool, result))
+                self.assertFalse(dlv.proves_ran(tool, result), (tool, result))
 
     def test_transform_ignores_the_kwargs(self):
         """The result body is the proof. At the pin Hermes derives the kwargs
@@ -2217,7 +2219,7 @@ class TestRefusalReview2(unittest.TestCase):
         h.setUp()
         try:
             ct_ledger.LEDGER_CACHE.put("s1", set())
-            out = act.on_transform_tool_result(
+            out = dlv.on_transform_tool_result(
                 tool_name="terminal", args={"command": "pnpm test"},
                 result=json.dumps({"output": "1 failed", "exit_code": 1, "error": None}),
                 task_id="", session_id="s1", tool_call_id="c1", turn_id="t",
@@ -2233,7 +2235,7 @@ class TestRefusalReview2(unittest.TestCase):
                 ("terminal", {"output": "rejected by remote: cancelled by user",
                               "exit_code": 1, "error": None}),
                 ("read_file", {"content": "Operation cancelled by user", "total_lines": 1})):
-            self.assertTrue(act.proves_ran(tool, result), result)
+            self.assertTrue(dlv.proves_ran(tool, result), result)
 
     def test_word_list_is_gone(self):
         for name in ("is_refusal", "_refused", "_refusal_value", "_refusal_text",
@@ -2241,6 +2243,62 @@ class TestRefusalReview2(unittest.TestCase):
                      "_REFUSED_PHRASES", "_REFUSED_ERROR_TYPE_WORDS",
                      "_ENVELOPE_TEXT_KEYS", "_REFUSAL_DEPTH"):
             self.assertFalse(hasattr(act, name), name)
+
+
+class TestModuleSplit(unittest.TestCase):
+    """Spec 2026-10-17-hermes-activity-delivery-split-design.md."""
+
+    def test_reset_caches_clears_builder_caches_only(self):
+        import ct_wisdom_activity as builder
+        import ct_wisdom_activity_delivery as delivery
+        delivery._STATE.start("s-split", "r-split", ("file", "x"))
+        builder.reset_caches()
+        self.assertIsNotNone(delivery._STATE.peek("s-split", "r-split", None),
+                             "reset_caches must leave delivery state alone")
+        delivery.reset_state()
+        self.assertIsNone(delivery._STATE.peek("s-split", "r-split", None))
+
+    def test_reset_state_also_clears_builder_caches(self):
+        import ct_wisdom_activity as builder
+        import ct_wisdom_activity_delivery as delivery
+        calls = []
+        orig = builder.reset_caches
+        builder.reset_caches = lambda: calls.append(1)
+        self.addCleanup(setattr, builder, "reset_caches", orig)
+        delivery.reset_state()
+        self.assertEqual(calls, [1])
+
+    def test_delivery_calls_the_builder_through_the_module(self):
+        """Patching a builder name changes what delivery builds."""
+        import ct_wisdom_activity as builder
+        import ct_wisdom_activity_delivery as delivery
+        seen = []
+        orig = builder.activity_for
+        builder.activity_for = lambda *a, **k: seen.append(a[0]) or None
+        self.addCleanup(setattr, builder, "activity_for", orig)
+        delivery.reset_state()
+        self.addCleanup(delivery.reset_state)
+        ct_ledger.LEDGER_CACHE.put("s-split", set())
+        self.addCleanup(ct_ledger.LEDGER_CACHE.clear)
+        delivery.on_transform_tool_result(
+            tool_name="read_file", args={"path": "src/x.py"}, result=READ_RESULT,
+            task_id="", session_id="s-split", tool_call_id="c1", api_request_id="r1")
+        self.assertEqual(seen, ["read_file"])
+
+    def test_delivery_only_uses_existing_builder_names(self):
+        """Renaming a builder helper delivery uses must fail here, not
+        silently disable delivery."""
+        import ast
+        import ct_wisdom_activity as builder
+        path = os.path.join(os.path.dirname(builder.__file__), "ct_wisdom_activity_delivery.py")
+        with open(path, encoding="utf-8") as fh:
+            tree = ast.parse(fh.read())
+        used = {n.attr for n in ast.walk(tree)
+                if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name)
+                and n.value.id == "builder"}
+        self.assertTrue(used, "delivery should call the builder through builder.<name>")
+        for name in sorted(used):
+            self.assertTrue(hasattr(builder, name), f"builder.{name} used by delivery is missing")
 
 
 if __name__ == "__main__":

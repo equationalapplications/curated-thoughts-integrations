@@ -17,7 +17,7 @@ What it wires up:
     (ct_tool_dedup) — the Intuitive Wisdom live path;
   * the same `transform_tool_result` hook delivers one fact per model step
     during autonomous work, keyed to the file, command or search the agent
-    is busy with (ct_wisdom_activity). No `pre_tool_call` hook: Hermes
+    is busy with (ct_wisdom_activity_delivery). No `pre_tool_call` hook: Hermes
     resolves approvals and blocks only after those callbacks return, so the
     query waits for a call Hermes let run;
 
@@ -153,7 +153,7 @@ def _pre_llm_call(**kwargs):
 
 def _transform_tool_result(**kwargs):
     """Stub CT recall entries already in context (ct_tool_dedup); for any
-    other tool, deliver the step's activity fact (ct_wisdom_activity). One
+    other tool, deliver the step's activity fact (ct_wisdom_activity_delivery). One
     callback, because Hermes keeps only the first string a plugin returns."""
     try:
         import ct_tool_dedup
@@ -164,9 +164,9 @@ def _transform_tool_result(**kwargs):
     except Exception:  # pragma: no cover - defensive
         logger.debug("curated-thoughts: tool dedup hook failed", exc_info=True)
     try:
-        import ct_wisdom_activity
+        import ct_wisdom_activity_delivery
 
-        return ct_wisdom_activity.on_transform_tool_result(**kwargs)
+        return ct_wisdom_activity_delivery.on_transform_tool_result(**kwargs)
     except Exception:  # pragma: no cover - defensive
         logger.debug("curated-thoughts: activity transform failed", exc_info=True)
         return None

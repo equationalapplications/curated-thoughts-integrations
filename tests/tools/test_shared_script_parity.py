@@ -9,8 +9,13 @@ claim enforceable.
 
 Contract (spec 2026-10-16-shared-env-doctor-parity-design.md, D3/D4):
 
-  * ct_env.py, ct_status.py, ct_preflight.py are byte-identical (line
-    endings normalized: Windows checkouts may be CRLF on disk).
+  * ct_env.py, ct_status.py, ct_preflight.py, ct_wisdom_activity.py (the
+    autonomous-work builder) and the other IDENTICAL scripts are
+    byte-identical (line endings normalized: Windows checkouts may be CRLF
+    on disk).
+  * ct_tool_dedup.py and ct_wisdom_activity_delivery.py are Hermes-only:
+    present in Hermes, absent from the copies, and the builder must not
+    define or import the Hermes delivery.
   * ct_doctor.py is identical outside a CLOSED list of named marker regions:
 
         # >>> harness-specific: <name>
@@ -28,6 +33,7 @@ runs tests/tools on every PR. Nothing is written; both trees are only read.
 """
 from __future__ import annotations
 
+import ast
 import difflib
 import re
 import unittest
@@ -56,17 +62,9 @@ IDENTICAL = (
     # verbose-mode-design.md, D6/D7).
     "ct_wisdom_verbose.py",
     "ct_wisdom_log.py",
+    # The autonomous-work activity builder (spec 2026-10-17-hermes-activity-delivery-split-design.md).
+    "ct_wisdom_activity.py",
 )
-# Shared scripts only some copies vendor: {copy integration: (names,)}.
-# Docker Agent reuses the Hermes activity builder (privacy amendment R1-R4,
-# command targets, block render and splice) through a byte-identical copy
-# (spec 2026-10-16-docker-agent-integration-design.md, D1, D7).
-IDENTICAL_EXTRA = {
-    "docker-agent": ("ct_wisdom_activity.py",),
-    # Claude Code's autonomous-work leg binds the same builder and renderer
-    # (spec 2026-10-17-claude-code-autonomous-work-wisdom-design.md, D1).
-    "claude-code": ("ct_wisdom_activity.py",),
-}
 # Hook-side modules shared by the command-hook adapters (no Hermes copy:
 # Hermes keeps this state in process). Every listed tree must carry an
 # identical copy (PR #59 review: the store/lock/prune/breaker primitives).
@@ -76,6 +74,16 @@ HOOK_SHARED = {
         REPO / "integrations" / "docker-agent" / "hooks",
     ),
 }
+# Hermes-only scripts: they must exist in Hermes and never in the copies
+# (spec 2026-10-17-hermes-activity-delivery-split-design.md).
+HERMES_ONLY = ("ct_tool_dedup.py", "ct_wisdom_activity_delivery.py")
+# The shared builder must not grow the Hermes delivery back.
+BUILDER = "ct_wisdom_activity.py"
+BUILDER_FORBIDDEN_NAMES = ("on_transform_tool_result", "ActivityState", "_transform", "_deliver",
+                           "proves_ran", "reset_state", "_Prefetch", "_run_prefetch",
+                           "_ct_unusable", "CT_UNUSABLE_PAUSE", "STEP_IDS_MAX", "SESSIONS_MAX",
+                           "_STATE")
+BUILDER_FORBIDDEN_IMPORTS = ("ct_wisdom_live", "ct_wisdom_verbose", "ct_wisdom_activity_delivery")
 REGIONED = {
     "ct_doctor.py": ("module-docstring", "harness-config", "registration-check"),
 }
@@ -138,10 +146,49 @@ def drift_report(reference, copy, ref_label, copy_label):
     )
 
 
+def builder_defined_names(source):
+    """Every name the builder binds anywhere in the module, at any depth.
+
+    Catches: function and class definitions (sync or async) at any nesting
+    depth; every Name target of an assignment, annotated assignment or
+    augmented assignment, including names inside tuple/list unpacking and
+    assignments nested in `if`/`try` blocks or functions; and import
+    bindings (`import x as NAME`, `from x import y as NAME`, `from x import
+    NAME`). It over-approximates on purpose: a forbidden Hermes delivery
+    name appearing anywhere in the builder is a failure.
+    """
+    names = set()
+
+    def targets(node):
+        if isinstance(node, ast.Name):
+            names.add(node.id)
+        elif isinstance(node, (ast.Tuple, ast.List)):
+            for elt in node.elts:
+                targets(elt)
+        elif isinstance(node, ast.Starred):
+            targets(node.value)
+
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names.add(node.name)
+        elif isinstance(node, ast.Assign):
+            for t in node.targets:
+                targets(t)
+        elif isinstance(node, (ast.AnnAssign, ast.AugAssign)):
+            targets(node.target)
+        elif isinstance(node, ast.Import):
+            for a in node.names:
+                names.add(a.asname or a.name.split(".")[0])
+        elif isinstance(node, ast.ImportFrom):
+            for a in node.names:
+                names.add(a.asname or a.name)
+    return names
+
+
 class SharedScriptParityTests(unittest.TestCase):
     def test_identical_scripts_are_byte_identical(self):
         for copy_dir in COPIES:
-            for name in IDENTICAL + IDENTICAL_EXTRA.get(copy_dir.parent.name, ()):
+            for name in IDENTICAL:
                 with self.subTest(copy=copy_dir.parent.name, script=name):
                     ref, copy = read(REFERENCE / name), read(copy_dir / name)
                     # normalize() with no allowed regions also rejects a
@@ -196,6 +243,51 @@ class HookSharedParityTests(unittest.TestCase):
                             + drift_report(ref, copy, f"{ref_dir.parent.name}/{name}",
                                            f"{other.parent.name}/{name}")
                         )
+
+
+class HermesOnlyBoundaryTests(unittest.TestCase):
+    def test_hermes_only_scripts_stay_in_hermes(self):
+        for name in HERMES_ONLY:
+            with self.subTest(script=name):
+                self.assertTrue((REFERENCE / name).is_file(), f"hermes/{name} missing")
+                for copy_dir in COPIES:
+                    self.assertFalse((copy_dir / name).exists(),
+                                     f"{copy_dir.parent.name} must not carry Hermes-only {name}")
+
+    def test_builder_has_no_hermes_delivery(self):
+        source = read(REFERENCE / BUILDER)
+        tree = ast.parse(source)
+        defined = builder_defined_names(source)
+        imported = set()
+        for n in ast.walk(tree):
+            if isinstance(n, ast.Import):
+                imported.update(a.name.split(".")[0] for a in n.names)
+            elif isinstance(n, ast.ImportFrom) and n.module:
+                imported.add(n.module.split(".")[0])
+        for name in BUILDER_FORBIDDEN_NAMES:
+            self.assertNotIn(name, defined, f"{BUILDER} must not define {name} (Hermes delivery)")
+        for name in BUILDER_FORBIDDEN_IMPORTS:
+            self.assertNotIn(name, imported, f"{BUILDER} must not import {name} (Hermes delivery)")
+
+
+class BuilderDefinedNamesTests(unittest.TestCase):
+    def test_collects_async_defs_and_top_level_assignments(self):
+        names = builder_defined_names("async def proves_ran(): pass\n_transform = 1\n")
+        self.assertIn("proves_ran", names)
+        self.assertIn("_transform", names)
+
+    def test_collects_nested_unpacked_and_imported_names(self):
+        for source in (
+            "try:\n    def proves_ran(): pass\nexcept ImportError:\n    pass\n",
+            "proves_ran, _x = 1, 2\n",
+            "from m import y as proves_ran\n",
+            "import m as proves_ran\n",
+            "from m import proves_ran\n",
+            "if 1:\n    [a, (proves_ran, b)] = 1, (2, 3)\n",
+            "class A:\n    async def proves_ran(self): pass\n",
+        ):
+            with self.subTest(source=source):
+                self.assertIn("proves_ran", builder_defined_names(source))
 
 
 class NormalizerGuardTests(unittest.TestCase):
