@@ -528,7 +528,7 @@ rule; opencode and openclaw get patch bumps for it.
   step can retry the activity (OpenCode / OpenClaw parity). A plan whose pre-step never runs is not
   aborted; it ends at the spawns' own timeouts as before (superseded by the next amendment: such a plan
   is cancelled once its slot is replaced or evicted).
-- **0.6.2: PR #71 review** (two rounds; this text is the final state).
+- **0.6.2: PR #71 review** (three rounds; this text is the final state).
   - *One kill switch per plan, owned by the host.* Each plan owns a `cancel` AbortController. The core
     gets a signal it never sees aborted; it is only the key through which the adapter finds `cancel`
     (`linkCancel`, a WeakMap), and the spawns listen to it. This depends on the core passing
@@ -537,26 +537,40 @@ rule; opencode and openclaw get patch bumps for it.
   - *Abandoned plans are cancelled, not charged to CT.* When `plan()` replaces an agent's slot for a
     newer step, when the slot LRU (256 agents) evicts it (`lruSet` `onEvict`, the one eviction rule), or
     on the `would_extend_turn` path, `cancel` kills the query and the key is freed. The core gets
-    outcome `aborted` and counts nothing.
-  - *Budget expiry.* `settleWithin`'s expiry aborts `cancel`. When the late match then settles as
-    `budget` (the kill really stopped it), the host calls `recordActivityBudgetMiss` once (the core
-    rule; the core itself never sees an aborted signal, so there is no double count). A child that had
-    already exited with an answer keeps it (binding rule below) and is not charged; a `ct` that cannot
-    start is class `spawn` (caches reset, not a budget miss). This supersedes "the core then counts the
-    miss" in the 0.6.2 amendment above.
+    outcome `aborted` and counts nothing. A replaced or evicted plan is reported to verbose mode as
+    `skip` / `abandoned`.
+  - *Budget expiry.* `settleWithin`'s expiry calls `recordActivityBudgetMiss` at once (before
+    `deliver` returns, so the next step's breaker gate sees it, and a query that never settles cannot
+    drop it), then aborts `cancel`. The core never sees an aborted signal, and the adapter reports a
+    cancelled match that surfaces as `timeout_or_exit` as `aborted`, so there is no double count. A
+    child that had already exited with an answer keeps it (binding rule below); the core then records
+    a success, which clears the charge (a wrong charge, cleared, is the lesser evil than a late one).
+    A `ct` that cannot start is class `spawn` (caches reset) on top of the one budget miss. This
+    supersedes "the core then counts the miss" in the 0.6.2 amendment above.
   - *Capability probe once per path.* `ct wisdom match --help` runs once per resolved `ct` path
     (OpenCode `probedPath` parity). A match that ends `timeout_or_exit` clears it, so a `ct` that lost
     the subcommand in place is re-probed and latched OFF on the next call; that one failure still
-    counts (an exit code cannot tell "unknown command" from other usage errors reliably). A spawn-class
-    reset (`resetDiscoveryAndProbeCaches`, called by the core) clears the latch, the probe cache and
-    discovery's accepted path (`invalidateAcceptedPath`), so a moved `ct` is found again.
+    counts (an exit code cannot tell "unknown command" from other usage errors reliably). A probe that
+    passed is cached before an abort that lands right after it is honored. A spawn-class reset
+    (`resetDiscoveryAndProbeCaches`, called by the core) clears the latch, the probe cache and
+    discovery's accepted path (`invalidateAcceptedPath`), so a moved `ct` is found again. Only a real
+    failure to start is class `spawn`: a probe that timed out is `timeout_or_exit`, charged to the
+    breaker, because a spawn-class reset re-runs discovery's blocking `spawnSync` walk (up to 3 s on
+    the event loop) and a slow `ct` would otherwise stall every step forever. Repeated slow probes are
+    therefore bounded by the breaker (three, then the five-minute pause).
   - *Binding (`nodeSpawnFn`).* One outcome normalization (`spawnOutcomeOf`): a failed start or an
     overflow is `spawnError` and never `aborted`. An already-aborted signal resolves `aborted` without
     spawning. An abort after the child exited keeps the real result. One kill path (`killTree`) for
     timeout, abort and overflow: the POSIX process group, or the direct child on Windows; a child with
     no pid (failed spawn) is never signalled, because Node's `child.kill()` there signals pid 0, the
-    caller's own process group. After a kill, once the child has exited, `close` gets a 250 ms grace
-    and the promise settles anyway (Windows, or a descendant that left the group, can hold the pipes).
+    caller's own process group, and a child that already exited is never signalled either (its leader
+    is reaped, so `-pid` could hit a reused group). After a kill, once the child has exited, `close`
+    gets a 250 ms grace and the promise settles anyway with the output read so far (Windows, or a
+    descendant that left the group, can hold the pipes).
+  - *Follow-ups (not in this PR).* (a) A `cancel` parameter in ct-wisdom-core, to replace the
+    `linkCancel` WeakMap side channel. (b) One spawn binding in ct-wisdom-core shared by every host, so
+    OpenCode and OpenClaw get the same kill, grace and normalization fixes: their bindings still hang
+    when `close` never fires after a kill (Windows, or a descendant that keeps the pipes open).
 
 ## Versioning and docs
 
