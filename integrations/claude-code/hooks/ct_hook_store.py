@@ -68,7 +68,7 @@ class LockTimeout(Exception):
 def session_key(session_id):
     """The file stem for a session id: the id itself when it is a safe
     name, else its sha256 hex digest."""
-    if _KEY_RE.match(session_id):
+    if _KEY_RE.fullmatch(session_id):
         return session_id
     return hashlib.sha256(session_id.encode("utf-8")).hexdigest()
 

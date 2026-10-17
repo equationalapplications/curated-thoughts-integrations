@@ -124,8 +124,12 @@ a non-interactive run) and is appended to
 with:
 
 ```bash
-python3 integrations/docker-agent/scripts/ct_wisdom_log.py --path ~/.cagent/curated-thoughts/wisdom/ct-wisdom-verbose.jsonl
+python3 integrations/docker-agent/scripts/ct_wisdom_log.py \
+  --path "${CT_WISDOM_VERBOSE_LOG:-${DOCKER_AGENT_DATA_DIR:-$HOME/.cagent}/curated-thoughts/wisdom/ct-wisdom-verbose.jsonl}"
 ```
+
+The expression follows the log wherever `CT_WISDOM_VERBOSE_LOG` or
+`DOCKER_AGENT_DATA_DIR` moved it.
 
 ## Limits
 

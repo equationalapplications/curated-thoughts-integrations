@@ -114,6 +114,10 @@ def _plugin_version(manifest=None):
 # Embedding backends: cloud keys OR a local Ollama. WARN-only check.
 EMBED_ENV_KEYS = (
     "CT_EMBED_API_KEY",
+    # The external-embedder contract (ct_env.external_embed_key_var):
+    # EMBED_API_KEY first, then the provider default.
+    ct_env.ENV_EMBED_API_KEY,
+    ct_env.ENV_OPENROUTER_API_KEY,
     "OPENAI_API_KEY",
     "ANTHROPIC_API_KEY",
     "VOYAGE_API_KEY",

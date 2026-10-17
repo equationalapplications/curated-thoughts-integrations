@@ -96,6 +96,36 @@ class ClaimReleasedWhenTheFinalResultCannotCarryIt(Base):
         self.assertIn("ct-fact:act1", out)
 
 
+class ClaimReleasedWhenTheFinalResultIsRejected(Base):
+    """CodeRabbit: a claim must also be released when the final result fails
+    the eligibility checks (error result, JSON list), not only on size."""
+
+    def claim(self, use_id):
+        self.fake.match = {"pnpm test": [fact("act1")]}
+        self.h(llm("s1"))
+        chunk = tool("s1", name="shell", category="shell", args={"cmd": "pnpm test"},
+                     response="> start\n", use_id=use_id)
+        self.assertIsNotNone(self.h(chunk))
+        self.assertIn("act1", self.e.store("s1")["delivered_ids"])
+        return chunk
+
+    def test_error_result_releases(self):
+        chunk = self.claim("e1")
+        self.assertIsNone(self.h(dict(chunk, tool_error=True, tool_response="boom")))
+        self.assertNotIn("act1", self.e.store("s1")["delivered_ids"])
+        self.assertNotIn("e1", self.e.store("s1")["claims"])
+
+    def test_json_list_result_releases(self):
+        chunk = self.claim("j1")
+        self.assertIsNone(self.h(dict(chunk, tool_response="[1, 2]")))
+        self.assertNotIn("act1", self.e.store("s1")["delivered_ids"])
+
+    def test_session_key_hashes_a_trailing_newline(self):
+        import ct_hook_store
+        self.assertNotEqual(ct_hook_store.session_key("abc\n"), "abc\n")
+        self.assertEqual(len(ct_hook_store.session_key("abc\n")), 64)
+
+
 class FirstMessageExcludesOnlyRenderedIds(Base):
     """Item 4: only ids the bootstrap block will actually carry are excluded."""
 

@@ -85,6 +85,15 @@ class RegistrationCheckTests(unittest.TestCase):
                                  capture_output=True, text=True, timeout=30).stdout
             self.assertEqual(out, ct_doctor._yaml_quote(need.value))
 
+    def test_embedding_check_accepts_the_embedder_contract_keys(self):
+        # Check 6 and check 6b must agree on key names (CodeRabbit, PR #59).
+        for key in ("OPENROUTER_API_KEY", "EMBED_API_KEY"):
+            env = {k: "" for k in ct_doctor.EMBED_ENV_KEYS}
+            env.update({key: "set", "OLLAMA_HOST": "http://127.0.0.1:1"})
+            r = ct_doctor.check_embedding(env=env)
+            self.assertEqual(r.status, ct_doctor.PASS, (key, r.detail))
+            self.assertIn(key, r.detail)
+
     def test_plugin_version_comes_from_plugin_json(self):
         self.assertEqual(ct_doctor._plugin_version(), "0.1.0")
 

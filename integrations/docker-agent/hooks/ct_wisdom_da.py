@@ -799,24 +799,28 @@ def tool_response_transform(payload, view):
             return _recall_dedup(payload, sid, wdir)
         return _skip(view, sid, "ct_tool")
     response = payload.get("tool_response")
-    if payload.get("tool_error"):
-        return _skip(view, sid, "tool_error")
-    if not isinstance(response, str) or ct_wisdom_activity._splice_mode(response) is None:
-        return _skip(view, sid, "unsupported_result")
     store = load_store(wdir, sid)
-    if store is None or store["state"] != "on":
-        return _skip(view, sid, "no_store" if store is None else store["state"])
     use_id = payload.get("tool_use_id")
     use_id = use_id if _nonempty(use_id) else None
-    if use_id is not None and use_id in store["claims"]:
+    if store is not None and use_id is not None and use_id in store["claims"]:
         # A later call for the same tool call (a streamed shell chunk, then
-        # the final result): the same block again, no new claim (P16).
+        # the final result): the same block again, no new claim (P16). Any
+        # call that cannot carry it (an error result, a JSON list, no room)
+        # releases the claim: never shown means never delivered.
         claim = store["claims"][use_id]
-        replay = ct_wisdom_activity.splice(response, claim["block"])
+        replay = None
+        if not payload.get("tool_error") and isinstance(response, str):
+            replay = ct_wisdom_activity.splice(response, claim["block"])
         if replay is None or not _fits(replay):
             return release_claim(view, wdir, sid, use_id)
         return {"hook_specific_output": {"hook_event_name": "tool_response_transform",
                                          "updated_tool_response": replay}}
+    if payload.get("tool_error"):
+        return _skip(view, sid, "tool_error")
+    if not isinstance(response, str) or ct_wisdom_activity._splice_mode(response) is None:
+        return _skip(view, sid, "unsupported_result")
+    if store is None or store["state"] != "on":
+        return _skip(view, sid, "no_store" if store is None else store["state"])
     if not _precheck(response):
         return _skip(view, sid, "near_limit")
     args = payload.get("tool_input")

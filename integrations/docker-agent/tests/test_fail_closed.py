@@ -5,10 +5,12 @@ from __future__ import annotations
 
 import json
 import os
+import time
 import unittest
 
 from _support import Env, FakeCT, fact, llm, patched, prompt, tool, updated_response
 
+import ct_hook_store
 import ct_wisdom_da as da
 
 
@@ -93,14 +95,16 @@ class FailClosedTests(unittest.TestCase):
 
     def test_lock_timeout_is_silent(self):
         self.h(llm("s1"))
-        orig = da.LOCK_WAIT
+        orig = ct_hook_store.LOCK_WAIT
         with da.locked(da.session_path(self.e.wdir, "s1")):
-            da.locked.__defaults__ = (0.05,)
+            ct_hook_store.LOCK_WAIT = 0.05
             try:
+                started = time.monotonic()
                 self.assertIsNone(self.h(tool("s1", args={"path": "src/a.py"})))
                 self.assertIsNone(self.h(prompt("s1", "q")))
+                self.assertLess(time.monotonic() - started, 1.5)
             finally:
-                da.locked.__defaults__ = (orig,)
+                ct_hook_store.LOCK_WAIT = orig
 
     def test_store_write_failure_inserts_nothing(self):
         orig = da.save_store

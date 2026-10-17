@@ -440,7 +440,7 @@ verbose on, a record where noted.
 | `no_payload` | every event | stdin empty or not a JSON object, no `session_id` |
 | `unreadable` | before_llm_call | `messages` not a list of objects → `state = off` for life |
 | `bootstrap_retry` | before_llm_call | transient bootstrap recall failure: stays `pending`, retried (≤ 3 calls) |
-| `store_failed` | before_llm_call | store could not be written → store removed, no insertion |
+| `store_failed` | before_llm_call | store could not be written → store left unchanged, no insertion this call |
 | `no_store` / `pending` | tool events | the session was never scanned |
 | `delivery_off` | every event | `state = off` |
 | `lock_timeout` | any | the store lock was not taken within 2 s |

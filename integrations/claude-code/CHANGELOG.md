@@ -21,6 +21,10 @@ heading format below is load-bearing: `## <version> — <date>`.
   Docker Agent integration (parity-gated). `scripts/ct_wisdom_live.py`
   gains an optional marker-first layout (shared with Hermes; unused here).
   No other behavior change.
+- Fixed: doctor check 6 (`embedding-backend`) now also accepts
+  `EMBED_API_KEY` and `OPENROUTER_API_KEY`, the names the external-embedder
+  contract (check 6b, `ct_env.external_embed_key_var`) uses. A valid
+  OpenRouter setup no longer gets a false "no embedding API key" warning.
 
 ## 0.3.2 — 2026-10-16
 
