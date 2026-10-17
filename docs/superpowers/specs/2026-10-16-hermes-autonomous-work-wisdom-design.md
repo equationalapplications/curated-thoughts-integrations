@@ -191,7 +191,8 @@ relative to it; any other absolute path is reduced to its last two components
 (`parent/name`), so a home directory or user name never leaves the machine. Leading `..`
 components are dropped. Targets are capped at 200 chars.
 *(Superseded for paths and search patterns by the "Privacy amendment (2026-10-16,
-hermes 0.6.2)" section below: the two-component rule leaked user names.)*
+hermes 0.6.2)" and "Privacy amendment 2 (2026-10-16, hermes 0.6.3)" sections below: the
+two-component rule leaked user names.)*
 
 **Self-trigger guard on targets.** A target containing a control character (newline,
 tab), a `ct-fact:` token or a `## Curated Thoughts —` heading gives no activity, so text
@@ -436,8 +437,10 @@ These rules replace the "Paths" paragraph and the `search_files` row above. They
 tighten; every other rule stands. The shared test vectors live in
 `tests/fixtures/activity_targets.json` (`{name, tool, args, cwd, env, expected_query,
 expected_line}`; `cwd` `""` means none, a null `expected_query` means no query); Hermes
-runs them in `tests/tools/test_activity_target_vectors.py`, and the TypeScript port in
-`packages/ct-wisdom-core` adopts the same rules and file.
+runs them in `tests/tools/test_activity_target_vectors.py`. **Requirement for ports:** any
+port of this builder (for example a TypeScript one in `packages/ct-wisdom-core`) MUST run
+`tests/fixtures/activity_targets.json` and pass every vector. No port does so yet.
+R1 and R3 below were tightened again in "Privacy amendment 2".
 
 - **User name.** The folded (NFC, casefolded) values of `USER`, `LOGNAME`, `USERNAME`
   and the basenames of `HOME` / `USERPROFILE`.
@@ -462,6 +465,48 @@ runs them in `tests/tools/test_activity_target_vectors.py`, and the TypeScript p
 Testing adds the shared vectors, a randomized search-pattern test and a randomized path
 test (planted secrets, quotes, assignments, absolute and `~` paths, user names, every
 cwd class), next to the existing 500-command secret-safety test.
+
+## Privacy amendment 2 (2026-10-16, hermes 0.6.3)
+
+A post-merge review of 0.6.2 ran cases through the real code and found that leaks
+remained: colon, flag and bearer forms in search patterns (`password:letmein`,
+`token: hunter2`, `--password hunter2`, `Bearer abc123xyz`), emails, rooted backslash
+paths in patterns (`\ProgramData\corp\secrets.txt`), cwd = HOME layouts
+(`/Users/alice/clients/acme/contract.md` → `clients/acme/contract.md`), Windows
+drive-relative paths (`C:..\Users\alice\x.md` → `C:../x.md`), and user names embedded in
+a component (`notes/alice.txt`). It also found that the user-name filter removed service
+accounts (`node server.js` with `USER=node` gave no activity), and that activity keys
+collided when two paths reduced to the same basename. Every case is a vector in
+`tests/fixtures/activity_targets.json`. These rules replace the matching parts of the
+first amendment:
+
+- **User name.** As before, minus service accounts (`root`, `node`, `app`, `user`,
+  `admin`, `test`, `ubuntu`, `runner`, `docker`, `www-data`, `nobody`, `daemon`,
+  `ec2-user`, `vscode`, `codespace`) and any name shorter than 3 chars. A component that
+  **contains** a user name (folded substring: `alice.txt`, `alice-notes.md`,
+  `alice@corp`) is dropped, and so is `Users`/`home` before one.
+- **R1 (cwd).** A cwd counts only when it is strictly inside HOME (any depth below it),
+  or else at depth ≥ 2 and neither HOME, nor an ancestor of HOME, nor a
+  `/Users/<x>` / `/home/<x>` home directory. HOME itself no longer counts.
+- **Which cwd.** Hermes's hook payload carries no cwd. [V] It does pass `task_id`, and
+  Hermes resolves file-tool paths against the task's cwd override, then the session's
+  recorded cwd (`tools/terminal_tool.py::get_session_cwd`, `resolve_task_overrides`;
+  used by `tools/file_tools.py::_create_terminal_env_for_file_ops` at `ee8dd6c8`), then
+  `TERMINAL_CWD`. The plugin uses the same order and falls back to the gateway's
+  `os.getcwd()`. It reads `tools.terminal_tool` only if Hermes has already imported it.
+- **R2 (paths).** Drive-relative (`C:foo.md`, `C:..\x`) and rooted backslash (`\etc\x`)
+  paths count as absolute, so they are reduced to their basename.
+- **R3 (search patterns), now an allowlist.** A pattern is sent only when every char is
+  an ASCII letter, digit, `_`, `.`, `-`, a space or a non-ASCII letter (Unicode category
+  L*, checked on the NFC form); it is at most 80 chars (longer is refused, not cut) and
+  at most 6 words; no word starts with `-`, is credential-shaped or contains a user name;
+  and it does not contain `bearer`, `token`, `password`, `passwd`, `secret`, `apikey`,
+  `api_key`, `api-key`, `api key` or `auth` anywhere (case-insensitive). Anything else
+  sends no query. Paths and regexes in patterns (`src/billing`, `\w+`) are no longer sent.
+- **Keys.** The activity key (local de-duplication only, never sent or logged) uses a
+  digest of the full local path, resolved against the cwd. So `/srv/a/README.md` and
+  `/srv/b/README.md` are different keys even though both queries are `README.md`.
+- **Hot path.** `user_names` and `valid_cwd` are computed once per `activity_for` call.
 
 ## Alignment with INTENT.md
 
@@ -488,7 +533,7 @@ cwd class), next to the existing 500-command secret-safety test.
 - **User decisions 1–7:** decision 1 → "Rate rule"; 2 → "Activity line builder" and the
   secret-safety tests; 3 and 4 → "Subagents and scheduled runs"; 5 → constants; 6 → this
   spec; 7 → `ct_tool` class.
-- **Privacy amendment:** serves "Why this repo exists" (CT is private and local-first):
+- **Privacy amendments 1 and 2:** serve "Why this repo exists" (CT is private and local-first):
   the query names the work, never the person or their directory layout. It only removes
   what is sent; relevance stays CT's (rule 8), limits are unchanged (rule 6), and an
   activity that cannot be sent safely fails quietly with no query (rule 4).
