@@ -20,7 +20,7 @@
  */
 
 import { createHash } from 'node:crypto';
-import { lstatSync, opendirSync, readlinkSync, realpathSync } from 'node:fs';
+import { lstatSync, opendirSync, readlinkSync, realpathSync, statSync } from 'node:fs';
 import { homedir, userInfo } from 'node:os';
 import nodePath from 'node:path';
 import { performance } from 'node:perf_hooks';
@@ -83,15 +83,10 @@ const VERB_CLASS: Record<ActivityVerb, string> = {
 const ELLIPSIS = '…';
 /** Never used as a target: our own block text (self-trigger guard). */
 const OWN_TEXT = ['ct-fact:', '## Curated Thoughts —'];
-const WORD_RE = /^[A-Za-z0-9._][A-Za-z0-9._/-]{0,39}$/;
 const ASSIGN_RE = /^[A-Za-z_][A-Za-z0-9_]*=/;
 const KEY_PREFIXES = ['sk-', 'sk_', 'pk_', 'rk_', 'ghp_', 'gho_', 'ghs_', 'ghu_', 'github_pat_',
   'xox', 'akia', 'asia', 'aiza', 'glpat-', 'eyj'];
 const OPERATOR_CHARS = new Set([';', '|', '&', '<', '>', '(', ')', '`']);
-/** Programs whose first argument is free text or a value: keep only the name. */
-const FREE_TEXT_PROGRAMS = new Set(['echo', 'printf', 'export', 'set', 'unset', 'alias', 'eval',
-  'exec', 'env', 'sudo', 'su', 'doas', 'ssh', 'scp', 'curl', 'wget', 'http', 'https', 'nc',
-  'telnet', 'openssl', 'gpg', 'pass', 'security', 'op', 'vault']);
 // eslint-disable-next-line no-control-regex
 const CONTROL_RE = /[\x00-\x1f\x7f]/;
 const PYTHON_RE = /^python[0-9.]*$/;
@@ -113,10 +108,6 @@ export function credentialShaped(token: string): boolean {
   let digits = 0;
   for (const ch of token) if (ch >= '0' && ch <= '9') digits++;
   return [...token].length >= 16 && digits >= 3;
-}
-
-function safeWord(token: unknown): boolean {
-  return typeof token === 'string' && WORD_RE.test(token) && !credentialShaped(token);
 }
 
 function cleanTarget(value: unknown): string | null {
@@ -191,9 +182,79 @@ const HOMES_PARENTS = new Set(['users', 'home', 'profiles']);
 /** `/<host>/home` homes locations (Fedora Silverblue, NFS, Solaris, NAS). */
 const HOMES_HOSTS = new Set(['var', 'nfs', 'export', 'data']);
 /** P3 command allowlist. */
-const PROGRAM_RE = /^[A-Za-z0-9][A-Za-z0-9._+-]{0,40}$/;
+/** A program is a bare command name: no path separator, no dot (`python3.11` is the one dotted form). */
+const PROGRAM_RE = /^[A-Za-z0-9][A-Za-z0-9_+-]{0,40}$/;
 const SUBCOMMAND_RE = /^[a-z][a-z0-9-]{0,30}$/;
 const MODULE_RE = /^[a-z_][a-z0-9_.]{0,60}$/;
+const verbs = (...words: string[]): ReadonlySet<string> => new Set(words);
+const MAKE_TARGETS = verbs('build', 'test', 'lint', 'fmt', 'format', 'check', 'clean', 'install', 'dev',
+  'run', 'deploy', 'release', 'docs', 'all');
+const JS_VERBS = verbs('install', 'i', 'ci', 'add', 'remove', 'rm', 'uninstall', 'run', 'run-script', 'test',
+  't', 'start', 'build', 'dev', 'lint', 'exec', 'dlx', 'x', 'create', 'init', 'publish', 'pack', 'update',
+  'upgrade', 'up', 'outdated', 'audit', 'ls', 'list', 'link', 'why', 'version', 'info', 'workspace', 'workspaces');
+const DOCKER_VERBS = verbs('build', 'run', 'ps', 'images', 'pull', 'push', 'exec', 'logs', 'compose', 'stop',
+  'start', 'restart', 'rm', 'rmi', 'inspect', 'tag', 'login', 'logout', 'network', 'volume', 'system', 'buildx',
+  'container', 'image', 'cp', 'kill', 'top', 'stats', 'version', 'info');
+const APT_VERBS = verbs('install', 'remove', 'purge', 'update', 'upgrade', 'search', 'list', 'show', 'info',
+  'autoremove', 'reinstall', 'check', 'makecache');
+/** P3b: tools with subcommands, each with its known verbs (Hermes `_SUBCOMMAND_TOOLS`). */
+const SUBCOMMAND_TOOLS: Record<string, ReadonlySet<string>> = {
+  git: verbs('add', 'am', 'apply', 'bisect', 'blame', 'branch', 'checkout', 'cherry-pick', 'clean', 'clone',
+    'commit', 'config', 'describe', 'diff', 'fetch', 'grep', 'init', 'log', 'merge', 'mv', 'pull', 'push',
+    'rebase', 'reflog', 'remote', 'reset', 'restore', 'revert', 'rm', 'show', 'stash', 'status', 'submodule',
+    'switch', 'tag', 'worktree', 'lfs', 'gc', 'shortlog', 'notes', 'range-diff', 'sparse-checkout'),
+  npm: JS_VERBS, pnpm: JS_VERBS, yarn: JS_VERBS, bun: JS_VERBS,
+  cargo: verbs('build', 'b', 'check', 'c', 'test', 't', 'run', 'r', 'bench', 'doc', 'fmt', 'clippy', 'add',
+    'remove', 'update', 'publish', 'install', 'new', 'init', 'clean', 'tree', 'fix', 'metadata', 'search',
+    'nextest'),
+  go: verbs('build', 'test', 'run', 'mod', 'get', 'install', 'vet', 'fmt', 'generate', 'env', 'list', 'work',
+    'tool', 'clean', 'doc', 'version'),
+  docker: DOCKER_VERBS, podman: DOCKER_VERBS,
+  kubectl: verbs('get', 'describe', 'apply', 'delete', 'logs', 'exec', 'rollout', 'scale', 'port-forward',
+    'config', 'create', 'edit', 'top', 'diff', 'explain', 'label', 'annotate', 'patch', 'cp', 'auth', 'version',
+    'cluster-info'),
+  helm: verbs('install', 'upgrade', 'uninstall', 'list', 'repo', 'template', 'lint', 'package', 'dependency',
+    'status', 'rollback', 'pull', 'push', 'show', 'search', 'test', 'history', 'version'),
+  gh: verbs('pr', 'issue', 'repo', 'run', 'workflow', 'release', 'api', 'auth', 'browse', 'search', 'status',
+    'gist', 'label', 'secret', 'variable', 'cache', 'codespace', 'extension', 'project', 'ruleset'),
+  pip: verbs('install', 'uninstall', 'list', 'freeze', 'show', 'download', 'wheel', 'check', 'config', 'cache',
+    'index', 'inspect', 'hash', 'search'),
+  pipx: verbs('install', 'uninstall', 'run', 'list', 'upgrade', 'upgrade-all', 'inject', 'reinstall', 'ensurepath'),
+  uv: verbs('run', 'sync', 'add', 'remove', 'lock', 'pip', 'venv', 'tool', 'init', 'build', 'publish', 'python',
+    'tree', 'export', 'cache', 'self'),
+  poetry: verbs('install', 'add', 'remove', 'update', 'lock', 'run', 'build', 'publish', 'shell', 'show', 'init',
+    'new', 'check', 'env', 'export', 'version', 'config'),
+  conda: verbs('install', 'create', 'activate', 'deactivate', 'list', 'update', 'remove', 'env', 'run', 'info',
+    'search', 'clean', 'config'),
+  brew: verbs('install', 'uninstall', 'reinstall', 'upgrade', 'update', 'list', 'search', 'info', 'services',
+    'tap', 'untap', 'doctor', 'cleanup', 'outdated', 'bundle', 'link', 'unlink', 'pin', 'unpin', 'deps'),
+  apt: APT_VERBS, 'apt-get': APT_VERBS, dnf: APT_VERBS, yum: APT_VERBS,
+  terraform: verbs('init', 'plan', 'apply', 'destroy', 'validate', 'fmt', 'output', 'state', 'import',
+    'workspace', 'show', 'providers', 'refresh', 'taint', 'untaint', 'graph', 'console', 'login', 'version'),
+  dotnet: verbs('build', 'test', 'run', 'restore', 'publish', 'new', 'add', 'pack', 'clean', 'format', 'watch',
+    'tool', 'sln', 'list', 'remove', 'nuget', 'ef'),
+  mvn: verbs('clean', 'compile', 'test', 'package', 'install', 'verify', 'deploy', 'site', 'validate', 'dependency'),
+  gradle: verbs('build', 'test', 'clean', 'assemble', 'check', 'run', 'tasks', 'dependencies', 'publish',
+    'bootrun', 'jar', 'lint'),
+  make: MAKE_TARGETS, just: MAKE_TARGETS, rake: MAKE_TARGETS,
+  bundle: verbs('install', 'exec', 'update', 'add', 'remove', 'list', 'show', 'outdated', 'check', 'init',
+    'config', 'lock'),
+  rails: verbs('server', 's', 'console', 'c', 'generate', 'g', 'destroy', 'd', 'db', 'test', 'new', 'routes',
+    'runner', 'credentials', 'assets'),
+  mix: verbs('test', 'compile', 'run', 'format', 'deps', 'new', 'release', 'clean', 'credo', 'dialyzer', 'ecto'),
+  dart: verbs('run', 'test', 'compile', 'pub', 'analyze', 'format', 'create', 'fix', 'doc', 'info'),
+  flutter: verbs('run', 'test', 'build', 'pub', 'analyze', 'format', 'create', 'doctor', 'clean', 'upgrade',
+    'devices', 'install', 'attach'),
+  swift: verbs('build', 'test', 'run', 'package', 'format'),
+  deno: verbs('run', 'test', 'fmt', 'lint', 'task', 'compile', 'bench', 'check', 'install', 'info', 'doc',
+    'serve', 'add', 'remove', 'upgrade'),
+  nx: verbs('run', 'build', 'test', 'lint', 'serve', 'affected', 'graph', 'run-many', 'generate', 'g', 'show',
+    'release', 'format', 'migrate'),
+  turbo: verbs('run', 'build', 'test', 'lint', 'dev', 'prune', 'ls', 'daemon', 'login', 'link', 'gen'),
+};
+/** P3c: `python -m` modules always sent (else only a module inside the project). */
+const PYTHON_MODULES = verbs('pytest', 'pip', 'venv', 'http.server', 'unittest', 'black', 'ruff', 'mypy',
+  'build', 'twine');
 /** Path components are case-folded only where filesystems usually ignore case. */
 const CASE_INSENSITIVE = process.platform === 'darwin' || process.platform === 'win32';
 const GIT_BASH_RE = /^\/([A-Za-z])(?:\/(.*))?$/s;
@@ -202,6 +263,17 @@ const NAME_TOKEN_RE = /[\p{L}\p{N}]+/gu;
 
 const sln = new Map<string, { at: number; found: boolean }>();
 const roots = new Map<string, { at: number; root: string | null }>();
+const HOMES_CACHE_TTL_MS = 30_000;
+const HOMES_CACHE_MAX = 16;
+interface Homes {
+  /** Every home, normalized and canonical: each is never a root. */
+  all: string[];
+  /** Canonical homes only. */
+  real: string[];
+  /** Real user homes, which also block every ancestor. */
+  blocking: string[];
+}
+const homesCache = new Map<string, { at: number; homes: Homes }>();
 let pwdIdentityCache: { name: string | null; dir: string | null } | null = null;
 
 /** Python-style casefold approximation (lower → upper → lower maps ß to ss). */
@@ -258,8 +330,12 @@ export const activitySeams = {
   fsRoot(directory: string): boolean {
     return nodePath.dirname(directory) === directory;
   },
-  /** (names, homes) of the process: pw_name; homedir() and pw_dir. Never throws. */
-  systemIdentity(): [string[], string[]] {
+  /**
+   * (names, homes, pw_dirs) of the process: the user name; the homes
+   * `homedir()` and the passwd home; and the passwd home alone (a real user
+   * home). Never throws.
+   */
+  systemIdentity(): [string[], string[], string[]] {
     const { name, dir } = pwdIdentity();
     let home: string | null = null;
     try {
@@ -267,7 +343,7 @@ export const activitySeams = {
     } catch {
       home = null;
     }
-    return [name ? [name] : [], [home, dir].filter((h): h is string => !!h)];
+    return [name ? [name] : [], [home, dir].filter((h): h is string => !!h), dir ? [dir] : []];
   },
 };
 
@@ -275,6 +351,7 @@ export const activitySeams = {
 export function resetActivityCaches(): void {
   roots.clear();
   sln.clear();
+  homesCache.clear();
   pwdIdentityCache = null;
 }
 
@@ -285,7 +362,7 @@ function homeOf(env: ActivityEnv): string | null {
 }
 
 /** Every home directory string: HOME, USERPROFILE and the process's. */
-function homeValues(env: ActivityEnv, identity: [string[], string[]]): string[] {
+function homeValues(env: ActivityEnv, identity: [string[], string[], string[]]): string[] {
   const values = [envStr(env, 'HOME'), envStr(env, 'USERPROFILE'), ...identity[1]];
   return values.filter((v): v is string => typeof v === 'string' && v.trim() !== '').map((v) => gitBash(v.trim()));
 }
@@ -520,18 +597,52 @@ function stopDir(directory: string): boolean {
   return fold(nodePath.basename(directory)) === 'mnt' && activitySeams.fsRoot(parent);
 }
 
-/** A stop directory, any home directory or any ancestor of one. */
-function blocked(directory: string, homes: string[]): boolean {
+function same(a: string, b: string): boolean {
+  return foldPath(a) === foldPath(b);
+}
+
+/**
+ * The home directories, cached per (HOME, USERPROFILE, process homes): `all`
+ * (normalized and canonical; each is never a root), `real` (canonical) and
+ * `blocking`, the real user homes that also block every ancestor: a home
+ * inside a known homes location, or the passwd home. A HOME elsewhere (a
+ * sandbox or Nix HOME inside a project) blocks only itself.
+ */
+function homesOf(env: ActivityEnv): Homes {
+  const identity = activitySeams.systemIdentity();
+  const key = JSON.stringify([envStr(env, 'HOME'), envStr(env, 'USERPROFILE'), identity[1], identity[2]]);
+  const now = performance.now();
+  const hit = lruGet(homesCache, key);
+  if (hit !== undefined && now - hit.at < HOMES_CACHE_TTL_MS) return hit.homes;
+  const values = homeValues(env, identity).filter((v) => nodePath.isAbsolute(v));
+  const pwDirs = identity[2].filter((v) => nodePath.isAbsolute(v)).map((v) => canon(v)).filter((c): c is string => !!c);
+  const realHomes: string[] = [];
+  const blocking: string[] = [];
+  for (const v of values) {
+    const logical = normp(v);
+    const c = canon(v);
+    if (c) realHomes.push(c);
+    const isUserHome = homesLocation(nodePath.dirname(logical))
+      || (!!c && (homesLocation(nodePath.dirname(c)) || pwDirs.some((p) => same(c, p))));
+    if (isUserHome) blocking.push(...[logical, c].filter((f): f is string => !!f));
+  }
+  const homes: Homes = { all: [...realHomes, ...values.map((v) => normp(v))], real: realHomes, blocking };
+  lruSet(homesCache, key, { at: now, homes }, HOMES_CACHE_MAX);
+  return homes;
+}
+
+/** A stop directory, any home in `homes`, or any ancestor of a home in `blocking`. */
+function blocked(directory: string, homes: string[], blocking: string[]): boolean {
   if (stopDir(directory)) return true;
-  const folded = foldPath(directory);
-  return homes.some((h) => folded === foldPath(h) || below(h, directory) !== null);
+  if (homes.some((h) => same(directory, h))) return true;
+  return blocking.some((h) => below(h, directory) !== null);
 }
 
 /** Nearest ancestor-or-self of `start` holding a marker, stopping at the first blocked directory. */
-function findRoot(start: string, homes: string[]): string | null {
+function findRoot(start: string, homes: string[], blockingHomes: string[]): string | null {
   const chain: string[] = [];
   let directory = start;
-  while (!blocked(directory, homes)) {
+  while (!blocked(directory, homes, blockingHomes)) {
     chain.push(directory);
     const parent = nodePath.dirname(directory);
     if (parent === directory) break;
@@ -559,19 +670,20 @@ function canon(path: string): string | null {
  * 30 s, or 2 s for "no root") on the raw cwd and HOME / USERPROFILE strings;
  * filesystem metadata checks only, never a subprocess.
  */
-export function projectRoot(cwd: unknown, env: ActivityEnv = process.env): string | null {
+export function projectRoot(cwd: unknown, env: ActivityEnv = process.env, start0?: string | null): string | null {
   const key = JSON.stringify([cwd ?? null, envStr(env, 'HOME'), envStr(env, 'USERPROFILE')]);
   const now = performance.now();
   const hit = lruGet(roots, key);
   if (hit !== undefined && now - hit.at < (hit.root ? ROOT_CACHE_TTL_MS : ROOT_NEGATIVE_TTL_MS)) return hit.root;
   let root: string | null = null;
-  const start = absCwd(cwd, env);
+  const start = start0 === undefined || start0 === null ? absCwd(cwd, env) : start0;
   if (start !== null) {
-    const values = homeValues(env, activitySeams.systemIdentity()).filter((v) => nodePath.isAbsolute(v));
-    const realHomes = values.map((v) => canon(v)).filter((h): h is string => !!h);
-    const found = findRoot(normp(start), [...realHomes, ...values.map((v) => normp(v))]);
+    const homes = homesOf(env);
+    // Walk the logical path (symlinks NOT resolved); then every stop rule
+    // applies again to the real root, against the real homes.
+    const found = findRoot(normp(start), homes.all, homes.blocking);
     root = found ? canon(found) : null;
-    if (root !== null && blocked(root, realHomes)) root = null;
+    if (root !== null && blocked(root, homes.real, homes.blocking)) root = null;
   }
   lruSet(roots, key, { at: now, root }, ROOT_CACHE_MAX);
   return root;
@@ -607,7 +719,7 @@ function resolvePath(raw0: string, cwd: unknown, env: ActivityEnv, names: Set<st
   }
   if (path === null || (base === null && !nodePath.isAbsolute(path))) return [null, false, digest(raw)];
   const joinedPy = base ? pyJoin(base, path) : path;
-  const root = base ? projectRoot(cwd, env) : null;
+  const root = base ? projectRoot(cwd, env, base) : null;
   if (root === null) return [null, false, digest(normp(joinedPy))];
   const full = canon(joinedPy);
   const local = digest(full ?? joinedPy);
@@ -629,9 +741,29 @@ export function normalizePath(raw: unknown, cwd?: string | null, env: ActivityEn
   return resolvePath(cleaned, cwd, env, userNames(env))[0];
 }
 
-/** P3: a subcommand may be sent (plain verb-like word, not credential-shaped, no name). */
-export function wordCheck(word: string, names: Set<string>): boolean {
-  return SUBCOMMAND_RE.test(word) && !credentialShaped(word) && !nameHit(word, names);
+/** P3: a subcommand may be sent (a plain verb, in `verbs` when given, not credential-shaped, no name). */
+export function wordCheck(word: string, names: Set<string>, verbsOf?: ReadonlySet<string>): boolean {
+  return SUBCOMMAND_RE.test(word) && (verbsOf === undefined || verbsOf.has(word))
+    && !credentialShaped(word) && !nameHit(word, names);
+}
+
+/** `module`'s top package resolves inside the project root (a package dir or `.py` at the root or under `src/`). */
+function projectModule(module: string, root: string | null): boolean {
+  if (!root) return false;
+  const top = module.split('.', 1)[0];
+  for (const base of [root, nodePath.join(root, 'src')]) {
+    try {
+      if (statSync(nodePath.join(base, top)).isDirectory()) return true;
+    } catch {
+      /* absent */
+    }
+    try {
+      if (statSync(nodePath.join(base, `${top}.py`)).isFile()) return true;
+    } catch {
+      /* absent */
+    }
+  }
+  return false;
 }
 
 /**
@@ -698,16 +830,27 @@ function tokens(command: string): string[] {
 }
 
 /**
- * Program plus subcommand of the first simple command (decision 2, P3
- * allowlist), or null. The program (basename of the first word) must match
- * `^[A-Za-z0-9][A-Za-z0-9._+-]{0,40}$`, not be credential-shaped and not
- * name the user, or there is no query. The subcommand is the word right
- * after the program, never a flag's value, and is sent only when it is a
- * plain verb-like word (`wordCheck`); `python -m <module>` sends a module
- * matching `^[a-z_][a-z0-9_.]{0,60}$`. Otherwise the program alone: never a
- * path, a dot or a file name.
+ * P3 (hermes 0.6.6, Privacy amendment 5): the program, plus a known
+ * subcommand for a known subcommand tool, or null.
+ *
+ * - The first word must be a bare command: no path separator, `~` or `:`,
+ *   and no dot (scripts are never sent; `python3.11` is the one dotted
+ *   form); it matches `^[A-Za-z0-9][A-Za-z0-9_+-]{0,40}$`, is not
+ *   credential-shaped and does not name the user. Otherwise no query.
+ * - For a program in SUBCOMMAND_TOOLS, the next word is sent when it is in
+ *   that tool's verb list (for make/just/rake, a common target) and passes
+ *   `wordCheck`. Every other program is sent alone (`rm`, `cat`, `cd`, ...).
+ * - `python -m <module>` sends the module when it is a known module or one
+ *   whose top package is inside the project root (`root()`, looked up only
+ *   then), and passes the name check.
+ * A name in a subcommand or module sends the program alone.
  */
-export function commandTarget(command: unknown, env: ActivityEnv = process.env, names?: Set<string>): string | null {
+export function commandTarget(
+  command: unknown,
+  env: ActivityEnv = process.env,
+  names?: Set<string>,
+  root?: () => string | null,
+): string | null {
   const cleaned = cleanTarget(command);
   if (cleaned === null) return null;
   const nm = names ?? userNames(env);
@@ -718,16 +861,25 @@ export function commandTarget(command: unknown, env: ActivityEnv = process.env, 
   }
   while (words.length > 0 && ASSIGN_RE.test(words[0])) words = words.slice(1);
   if (words.length === 0) return null;
-  const program = basename(words[0].replace(/\\/g, '/'));
-  if (!PROGRAM_RE.test(program) || credentialShaped(program) || nameHit(program, nm)) return null;
-  if (FREE_TEXT_PROGRAMS.has(program.toLowerCase())) return program;
+  const program = words[0];
+  if ([...'/\\:~'].some((ch) => program.includes(ch))) return null;
+  if (!(PROGRAM_RE.test(program) || PYTHON_RE.test(program))) return null;
+  if (credentialShaped(program) || nameHit(program, nm)) return null;
   const rest = words.slice(1);
-  if (PYTHON_RE.test(program) && rest[0] === '-m') {
-    const module = rest[1] ?? '';
-    if (MODULE_RE.test(module) && !credentialShaped(module) && !nameHit(module, nm)) return `${program} ${module}`;
+  if (PYTHON_RE.test(program)) {
+    if (rest[0] === '-m' && rest.length > 1) {
+      const module = rest[1];
+      if (MODULE_RE.test(module) && !credentialShaped(module) && !nameHit(module, nm)
+        && (PYTHON_MODULES.has(module) || projectModule(module, root ? root() : null))) {
+        return `${program} ${module}`;
+      }
+    }
     return program;
   }
-  if (rest.length > 0 && wordCheck(rest[0], nm)) return `${program} ${rest[0]}`;
+  const known = Object.prototype.hasOwnProperty.call(SUBCOMMAND_TOOLS, program.toLowerCase())
+    ? SUBCOMMAND_TOOLS[program.toLowerCase()]
+    : undefined;
+  if (known !== undefined && rest.length > 0 && wordCheck(rest[0], nm, known)) return `${program} ${rest[0]}`;
   return program;
 }
 
@@ -748,7 +900,7 @@ export function buildActivity(
   if (!['read', 'write', 'edit', 'search', 'run'].includes(spec.verb)) return null;
   const names = userNames(env);
   if (spec.verb === 'run') {
-    const target = commandTarget(spec.command, env, names);
+    const target = commandTarget(spec.command, env, names, () => projectRoot(cwd, env));
     return target === null ? null : { verb: 'run', target, key: `run\u0000${target}`, line: `run ${target}`, query: target };
   }
   const pathOf = (value: unknown): [string | null, boolean, string | null] => {

@@ -28,8 +28,11 @@
       homes locations are never a root. Files outside a project get no
       autonomous-work wisdom;
     - nothing that names you is sent (your user name, also inside a word);
-    - a command sends its program plus a plain subcommand (`pnpm test`,
-      `git rebase`) or a `python -m` module, never a path or file name;
+    - a command sends only a bare program name (`rm`, `cat`, `pytest`; a
+      script or a path as the program sends nothing), plus a known verb for
+      known subcommand tools (`pnpm test`, `git rebase`, `make build`) or a
+      known or in-project `python -m` module; never a path or file name
+      (the hermes 0.6.6 command rules);
     - a search pattern is sent only when it is plain words (letters,
       digits, `_`, `.`, `-`; at most 6 words and 80 characters) with no
       auth word such as `token` or `password`.

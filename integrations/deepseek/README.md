@@ -106,8 +106,10 @@ relevant fact per model step, keyed to what it is doing
     `*.sln`. Your home directory and its parents, `/`, `/Users`, `/home`
     and other homes locations are never a root. Files outside a project get
     nothing; to opt a folder in, add an empty `.curated-thoughts-project`;
-  - a command's program plus a plain subcommand (`pnpm test`,
-    `git rebase`) or a `python -m` module; never a path or file name;
+  - a command's bare program name only (`rm`, `cat`, `pytest`; a script
+    or a path as the program sends nothing), plus a known verb for known
+    subcommand tools (`pnpm test`, `git rebase`, `make build`) or a known or
+    in-project `python -m` module; never a path or file name;
   - a search pattern made of plain words (letters, digits, `_`, `.`, `-`;
     at most 6 words and 80 characters) with no auth word such as `token`
     or `password`.

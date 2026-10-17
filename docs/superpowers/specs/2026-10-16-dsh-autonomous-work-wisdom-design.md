@@ -447,6 +447,14 @@ rule; opencode and openclaw get patch bumps for it.
   the query (guarantee 2 keeps the superseded one out), and it is delivered like any fact. Rendering
   differences that remain from before (TS lists every `supersedes` id in a correction's title and puts
   entries before corrections; Hermes lists only ids in context, corrections first) change no ids.
+- **Line builder synced to hermes 0.6.6** ("Privacy amendment 5"): the command builder (one isolated
+  `commandTarget`) now sends a bare program only (no path separator, `~`, `:` or dot, `python3.11` the
+  one dotted form, else no query), a subcommand only for the known subcommand tools and their verbs
+  (make/just/rake: the common targets), and a `python -m` module only when known or a top package in the
+  project (root looked up lazily); a HOME blocks its ancestors only when it is a real user home (a
+  homes-location child or the passwd home, `os.userInfo().homedir`); the canonical homes are cached. The
+  core suite runs all 240 shared vectors, each case in its own world at the same path, with the
+  `key_distinct_from` pairs built as (case, other, case). A later 0.6.7 re-sync is pending.
 - **Line builder synced to hermes 0.6.5** ("Privacy amendment 4: project-root allowlist", which
   supersedes the path rules below): a path is sent only relative to a project root it resolves inside
   of (marker walk on the logical cwd, real-root re-check of every stop rule, homes locations, `/mnt`

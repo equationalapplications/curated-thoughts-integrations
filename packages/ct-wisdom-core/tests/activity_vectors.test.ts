@@ -65,13 +65,15 @@ function spec(tool: string, args: Record<string, unknown>): ActivitySpec | null 
 
 const savedSeams = { ...activitySeams };
 
+/** One case's fake filesystem under a directory that models `/`. */
 class World {
   readonly tmp: string;
   symlinksOk = true;
 
-  constructor(...cases: Vector[]) {
-    this.tmp = realpathSync(mkdtempSync(nodePath.join(tmpdir(), 'ct-activity-')));
-    for (const c of cases) for (const entry of c.fs) this.create(entry);
+  constructor(c: Vector, tmp: string) {
+    mkdirSync(tmp, { recursive: true });
+    this.tmp = realpathSync(tmp);
+    for (const entry of c.fs) this.create(entry);
   }
 
   map(value: unknown): unknown {
@@ -117,10 +119,8 @@ class World {
     const args = { ...c.args };
     if (typeof args.path === 'string') args.path = this.map(args.path);
     const tmp = this.tmp;
-    const identity: [string[], string[]] = [
-      c.system_user ? [c.system_user] : [],
-      c.system_home ? [this.map(c.system_home) as string] : [],
-    ];
+    const home = c.system_home ? [this.map(c.system_home) as string] : [];
+    const identity: [string[], string[], string[]] = [c.system_user ? [c.system_user] : [], home, home];
     activitySeams.fsRoot = (d: string) => d === tmp || !d.startsWith(tmp + nodePath.sep);
     activitySeams.systemIdentity = () => identity;
     resetActivityCaches();
@@ -138,13 +138,26 @@ class World {
   }
 }
 
+/**
+ * Build each case in its own world, one after the other, at the SAME path
+ * under one temp dir (Hermes `build`): no cross-talk between `fs` lists, and
+ * keys (digests of full paths) stay comparable.
+ */
 function buildIn(...cases: Vector[]): { tmp: string; built: Array<Activity | null> | null } {
-  const world = new World(...cases);
+  const parent = mkdtempSync(nodePath.join(tmpdir(), 'ct-activity-'));
+  const built: Array<Activity | null> = [];
+  let tmp = '';
   try {
-    if (!world.symlinksOk) return { tmp: world.tmp, built: null };
-    return { tmp: world.tmp, built: cases.map((c) => world.build(c)) };
+    for (const c of cases) {
+      const world = new World(c, nodePath.join(parent, 'w'));
+      tmp = world.tmp;
+      if (!world.symlinksOk) return { tmp, built: null };
+      built.push(world.build(c));
+      world.close();
+    }
+    return { tmp, built };
   } finally {
-    world.close();
+    rmSync(parent, { recursive: true, force: true });
   }
 }
 
@@ -153,10 +166,10 @@ afterEach(() => {
   resetActivityCaches();
 });
 
-describe('shared activity-target vectors (Hermes parity, privacy amendment 4)', () => {
+describe('shared activity-target vectors (Hermes parity, privacy amendments 4 and 5)', () => {
   it('the vector file has the documented shape', () => {
     const cases = load();
-    expect(cases.length).toBeGreaterThanOrEqual(206);
+    expect(cases.length).toBeGreaterThanOrEqual(240);
     const names = cases.map((c) => c.name);
     expect(new Set(names).size).toBe(names.length);
     const fields = ['name', 'tool', 'args', 'cwd', 'env', 'fs', 'expected_query', 'expected_line'];
@@ -197,9 +210,10 @@ describe('shared activity-target vectors (Hermes parity, privacy amendment 4)', 
     let checked = 0;
     for (const c of cases.values()) {
       if (!c.key_distinct_from) continue;
-      const { built } = buildIn(c, cases.get(c.key_distinct_from)!);
+      const { built } = buildIn(c, cases.get(c.key_distinct_from)!, c);
       expect(built, c.name).not.toBeNull();
-      const [a, b] = built!;
+      const [a, b, again] = built!;
+      expect(a!.key, `${c.name}: keys are comparable across worlds`).toBe(again!.key);
       expect(activityQuery(a!), c.name).toBe(activityQuery(b!));
       expect(a!.key, c.name).not.toBe(b!.key);
       checked++;

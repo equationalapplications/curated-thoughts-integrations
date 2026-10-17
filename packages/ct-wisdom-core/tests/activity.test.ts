@@ -99,7 +99,7 @@ function act(tool: string, args: unknown, cwd: string = PROJ): Activity | null {
   return spec === null ? null : buildActivity(spec, cwd, ENV);
 }
 
-/** Commands and searches (P3 / P4); paths are covered by the shared vectors. */
+/** Commands (hermes 0.6.6 P3) and searches (P4); paths are covered by the shared vectors. */
 const CASES: Array<[string, Record<string, unknown>, string, string]> = [
   ['read_file', { path: 'src/billing/invoice.py' }, 'read src/billing/invoice.py', 'src/billing/invoice.py'],
   ['write_file', { path: './a/b.py', content: 'SECRET_CONTENT' }, 'write a/b.py', 'a/b.py'],
@@ -112,7 +112,7 @@ const CASES: Array<[string, Record<string, unknown>, string, string]> = [
   ['terminal', { command: 'API_KEY=sk-123 python deploy.py --token x' }, 'run python', 'python'],
   ['terminal', { command: "curl -H 'Authorization: Bearer x' https://h" }, 'run curl', 'curl'],
   ['terminal', { command: "git commit -m 'msg SECRET'" }, 'run git commit', 'git commit'],
-  ['terminal', { command: '/usr/local/bin/python3 -m pytest' }, 'run python3 pytest', 'python3 pytest'],
+  ['terminal', { command: 'python3 -m pytest' }, 'run python3 pytest', 'python3 pytest'],
   ['terminal', { command: 'cat .env.local | grep KEY' }, 'run cat', 'cat'],
   ['terminal', { command: 'echo sk-live-abcdef' }, 'run echo', 'echo'],
   ['terminal', { command: 'export TOKEN=abc && make' }, 'run export', 'export'],
@@ -120,7 +120,11 @@ const CASES: Array<[string, Record<string, unknown>, string, string]> = [
   ['terminal', { command: 'psql -W secretpw' }, 'run psql', 'psql'],
   ['terminal', { command: 'deploy --token abcsecret' }, 'run deploy', 'deploy'],
   ['terminal', { command: 'git -C somedir status' }, 'run git', 'git'],
-  ['terminal', { command: 'python -m mypkg.cli --key v' }, 'run python mypkg.cli', 'python mypkg.cli'],
+  ['terminal', { command: 'python -m mypkg.cli --key v' }, 'run python', 'python'], // not known, not in the project
+  ['terminal', { command: 'rm divorce-papers' }, 'run rm', 'rm'], // 0.6.6: no subcommand for ordinary programs
+  ['terminal', { command: 'make test' }, 'run make test', 'make test'],
+  ['terminal', { command: 'make secret-target' }, 'run make', 'make'],
+  ['terminal', { command: 'cargo nextest' }, 'run cargo nextest', 'cargo nextest'],
   ['terminal', { command: 'python3.11 -m pytest -q' }, 'run python3.11 pytest', 'python3.11 pytest'],
   ['terminal', { command: 'node -m x' }, 'run node', 'node'],
   ['terminal', { command: 'grep "SecretPassword" app.log' }, 'run grep', 'grep'],
@@ -198,6 +202,25 @@ describe('activity line builder (hermes 0.6.5 rules; the full contract is activi
     expect(act('read_file', { path: 'src/x.py' }, NO_ROOT)).toBeNull(); // no marker anywhere up the walk
     expect(act('read_file', { path: 'a:b.py' })).toBeNull(); // `:` outside a drive prefix
     expect(act('read_file', { path: `src/${'d/'.repeat(120)}f.py` })).toBeNull(); // > 200 chars: never cut
+  });
+
+  it('P3a: a script, a path or a dotted program gives no query', () => {
+    for (const command of ['./acme_export.sh', '/usr/local/bin/python3 -m pytest', '~/bin/tool', 'C:\\x\\y.exe',
+      'acme_export.sh --all', 'node.js x', '../run test']) {
+      expect(act('terminal', { command }), command).toBeNull();
+    }
+    expect(act('terminal', { command: 'python3.11 -m pytest' })!.query).toBe('python3.11 pytest');
+  });
+
+  it('P3c: python -m sends a known module, or one whose top package is in the project', () => {
+    expect(act('terminal', { command: 'python -m http.server 8000' })!.query).toBe('python http.server');
+    expect(act('terminal', { command: 'python -m billing.cli' })!.query).toBe('python');
+    mkdirSync(nodePath.join(PROJ, 'src', 'billing'), { recursive: true });
+    resetActivityCaches();
+    expect(act('terminal', { command: 'python -m billing.cli' })!.query).toBe('python billing.cli');
+    writeFileSync(nodePath.join(PROJ, 'tool.py'), '');
+    expect(act('terminal', { command: 'python -m tool' })!.query).toBe('python tool');
+    expect(act('terminal', { command: 'python -m tool' }, NO_ROOT)!.query).toBe('python'); // no root: not sent
   });
 
   it('P2: a path, a search pattern or a program that names the user gives nothing', () => {

@@ -802,8 +802,10 @@ EOF
   #   5. every activity query CT receives is the bare target, after `--`;
   #   plus verbose mode: the JSONL line for an activity delivery (channel
   #   activity) and the logger notice.
+  # A project root (hermes 0.6.5+ P1): paths are sent only relative to one,
+  # so the work dir carries a `.git` (and a package.json for `pnpm test`).
   W="$HOME/work"
-  mkdir -p "$W"
+  mkdir -p "$W/.git"
   cat >"$W/package.json" <<'EOF'
 {"name": "e2e-work", "version": "1.0.0", "scripts": {"test": "echo all 3 tests passed"}}
 EOF
