@@ -899,6 +899,130 @@ describe('OpenCode host contract', () => {
     },
     TEST_TIMEOUT_MS,
   );
+
+  // Autonomous-work delivery (spec 2026-10-17-opencode-autonomous-work-
+  // wisdom-design.md) on the real binary: the fake provider scripts one tool
+  // call per model step: read an ABSOLUTE in-project path, `ls -la`, `ls -l`
+  // (same key), then `read secrets.env`, which the default ruleset asks for
+  // and `opencode run` auto-rejects. Asserts the [V run] host facts: the
+  // block appended in tool.execute.after reaches the model and persists as
+  // the tool part's state.output; the tool part (callID → messageID) is in
+  // the history while the hook runs (else nothing would be delivered: no
+  // step id); the session directory turns the absolute path into the
+  // project-relative query; a refused call never reaches CT.
+  test(
+    'wisdom autonomous work: tool.execute.after append, once per key, refused calls send nothing',
+    async () => {
+      const sb = makeSandboxTracked('activity');
+      const pkgRoot = join(HERE, '..', '..');
+      if (!existsSync(join(pkgRoot, 'lib', 'src', 'index.js')) || !existsSync(join(pkgRoot, 'lib', 'ct-wisdom-core', 'index.js'))) {
+        throw new Error('built payload missing: run `pnpm run build` (core built first) before the host contract');
+      }
+      const payloadDir = join(sb.dataHome, 'curated-thoughts', 'opencode');
+      cpSync(join(pkgRoot, 'lib'), join(payloadDir, 'lib'), { recursive: true });
+      cpSync(join(pkgRoot, 'package.json'), join(payloadDir, 'package.json'));
+      const loaderPath = join(sb.configHome, 'opencode', 'plugins', 'curated-thoughts.js');
+      mkdirSync(dirname(loaderPath), { recursive: true });
+      writeFileSync(loaderPath, loaderSource(join(payloadDir, 'lib', 'src', 'index.js')));
+      // A project root: paths are sent only relative to one.
+      mkdirSync(join(sb.project, '.git'), { recursive: true });
+      mkdirSync(join(sb.project, 'src'), { recursive: true });
+      writeFileSync(join(sb.project, 'src', 'index.ts'), 'export const x = 1;\n');
+      writeFileSync(join(sb.project, 'secrets.env'), 'TOKEN=not-a-secret\n');
+
+      const stubBin = join(sb.root, 'bin');
+      mkdirSync(stubBin, { recursive: true });
+      cpSync(join(HERE, '..', 'fixtures', 'ct-stub.mjs'), join(stubBin, 'ct'));
+      chmodSync(join(stubBin, 'ct'), 0o755);
+      const ctLog = join(sb.root, 'ct.jsonl');
+      const vlog = join(sb.root, 'verbose.jsonl');
+      const fact = (id: string) => ({ id, title: `Fact ${id}`, text: `The body of ${id}.`, provenance: 'stated' });
+      const extraEnv = {
+        PATH: `${stubBin}${delimiter}${process.env.PATH ?? ''}`,
+        CURATED_BRAIN_DIR: join(sb.root, 'brain'),
+        CT_STUB_LOG: ctLog,
+        CT_STUB_MATCH: '[]',
+        CT_STUB_MATCH_ACTIVITY: JSON.stringify([fact('hc-act-1'), fact('hc-act-2')]),
+        CT_WISDOM_VERBOSE: '1',
+        CT_WISDOM_VERBOSE_LOG: vlog,
+      };
+      writeOpencodeConfig(sb, provider);
+      const absIndex = join(sb.project, 'src', 'index.ts');
+      const script: Array<{ name: string; args: Record<string, unknown> }> = [
+        { name: 'read', args: { filePath: absIndex } },
+        { name: 'bash', args: { command: 'ls -la', description: 'list' } },
+        { name: 'bash', args: { command: 'ls -l', description: 'list again' } },
+        { name: 'read', args: { filePath: 'secrets.env' } },
+      ];
+      providerScript = (body) => {
+        const messages = body.messages ?? [];
+        const firstUser = messages.find((m) => m.role === 'user');
+        if (!firstUser || !textOf(firstUser.content).includes('ACTIVITY_RUN')) return null;
+        const done = messages.filter((m) => m.role === 'tool').length;
+        return script[done] ?? null;
+      };
+      const before = provider.requests.length;
+      let run: RunResult;
+      try {
+        run = await runOpencode(bin, sb, ['run', 'ACTIVITY_RUN: work on the project.'], extraEnv);
+      } finally {
+        providerScript = null;
+      }
+      if (run.exitCode !== 0 || run.timedOut) console.error(`[activity] exit=${run.exitCode}\n${run.stderr.slice(-4000)}`);
+      expect(run.timedOut).toBe(false);
+      expect(run.exitCode).toBe(0);
+
+      const reqs = provider.requests.slice(before).filter((r) => (r.body.messages ?? []).some((m) => m.role === 'user' && textOf(m.content).includes('ACTIVITY_RUN')));
+      const last = reqs.at(-1)!;
+      const toolTexts = (last.body.messages ?? []).filter((m) => m.role === 'tool').map((m) => textOf(m.content));
+      // A refused ask ends `opencode run`'s loop: the model sees the first
+      // three results; the refused call is checked in the export below.
+      expect(toolTexts.length).toBeGreaterThanOrEqual(3);
+      const HEAD = '## Curated Thoughts — relevant to this step';
+      // (1) the read's result carries one block, marker first.
+      expect(countOccurrences(toolTexts[0]!, HEAD)).toBe(1);
+      expect(toolTexts[0]).toContain(`${HEAD}\n_for: read src/index.ts_\n\n<!-- ct-fact:hc-act-1 --> **Fact hc-act-1** (provenance: stated)`);
+      // (2) the first `ls` delivers the next fact; the second `ls` (same key) nothing.
+      expect(toolTexts[1]).toContain('<!-- ct-fact:hc-act-2 -->');
+      expect(countOccurrences(toolTexts[2]!, HEAD)).toBe(0);
+      const all = toolTexts.join('\n');
+      for (const id of ['hc-act-1', 'hc-act-2']) expect(countOccurrences(all, `ct-fact:${id}`), id).toBe(1);
+
+      // (4) CT saw exactly two activity queries: bare, project-relative, last after `--`.
+      const ctCalls = readFileSync(ctLog, 'utf8').split('\n').filter(Boolean).map((l) => (JSON.parse(l) as { argv: string[] }).argv);
+      const act = ctCalls.filter((a) => a[0] === 'wisdom' && a[a.indexOf('--max') + 1] === '1');
+      expect(act.map((a) => a.slice(a.indexOf('--')))).toEqual([['--', 'src/index.ts'], ['--', 'ls']]);
+      expect(act[1]).toContain('--exclude=hc-act-1');
+      expect(JSON.stringify(ctCalls)).not.toContain('secrets.env');
+
+      // (5) persisted: the tool parts' state.output hold the blocks; the refused read errored.
+      const list = await runOpencode(bin, sb, ['session', 'list', '--format', 'json'], extraEnv);
+      const sessions = JSON.parse(list.stdout) as Array<{ id: string }>;
+      const exported = await runOpencode(bin, sb, ['export', sessions[0]!.id], extraEnv);
+      const dump = JSON.parse(exported.stdout.slice(exported.stdout.indexOf('{'))) as {
+        messages: Array<{ parts: Array<{ type: string; tool?: string; state?: { status?: string; output?: string; input?: Record<string, unknown> } }> }>;
+      };
+      const toolParts = dump.messages.flatMap((m) => m.parts.filter((p) => p.type === 'tool'));
+      expect(toolParts.length).toBe(4);
+      expect(toolParts[0]!.state?.output).toContain('<!-- ct-fact:hc-act-1 -->');
+      expect(toolParts[1]!.state?.output).toContain('<!-- ct-fact:hc-act-2 -->');
+      expect(toolParts[3]!.state?.status).toBe('error');
+      expect(JSON.stringify(toolParts[3])).not.toContain(HEAD);
+      expect(toolParts.filter((p) => (p.state?.output ?? '').includes(HEAD)).length).toBe(2);
+
+      // (6) verbose: two activity deliveries, nothing about the refused call.
+      const verbose = readFileSync(vlog, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l) as Record<string, unknown>);
+      const deliveries = verbose.filter((v) => v.channel === 'activity' && v.event === 'delivery');
+      expect(deliveries.map((v) => v.query)).toEqual(['src/index.ts', 'ls']);
+      expect(JSON.stringify(verbose)).not.toContain('secrets.env');
+      record('wisdomActivity', {
+        toolResults: toolTexts.length,
+        activityQueries: act.map((a) => a.at(-1)),
+        refusedReadStatus: toolParts[3]!.state?.status,
+      });
+    },
+    TEST_TIMEOUT_MS,
+  );
 });
 
 function makeSandboxTracked(label: string): Sandbox {

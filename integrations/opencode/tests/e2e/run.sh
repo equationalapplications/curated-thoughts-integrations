@@ -6,6 +6,9 @@
 #
 #   tests/e2e/run.sh                 # live-model step runs if ZAI_API_KEY is set
 #   CT_VERSION=2.12.1 tests/e2e/run.sh
+#   CT_E2E_REAL_GATE=1 tests/e2e/run.sh   # + autonomous-work delivery through
+#                                         #   CT's REAL relevance gate (needs
+#                                         #   OPENROUTER_API_KEY too)
 #
 # The API key is passed by NAME (`-e ZAI_API_KEY`), so it never appears on a
 # command line or in the image. Container artifacts (logs, doctor JSON, the
@@ -55,5 +58,11 @@ chmod 777 "$HERE/out"
 env_args=()
 [ -n "${ZAI_API_KEY:-}" ] && env_args+=(-e ZAI_API_KEY)
 [ -n "${CT_E2E_MODEL:-}" ] && env_args+=(-e CT_E2E_MODEL)
+# Opt-in real relevance gate (see e2e.sh): the embedding key is forwarded
+# ONLY in that mode, by name, so a default run never sees it.
+if [ "${CT_E2E_REAL_GATE:-0}" = 1 ]; then
+  env_args+=(-e CT_E2E_REAL_GATE)
+  [ -n "${OPENROUTER_API_KEY:-}" ] && env_args+=(-e OPENROUTER_API_KEY)
+fi
 # ${env_args[@]+...} — empty-array expansion aborts under set -u on bash 3.2.
 docker run --rm ${env_args[@]+"${env_args[@]}"} -v "$HERE/out:/home/tester/out" "$IMAGE"
