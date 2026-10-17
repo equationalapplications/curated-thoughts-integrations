@@ -27,7 +27,7 @@ class TestSelect(unittest.TestCase):
         entries = ct_ci_discover.select(REPO, base_ref=None, all_=True)
         self.assertEqual(
             {e["id"] for e in entries},
-            {"claude-code", "deepseek", "hermes", "openclaw", "opencode"},
+            {"claude-code", "deepseek", "docker-agent", "hermes", "openclaw", "opencode"},
         )
 
     def test_planned_integrations_are_never_selected(self):
@@ -45,9 +45,9 @@ class TestSelect(unittest.TestCase):
 
     def test_matrix_is_the_flat_os_x_interpreter_cross_product(self):
         entries = ct_ci_discover.select(REPO, base_ref=None, all_=True)
-        # claude-code/deepseek/hermes/opencode: 3 os x 2 interpreters each;
+        # claude-code/deepseek/docker-agent/hermes/opencode: 3 os x 2 interpreters each;
         # openclaw: 3 os x node 24.x (OpenClaw's engine floor is Node 24.16).
-        self.assertEqual(len(entries), 27)
+        self.assertEqual(len(entries), 33)
         oses = ("ubuntu-latest", "macos-latest", "windows-latest")
         triples = {
             "claude-code": {
@@ -119,10 +119,10 @@ class TestCli(unittest.TestCase):
             capture_output=True, text=True, check=True,
         ).stdout
         entries = json.loads(out)
-        self.assertEqual(len(entries), 27)
+        self.assertEqual(len(entries), 33)
         self.assertEqual(
             {e["id"] for e in entries},
-            {"claude-code", "deepseek", "hermes", "openclaw", "opencode"},
+            {"claude-code", "deepseek", "docker-agent", "hermes", "openclaw", "opencode"},
         )
 
 

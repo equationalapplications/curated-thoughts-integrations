@@ -28,8 +28,6 @@ stdin; imported by hooks/session-start.py for the bootstrap.
 
 from __future__ import annotations
 
-import contextlib
-import hashlib
 import json
 import logging
 import os
@@ -39,42 +37,35 @@ import time
 from pathlib import Path
 
 # Same self-location rule as session-start.py: never read CLAUDE_PLUGIN_ROOT.
-_SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
-if str(_SCRIPTS) not in sys.path:
-    sys.path.insert(0, str(_SCRIPTS))
+_HOOKS = Path(__file__).resolve().parent
+_SCRIPTS = _HOOKS.parent / "scripts"
+for _p in (str(_SCRIPTS), str(_HOOKS)):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
+import ct_hook_store  # noqa: E402
 import ct_env  # noqa: E402
 import ct_ledger  # noqa: E402
 import ct_wisdom  # noqa: E402
 import ct_wisdom_live  # noqa: E402
 import ct_wisdom_verbose  # noqa: E402
 
-try:  # POSIX
-    import fcntl
-except ImportError:  # pragma: no cover - Windows
-    fcntl = None
-try:  # Windows
-    import msvcrt
-except ImportError:
-    msvcrt = None
 
 logger = logging.getLogger(__name__)
 
 STORE_VERSION = 1
 DATA_ENV = "CLAUDE_PLUGIN_DATA"
-LOCK_WAIT = 2.0  # seconds; a hook never blocks longer than this on the store
-STORE_MAX_AGE = 30 * 86400  # startup prunes session files older than this
+LOCK_WAIT = ct_hook_store.LOCK_WAIT
+STORE_MAX_AGE = ct_hook_store.STORE_MAX_AGE
 RECALL_TOOL_SUFFIX = "__curated_recall_context"
 
-_KEY_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 # A harness envelope (`<agent-message from=…>`, `<task-notification>`, …) at
 # the very start of the prompt means the text was not typed by the user (D5).
 _ENVELOPE_RE = re.compile(r"^<[A-Za-z][A-Za-z0-9_-]*(?=[\s>/])")
 _LIST_FIELDS = ("bootstrap_ids", "live_ids", "tool_ids", "order")
 
 
-class LockTimeout(Exception):
-    """The store lock could not be taken within its bounded wait."""
+LockTimeout = ct_hook_store.LockTimeout
 
 
 # ---------------------------------------------------------------------------
@@ -88,10 +79,7 @@ def data_dir(view):
     return value if isinstance(value, str) and value.strip() else None
 
 
-def session_key(session_id):
-    if _KEY_RE.match(session_id):
-        return session_id
-    return hashlib.sha256(session_id.encode("utf-8")).hexdigest()
+session_key = ct_hook_store.session_key
 
 
 def _sessions_dir(ddir):
@@ -168,13 +156,7 @@ def load_store(ddir, session_id):
     return data if _valid_store(data, session_id) else None
 
 
-def _atomic_write(path, data):
-    directory = os.path.dirname(path)
-    os.makedirs(directory, exist_ok=True)
-    tmp = "%s.%d.tmp" % (path, os.getpid())
-    with open(tmp, "w", encoding="utf-8") as handle:
-        json.dump(data, handle, ensure_ascii=False)
-    os.replace(tmp, path)
+_atomic_write = ct_hook_store.atomic_write
 
 
 def save_store(ddir, session_id, store):
@@ -190,58 +172,13 @@ def _forget(ddir, session_id):
         pass
 
 
-@contextlib.contextmanager
-def locked(path, wait=LOCK_WAIT):
-    """Exclusive advisory lock on `<path>.lock`, waiting at most `wait` s."""
-    lock_path = path + ".lock"
-    os.makedirs(os.path.dirname(lock_path), exist_ok=True)
-    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
-    deadline = time.monotonic() + wait
-    try:
-        while True:
-            try:
-                if fcntl is not None:
-                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                elif msvcrt is not None:  # pragma: no cover - Windows
-                    os.lseek(fd, 0, 0)
-                    msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
-                break
-            except OSError:
-                if time.monotonic() >= deadline:
-                    raise LockTimeout(lock_path)
-                time.sleep(0.02)
-        try:
-            yield
-        finally:
-            try:
-                if fcntl is not None:
-                    fcntl.flock(fd, fcntl.LOCK_UN)
-                elif msvcrt is not None:  # pragma: no cover - Windows
-                    os.lseek(fd, 0, 0)
-                    msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
-            except OSError:
-                pass
-    finally:
-        os.close(fd)
+locked = ct_hook_store.locked
 
 
 def prune(ddir, now=None, max_age=STORE_MAX_AGE):
-    """Remove session files (and their lock files) not touched in max_age."""
-    now = time.time() if now is None else now
-    directory = _sessions_dir(ddir)
-    try:
-        names = os.listdir(directory)
-    except OSError:
-        return
-    for name in names:
-        if not name.endswith((".json", ".lock")):
-            continue
-        path = os.path.join(directory, name)
-        try:
-            if now - os.path.getmtime(path) > max_age:
-                os.remove(path)
-        except OSError:
-            pass
+    """Remove session stores not touched in max_age (lock files are kept:
+    see ct_hook_store)."""
+    ct_hook_store.prune(_sessions_dir(ddir), now=now, max_age=max_age)
 
 
 # ---------------------------------------------------------------------------
@@ -249,57 +186,7 @@ def prune(ddir, now=None, max_age=STORE_MAX_AGE):
 # ---------------------------------------------------------------------------
 
 
-class PersistedBreaker:
-    """ct_wisdom_live.Breaker semantics over a JSON file: after BREAKER_FAILS
-    consecutive timeout/exit failures, live matching pauses BREAKER_PAUSE s.
-    An unreadable file reads as closed (the breaker only ever suppresses)."""
-
-    def __init__(self, path, fails=ct_wisdom_live.BREAKER_FAILS,
-                 pause=ct_wisdom_live.BREAKER_PAUSE, clock=time.time):
-        self._path = path
-        self._fails = fails
-        self._pause = pause
-        self._clock = clock
-
-    def _read(self):
-        try:
-            with open(self._path, encoding="utf-8") as handle:
-                data = json.load(handle)
-        except (OSError, ValueError):
-            return {"count": 0, "open_until": None}
-        count = data.get("count") if isinstance(data, dict) else None
-        until = data.get("open_until") if isinstance(data, dict) else None
-        return {
-            "count": count if isinstance(count, int) else 0,
-            "open_until": until if isinstance(until, (int, float)) else None,
-        }
-
-    def _write(self, state):
-        try:
-            _atomic_write(self._path, state)
-        except OSError:
-            logger.debug("wisdom-cc: breaker write failed", exc_info=True)
-
-    def is_open(self):
-        state = self._read()
-        if state["open_until"] is None:
-            return False
-        if self._clock() >= state["open_until"]:
-            self._write({"count": 0, "open_until": None})
-            return False
-        return True
-
-    def record_failure(self):
-        state = self._read()
-        state["count"] += 1
-        if state["count"] >= self._fails:
-            state["open_until"] = self._clock() + self._pause
-        self._write(state)
-
-    def record_success(self):
-        state = self._read()
-        if state["count"] or state["open_until"] is not None:
-            self._write({"count": 0, "open_until": None})
+PersistedBreaker = ct_hook_store.PersistedBreaker
 
 
 # ---------------------------------------------------------------------------
