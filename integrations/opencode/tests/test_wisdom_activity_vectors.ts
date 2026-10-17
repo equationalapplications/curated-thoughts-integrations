@@ -163,7 +163,11 @@ afterEach(() => {
   resetActivityCaches();
 });
 
-describe('shared activity-target vectors through the OpenCode binding', () => {
+// The vectors model POSIX roots (`/Users/…`, `/home/…`) mapped under a temp
+// dir; like the core runner (packages/ct-wisdom-core, Linux CI job), they run
+// on POSIX only. Windows path rules (drive letters, `\\`) are vectors too,
+// exercised there as strings.
+describe.skipIf(process.platform === 'win32')('shared activity-target vectors through the OpenCode binding', () => {
   it('covers all 290 vectors', () => {
     expect(load().length).toBeGreaterThanOrEqual(290);
   });
