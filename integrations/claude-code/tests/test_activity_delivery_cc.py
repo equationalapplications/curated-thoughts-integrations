@@ -349,6 +349,35 @@ class SubagentTests(Base):
         text = out["hookSpecificOutput"]["updatedToolOutput"][0]["text"]
         self.assertTrue(json.loads(text)["wiki_entries"][0]["in_context"])
 
+    def test_concurrent_batches_of_one_tree_deliver_a_fact_once(self):
+        # Main thread and background subagents run their PostToolBatch hooks
+        # at the same time on one store: the lock serializes every
+        # read-modify-write and the delivery re-reads the ledger under it.
+        import threading
+        self.match = {"src/a.py": [fact("a1")]}
+        self.honor_exclude = False
+        self.start()
+        agents = [None] + ["af%02d" % i for i in range(7)]
+        prepared = []
+        for agent in agents:
+            c = call()
+            self.executed(c, agent_id=agent)
+            prepared.append((agent, c))
+        outs, barrier = [], threading.Barrier(len(prepared))
+
+        def worker(agent, c):
+            barrier.wait()
+            outs.append(self.batch([c], agent_id=agent, run=False))
+
+        threads = [threading.Thread(target=worker, args=p) for p in prepared]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        blocks = [self.block(o) for o in outs if self.block(o)]
+        self.assertEqual(len(blocks), 1, blocks)
+        self.assertEqual(self.store()["activity_ids"], ["a1"])
+
     def test_agents_map_is_bounded(self):
         self.start()
         for i in range(cc.AGENTS_MAX + 10):
