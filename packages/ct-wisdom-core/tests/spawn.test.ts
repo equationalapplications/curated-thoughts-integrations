@@ -261,8 +261,9 @@ describe('nodeSpawnFn abort (real process tree)', { timeout: 30_000 }, () => {
     chmodSync(script, 0o755);
     let stray = 0;
     try {
-      // The child exits at once; the 500 ms timer fires inside the 2000 ms grace.
-      const out = await nodeSpawnFn(process.env, { killGraceMs: 2000 })({ command: script, args: [], timeoutMs: 500 });
+      // The child exits at once; the 1000 ms timer (room for a slow `sh`
+      // start) fires inside the 2000 ms grace.
+      const out = await nodeSpawnFn(process.env, { killGraceMs: 2000 })({ command: script, args: [], timeoutMs: 1000 });
       if (existsSync(strayPid)) stray = Number(readFileSync(strayPid, 'utf8').trim());
       expect(out.timedOut).toBe(false);
       expect(out.code).toBe(0);

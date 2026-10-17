@@ -18,7 +18,8 @@ Tags: **[V]** verified in this session by reading the repo at `fb66034`.
   - `spawnOutcomeOf` normalization;
   - one kill path, `killTree`, for timeout, abort and overflow;
   - a child with no pid, or one that already exited, is never signalled;
-  - once the child has exited (for any reason), `close` gets a 250 ms grace;
+  - after a kill, once the child has exited, `close` gets a 250 ms grace (only after a kill: a child that exits
+    normally while a descendant holds stdout waits out the full timeout; PR B fixes that);
   - an abort after exit keeps the real result;
   - a call whose signal is already aborted starts nothing.
 - OpenCode's binding ([V] `integrations/opencode/src/wisdom-live/adapter.ts:181-267`) and OpenClaw's
@@ -61,7 +62,10 @@ Tags: **[V]** verified in this session by reading the repo at `fb66034`.
 
 ```ts
 export interface NodeSpawnOptions {
-  /** After a kill, how long to wait for 'close' once the child has exited (default 250). */
+  /**
+   * Two bounds, one value (default 250): after ANY exit, how long to wait for 'close'; and after a kill of a
+   * child that has not exited, the hard deadline by which the call settles even if the kill failed.
+   */
   killGraceMs?: number;
   /** Byte cap for stdout and for stderr; past it the child is killed and the outcome is spawnError (default 4 MiB). */
   capBytes?: number;

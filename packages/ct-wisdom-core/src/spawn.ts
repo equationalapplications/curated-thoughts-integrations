@@ -39,18 +39,24 @@ export function spawnOutcomeOf(raw: {
 }
 
 /**
- * Once the child has exited (normally or killed), how long to wait for
- * 'close'. A descendant that inherited stdout can hold the pipe open long
- * after the child is gone (a background helper, Windows killing only the
- * direct child, a process that left the group), and a promise that never
- * settles would leak the plan, skip the budget miss, or report a working
- * run as timed out.
+ * The default for `killGraceMs`, which bounds two waits:
+ * - after ANY exit (normal or killed), how long to wait for 'close'. A
+ *   descendant that inherited stdout can hold the pipe open long after the
+ *   child is gone (a background helper, Windows killing only the direct
+ *   child, a process that left the group);
+ * - after a kill of a child that has not exited, the hard deadline by which
+ *   the call settles even if the kill failed and no 'exit' ever comes.
+ * A promise that never settles would leak the plan, skip the budget miss,
+ * or report a working run as timed out.
  */
 export const DEFAULT_KILL_GRACE_MS = 250;
 export const DEFAULT_CAP_BYTES = 4 * 1024 * 1024;
 
 export interface NodeSpawnOptions {
-  /** Once the child has exited (any reason), how long to wait for 'close'. */
+  /**
+   * After any exit, how long to wait for 'close'; after a kill of a running
+   * child, the hard deadline to settle even if the kill failed.
+   */
   killGraceMs?: number;
   /** Byte cap for stdout and for stderr; past it the child is killed (spawnError). */
   capBytes?: number;
@@ -113,6 +119,15 @@ export function nodeSpawnFn(
       function settleNow(): void {
         child.stdout?.destroy();
         child.stderr?.destroy();
+        // Not exited (a failed kill): a surviving child must not keep the
+        // host's event loop alive.
+        if (!exited) {
+          try {
+            child.unref();
+          } catch {
+            /* nothing more to do */
+          }
+        }
         finish(exited ? exitCode : null, false);
       }
       /**

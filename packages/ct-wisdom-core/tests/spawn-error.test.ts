@@ -17,6 +17,7 @@ class FakeChild extends EventEmitter {
   stdout = new FakeStream();
   stderr = new FakeStream();
   kill = vi.fn(() => true);
+  unref = vi.fn();
   constructor(pid: number | undefined) {
     super();
     this.pid = pid;
@@ -49,6 +50,7 @@ describe("nodeSpawnFn 'error' handling (mocked child)", () => {
     expect(out.code).toBe(0);
     expect(out.stdout).toBe('{"entries": []}');
     expect(child.kill).not.toHaveBeenCalled();
+    expect(child.unref).not.toHaveBeenCalled();
   });
 
   it("an 'error' from a child that never got a pid is a spawn error", async () => {
@@ -98,6 +100,8 @@ describe("nodeSpawnFn 'error' handling (mocked child)", () => {
       expect(out.code).toBeNull();
       expect(out.stdout).toBe('partial');
       expect(child.kill).toHaveBeenCalled();
+      // The surviving child must not keep the host's event loop alive.
+      expect(child.unref).toHaveBeenCalled();
     });
 
     it('abort: settles within the kill deadline as aborted', { timeout: 3000 }, async () => {
