@@ -376,12 +376,27 @@ tools never trigger a query; (5) every activity query is the bare target; plus v
 notice and the JSONL line). Real CT gate (OpenRouter `qwen/qwen3-embedding-4b`), ZAI GLM-5.3-FLASH,
 keys by name at run time only, logs grepped for both keys afterwards.
 
+**E2E (done, 2026-10-17 UTC):** `CT_E2E_REAL_GATE=1 integrations/deepseek/tests/e2e/run.sh`, 75 passed,
+0 failed. The agent's six tool steps (`read TASK.md`, `bash pnpm test`, `bash pnpm test --silent`,
+`write .env.local`, `read .env.local`, `curated_recall_context`) gave exactly three activity queries,
+`TASK.md`, `pnpm test`, `.env.local` (absolute paths normalized to the workspace), and two activity
+messages through the real gate (`pnpm test` → "CI rejects pushes when `pnpm test` fails.", `.env.local`
+→ ".env.local holds local-only secrets …"), each once, marker first, identified user-role messages; the
+session continued with `--session-id`. Verbose JSONL carried the `activity` records. Findings: the
+logger notice did not appear on headless stderr (where DSH's headless logger exports is still [U]; the
+JSONL log works), and the e2e also fixed a host-side detail of the harness (the jq brain-config edit now
+reads the ZAI key from the environment, never from argv). A grep of every output file found neither key.
+The randomized test also found two pre-existing user-turn duplicate paths in `ct-wisdom-core` (a correction
+whose own id is in context; one id as both entry and correction), fixed to the Hermes `render_live_block`
+rule; opencode and openclaw get patch bumps for it.
+
 ## Versioning and docs
 
 - deepseek `0.5.0 → 0.6.0` (`package.json`, `integration.yaml`), CHANGELOG, README (Intuitive Wisdom
   section and limitations), README table via `tools/ct_ci.py readme`.
-- opencode / openclaw: a patch bump with a "no behavior change" note only if the policy gate requires
-  it for the core change.
+- opencode `0.3.0 → 0.3.1`, openclaw `0.2.0 → 0.2.1`: the policy gate does not require it, but they ship
+  the core's correction-dedup fix, so each gets a patch bump and a CHANGELOG note; the activity API itself
+  is not called there yet.
 
 ## Out of scope
 
