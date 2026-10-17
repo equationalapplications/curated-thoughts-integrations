@@ -11,6 +11,7 @@
  */
 
 import { FACT_ID_RE, FACT_TOKEN, SCAN_RE } from './constants.js';
+import { lruSet } from './lru.js';
 
 /** True for a CT fact id usable in a marker (spec CT guarantee 4). */
 export function validId(value: unknown): value is string {
@@ -127,12 +128,7 @@ export class LedgerCache {
   }
 
   put(sessionId: string, ids: Iterable<string>): void {
-    this.store.set(sessionId, new Set(ids));
-    while (this.store.size > this.max) {
-      const oldest = this.store.keys().next();
-      if (oldest.done) break;
-      this.store.delete(oldest.value);
-    }
+    lruSet(this.store, sessionId, new Set(ids), this.max);
   }
 
   /** Union ids into an existing entry; no-op when the session is absent. */

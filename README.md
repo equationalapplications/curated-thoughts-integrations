@@ -11,9 +11,9 @@ common architecture.
 | Harness | Directory | Status | Version |
 |---------|-----------|--------|---------|
 | [Hermes Agent](https://github.com/NousResearch/hermes-agent) | [`integrations/hermes/`](integrations/hermes/) | implemented | [0.6.9](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=hermes) |
-| DeepSeek Harness | [`integrations/deepseek/`](integrations/deepseek/) | implemented | [0.5.1](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=deepseek) |
-| OpenCode | [`integrations/opencode/`](integrations/opencode/) | implemented | [0.3.0](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=opencode) |
-| OpenClaw | [`integrations/openclaw/`](integrations/openclaw/) | implemented | [0.2.1](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=openclaw) |
+| DeepSeek Harness | [`integrations/deepseek/`](integrations/deepseek/) | implemented | [0.6.0](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=deepseek) |
+| OpenCode | [`integrations/opencode/`](integrations/opencode/) | implemented | [0.3.1](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=opencode) |
+| OpenClaw | [`integrations/openclaw/`](integrations/openclaw/) | implemented | [0.2.2](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=openclaw) |
 | Claude Code | [`integrations/claude-code/`](integrations/claude-code/) | implemented | [0.3.3](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=claude-code) |
 | [Docker Agent](https://github.com/docker/docker-agent) | [`integrations/docker-agent/`](integrations/docker-agent/) | implemented | [0.1.0](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=docker-agent) |
 
@@ -49,10 +49,10 @@ Wisdom, every integration does two things:
   the user's message. The ones not yet in context are added *to that turn*.
   They never go into the system prompt, so the prompt and its provider cache
   stay untouched.
-- **During autonomous work** (Hermes and Docker Agent so far), while the agent works on
-  its own between messages, the file it reads or edits, the command it runs
-  or the pattern it searches can bring in one relevant fact. See
-  [Autonomous-work delivery](#autonomous-work-delivery-hermes).
+- **During autonomous work** (Hermes, DeepSeek Harness and Docker Agent so
+  far), while the agent works on its own between messages, the file it reads
+  or edits, the command it runs or the pattern it searches can bring in one
+  relevant fact. See [Autonomous-work delivery](#autonomous-work-delivery).
 
 A fact is in the session's context **at most once**. Each delivered fact
 carries a `ct-fact:<id>` marker, and the integration skips any fact the
@@ -109,10 +109,22 @@ receive live delivery. Host-specific gates:
   byte-level capture on 2026-10-16) and works on the CLI runner. The Codex
   app-server and Copilot runtimes are degraded.
 
-### Autonomous-work delivery (Hermes)
+### Autonomous-work delivery
 
-Since hermes 0.6.0, Hermes also delivers facts *between* user messages,
-keyed to what the agent is doing:
+Since hermes 0.6.0, deepseek 0.6.0 and docker-agent 0.1.0, Hermes, DeepSeek
+Harness and Docker Agent also deliver facts *between* user messages, keyed
+to what the agent is doing. The rules are the same on all three (Docker
+Agent runs a byte-identical copy of the Hermes builder; the TypeScript side
+lives in `packages/ct-wisdom-core`, ready for the other hosts); the hook and
+the channel differ:
+
+| Host | Trigger | Delivered as |
+|------|---------|--------------|
+| Hermes | `pre_tool_call` starts the query, `transform_tool_result` delivers | spliced into that tool's result |
+| DeepSeek Harness | `tools/pre-execute` starts the query, the next `agent/pre-step` (step 2 and later) delivers | a user message persisted in the session log (source kind `curated-thoughts-wisdom-activity`), before the next model step |
+| [Docker Agent](integrations/docker-agent/README.md#intuitive-wisdom) | `tool_response_transform` queries and delivers (`read_file`, `write_file`, `edit_file`, `search_files_content`, `shell`; one query per model step, counted by `before_llm_call`) | spliced into that tool's result, marker first |
+
+On Hermes:
 
 - **Trigger:** a `read_file`, `write_file`, `patch`, `search_files` or
   `terminal` call whose activity is new for the session. At most one
@@ -164,6 +176,13 @@ keyed to what the agent is doing:
 - **Verbose mode** (below) records these deliveries with channel
   `activity` and the activity label (`read src/x.py`).
 
+On DeepSeek Harness the same rules apply to the `read`, `write`, `edit`,
+`str_replace_editor`, `grep`, `glob`, `bash` and `pwsh` tools; see
+[its README](integrations/deepseek/README.md#autonomous-work-delivery).
+The fact arrives as its own user message before the next model step, is
+replayed on `--session-id`, and the record of what is in context is rebuilt
+from the session log at every step. Subagents get deliveries too.
+
 ### Verbose mode
 
 To see what Intuitive Wisdom adds to your conversation, and why it added
@@ -211,7 +230,8 @@ records. Each integration's README gives the exact path.
   superseded fact,** because `ct recall` returns neither provenance nor
   supersession status. Live delivery (`ct wisdom match`) has both. Closing
   this needs a CT change first.
-- **Autonomous-work delivery is Hermes and Docker Agent only so far.** On the other hosts,
+- **Autonomous-work delivery is on Hermes, DeepSeek Harness and Docker Agent
+  only so far.** On the other hosts,
   an agent working autonomously between messages gets no new facts until
   the next message (see [INTENT.md](INTENT.md) for the end state).
 - **Concept rules reached only via paths need CT activity mode.** From a

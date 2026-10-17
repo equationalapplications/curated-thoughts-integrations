@@ -20,7 +20,10 @@
  *     (ct_tool_dedup parity) — no test-side marker patching.
  */
 
-import { describe, expect, it } from 'vitest';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterAll, describe, expect, it } from 'vitest';
 
 import { onToolResult, onUserTurn, Breaker, marker } from '@equational-applications/ct-wisdom-core';
 import type {
@@ -29,6 +32,7 @@ import type {
   WisdomMatchResult,
 } from '@equational-applications/ct-wisdom-core';
 import { DshWisdomAdapter, type AdapterDeps } from '../src/wisdom-live/adapter.js';
+import { DshActivity, activityMessage } from '../src/wisdom-live/activity.js';
 
 const UNIVERSE = Array.from({ length: 16 }, (_, i) => `fact_${String(i).padStart(2, '0')}`);
 const SESSIONS = 200;
@@ -226,6 +230,199 @@ function fakeCtFor(matchFor: (query: string, max: number, exclude: string[]) => 
           }),
     });
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// Autonomous-work delivery mixed in (spec 2026-10-16-dsh-autonomous-work-
+// wisdom-design.md): multi-step turns whose tool calls trigger activity
+// deliveries at the next pre-step, CT recalls inside those steps, compaction
+// between steps, and resume into a NEW process (adapter + DshActivity
+// rebuilt; only the session log and the re-rendered bootstrap carry over).
+// ─────────────────────────────────────────────────────────────────────────
+
+type AnyMsg = { id?: string; role: string; source?: { kind: string }; content: Array<Record<string, unknown>> };
+
+const TOOLS: Array<() => [string, Record<string, unknown>]> = [
+  () => ['bash', { command: pickStatic(['pnpm test', 'pnpm test --silent', 'npm run build', 'git status', 'make']) }],
+  () => ['read', { file_path: pickStatic(['src/a.ts', 'src/b.ts', '.env.local', 'README.md']) }],
+  () => ['write', { file_path: pickStatic(['src/a.ts', '.env.local']), content: 'x' }],
+  () => ['edit', { file_path: pickStatic(['src/a.ts', 'src/c.ts']), old_string: 'a', new_string: 'b' }],
+  () => ['grep', { pattern: pickStatic(['TODO', 'MCP tool name', 'fleet']) }],
+];
+let staticRand: () => number = Math.random;
+function pickStatic<T>(arr: T[]): T {
+  return arr[Math.floor(staticRand() * arr.length)];
+}
+
+/** A real project root (hermes 0.6.5 P1), so file activities are sent too. */
+const SIM_PROJ = realpathSync(mkdtempSync(join(tmpdir(), 'ct-dsh-sim-proj-')));
+mkdirSync(join(SIM_PROJ, '.git'));
+afterAll(() => rmSync(SIM_PROJ, { recursive: true, force: true }));
+
+class ActivitySim {
+  log: AnyMsg[] = [];
+  adapter!: DshWisdomAdapter;
+  activity!: DshActivity;
+  breaker!: Breaker;
+  bootIds: string[] = [];
+  private seq = 0;
+  activityDeliveries = 0;
+  userDeliveries = 0;
+
+  constructor(readonly id: string, readonly fake: SpawnFn) {
+    this.boot();
+  }
+
+  /** A fresh process: in-memory state gone, the log and the prompt replay. */
+  boot(): void {
+    this.adapter = new DshWisdomAdapter({ env: {}, discover: () => ({ path: '/bin/ct', failure: null }), spawnFn: this.fake });
+    this.breaker = new Breaker();
+    this.activity = new DshActivity({ adapter: this.adapter, breaker: this.breaker, cwd: () => SIM_PROJ, env: { USER: 'alice', HOME: '/Users/alice' } });
+    if (this.bootIds.length > 0) {
+      // The section re-renders the same bootstrap block into the memo.
+      this.adapter.bootstrapMemo[this.id] = { block: 'boot', ids: [...this.bootIds] };
+    }
+  }
+
+  agent() {
+    return { id: this.id, session: { deriveMessages: () => [...this.log] } };
+  }
+
+  compact(rand: () => number): void {
+    if (this.log.length > 0 && rand() < 0.15) this.log.splice(0, 1 + Math.floor(rand() * this.log.length));
+  }
+
+  async userTurn(question: string): Promise<void> {
+    // index.ts: snapshot the log BEFORE the engine runs.
+    this.adapter.sessionMessages.set(this.id, [...this.log]);
+    const out = await onUserTurn(this.adapter, { id: this.id }, question, this.breaker);
+    this.log.push({ id: `u${++this.seq}`, role: 'user', source: { kind: 'user' }, content: [textBlock(question)] });
+    if (out !== null) {
+      this.userDeliveries++;
+      this.log.push({ id: `w${++this.seq}`, role: 'user', source: { kind: 'curated-thoughts-wisdom' }, content: [textBlock(out)] });
+    }
+  }
+
+  /** One model step with tool calls (CT recalls among them), then their results. */
+  step(rand: () => number): void {
+    staticRand = rand;
+    const n = 1 + Math.floor(rand() * 3);
+    const blocks: Array<{ type: string; id: string; name: string; arguments: string }> = [];
+    for (let i = 0; i < n; i++) {
+      const [name, args] = rand() < 0.2
+        ? ['curated-thoughts__curated_recall_context', { query: 'q' }]
+        : pick(rand, TOOLS)();
+      blocks.push({ type: 'tool-call', id: `c${++this.seq}`, name, arguments: JSON.stringify(args) });
+    }
+    this.log.push({ id: `a${++this.seq}`, role: 'assistant', source: { kind: 'model' }, content: blocks });
+    const agent = this.agent();
+    for (const b of blocks) {
+      this.activity.prefetch({ callId: b.id, name: b.name, arguments: JSON.parse(b.arguments), agent });
+    }
+    for (const b of blocks) {
+      let body = 'ok';
+      if (b.name.startsWith('curated-thoughts__')) {
+        const ids = sample(rand, UNIVERSE, Math.floor(rand() * 4));
+        const envelope = { result: JSON.stringify({ wiki_entries: ids.map((id) => ({ id, title: 'T' + id, text: 'full ' + id })) }) };
+        body = JSON.stringify(onToolResult(this.adapter, { id: this.id }, envelope));
+      }
+      this.log.push({ id: `t${++this.seq}`, role: 'tool', source: { kind: 'tool' }, content: [textBlock(body)] });
+    }
+  }
+
+  /** The next pre-step (step >= 2). */
+  async preStep(): Promise<void> {
+    const block = await this.activity.deliver(this.agent(), [], []);
+    if (block !== null) {
+      this.activityDeliveries++;
+      this.log.push({ ...activityMessage(block) } as unknown as AnyMsg);
+    }
+  }
+}
+
+const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/** Every fact id visible in the simulated context (prompt bootstrap + log). */
+function activityPresent(sim: ActivitySim): Map<string, number> {
+  const counts = new Map<string, number>();
+  const bump = (id: string) => counts.set(id, (counts.get(id) ?? 0) + 1);
+  for (const id of sim.bootIds) bump(id);
+  for (const msg of sim.log) {
+    const texts = msg.content.filter((b) => b.type === 'text').map((b) => String(b.text));
+    for (const t of texts) {
+      if (msg.role === 'user') {
+        for (const id of UNIVERSE) {
+          // user-turn block: `**T<id>** <!-- ct-fact:<id> -->` (or a correction's `**Correction: ...** marker`);
+          // activity block: `<!-- ct-fact:<id> --> **T<id>**` (marker first).
+          const m = esc(marker(id));
+          const live = new RegExp(`\\*\\* ${m}`, 'g');
+          const act = new RegExp(`${m} \\*\\*`, 'g');
+          const hits = (t.match(live)?.length ?? 0) + (t.match(act)?.length ?? 0);
+          for (let k = 0; k < hits; k++) bump(id);
+        }
+      } else if (msg.role === 'tool') {
+        try {
+          const outer = JSON.parse(t.split('\n')[0]) as { result?: string };
+          const inner = JSON.parse((outer.result ?? '').split('\n')[0]) as { wiki_entries?: Array<Record<string, unknown>> };
+          for (const e of inner.wiki_entries ?? []) {
+            if (typeof e.id === 'string' && e.in_context !== true) bump(e.id);
+          }
+        } catch {
+          /* plain tool output carries no facts */
+        }
+      }
+    }
+  }
+  return counts;
+}
+
+describe('exactly-once with autonomous-work deliveries (DSH)', () => {
+  it('no fact twice across 200 randomized sessions mixing user turns, activity, recalls, compaction and resume', async () => {
+    let totalActivity = 0;
+    let totalUser = 0;
+    let resumes = 0;
+    for (let s = 0; s < SESSIONS; s++) {
+      const rand = rng(0xa11ce + s);
+      const r2 = rng(0x5eed + s);
+      const fake: SpawnFn = fakeCtFor((_q, max, exclude) => {
+        const pool = r2() < 0.5 ? UNIVERSE : UNIVERSE.filter((f) => !exclude.includes(f));
+        const entries = sample(r2, pool, Math.min(pool.length, max)).map((f) => fact(f));
+        const corrections: WisdomMatchResult['corrections'] = [];
+        if (exclude.length > 0 && r2() < 0.3) corrections.push(fact(pick(r2, UNIVERSE), [pick(r2, exclude)]));
+        return { entries, corrections };
+      });
+      const sim = new ActivitySim(`act-${s}`, fake);
+      sim.bootIds = sample(rand, UNIVERSE, Math.floor(rand() * 3));
+      sim.boot();
+      const check = (where: string) => {
+        for (const [id, n] of activityPresent(sim)) expect(n, `${sim.id} ${where}: ${id} x${n}`).toBe(1);
+      };
+      const turns = 1 + Math.floor(rand() * 6);
+      for (let turn = 0; turn < turns; turn++) {
+        if (turn > 0 && rand() < 0.3) {
+          sim.boot(); // resume with --session-id in a new process
+          resumes++;
+        }
+        sim.compact(rand);
+        await sim.userTurn(`question ${turn}`);
+        check(`turn ${turn} user`);
+        const steps = 1 + Math.floor(rand() * 4);
+        for (let st = 0; st < steps; st++) {
+          sim.step(rand);
+          check(`turn ${turn} step ${st} tools`);
+          if (rand() < 0.1) sim.compact(rand);
+          await sim.preStep();
+          check(`turn ${turn} step ${st + 1} pre-step`);
+        }
+      }
+      totalActivity += sim.activityDeliveries;
+      totalUser += sim.userDeliveries;
+    }
+    // The property is not vacuous: both channels delivered, and sessions resumed.
+    expect(totalActivity).toBeGreaterThan(50);
+    expect(totalUser).toBeGreaterThan(50);
+    expect(resumes).toBeGreaterThan(20);
+  });
+});
 
 describe('exactly-once across randomized sessions (DSH binding)', () => {
   it('no fact twice in current context over 200 randomized sessions', async () => {

@@ -48,6 +48,13 @@ export interface VerboseTurn {
   ledgerIds?: string[];
   deliveredIds?: string[];
   block?: string;
+  /**
+   * Overrides the recorder's channel for this record: autonomous-work
+   * deliveries report `activity` (Hermes parity). Absent on user turns.
+   */
+  channel?: string;
+  /** Autonomous-work label, e.g. `read src/x.ts` (never sent to CT). */
+  activity?: string;
 }
 
 export type MatchOutcomeLabel = 'delivered' | 'in_context' | 'budget' | 'not_applicable';
@@ -73,6 +80,7 @@ export interface VerboseRecord {
   event: 'delivery' | 'skip';
   reason: string | null;
   query?: string;
+  activity?: string;
   gate?: string | null;
   matched?: VerboseMatched[];
   delivered_ids?: string[];
@@ -200,13 +208,15 @@ export function buildRecord(
     v: VERBOSE_SCHEMA,
     ts: (opts.now ? opts.now() : new Date()).toISOString(),
     host: opts.host,
-    channel: opts.channel,
+    channel: str(turn.channel) ?? opts.channel,
     session_id: str(turn.sessionId) ?? '',
     event: turn.kind === 'delivery' ? 'delivery' : 'skip',
     reason,
   };
   const query = str(turn.query);
   if (query !== null) record.query = query;
+  const activity = str(turn.activity);
+  if (activity !== null) record.activity = activity;
   if (result) {
     record.gate = gate;
     record.matched = items;

@@ -13,6 +13,7 @@ import {
 } from './constants.js';
 import { scanIds, stripForged, validId } from './ledger.js';
 import { renderBlock } from './render.js';
+import { cpSlice } from './text.js';
 import { EMPTY_LEDGER } from './types.js';
 import type {
   HostAdapter,
@@ -25,7 +26,8 @@ import type { VerboseTurn } from './verbose.js';
 /** Query derived from the user message: sanitized + char-capped. */
 export function buildQuery(userMessage: unknown): string {
   const raw = typeof userMessage === 'string' ? userMessage : '';
-  return stripForged(raw).trim().slice(0, QUERY_CHARS).trim();
+  // Capped by code point (Python parity): never splits a surrogate pair.
+  return cpSlice(stripForged(raw).trim(), 0, QUERY_CHARS).trim();
 }
 
 /**
@@ -90,12 +92,28 @@ export async function onUserTurn(
 
   // Always post-filter against the ledger (the `--exclude` bound is a subset
   // of the context view; the two can disagree transiently).
-  const entries = attempt.result.entries.filter(
-    (e) => !validId(e?.id) || !ledger.has(e.id),
-  );
   // Corrections are exempt from the exclude filter —
-  // superseding a fact already in context is the point of a correction.
-  const corrections = attempt.result.corrections;
+  // superseding a fact already in context is the point of a correction. But
+  // (Hermes render_live_block parity) a correction rides only when it
+  // supersedes an id actually in context, and never when its OWN id is
+  // already there: re-delivering it would show the fact twice (rule 1). One
+  // id is delivered at most once per block: a correction wins over an entry
+  // with the same id, and repeats are dropped (the `seen` set of the
+  // reference).
+  const seen = new Set<string>();
+  const corrections = attempt.result.corrections.filter((c) => {
+    if (!validId(c?.id) || ledger.has(c.id) || seen.has(c.id)) return false;
+    const supersedes = Array.isArray(c.supersedes) ? c.supersedes : [];
+    if (!supersedes.some((s) => validId(s) && ledger.has(s))) return false;
+    seen.add(c.id);
+    return true;
+  });
+  const entries = attempt.result.entries.filter((e) => {
+    if (!validId(e?.id)) return true; // renders without a marker (untracked)
+    if (ledger.has(e.id) || seen.has(e.id)) return false;
+    seen.add(e.id);
+    return true;
+  });
   const match: WisdomMatchResult = { entries, corrections };
 
   const { text, deliveredIds } = renderBlock(match);

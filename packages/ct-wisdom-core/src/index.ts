@@ -12,3 +12,6 @@ export * from './match.js';
 export * from './engine.js';
 export * from './types.js';
 export * from './verbose.js';
+export * from './activity.js';
+export * from './text.js';
+export * from './lru.js';
