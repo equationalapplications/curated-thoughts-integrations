@@ -186,7 +186,9 @@ describe('activity line builder (Hermes parity)', () => {
       expect(normalizePath('/Users/carol/projects/app/src/x.ts', cwd, ENV), cwd).toBe('x.ts');
     }
     expect(validCwd('C:\\Users', ENV)).toBeNull();
-    expect(validCwd('/Users/alice', ENV)).toBe('/Users/alice'); // a cwd equal to HOME counts
+    expect(validCwd('/Users/alice', ENV)).toBeNull(); // 0.6.3: HOME itself never counts
+    expect(validCwd('/Users/alice/proj', ENV)).toBe('/Users/alice/proj'); // strictly inside HOME counts
+    expect(validCwd('/Users/bob', ENV)).toBeNull(); // another /Users/<x> home
     expect(normalizePath('/srv/app/src/x.ts', '/srv/app', ENV)).toBe('src/x.ts');
     expect(normalizePath('C:\\work\\repo\\src\\x.ts', 'C:\\work\\repo', ENV)).toBe('src/x.ts');
   });
@@ -218,7 +220,13 @@ describe('activity line builder (Hermes parity)', () => {
       'C:\\secret', '../up', 'src/Alice/x']) {
       expect(act('search_files', { pattern }, '/work/repo'), pattern).toBeNull();
     }
-    expect(act('search_files', { pattern: '**/*.ts' })!.query).toBe('**/*.ts');
+    // 0.6.3 allowlist: globs, paths, regexes, flags and auth words are not sent.
+    for (const pattern of ['**/*.ts', 'src/billing', '\\w+', '--password hunter2', 'Bearer abc', 'token x',
+      'password:letmein', 'x@corp.com', 'w1 w2 w3 w4 w5 w6 w7', 'y'.repeat(81)]) {
+      expect(act('search_files', { pattern }), pattern).toBeNull();
+    }
+    expect(act('search_files', { pattern: 'MCP tool name' })!.query).toBe('MCP tool name');
+    expect(act('search_files', { pattern: 'café menü' })!.query).toBe('café menü');
     expect(act('search_files', { pattern: 'error 404', path: 'src' })!.line).toBe('search error 404 in src');
     expect(act('search_files', { pattern: 'TODO', path: '/Users/alice' })!.line).toBe('search TODO');
   });
@@ -273,11 +281,27 @@ describe('activity line builder (Hermes parity)', () => {
     const vectors = JSON.parse(readFileSync(VECTORS, 'utf8')) as Array<{
       name: string; tool: string; args: Record<string, unknown>; cwd: string;
       env: Record<string, string>; expected_query: string | null; expected_line: string | null;
+      key_distinct_from?: string;
     }>;
-    expect(vectors.length).toBeGreaterThanOrEqual(50);
-    for (const v of vectors) {
+    expect(vectors.length).toBeGreaterThanOrEqual(111);
+    const build = (v: (typeof vectors)[number]) => {
       const spec = hermes(v.tool, v.args);
-      const a = spec === null ? null : buildActivity(spec, v.cwd, v.env);
+      return spec === null ? null : buildActivity(spec, v.cwd, v.env);
+    };
+    // `key_distinct_from`: equal sanitized queries, distinct local keys.
+    const byName = new Map(vectors.map((v) => [v.name, v]));
+    let keyChecks = 0;
+    for (const v of vectors) {
+      if (!v.key_distinct_from) continue;
+      const a = build(v);
+      const b = build(byName.get(v.key_distinct_from)!);
+      expect(activityQuery(a!), v.name).toBe(activityQuery(b!));
+      expect(a!.key, v.name).not.toBe(b!.key);
+      keyChecks++;
+    }
+    expect(keyChecks).toBeGreaterThan(0);
+    for (const v of vectors) {
+      const a = build(v);
       if (v.expected_query === null) {
         expect(a === null || activityQuery(a) === '', `${v.name}: got ${a?.line}`).toBe(true);
         continue;
@@ -396,7 +420,8 @@ describe('activity line builder (Hermes parity)', () => {
   });
 
   it('caps the query and the target', () => {
-    const a = act('search_files', { pattern: 'x'.repeat(600), path: 'y'.repeat(600) }, '/w')!;
+    expect(act('search_files', { pattern: 'x'.repeat(81) }, '/w')).toBeNull(); // refused, not cut
+    const a = act('search_files', { pattern: 'x'.repeat(80), path: 'y'.repeat(600) }, '/w')!;
     expect(activityQuery(a).length).toBeLessThanOrEqual(ACTIVITY_QUERY_CHARS);
     expect(a.query.length).toBeLessThanOrEqual(ACTIVITY_TARGET_CHARS);
   });

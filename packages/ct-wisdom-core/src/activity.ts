@@ -19,6 +19,8 @@
  * without throwing.
  */
 
+import { createHash } from 'node:crypto';
+
 import { Breaker } from './breaker.js';
 import {
   ACTIVITY_HEADING,
@@ -143,22 +145,44 @@ function basename(path: string): string {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// Privacy rules R1–R4 — IDENTICAL to the Hermes builder (hermes 0.6.2,
-// ct_wisdom_activity.py, spec "Privacy amendment"); the shared vectors in
-// tests/fixtures/activity_targets.json run against both. A user name never
-// leaves the machine.
+// Privacy rules — a behavioral port of the Hermes builder at hermes 0.6.3
+// (ct_wisdom_activity.py; spec 2026-10-16-hermes-autonomous-work-wisdom-
+// design.md, "Privacy amendment" and "Privacy amendment 2"). The shared
+// vectors in tests/fixtures/activity_targets.json run against both. A user
+// name never leaves the machine.
 // ─────────────────────────────────────────────────────────────────────────
 
 /** The environment view the builder reads (user names, HOME for `~`). */
 export type ActivityEnv = Record<string, string | undefined>;
 
 const DRIVE_PREFIX_RE = /^[A-Za-z]:(\/|$)/;
-const QUOTE_CHARS = new Set(['"', "'", '`', '\u2018', '\u2019', '\u201c', '\u201d']);
+const DRIVE_ANY_RE = /^[A-Za-z]:/;
 const HOME_PARENTS = new Set(['users', 'home']);
+/** Service accounts are not private user names (CI runners, containers, dev boxes). */
+const SERVICE_ACCOUNTS = new Set(['root', 'node', 'app', 'user', 'admin', 'test', 'ubuntu', 'runner',
+  'docker', 'www-data', 'nobody', 'daemon', 'ec2-user', 'vscode', 'codespace']);
+const MIN_NAME_CHARS = 3;
+const SEARCH_MAX_CHARS = 80;
+const SEARCH_MAX_WORDS = 6;
+const SEARCH_ASCII = /^[A-Za-z0-9_ .-]$/;
+const LETTER_RE = /^\p{L}$/u;
+/** A search pattern naming any of these (case-insensitive, anywhere) is never sent. */
+const AUTH_WORDS = ['bearer', 'token', 'password', 'passwd', 'secret', 'apikey', 'api_key',
+  'api-key', 'api key', 'auth'];
 
-/** Comparison form: NFC (macOS paths are often NFD) and case-folded (≈ Python casefold). */
+/** Python-style casefold approximation (lower → upper → lower maps ß to ss). */
+function casefold(text: string): string {
+  return text.toLowerCase().toUpperCase().toLowerCase();
+}
+
+/** Comparison form: NFC (macOS paths are often NFD) and case-folded. */
 function fold(text: string): string {
-  return text.normalize('NFC').toLowerCase().toUpperCase().toLowerCase();
+  return casefold(text.normalize('NFC'));
+}
+
+/** Code-point length (Python `len`). */
+function cpLen(text: string): number {
+  return [...text].length;
 }
 
 function envStr(env: ActivityEnv, name: string): string | null {
@@ -170,17 +194,10 @@ function homeOf(env: ActivityEnv): string | null {
   return envStr(env, 'HOME') ?? envStr(env, 'USERPROFILE');
 }
 
-/** Python posixpath.dirname. */
-function dirname(path: string): string {
-  const i = path.lastIndexOf('/') + 1;
-  let head = path.slice(0, i);
-  if (head && head !== '/'.repeat(head.length)) head = head.replace(/\/+$/, '');
-  return head;
-}
-
 /**
- * Folded names of the current user: USER, LOGNAME, USERNAME and the
- * basename of HOME / USERPROFILE (Hermes `user_names`).
+ * Folded private names of the current user: USER, LOGNAME, USERNAME and
+ * the basenames of HOME / USERPROFILE, minus service accounts and names
+ * shorter than 3 chars (Hermes `user_names`).
  */
 export function userNames(env: ActivityEnv = process.env): Set<string> {
   const names = new Set<string>();
@@ -190,17 +207,27 @@ export function userNames(env: ActivityEnv = process.env): Set<string> {
   }
   for (const name of ['HOME', 'USERPROFILE']) {
     const v = envStr(env, name);
-    if (!v) continue;
-    const base = basename(v.replace(/\\/g, '/').replace(/\/+$/, ''));
-    if (base && !base.endsWith(':')) names.add(fold(base));
+    if (v) names.add(fold(basename(v.replace(/\\/g, '/').replace(/\/+$/, ''))));
   }
-  for (const bad of ['', '.', '..']) names.delete(bad);
-  return names;
+  return new Set([...names].filter((n) => cpLen(n) >= MIN_NAME_CHARS && !SERVICE_ACCOUNTS.has(n) && !n.includes(':')));
+}
+
+/** True when `component` contains a user name (folded substring). */
+function hasName(component: string, names: Set<string>): boolean {
+  const folded = fold(component);
+  for (const name of names) if (folded.includes(name)) return true;
+  return false;
+}
+
+/** '/'-converted `path` is absolute, `~`, drive-absolute or drive-relative (`C:foo`), or rooted. */
+function rooted(path: string): boolean {
+  return path.startsWith('/') || path.startsWith('~') || DRIVE_ANY_RE.test(path);
 }
 
 /**
  * Normalized '/' form of an absolute path (drive letter lowercased, a
- * leading `~` or `~/` expanded from HOME), or null when it is not one.
+ * leading `~` or `~/` expanded from HOME), or null when it is not one (a
+ * relative, drive-relative or `~user` path).
  */
 function absNorm(raw: string, env: ActivityEnv): string | null {
   let path = raw.replace(/\\/g, '/');
@@ -217,74 +244,90 @@ function absNorm(raw: string, env: ActivityEnv): string | null {
   return normpath(path);
 }
 
-function depth(norm: string): number {
+function depthParts(norm: string): string[] {
   let parts = norm.split('/').filter((p) => p !== '');
   if (parts.length > 0 && DRIVE_RE.test(parts[0])) parts = parts.slice(1);
-  return parts.length;
+  return parts;
 }
 
 /**
- * R1: the normalized cwd, or null when it does not count: empty, not
- * absolute, `/`, a drive root, any cwd of depth < 2 (`/Users`, `/home`,
- * `C:/Users`) or the parent of the user's home directory.
+ * R1: the normalized cwd, or null when it does not count. It counts when it
+ * is strictly inside HOME, or else at depth ≥ 2 and neither HOME nor an
+ * ancestor of it nor a `/Users/<x>` / `/home/<x>` home directory. So `/`, a
+ * drive root, `/Users`, `/home`, HOME itself and an empty or relative cwd
+ * never count.
  */
 export function validCwd(cwd: unknown, env: ActivityEnv = process.env): string | null {
   if (typeof cwd !== 'string' || cwd.trim() === '') return null;
   const norm = absNorm(cwd.trim(), env);
-  if (norm === null || depth(norm) < 2) return null;
+  if (norm === null) return null;
+  const parts = depthParts(norm);
+  if (parts.length === 0) return null;
   const home = homeOf(env);
   const homeNorm = home ? absNorm(home, env) : null;
-  if (homeNorm && fold(dirname(homeNorm)) === fold(norm)) return null;
+  if (homeNorm) {
+    const folded = fold(norm);
+    const homeFolded = fold(homeNorm);
+    if (folded === homeFolded || homeFolded.startsWith(`${folded.replace(/\/+$/, '')}/`)) return null;
+    if (folded.startsWith(`${homeFolded.replace(/\/+$/, '')}/`)) return norm;
+  }
+  if (parts.length < 2 || (parts.length === 2 && HOME_PARENTS.has(fold(parts[0])))) return null;
   return norm;
 }
 
-/** R2: drop every user-name component, and `Users`/`home` right before one. */
+/** R2: drop every component containing a user name, and `Users`/`home` right before one. */
 function dropNames(parts: string[], names: Set<string>): string[] {
   const out: string[] = [];
   parts.forEach((part, i) => {
-    const folded = fold(part);
-    if (names.has(folded)) return;
-    if (HOME_PARENTS.has(folded) && i + 1 < parts.length && names.has(fold(parts[i + 1]))) return;
+    if (hasName(part, names)) return;
+    if (HOME_PARENTS.has(fold(part)) && i + 1 < parts.length && hasName(parts[i + 1], names)) return;
     out.push(part);
   });
   return out;
 }
 
 /**
- * True when R2 would leave `token` (one word of a search pattern or a
- * command's subcommand) exactly as it is: relative, no `..`, no user-name
- * component. An absolute, `~`, drive or UNC token fails.
+ * True when R2 would leave a command's subcommand `token` exactly as it is:
+ * relative, no `..`, no component containing a user name.
  */
 export function pathTokenOk(token: string, names: Set<string>): boolean {
-  if (token.startsWith('/') || token.startsWith('~') || token.startsWith('\\\\')) return false;
-  if (DRIVE_PREFIX_RE.test(token.replace(/\\/g, '/'))) return false;
+  if (rooted(token.replace(/\\/g, '/'))) return false;
   const comps = token.split(/[/\\]/);
   if (comps.includes('..')) return false;
-  return !comps.some((c) => names.has(fold(c)));
+  return !comps.some((c) => hasName(c, names));
+}
+
+/** Python posixpath.join for two parts. */
+function join2(a: string, b: string): string {
+  if (b.startsWith('/')) return b;
+  return a === '' || a.endsWith('/') ? a + b : `${a}/${b}`;
 }
 
 /**
- * Relative, machine-neutral form of a path argument, or null.
- *
- * R2: an absolute (or `~`) path under a valid cwd (R1, `validCwd`) becomes
- * relative to it; any other absolute or `~` path is reduced to its basename.
- * Relative paths are kept, leading `..` dropped. Then every component equal
- * to the user's name (`userNames`), and `Users`/`home` right before one, is
- * dropped. Null when nothing is left.
+ * Digest of the full local path, for de-duplication only (never sent or
+ * logged), so two files with the same sanitized basename never share a key.
  */
-export function normalizePath(raw: unknown, cwd?: string | null, env: ActivityEnv = process.env): string | null {
-  const cleaned = cleanTarget(raw);
-  if (cleaned === null) return null;
-  const path = cleaned.replace(/\\/g, '/');
+function localKey(path: string, cwd: string | null | undefined, env: ActivityEnv): string {
+  let full = absNorm(path, env);
+  if (full === null) {
+    const converted = path.replace(/\\/g, '/');
+    const base = typeof cwd === 'string' && cwd.trim() !== '' ? absNorm(cwd, env) : null;
+    full = normpath(base && !rooted(converted) ? join2(base, converted) : converted);
+  }
+  return createHash('sha256').update(full, 'utf8').digest('hex').slice(0, 24);
+}
+
+function normalizeWith(raw: string, base: string | null, env: ActivityEnv, names: Set<string>): string | null {
+  let path = raw.replace(/\\/g, '/');
   let parts: string[];
-  if (path.startsWith('/') || path.startsWith('~') || DRIVE_PREFIX_RE.test(path)) {
+  if (rooted(path)) {
     const norm = absNorm(path, env);
-    const base = validCwd(cwd, env);
-    if (norm !== null && base !== null && norm.startsWith(`${base}/`)) {
-      parts = norm.slice(base.length + 1).split('/');
+    const prefix = base === null ? null : `${base.replace(/\/+$/, '')}/`;
+    if (norm !== null && prefix !== null && norm.startsWith(prefix)) {
+      parts = norm.slice(prefix.length).split('/');
     } else {
-      parts = normpath(path).split('/').filter((p) => p !== '' && p !== '.' && p !== '..' && !DRIVE_RE.test(p));
-      parts = parts.slice(-1);
+      if (DRIVE_ANY_RE.test(path)) path = path.slice(2);
+      parts = normpath(path).split('/').filter((p) => p !== '' && p !== '.' && p !== '..').slice(-1);
       if (parts.length > 0 && parts[0].startsWith('~')) parts = [];
     }
   } else {
@@ -292,7 +335,7 @@ export function normalizePath(raw: unknown, cwd?: string | null, env: ActivityEn
   }
   parts = parts.filter((p) => p !== '' && p !== '.' && p !== '~');
   while (parts.length > 0 && parts[0] === '..') parts = parts.slice(1);
-  parts = dropNames(parts, userNames(env));
+  parts = dropNames(parts, names);
   if (parts.length === 0) return null;
   let target = parts.join('/');
   if (target.length > ACTIVITY_TARGET_CHARS) {
@@ -304,17 +347,41 @@ export function normalizePath(raw: unknown, cwd?: string | null, env: ActivityEn
 }
 
 /**
- * R3: the search pattern to send (≤ ACTIVITY_TARGET_CHARS), or null when it
- * has an `=`, any quote, a credential-shaped word, or a word R2 would change.
+ * Relative, machine-neutral form of a path argument, or null.
+ *
+ * R2: an absolute (or `~`) path under a valid cwd (R1, `validCwd`) becomes
+ * relative to it; any other absolute, `~`, drive-relative (`C:foo`), rooted
+ * (`\etc`) or UNC path is reduced to its basename. Relative paths are kept,
+ * leading `..` dropped. Then every component containing the user's name, and
+ * `Users`/`home` right before one, is dropped. Null when nothing is left.
  */
-export function searchTarget(pattern: unknown, env: ActivityEnv = process.env): string | null {
+export function normalizePath(raw: unknown, cwd?: string | null, env: ActivityEnv = process.env): string | null {
+  const cleaned = cleanTarget(raw);
+  if (cleaned === null) return null;
+  return normalizeWith(cleaned, validCwd(cwd, env), env, userNames(env));
+}
+
+/**
+ * R3 (allowlist): the search pattern to send, or null. Sent only when it is
+ * at most 80 chars of ASCII letters, digits, `_`, `.`, `-`, spaces and
+ * non-ASCII letters; has at most 6 words, none starting with `-`, none
+ * credential-shaped, none containing a user name; and names no auth word.
+ */
+export function searchTarget(pattern: unknown, env: ActivityEnv = process.env, names: Set<string> = userNames(env)): string | null {
   const cleaned = cleanTarget(pattern);
-  if (cleaned === null || [...cleaned].some((ch) => ch === '=' || QUOTE_CHARS.has(ch))) return null;
-  const names = userNames(env);
-  for (const word of cleaned.split(/\s+/).filter((w) => w !== '')) {
-    if (credentialShaped(word) || !pathTokenOk(word, names)) return null;
+  if (cleaned === null || cpLen(cleaned) > SEARCH_MAX_CHARS) return null;
+  for (const ch of cleaned.normalize('NFC')) {
+    if (SEARCH_ASCII.test(ch)) continue;
+    if (ch.charCodeAt(0) < 128 || !LETTER_RE.test(ch)) return null;
   }
-  return cleaned.slice(0, ACTIVITY_TARGET_CHARS);
+  const folded = casefold(cleaned);
+  if (AUTH_WORDS.some((w) => folded.includes(w))) return null;
+  const words = cleaned.split(/\s+/).filter((w) => w !== '');
+  if (words.length === 0 || words.length > SEARCH_MAX_WORDS) return null;
+  for (const word of words) {
+    if (word.startsWith('-') || credentialShaped(word) || hasName(word, names)) return null;
+  }
+  return cleaned;
 }
 
 
@@ -365,10 +432,9 @@ function tokens(command: string): string[] {
  * one supported form. A program named like the user gives null; a second
  * word R2 would change is dropped. Everything else is dropped.
  */
-export function commandTarget(command: unknown, env: ActivityEnv = process.env): string | null {
+export function commandTarget(command: unknown, env: ActivityEnv = process.env, names: Set<string> = userNames(env)): string | null {
   const cleaned = cleanTarget(command);
   if (cleaned === null) return null;
-  const names = userNames(env);
   let words: string[] = [];
   for (const token of tokens(cleaned)) {
     if (token === '' || [...token].some((ch) => OPERATOR_CHARS.has(ch))) break;
@@ -377,7 +443,7 @@ export function commandTarget(command: unknown, env: ActivityEnv = process.env):
   while (words.length > 0 && ASSIGN_RE.test(words[0])) words = words.slice(1);
   if (words.length === 0) return null;
   const program = basename(words[0].replace(/\\/g, '/'));
-  if (!safeWord(program) || names.has(fold(program))) return null;
+  if (!safeWord(program) || hasName(program, names)) return null;
   if (FREE_TEXT_PROGRAMS.has(program.toLowerCase())) return program;
   let rest = words.slice(1);
   if (PYTHON_RE.test(program) && rest[0] === '-m') {
@@ -389,14 +455,17 @@ export function commandTarget(command: unknown, env: ActivityEnv = process.env):
   return program;
 }
 
-function make(verb: ActivityVerb, target: string, line: string, query: string): Activity {
-  return { verb, target, key: `${VERB_CLASS[verb]}\u0000${target}`, line, query };
+function make(verb: ActivityVerb, target: string, key: string, line: string, query: string): Activity {
+  return { verb, target, key, line, query };
 }
 
 /**
  * The activity for one tool call, built from its args only, or null.
  * R4: `line` (the visible `_for:` label and the verbose `activity` field)
  * and `query` come from the same sanitized target, never a raw argument.
+ * The `key` (local de-duplication only, never sent or logged) uses a digest
+ * of the full local path, so two files that sanitize to the same basename
+ * never collide. `cwd` is the session's working directory (the host's);
  * `env` defaults to process.env (user names, HOME for `~`).
  */
 export function buildActivity(
@@ -405,23 +474,31 @@ export function buildActivity(
   env: ActivityEnv = process.env,
 ): Activity | null {
   if (spec === null || typeof spec !== 'object') return null;
+  const names = userNames(env);
+  const base = validCwd(cwd, env);
+  const pathOf = (value: unknown): [string | null, string | null] => {
+    const cleaned = cleanTarget(value);
+    if (cleaned === null) return [null, null];
+    return [normalizeWith(cleaned, base, env, names), localKey(cleaned, cwd, env)];
+  };
   switch (spec.verb) {
     case 'read':
     case 'write':
     case 'edit': {
-      const target = normalizePath(spec.path, cwd, env);
-      return target === null ? null : make(spec.verb, target, `${spec.verb} ${target}`, target);
+      const [target, local] = pathOf(spec.path);
+      if (target === null) return null;
+      return make(spec.verb, target, `${VERB_CLASS[spec.verb]}\u0000${local}`, `${spec.verb} ${target}`, target);
     }
     case 'search': {
-      const pattern = searchTarget(spec.pattern, env);
+      const pattern = searchTarget(spec.pattern, env, names);
       if (pattern === null) return null;
-      const where = spec.path ? normalizePath(spec.path, cwd, env) : null;
+      const [where, local] = spec.path ? pathOf(spec.path) : [null, null];
       const target = pattern + (where ? ` in ${where}` : '');
-      return make('search', target, `search ${target}`, pattern);
+      return make('search', target, `search\u0000${pattern}\u0000${local ?? ''}`, `search ${target}`, pattern);
     }
     case 'run': {
-      const target = commandTarget(spec.command, env);
-      return target === null ? null : make('run', target, `run ${target}`, target);
+      const target = commandTarget(spec.command, env, names);
+      return target === null ? null : make('run', target, `run\u0000${target}`, `run ${target}`, target);
     }
     default:
       return null;
