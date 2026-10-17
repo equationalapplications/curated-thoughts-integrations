@@ -15,7 +15,8 @@ and the specs. Change this file only when the intent changes.
 Curated Thoughts (CT) is a private, local-first "second brain" with a curated
 **wisdom layer**: short, trustworthy facts its Librarian distills from your
 files. This repo holds the **integrations**: thin plugins for agent harnesses
-(Hermes, DeepSeek Harness, OpenCode, Claude Code, OpenClaw, and more to come)
+(Hermes, DeepSeek Harness, OpenCode, Claude Code, OpenClaw, Docker Agent, and
+more to come)
 that put those facts in front of the agent automatically, so it doesn't have to
 remember to ask.
 
@@ -32,10 +33,11 @@ steps:
   messages (reading files, running commands, editing code) must also be able
   to trigger the inclusion of relevant facts, keyed to what it is doing at
   that moment. Without this, a long autonomous task only ever sees the facts
-  that matched the user's opening request. This is the end state. How to do
-  it is not decided yet: which host events trigger it, what text to send CT,
-  how often to ask, and where a fact can be added mid-task without breaking
-  the rules below.
+  that matched the user's opening request. It is keyed to what the agent just
+  did: at most one CT query per model step, sent only when the activity
+  changes, naming only the file path or the command's program and subcommand
+  (rule 9). Work done by subagents counts too. Each delivery is smaller than
+  a user-turn delivery.
 
 The same rules apply at every step. Every host should reach every step; where
 a host can't, its spec says why and what the user loses.
@@ -104,7 +106,9 @@ is marked as replaced.
 If CT isn't installed, the brain is unreachable, a call times out, or nothing
 matches, the integration does nothing: no empty block and no error in the
 session. It logs locally. Every CT call has a short timeout, so a hung backend
-can't stall the session, and repeated failures pause CT calls for a while.
+can't stall the session, and repeated failures pause CT calls for a while. A
+CT that is missing or keeps failing may cost the session a short wait only a
+few times; after that it goes quiet until something changes.
 
 *Why:* an agent session must never break because the brain is down.
 
@@ -143,6 +147,17 @@ returns. If CT matches too little or too much, fix it in CT, never work around
 it here.
 
 *Why:* every harness then gets the same quality, and it improves in one place.
+
+### 9. Send CT only what the agent actually did, and as little as possible
+
+A query names only the target of an action the agent really took: a path, or
+a command's program and subcommand. It never contains file contents,
+arguments, secrets or the user's name. A call the user refused, or that
+another guard blocked, sends nothing. When the integration can't tell whether
+a call ran, it sends nothing.
+
+*Why:* CT and its embedding provider should learn no more than they need to
+find a relevant fact, and a refusal must mean nothing left the machine.
 
 ## Out of scope (don't build these here)
 

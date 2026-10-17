@@ -210,7 +210,9 @@ dedups). `planStep` walks the step's tool calls in model order and stops at the 
   The breaker is the **same** instance the user-turn path uses (rule 4: three failures pause both).
 - **Budget:** `deadline = plan start + TIMEOUT_MS (3 s)`. Pre-step awaits the match for
   `max(0, deadline − now)`; a match that already settled is used even past the deadline (it costs
-  nothing). Running out is class `budget` (not a breaker failure; the match records its own outcome).
+  nothing). Running out is class `budget`. Superseded by the 0.6.2 amendments ("Review amendments"):
+  the query is killed on expiry and a miss the kill really stopped counts as ONE breaker failure; the
+  key is freed, the step stays used.
 - If no prefetch happened (a tool path that skips `pre-execute`), pre-step plans and awaits itself
   within the same budget.
 
@@ -339,7 +341,8 @@ where every call of a step reaches the gate; DSH plans a step once and does not 
 - **Rule 3 (no superseded fact):** CT filters superseded entries; corrections ride only when they
   supersede an id in context.
 - **Rule 4 (fail quietly):** every listener catches everything; the pre-execute listener never changes
-  the tool decision; 3 s budget; the shared breaker.
+  the tool decision; 3 s budget, enforced by killing the `ct` child on expiry; the shared breaker, which
+  counts a budget miss once and never a host-side cancel (0.6.2 amendments).
 - **Rule 5 (provenance):** the block shows CT's provenance label.
 - **Rule 6 (keep it small):** 1 fact, ≤ 600 chars per delivery (decision 5), no session cap.
 - **Rule 7 (read only):** `ct wisdom match` only.
@@ -441,7 +444,7 @@ rule; opencode and openclaw get patch bumps for it.
   call sends nothing. A started query that got no genuine answer (budget, a CT failure, a gate that
   closed, a turn the host would not extend) releases its key and step (`ActivityTracker.release`,
   `finishActivityOutcome().retry`); CT's "nothing relevant" (`zero_hits`: no_match, deduped) keeps
-  it. `peek` is pure and a `seen_key` refusal no longer bumps recency (a deliberate difference from
+  it. (Since 0.6.2 only the key is freed and the step stays used; see the 0.6.2 amendment below.) `peek` is pure and a `seen_key` refusal no longer bumps recency (a deliberate difference from
   Hermes's `move_to_end`, which only affects LRU eviction order). The named logger caches only a
   successful lookup. The `str_replace_editor` verb map is a Map. The activity block was compared with
   Hermes `render_activity_block` and already matched; `tests/fixtures/activity_blocks.json` (generated
@@ -514,6 +517,60 @@ rule; opencode and openclaw get patch bumps for it.
   reduce to their basename); `process.cwd()` is never used.
 - **e2e check 5** now reads tab-separated argv and asserts the query is the single element right after
   `--` with nothing after it.
+- **0.6.2: abort on budget expiry** (follow-up to the shared core's abort support and
+  `recordActivityBudgetMiss`, PR #70). Each started activity owns an `AbortController`; its signal goes
+  to `startActivity` → `runActivityMatch` → the adapter's `wisdomMatch` (capability probe and match) →
+  `SpawnLike.signal`. The pre-step's `settleWithin(match, remaining, onExpire)` aborts it on expiry, and
+  `nodeSpawnFn` kills the child's process group and reports `aborted: true`. The core then counts the
+  miss as ONE breaker failure; this supersedes "Running out is class `budget` (not a breaker failure)"
+  above. A non-budget abort counts zero. On a retryable outcome DSH now frees only the key
+  (`ActivityTracker.releaseKey`): the step stays used, so it never gets a second query, and a later
+  step can retry the activity (OpenCode / OpenClaw parity). A plan whose pre-step never runs is not
+  aborted; it ends at the spawns' own timeouts as before (superseded by the next amendment: such a plan
+  is cancelled once its slot is replaced or evicted).
+- **0.6.2: PR #71 review** (three rounds; this text is the final state).
+  - *One kill switch per plan, owned by the host.* Each plan owns a `cancel` AbortController. The core
+    gets a signal it never sees aborted; it is only the key through which the adapter finds `cancel`
+    (`linkCancel`, a WeakMap), and the spawns listen to it. This depends on the core passing
+    `wisdomMatch` the same signal object it got from `startActivity`; a host test fails if a cancel
+    stops killing the child. The clean design is a `cancel` parameter in ct-wisdom-core (not done here).
+  - *Abandoned plans are cancelled, not charged to CT.* When `plan()` replaces an agent's slot for a
+    newer step, when the slot LRU (256 agents) evicts it (`lruSet` `onEvict`, the one eviction rule), or
+    on the `would_extend_turn` path, `cancel` kills the query and the key is freed. The core gets
+    outcome `aborted` and counts nothing. A replaced or evicted plan is reported to verbose mode as
+    `skip` / `abandoned`.
+  - *Budget expiry.* `settleWithin`'s expiry calls `recordActivityBudgetMiss` at once (before
+    `deliver` returns, so the next step's breaker gate sees it, and a query that never settles cannot
+    drop it), then aborts `cancel`. The core never sees an aborted signal, and the adapter reports a
+    cancelled match that surfaces as `timeout_or_exit` as `aborted`, so there is no double count. A
+    child that had already exited with an answer keeps it (binding rule below); the core then records
+    a success, which clears the charge (a wrong charge, cleared, is the lesser evil than a late one).
+    A `ct` that cannot start is class `spawn` (caches reset) on top of the one budget miss. This
+    supersedes "the core then counts the miss" in the 0.6.2 amendment above.
+  - *Capability probe once per path.* `ct wisdom match --help` runs once per resolved `ct` path
+    (OpenCode `probedPath` parity). A match that ends `timeout_or_exit` clears it, so a `ct` that lost
+    the subcommand in place is re-probed and latched OFF on the next call; that one failure still
+    counts (an exit code cannot tell "unknown command" from other usage errors reliably). A probe that
+    passed is cached before an abort that lands right after it is honored. A spawn-class reset
+    (`resetDiscoveryAndProbeCaches`, called by the core) clears the latch, the probe cache and
+    discovery's accepted path (`invalidateAcceptedPath`), so a moved `ct` is found again. Only a real
+    failure to start is class `spawn`: a probe that timed out is `timeout_or_exit`, charged to the
+    breaker, because a spawn-class reset re-runs discovery's blocking `spawnSync` walk (up to 3 s on
+    the event loop) and a slow `ct` would otherwise stall every step forever. Repeated slow probes are
+    therefore bounded by the breaker (three, then the five-minute pause).
+  - *Binding (`nodeSpawnFn`).* One outcome normalization (`spawnOutcomeOf`): a failed start or an
+    overflow is `spawnError` and never `aborted`. An already-aborted signal resolves `aborted` without
+    spawning. An abort after the child exited keeps the real result. One kill path (`killTree`) for
+    timeout, abort and overflow: the POSIX process group, or the direct child on Windows; a child with
+    no pid (failed spawn) is never signalled, because Node's `child.kill()` there signals pid 0, the
+    caller's own process group, and a child that already exited is never signalled either (its leader
+    is reaped, so `-pid` could hit a reused group). After a kill, once the child has exited, `close`
+    gets a 250 ms grace and the promise settles anyway with the output read so far (Windows, or a
+    descendant that left the group, can hold the pipes).
+  - *Follow-ups (not in this PR).* (a) A `cancel` parameter in ct-wisdom-core, to replace the
+    `linkCancel` WeakMap side channel. (b) One spawn binding in ct-wisdom-core shared by every host, so
+    OpenCode and OpenClaw get the same kill, grace and normalization fixes: their bindings still hang
+    when `close` never fires after a kill (Windows, or a descendant that keeps the pipes open).
 
 ## Versioning and docs
 

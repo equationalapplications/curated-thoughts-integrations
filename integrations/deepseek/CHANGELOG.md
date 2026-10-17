@@ -2,6 +2,43 @@
 
 ## Unreleased
 
+## 0.6.2 — 2026-10-17
+
+- Fixed: an autonomous-work query that runs past its 3 s budget is now
+  stopped. The pre-step aborts it on expiry and the `ct` child is killed
+  (on macOS and Linux its whole process group, so anything it started goes
+  too; on Windows the direct child), the capability probe included, so it
+  no longer keeps running in the background. The miss counts as exactly one
+  failure toward the five-minute failure pause (the shared core rule
+  `recordActivityBudgetMiss`), recorded before the next step; a child that
+  had already answered keeps its result, and that success clears the
+  count. The activity can
+  still trigger again at a later step; the step that missed keeps its one
+  query (the key is freed, the step is not).
+- Fixed: a query nobody will use is stopped too, without counting as a
+  failure: when a newer step replaces an agent's pending query, when that
+  query is evicted (more than 256 agents), or when the host would not extend
+  the turn. Its activity can trigger again later.
+- Fixed: the `ct wisdom match --help` capability check runs once per `ct`
+  path instead of before every query, so the query gets the whole 3 s
+  budget. A failed query re-checks it next time, so a `ct` that loses
+  `wisdom match` in place is switched off after one failure. A `ct` that
+  cannot start clears that cache and discovery's remembered path (a moved
+  `ct` is found again without a restart). A capability check that times out
+  counts as a failure (so a slow `ct` pauses after three) and never
+  re-runs discovery.
+- Fixed: a `ct` child that already exited when the budget ran out keeps its
+  real result; an already-expired budget starts no child at all; and a `ct`
+  that failed to start is never signalled (signalling a child with no
+  process id would have hit the harness's own process group). A killed
+  `ct` whose pipes stay open (Windows, or a descendant that left the
+  process group) no longer hangs the query: it settles shortly after the
+  child exits. A child that already exited is never signalled.
+- Verbose mode records a query dropped for a newer step or by eviction as
+  `skip` / `abandoned`.
+- Internal: `lruSet` in `ct-wisdom-core` takes an optional `onEvict`
+  callback (no behavior change for other hosts).
+
 ## 0.6.1 — 2026-10-17
 
 - Changed (no behavior change): the autonomous-work budget wait uses the
