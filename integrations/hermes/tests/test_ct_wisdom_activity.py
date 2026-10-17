@@ -2285,11 +2285,20 @@ class TestModuleSplit(unittest.TestCase):
             task_id="", session_id="s-split", tool_call_id="c1", api_request_id="r1")
         self.assertEqual(seen, ["read_file"])
 
-    def test_builder_has_no_delivery(self):
+    def test_delivery_only_uses_existing_builder_names(self):
+        """Renaming a builder helper delivery uses must fail here, not
+        silently disable delivery."""
+        import ast
         import ct_wisdom_activity as builder
-        for name in ("on_transform_tool_result", "ActivityState", "_transform", "_deliver",
-                     "proves_ran", "reset_state"):
-            self.assertFalse(hasattr(builder, name), name)
+        path = os.path.join(os.path.dirname(builder.__file__), "ct_wisdom_activity_delivery.py")
+        with open(path, encoding="utf-8") as fh:
+            tree = ast.parse(fh.read())
+        used = {n.attr for n in ast.walk(tree)
+                if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name)
+                and n.value.id == "builder"}
+        self.assertTrue(used, "delivery should call the builder through builder.<name>")
+        for name in sorted(used):
+            self.assertTrue(hasattr(builder, name), f"builder.{name} used by delivery is missing")
 
 
 if __name__ == "__main__":

@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import logging
 import os
 import re
 import shlex
@@ -34,8 +33,6 @@ from functools import lru_cache
 
 import ct_ledger
 import ct_wisdom
-
-logger = logging.getLogger(__name__)
 
 # Frozen (spec "Channel", user decision 5; INTENT rule 6). Never raised to
 # compensate for weak matching.

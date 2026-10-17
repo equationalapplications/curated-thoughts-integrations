@@ -79,9 +79,11 @@ HOOK_SHARED = {
 HERMES_ONLY = ("ct_tool_dedup.py", "ct_wisdom_activity_delivery.py")
 # The shared builder must not grow the Hermes delivery back.
 BUILDER = "ct_wisdom_activity.py"
-BUILDER_FORBIDDEN_DEFS = ("on_transform_tool_result", "ActivityState", "_transform", "_deliver",
-                          "proves_ran")
-BUILDER_FORBIDDEN_IMPORTS = ("ct_wisdom_live", "ct_wisdom_verbose")
+BUILDER_FORBIDDEN_NAMES = ("on_transform_tool_result", "ActivityState", "_transform", "_deliver",
+                           "proves_ran", "reset_state", "_Prefetch", "_run_prefetch",
+                           "_ct_unusable", "CT_UNUSABLE_PAUSE", "STEP_IDS_MAX", "SESSIONS_MAX",
+                           "_STATE")
+BUILDER_FORBIDDEN_IMPORTS = ("ct_wisdom_live", "ct_wisdom_verbose", "ct_wisdom_activity_delivery")
 REGIONED = {
     "ct_doctor.py": ("module-docstring", "harness-config", "registration-check"),
 }
@@ -145,19 +147,41 @@ def drift_report(reference, copy, ref_label, copy_label):
 
 
 def builder_defined_names(source):
-    """Top-level names the builder binds: functions, classes and assignments.
+    """Every name the builder binds anywhere in the module, at any depth.
 
-    Assignments count too, so `proves_ran = _x` cannot smuggle a Hermes
-    delivery name past the forbidden-definitions check.
+    Catches: function and class definitions (sync or async) at any nesting
+    depth; every Name target of an assignment, annotated assignment or
+    augmented assignment, including names inside tuple/list unpacking and
+    assignments nested in `if`/`try` blocks or functions; and import
+    bindings (`import x as NAME`, `from x import y as NAME`, `from x import
+    NAME`). It over-approximates on purpose: a forbidden Hermes delivery
+    name appearing anywhere in the builder is a failure.
     """
     names = set()
-    for node in ast.parse(source).body:
+
+    def targets(node):
+        if isinstance(node, ast.Name):
+            names.add(node.id)
+        elif isinstance(node, (ast.Tuple, ast.List)):
+            for elt in node.elts:
+                targets(elt)
+        elif isinstance(node, ast.Starred):
+            targets(node.value)
+
+    for node in ast.walk(ast.parse(source)):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             names.add(node.name)
         elif isinstance(node, ast.Assign):
-            names.update(t.id for t in node.targets if isinstance(t, ast.Name))
-        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
-            names.add(node.target.id)
+            for t in node.targets:
+                targets(t)
+        elif isinstance(node, (ast.AnnAssign, ast.AugAssign)):
+            targets(node.target)
+        elif isinstance(node, ast.Import):
+            for a in node.names:
+                names.add(a.asname or a.name.split(".")[0])
+        elif isinstance(node, ast.ImportFrom):
+            for a in node.names:
+                names.add(a.asname or a.name)
     return names
 
 
@@ -240,7 +264,7 @@ class HermesOnlyBoundaryTests(unittest.TestCase):
                 imported.update(a.name.split(".")[0] for a in n.names)
             elif isinstance(n, ast.ImportFrom) and n.module:
                 imported.add(n.module.split(".")[0])
-        for name in BUILDER_FORBIDDEN_DEFS:
+        for name in BUILDER_FORBIDDEN_NAMES:
             self.assertNotIn(name, defined, f"{BUILDER} must not define {name} (Hermes delivery)")
         for name in BUILDER_FORBIDDEN_IMPORTS:
             self.assertNotIn(name, imported, f"{BUILDER} must not import {name} (Hermes delivery)")
@@ -251,6 +275,19 @@ class BuilderDefinedNamesTests(unittest.TestCase):
         names = builder_defined_names("async def proves_ran(): pass\n_transform = 1\n")
         self.assertIn("proves_ran", names)
         self.assertIn("_transform", names)
+
+    def test_collects_nested_unpacked_and_imported_names(self):
+        for source in (
+            "try:\n    def proves_ran(): pass\nexcept ImportError:\n    pass\n",
+            "proves_ran, _x = 1, 2\n",
+            "from m import y as proves_ran\n",
+            "import m as proves_ran\n",
+            "from m import proves_ran\n",
+            "if 1:\n    [a, (proves_ran, b)] = 1, (2, 3)\n",
+            "class A:\n    async def proves_ran(self): pass\n",
+        ):
+            with self.subTest(source=source):
+                self.assertIn("proves_ran", builder_defined_names(source))
 
 
 class NormalizerGuardTests(unittest.TestCase):
