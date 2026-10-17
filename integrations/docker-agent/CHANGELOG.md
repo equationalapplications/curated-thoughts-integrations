@@ -5,6 +5,11 @@ All notable changes to this integration. Versions follow SemVer; tags are
 
 ## Unreleased
 
+## 0.1.2 — 2026-10-17
+
+- Shared `ct_wisdom_activity.py` re-synced with Hermes 0.7.1 (its Hermes-only
+  ran check changed). No behavior change for Docker Agent.
+
 ## 0.1.1 — 2026-10-17
 
 - Shared-builder update (the byte-identical copy of Hermes's

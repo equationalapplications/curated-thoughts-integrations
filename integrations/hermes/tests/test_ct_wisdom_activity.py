@@ -1104,6 +1104,9 @@ class Harness(unittest.TestCase):
 
 
 READ_RESULT = json.dumps({"content": "1|print('hi')\n", "total_lines": 1}, ensure_ascii=False)
+# A terminal result that proves the command ran (terminal_tool_result.py:255
+# at the pin): proves_ran needs a JSON object with an int exit_code.
+TERMINAL_OK = json.dumps({"output": "pushed", "exit_code": 0, "error": None})
 
 
 class TestDelivery(Harness):
@@ -1129,20 +1132,70 @@ class TestDelivery(Harness):
         self.assertIn("bytes_written", data)
         self.assertFalse(data.get("error"))
 
-    def test_plain_text_appended(self):
+    def test_terminal_result_gets_the_block(self):
         ct_ledger.LEDGER_CACHE.put("s1", set())
-        out = self.post("ok 3 passed", tool="terminal", args={"command": "pnpm test"})
-        self.assertTrue(out.startswith("ok 3 passed\n\n" + act.ACTIVITY_HEADING))
+        out = self.post(TERMINAL_OK, tool="terminal", args={"command": "pnpm test"})
+        data = json.loads(out)
+        self.assertEqual(data["exit_code"], 0)
+        self.assertTrue(data[act.ACTIVITY_RESULT_KEY].startswith(act.ACTIVITY_HEADING))
         self.assertEqual(self.calls[0]["text"], "pnpm test")
 
-    def test_empty_object(self):
+    def test_patch_result_gets_the_block(self):
         ct_ledger.LEDGER_CACHE.put("s1", set())
-        out = self.post("{}")
-        self.assertEqual(list(json.loads(out)), [act.ACTIVITY_RESULT_KEY])
+        out = self.post(json.dumps({"success": True, "diff": "--- a\n+++ b\n",
+                                    "files_modified": ["/w/a.py"]}),
+                        tool="patch",
+                        args={"path": "a.py", "old_string": "x", "new_string": "y"})
+        self.assertIsNotNone(out)
+        self.assertIn(act.ACTIVITY_RESULT_KEY, json.loads(out))
+        self.assertEqual(self.calls[0]["text"], "a.py")
+
+    def test_search_files_result_gets_the_block(self):
+        ct_ledger.LEDGER_CACHE.put("s1", set())
+        out = self.post(json.dumps({"total_count": 0}), tool="search_files",
+                        args={"pattern": "TODO"})
+        self.assertIsNotNone(out)
+        self.assertIn(act.ACTIVITY_RESULT_KEY, json.loads(out))
+        self.assertEqual(self.calls[0]["text"], "TODO")
+
+    def test_non_activity_tool_skips_as_no_activity(self):
+        ct_ledger.LEDGER_CACHE.put("s1", set())
+        classes = []
+        orig = act._skip
+        act._skip = lambda sid, cls, *a, **k: classes.append(cls) or orig(sid, cls, *a, **k)
+        self.addCleanup(setattr, act, "_skip", orig)
+        self.assertIsNone(self.post(json.dumps({"output": "", "exit_code": 0, "error": None}),
+                                    tool="web_search", args={"query": "q"}))
+        self.assertEqual(self.calls, [])
+        self.assertEqual(classes, ["no_activity"])
+
+    def test_unhashable_tool_name_skips_as_no_activity(self):
+        ct_ledger.LEDGER_CACHE.put("s1", set())
+        classes = []
+        orig = act._skip
+        act._skip = lambda sid, cls, *a, **k: classes.append(cls) or orig(sid, cls, *a, **k)
+        self.addCleanup(setattr, act, "_skip", orig)
+        for tool in (["x"], {"a": 1}):
+            with self.subTest(tool=tool):
+                self.assertIsNone(self.post(TERMINAL_OK, tool=tool, args={"command": "ls"}))
+        self.assertEqual(self.calls, [])
+        self.assertEqual(classes, ["no_activity", "no_activity"])
+
+    def test_plain_text_result_sends_nothing(self):
+        """No activity tool returns plain text at the pin: it proves nothing."""
+        ct_ledger.LEDGER_CACHE.put("s1", set())
+        self.assertIsNone(self.post("ok 3 passed", tool="terminal",
+                                    args={"command": "pnpm test"}))
+        self.assertEqual(self.calls, [])
+
+    def test_empty_object_sends_nothing(self):
+        ct_ledger.LEDGER_CACHE.put("s1", set())
+        self.assertIsNone(self.post("{}"))
+        self.assertEqual(self.calls, [])
 
     def test_unsupported_results_claim_nothing(self):
         for result in ('[1, 2]', '"str"', '42', {"multimodal": True},
-                       json.dumps({act.ACTIVITY_RESULT_KEY: "x"})):
+                       json.dumps({"content": "x", act.ACTIVITY_RESULT_KEY: "x"})):
             with self.subTest(result=result):
                 act.reset_state()
                 ct_ledger.LEDGER_CACHE.put("s1", set())
@@ -1452,27 +1505,23 @@ class TestApprovalGate(Harness):
                 self.assertIsNotNone(self.post(READ_RESULT, call="c2"))
                 self.assertEqual([c["text"] for c in self.calls], ["src/x.py"])
                 # The refused key was never recorded: it queries when it runs.
-                self.post("pushed", tool="terminal", args=GIT_PUSH, call="c3", req="r2")
+                self.post(TERMINAL_OK, tool="terminal", args=GIT_PUSH, call="c3", req="r2")
                 self.assertEqual([c["text"] for c in self.calls], ["src/x.py", "git push"])
         self.assertEqual(self.breaker.failures, 0)
 
-    def test_refusal_shapes(self):
+    def test_refusal_shapes_prove_nothing(self):
+        """Every refusal the old word list caught still sends nothing, for
+        every activity tool: none of them carries a proof shape."""
         for result in REFUSALS + MORE_REFUSALS:
-            self.assertTrue(act.is_refusal(result), result)
-        for result in (READ_RESULT, "{}", json.dumps({"error": "boom"}),
-                       json.dumps({"output": "x", "exit_code": 1, "error": "", "status": "ok"}),
-                       json.dumps({"output": "Permission denied (publickey).", "exit_code": 255,
-                                   "error": ""}),
-                       json.dumps({"content": "the deploy was blocked last week", "total_lines": 1}),
-                       json.dumps({"error": {"BLOCKED": 1}}), json.dumps({"status": 3}),
-                       "ok 3 passed", "[1]", None, 42):
-            self.assertFalse(act.is_refusal(result), result)
+            for tool in ("terminal", "read_file", "write_file", "patch", "search_files"):
+                with self.subTest(tool=tool, result=result):
+                    self.assertFalse(act.proves_ran(tool, act._parse(result)))
 
     def test_blocked_call_never_reaching_transform_sends_nothing(self):
         """A plugin block, the approve gate's denial, guardrails or ACP edit
         approval stop the call before execution: Hermes runs no transform, so
         nothing is recorded and the same activity queries once it runs."""
-        self.post("pushed", tool="terminal", args=GIT_PUSH, call="c2", req="r2")
+        self.post(TERMINAL_OK, tool="terminal", args=GIT_PUSH, call="c2", req="r2")
         self.assertEqual([c["text"] for c in self.calls], ["git push"])
         self.assertEqual(self.breaker.failures, 0)
 
@@ -2048,14 +2097,16 @@ class TestReview3(TestUnusableCt):
         self.assertIsNotNone(self.step(2, path="same.py"), "ledger claim")
 
     def test_more_refusal_wording(self):
-        """3: declined, approval timed out, not allowed (envelope only)."""
+        """3: declined, approval timed out, not allowed: an `error` or a
+        missing proof field sends nothing, whatever the wording."""
         for err in ("User declined to run this command", "Approval timed out after 60s",
                     "Not allowed: path is outside the sandbox",
                     "Timed out waiting for approval"):
-            self.assertTrue(act.is_refusal(json.dumps({"error": err})), err)
-            self.assertTrue(act.is_refusal(json.dumps({"message": err})), err)
-            self.assertFalse(act.is_refusal(json.dumps({"output": err, "exit_code": 0,
-                                                        "error": ""})), err)
+            self.assertFalse(act.proves_ran("terminal", {"error": err}), err)
+            self.assertFalse(act.proves_ran("terminal", {"message": err}), err)
+            # Output wording is never read: a command that ran and printed it sends.
+            self.assertTrue(act.proves_ran("terminal", {"output": err, "exit_code": 0,
+                                                        "error": None}), err)
 
     def test_comment_and_docstring(self):
         """8, 9."""
@@ -2137,15 +2188,16 @@ class TestTransformCost(Harness):
 
 
 class TestRefusalReview2(unittest.TestCase):
-    """Re-review finding 3: more wording, Hermes's own kwargs, nested and
-    JSON-string errors. Output fields stay ignored."""
+    """Re-review finding 3, now under proves_ran: wording, nesting and
+    JSON-string errors all fail on `error`; Hermes's kwargs are not read;
+    output fields stay ignored."""
 
     def test_more_free_text(self):
         for err in ("Rejected by policy", "The user rejected this call",
                     "Cancelled by user", "Operation cancelled", "operation canceled",
                     "request was rejected"):
             for key in ("error", "message"):
-                self.assertTrue(act.is_refusal(json.dumps({key: err})), (key, err))
+                self.assertFalse(act.proves_ran("read_file", {key: err}), (key, err))
 
     def test_nested_and_json_string_errors(self):
         for result in (
@@ -2154,39 +2206,41 @@ class TestRefusalReview2(unittest.TestCase):
                 {"error": json.dumps({"status": "blocked"})},
                 {"error": json.dumps({"error": "Refusing to write"})},
                 {"error": {"error": {"message": "not approved"}}}):
-            self.assertTrue(act.is_refusal(json.dumps(result)), result)
+            for tool in ("terminal", "read_file", "write_file", "patch", "search_files"):
+                self.assertFalse(act.proves_ran(tool, result), (tool, result))
 
-    def test_hermes_kwargs(self):
-        plain = "some output"
-        self.assertTrue(act.is_refusal(plain, status="blocked"))
-        self.assertTrue(act.is_refusal(plain, error_type="guardrail_block"))
-        self.assertTrue(act.is_refusal(plain, error_message="BLOCKED: User denied this command."))
-        self.assertTrue(act.is_refusal(READ_RESULT, error_message="Cancelled by user"))
-        self.assertFalse(act.is_refusal(plain, status="ok", error_type=None, error_message=None))
-        self.assertFalse(act.is_refusal(plain, status="error", error_type="tool_error",
-                                        error_message="boom"))
-
-    def test_transform_reads_the_kwargs(self):
+    def test_transform_ignores_the_kwargs(self):
+        """The result body is the proof. At the pin Hermes derives the kwargs
+        from that body, and says status="error" for any non-zero exit (a
+        command that ran), so they are not read."""
         h = Harness("run")
         h.setUp()
         try:
             ct_ledger.LEDGER_CACHE.put("s1", set())
             out = act.on_transform_tool_result(
-                tool_name="read_file", args={"path": "src/x.py"}, result=READ_RESULT,
+                tool_name="terminal", args={"command": "pnpm test"},
+                result=json.dumps({"output": "1 failed", "exit_code": 1, "error": None}),
                 task_id="", session_id="s1", tool_call_id="c1", turn_id="t",
                 api_request_id="r1", duration_ms=5, status="error",
-                error_type="tool_error", error_message="BLOCKED: denied by user")
-            self.assertIsNone(out)
-            self.assertEqual(h.calls, [])
+                error_type="tool_error", error_message="[exit 1]")
+            self.assertIsNotNone(out)
+            self.assertEqual([c["text"] for c in h.calls], ["pnpm test"])
         finally:
             h.doCleanups()
 
     def test_output_fields_still_ignored(self):
-        for result in ({"output": "rejected by remote: cancelled by user", "exit_code": 1,
-                        "error": ""},
-                       {"content": "Operation cancelled by user", "total_lines": 1},
-                       {"stdout": "BLOCKED", "stderr": "denied by policy"}):
-            self.assertFalse(act.is_refusal(json.dumps(result)), result)
+        for tool, result in (
+                ("terminal", {"output": "rejected by remote: cancelled by user",
+                              "exit_code": 1, "error": None}),
+                ("read_file", {"content": "Operation cancelled by user", "total_lines": 1})):
+            self.assertTrue(act.proves_ran(tool, result), result)
+
+    def test_word_list_is_gone(self):
+        for name in ("is_refusal", "_refused", "_refusal_value", "_refusal_text",
+                     "_refused_status", "_REFUSED_STATUSES", "_REFUSED_PREFIXES",
+                     "_REFUSED_PHRASES", "_REFUSED_ERROR_TYPE_WORDS",
+                     "_ENVELOPE_TEXT_KEYS", "_REFUSAL_DEPTH"):
+            self.assertFalse(hasattr(act, name), name)
 
 
 if __name__ == "__main__":

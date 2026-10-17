@@ -1136,7 +1136,11 @@ status or wording not in these lists; and another plugin's `transform_tool_resul
 that rewrites a refusal before ours sees it (Hermes passes each callback the original
 result, so this needs a plugin that runs first and returns a non-refusal string, and
 then our block is dropped anyway: first string wins). A fail-closed design (send only
-when the result shows the tool ran, per tool) is proposed in the PR, not built.
+when the result shows the tool ran, per tool) was proposed and is built in hermes 0.7.1 (see the hermes 0.7.1 note below).
+
+**Replaced in hermes 0.7.1 (Amendment 9):** the word list above is gone. The transform now sends only when the
+result proves the tool ran, checked per tool. See
+[`2026-10-17-hermes-fail-closed-ran-check-design.md`](2026-10-17-hermes-fail-closed-ran-check-design.md).
 
 ### Versioning
 

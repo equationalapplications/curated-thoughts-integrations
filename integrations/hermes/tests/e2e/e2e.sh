@@ -119,11 +119,11 @@ bash /home/tester/plugin/scripts/install.sh >"$OUT/install.log" 2>&1 || die 'plu
 test -f "$HERMES_HOME/plugins/curated-thoughts/__init__.py" || die 'plugin files not installed'
 echo 'install ok'
 # Check 6: a second plugin whose pre_tool_call blocks reading secrets.env.
-# Hermes resolves the block after every pre_tool_call callback and runs no
-# transform_tool_result for the blocked call. The block message deliberately
-# does NOT start with "BLOCKED" (or any other wording is_refusal matches), so
-# if Hermes did run our transform for it, CT would receive secrets.env and the
-# check would fail: it tests "no transform", not our refusal check.
+# Hermes resolves the block after every pre_tool_call callback. This checks
+# end to end that CT never receives the blocked target. Since 0.7.1 it passes
+# whether Hermes skips the transform for the blocked call (amendment 8) or the
+# transform's ran check (proves_ran) skips the blocked result, so it no longer
+# isolates the "no transform" property.
 mkdir -p "$HERMES_HOME/plugins/e2e-blocker"
 cat >"$HERMES_HOME/plugins/e2e-blocker/plugin.yaml" <<'EOF'
 name: e2e-blocker
