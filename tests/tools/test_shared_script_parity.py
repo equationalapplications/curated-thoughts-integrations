@@ -144,6 +144,23 @@ def drift_report(reference, copy, ref_label, copy_label):
     )
 
 
+def builder_defined_names(source):
+    """Top-level names the builder binds: functions, classes and assignments.
+
+    Assignments count too, so `proves_ran = _x` cannot smuggle a Hermes
+    delivery name past the forbidden-definitions check.
+    """
+    names = set()
+    for node in ast.parse(source).body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names.add(node.name)
+        elif isinstance(node, ast.Assign):
+            names.update(t.id for t in node.targets if isinstance(t, ast.Name))
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            names.add(node.target.id)
+    return names
+
+
 class SharedScriptParityTests(unittest.TestCase):
     def test_identical_scripts_are_byte_identical(self):
         for copy_dir in COPIES:
@@ -214,8 +231,9 @@ class HermesOnlyBoundaryTests(unittest.TestCase):
                                      f"{copy_dir.parent.name} must not carry Hermes-only {name}")
 
     def test_builder_has_no_hermes_delivery(self):
-        tree = ast.parse(read(REFERENCE / BUILDER))
-        defined = {n.name for n in tree.body if isinstance(n, (ast.FunctionDef, ast.ClassDef))}
+        source = read(REFERENCE / BUILDER)
+        tree = ast.parse(source)
+        defined = builder_defined_names(source)
         imported = set()
         for n in ast.walk(tree):
             if isinstance(n, ast.Import):
@@ -226,6 +244,13 @@ class HermesOnlyBoundaryTests(unittest.TestCase):
             self.assertNotIn(name, defined, f"{BUILDER} must not define {name} (Hermes delivery)")
         for name in BUILDER_FORBIDDEN_IMPORTS:
             self.assertNotIn(name, imported, f"{BUILDER} must not import {name} (Hermes delivery)")
+
+
+class BuilderDefinedNamesTests(unittest.TestCase):
+    def test_collects_async_defs_and_top_level_assignments(self):
+        names = builder_defined_names("async def proves_ran(): pass\n_transform = 1\n")
+        self.assertIn("proves_ran", names)
+        self.assertIn("_transform", names)
 
 
 class NormalizerGuardTests(unittest.TestCase):

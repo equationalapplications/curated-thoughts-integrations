@@ -1,6 +1,6 @@
 # Split the Hermes activity delivery out of the shared builder — design
 
-**Date:** 2026-10-17 · **Status:** Draft for user review · **Branch:** `refactor/hermes-activity-delivery-split`
+**Date:** 2026-10-17 · **Status:** Approved (user, 2026-10-17) · **Branch:** `refactor/hermes-activity-delivery-split`
 · **Base:** `main` @ `2466274`
 **Release:** hermes 0.7.1 → 0.7.2, claude-code 0.4.2 → 0.4.3, docker-agent 0.1.2 → 0.1.3 (last three-way bump)
 **Builds on:** the architecture review in handoff `2026-10-17e-fable-architecture-open-items.md` (item C), and the

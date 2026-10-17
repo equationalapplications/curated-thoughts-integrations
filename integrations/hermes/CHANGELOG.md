@@ -11,6 +11,7 @@ format below is load-bearing: `## <version> — <date>`.
 - Internal: the autonomous-work delivery moved out of the shared builder into
   a Hermes-only `ct_wisdom_activity_delivery.py`. No behavior change. Later
   Hermes-only fixes no longer require Claude Code and Docker Agent releases.
+  Delivery debug lines now come from the logger `ct_wisdom_activity_delivery` (was `ct_wisdom_activity`).
 
 ## 0.7.1 — 2026-10-17
 
