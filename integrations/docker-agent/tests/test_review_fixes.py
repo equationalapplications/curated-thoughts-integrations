@@ -127,6 +127,38 @@ class SpliceFallsBackToTheDeferredBlock(Base):
         self.assertNotIn("act1", store["delivered_ids"])
 
 
+class StreamedShellChunks(Base):
+    """P16 (found by the live e2e): the shell tool runs tool_response_transform
+    on every streamed output chunk and then on the final result, all with one
+    tool_use_id. The block claimed on the first call must ride the final
+    result, and nothing is claimed or queried twice."""
+
+    def test_every_call_of_one_tool_call_gets_the_same_block(self):
+        self.fake.match = {"q": [fact("live1")], "pnpm test": [fact("act1")]}
+        self.h(llm("s1"))
+        self.h(prompt("s1", "q"))
+        calls = [tool("s1", name="shell", category="shell", args={"cmd": "pnpm test"},
+                      response=text, use_id="call_sh") for text in
+                 ("> e2e test\n", "all passed\n", "> e2e test\nall passed")]
+        outs = [updated_response(self.h(c)) for c in calls]
+        final = outs[-1]
+        self.assertTrue(final.startswith("> e2e test\nall passed\n\n"))
+        self.assertEqual(final.count("ct-fact:live1"), 1)
+        self.assertEqual(final.count("ct-fact:act1"), 1)
+        blocks = {o[o.index("## Curated Thoughts"):] for o in outs}
+        self.assertEqual(len(blocks), 1)
+        self.assertEqual(self.fake.queries(), ["q", "pnpm test"])
+        self.assertEqual(self.e.store("s1")["delivered_ids"].count("act1"), 1)
+
+    def test_another_tool_call_is_not_a_replay(self):
+        self.fake.match = {"pnpm test": [fact("act1")]}
+        self.h(llm("s1"))
+        self.assertIsNotNone(self.h(tool("s1", name="shell", category="shell",
+                                         args={"cmd": "pnpm test"}, use_id="a")))
+        self.assertIsNone(self.h(tool("s1", name="shell", category="shell",
+                                      args={"cmd": "pnpm test"}, use_id="b")))
+
+
 class CtCacheKeyedOnTheDiscoveryView(Base):
     """Item 6: a cache written under one PATH is not trusted under another."""
 

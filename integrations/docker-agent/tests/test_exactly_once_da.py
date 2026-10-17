@@ -77,7 +77,7 @@ class Host:
             name, args, cat, resp = "write_file", {"path": self.rng.choice(PATHS), "content": "c"}, \
                 "filesystem", '{"bytes_written": 1}'
         return {"hook_event_name": "tool_response_transform", "session_id": sid,
-                "cwd": PROJECT, "tool_name": name, "tool_use_id": "c%d" % i,
+                "cwd": PROJECT, "tool_name": name, "tool_use_id": "c%d-%d" % (i, self.rng.getrandbits(48)),
                 "tool_input": args, "tool_category": cat, "tool_response": resp}
 
     def batch(self, sid, n):

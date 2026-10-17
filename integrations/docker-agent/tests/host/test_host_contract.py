@@ -31,6 +31,7 @@ FACTS = {
     "match": {
         "how do I deploy": [{"id": "live1", "title": "Release train", "text": "Tag from main."}],
         "src/a.py": [{"id": "act1", "title": "Module a", "text": "a.py owns billing."}],
+        "printf": [{"id": "act-sh", "title": "Shell rule", "text": "Quote your arguments."}],
     },
 }
 
@@ -51,6 +52,7 @@ agents:
     sub_agents: [helper]
     toolsets:
       - type: filesystem
+      - type: shell
   helper:
     model: m
     description: A helper agent.
@@ -161,6 +163,20 @@ class HostContractTests(unittest.TestCase):
         queries = [c[c.index("--") + 1] for c in calls if c[:2] == ["wisdom", "match"] and "--" in c]
         self.assertIn("how do I deploy", queries)
         self.assertIn("src/a.py", queries)  # the bare target
+
+    def test_streamed_shell_output_keeps_the_block_in_the_final_result(self):
+        # The shell tool runs tool_response_transform on each streamed chunk
+        # and then on the final result (spec P16): the block claimed on the
+        # first call must reach the model-facing result, once.
+        cmd = "printf 'one\\n'; sleep 0.3; printf 'two\\n'"
+        script = [{"tool_calls": [{"name": "shell", "arguments": {"cmd": cmd}}]}, {"text": "ok"}]
+        bodies, _ = self.drive("shell", script, "sess-shell", ["run it"],
+                               data=self.root / "data-shell")
+        tool_msgs = [m for m in bodies[-1]["messages"] if m.get("role") == "tool"]
+        self.assertEqual(len(tool_msgs), 1)
+        content = tool_msgs[0]["content"]
+        self.assertIn("two", content)
+        self.assertEqual(MARKER_RE.findall(content), ["act-sh"])
 
     def test_helper_gets_its_own_bootstrap(self):
         script = [{"tool_calls": [{"name": "transfer_task", "arguments": {

@@ -69,6 +69,7 @@ LOCK_WAIT = ct_hook_store.LOCK_WAIT
 STORE_MAX_AGE = ct_hook_store.STORE_MAX_AGE
 CT_CACHE_MAX_AGE = 86400
 RECENT_KEYS_MAX = ct_wisdom_activity.RECENT_KEYS_MAX
+CLAIMS_MAX = 64
 # The size limiter (limit_large_tool_results) cuts results over 51 200 bytes
 # or 2 000 lines AFTER our transform. Stay well under it so it can never cut
 # a block (spec D6, P11).
@@ -171,6 +172,13 @@ def new_store(session_id, state="pending"):
         # renders and the first message's match excludes.
         "boot_entries": None,
         "boot_attempts": 0,
+        # {tool_use_id: block} for the last CLAIMS_MAX deliveries. The shell
+        # tool streams each output chunk through tool_response_transform
+        # (pkg/tools/builtin/shell/shell.go:68-72 -> callRuntime.EmitOutput)
+        # before the final result; every call for one tool_use_id gets the
+        # same block, claimed once, so the model-facing final result carries
+        # it (spec P16).
+        "claims": {},
         "updated": time.time(),
     }
 
@@ -211,6 +219,10 @@ def _valid_store(data, session_id):
             return False
     pending = data.get("pending_live")
     if pending is not None and not isinstance(pending, dict):
+        return False
+    claims = data.get("claims")
+    if not isinstance(claims, dict) or not all(
+            isinstance(k, str) and isinstance(v, str) for k, v in claims.items()):
         return False
     entries = data.get("boot_entries")
     if entries is not None and not (isinstance(entries, list) and all(
@@ -792,6 +804,16 @@ def tool_response_transform(payload, view):
     store = load_store(wdir, sid)
     if store is None or store["state"] != "on":
         return _skip(view, sid, "no_store" if store is None else store["state"])
+    use_id = payload.get("tool_use_id")
+    use_id = use_id if _nonempty(use_id) else None
+    if use_id is not None and use_id in store["claims"]:
+        # A later call for the same tool call (a streamed shell chunk, then
+        # the final result): the same block again, no new claim (P16).
+        replay = ct_wisdom_activity.splice(response, store["claims"][use_id])
+        if replay is None or not _fits(replay):
+            return _skip(view, sid, "near_limit")
+        return {"hook_specific_output": {"hook_event_name": "tool_response_transform",
+                                         "updated_tool_response": replay}}
     if not _precheck(response):
         return _skip(view, sid, "near_limit")
     args = payload.get("tool_input")
@@ -908,6 +930,10 @@ def tool_response_transform(payload, view):
         # Unused parts are not recorded as delivered, but the claimed pending
         # result and step slot stay spent (at-most-once).
         if out is not None:
+            if use_id is not None:
+                cur["claims"][use_id] = "\n\n".join(p[1] for p in used)
+                while len(cur["claims"]) > CLAIMS_MAX:
+                    cur["claims"].pop(next(iter(cur["claims"])))
             save_store(wdir, sid, cur)
     for kind, event in events:
         _record(kind, view, event)

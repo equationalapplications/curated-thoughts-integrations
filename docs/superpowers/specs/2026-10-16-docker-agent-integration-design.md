@@ -72,6 +72,7 @@ The investigation's facts stand. These are the [U] targets that block the design
 | P13 | A multi-line `system_message` prints in a non-TUI run as `⚠️  <line 1>\n<line 2>` on stdout; it never enters the session messages. | [E] experiment E; [V] `pkg/runtime/hooks.go:134-136` |
 | P14 | The config dir is `$DOCKER_AGENT_CONFIG_DIR`, else `$CAGENT_CONFIG_DIR`, else `$HOME/.config/cagent` (**not** `$XDG_CONFIG_HOME`). The data dir is `$DOCKER_AGENT_DATA_DIR`, else `$HOME/.cagent`. | [V] `pkg/paths/paths.go:96-120`, `cmd/root/root.go:43-60` |
 | P15 | Tool names and args at the pin: `read_file{path}`, `write_file{path,content}`, `edit_file{path,edits}`, `search_files_content{path,query,is_regex}`, `shell{cmd}` (alias `command`). Tool-event payloads carry `cwd`, `agent_name`, `tool_category` (`filesystem`, `shell`, `mcp`, `transfer`, …). | [V] `pkg/tools/builtin/filesystem/types/types.go`, `shell/types/types.go`; [E] experiments A, D |
+| P16 | **The shell tool streams.** Each output chunk is written through `callRuntime.EmitOutput`, which runs `tool_response_transform` on the chunk (UI only, never recorded); the final result then runs it again. Every call carries the same `tool_use_id` and an identical payload shape, so a hook cannot tell a chunk from the result. Found by the live e2e: a block claimed on a chunk never reached the model. Only `shell` streams at the pin. | [E] live e2e + mock-host reproduction; [V] `pkg/tools/builtin/shell/shell.go:62-80`, `pkg/runtime/toolexec/dispatcher.go:1043-1046` |
 
 Closed differently from the investigation's sketch: the sketch emitted the bootstrap from
 `session_start`. P3 and P4 together make `before_llm_call` the better channel (D4).
@@ -296,6 +297,12 @@ and the activity block together would not fit under the limiter margin, the per-
 tried alone (it has priority); the activity fact is then not recorded. Splicing and the limiter
 margin follow D6. When a deferred per-message block rides the same result, it goes first and the
 activity block follows it.
+
+**One tool call, one claim (P16).** The block a tool call claims is stored under its
+`tool_use_id` (the last 64 calls). Every later transform with that id (a streamed shell chunk, then
+the final result) gets the same block spliced in, with no new claim, query or record, so the
+model-facing final result carries it exactly once. The UI may show the block on streamed chunks
+too; the model never sees chunks.
 
 Subagents get activity delivery like any session (P6); so do scheduled and non-interactive runs:
 nothing checks how the run started.

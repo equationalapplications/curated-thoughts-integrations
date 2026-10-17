@@ -147,8 +147,14 @@ def prompt(sid, text, event="user_prompt_submit"):
             "agent_name": "root", "prompt": text}
 
 
+_IDS = [0]
+
+
 def tool(sid, name="read_file", args=None, response="file text\n", category="filesystem",
-         error=False, cwd=PROJECT, use_id="call_1"):
+         error=False, cwd=PROJECT, use_id=None):
+    if use_id is None:  # the host gives every tool call its own id
+        _IDS[0] += 1
+        use_id = "call_auto_%d" % _IDS[0]
     payload = {"hook_event_name": "tool_response_transform", "session_id": sid, "cwd": cwd,
                "agent_name": "root", "tool_name": name, "tool_use_id": use_id,
                "tool_input": args if args is not None else {"path": "src/a.py"},
