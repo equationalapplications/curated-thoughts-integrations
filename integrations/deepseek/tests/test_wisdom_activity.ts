@@ -13,6 +13,7 @@ import { afterAll, describe, expect, it } from 'vitest';
 
 import {
   ACTIVITY_HEADING,
+  ACTIVITY_SESSIONS_MAX,
   Breaker,
   BREAKER_FAILS,
   createVerboseRecorder,
@@ -540,9 +541,12 @@ describe('keys burned by a post-start failure are released (review of PR #56)', 
   });
 
   it('would_extend_turn releases the key', async () => {
-    const s = setup();
+    let hang = true;
+    const s = setup(() => (hang ? 'hang' : { entries: [fact('f1')], corrections: [] }));
     s.step([['bash', { command: 'pnpm test' }]]);
+    await new Promise((r) => setTimeout(r, 0)); // the match spawn is running
     expect(await s.pre([{ id: 'steer' }], [])).toBeNull();
+    hang = false;
     s.step([['bash', { command: 'pnpm test' }]]);
     expect(await s.pre()).not.toBeNull();
     expect(s.ct.calls).toHaveLength(2);
@@ -649,6 +653,50 @@ describe('budget expiry aborts the query (core recordActivityBudgetMiss)', () =>
     const s = setup(undefined, { breaker });
     s.step([['read', { file_path: 'a.ts' }]]);
     expect(await s.pre()).not.toBeNull();
+    expect(breaker.failuresRecorded).toBe(0);
+  });
+});
+
+describe('abandoned plans are cancelled, not charged to CT (PR #71 review)', () => {
+  it('a newer step replacing the slot aborts the old query, frees its key, and counts no failure', async () => {
+    const breaker = new CountingBreaker();
+    const s = setup(() => 'hang', { breaker });
+    s.step([['bash', { command: 'pnpm test' }]]);
+    await flush();
+    expect(s.ct.signals).toHaveLength(1);
+    // The pre-step for that step never ran; the next step plans the same key.
+    s.step([['bash', { command: 'pnpm test' }]]);
+    await flush();
+    expect(s.ct.signals[0]!.aborted).toBe(true);
+    expect(s.ct.calls.map((c) => c.query)).toEqual(['pnpm test', 'pnpm test']);
+    expect(breaker.failuresRecorded).toBe(0);
+  });
+
+  it('an LRU-evicted slot aborts its query and counts no failure', async () => {
+    const breaker = new CountingBreaker();
+    const s = setup(() => 'hang', { breaker });
+    s.step([['bash', { command: 'pnpm test' }]]);
+    await flush();
+    for (let i = 0; i < ACTIVITY_SESSIONS_MAX; i++) {
+      const log: Msg[] = [assistant([['read', { file_path: `f${i}.ts` }]])];
+      const other = { id: `other-${i}`, session: { deriveMessages: () => [...log], header: { cwd: PROJ } } };
+      const b = (log[0].content as Array<{ id: string }>)[0];
+      s.activity.prefetch({ callId: b.id, name: 'read', arguments: { file_path: `f${i}.ts` }, agent: other });
+    }
+    await flush();
+    expect(s.ct.signals[0]!.aborted).toBe(true);
+    expect(s.ct.signals.slice(1).every((sig) => !sig.aborted)).toBe(true);
+    expect(breaker.failuresRecorded).toBe(0);
+  });
+
+  it('would_extend_turn aborts the query as well as freeing the key, and counts no failure', async () => {
+    const breaker = new CountingBreaker();
+    const s = setup(() => 'hang', { breaker });
+    s.step([['bash', { command: 'pnpm test' }]]);
+    await flush();
+    expect(await s.pre([{ id: 'steer' }], [])).toBeNull();
+    expect(s.ct.signals[0]!.aborted).toBe(true);
+    await flush();
     expect(breaker.failuresRecorded).toBe(0);
   });
 });

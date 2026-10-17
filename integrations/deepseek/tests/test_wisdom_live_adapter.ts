@@ -219,6 +219,83 @@ describe('nodeSpawnFn abort (real process tree)', () => {
     expect(getEventListeners(abort.signal, 'abort')).toHaveLength(0);
   });
 
+  it('the timeout kills the grandchild too (one kill path, PR #71 review)', async () => {
+    if (process.platform === 'win32') return;
+    const ct = await hangingCt();
+    try {
+      const pending = nodeSpawnFn()({ command: ct.script, args: ['wisdom', 'match'], timeoutMs: 2000 });
+      const gpid = await ct.grandchild();
+      expect(gpid).toBeGreaterThan(0);
+      const out = await pending;
+      expect(out.timedOut).toBe(true);
+      expect(await waitFor(() => !alive(gpid), 3000)).toBe(true);
+    } finally {
+      ct.cleanup();
+    }
+  });
+
+  it('an already-aborted signal resolves aborted without spawning (PR #71 review)', async () => {
+    if (process.platform === 'win32') return;
+    const { mkdtempSync, writeFileSync, chmodSync, rmSync, existsSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const dir = mkdtempSync(join(tmpdir(), 'ct-spawn-pre-abort-'));
+    const touched = join(dir, 'ran');
+    const script = join(dir, 'ct');
+    writeFileSync(script, `#!/bin/sh\ntouch '${touched}'\n`);
+    chmodSync(script, 0o755);
+    try {
+      const abort = new AbortController();
+      abort.abort();
+      const out = await nodeSpawnFn()({ command: script, args: [], timeoutMs: 3000, signal: abort.signal });
+      expect(out.aborted).toBe(true);
+      expect(out.spawnError).toBe(false);
+      await new Promise((r) => setTimeout(r, 200));
+      expect(existsSync(touched)).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('a binary that cannot start is a spawn error, not an abort, even if the abort lands first (PR #71 review)', async () => {
+    const abort = new AbortController();
+    const pending = nodeSpawnFn()({ command: '/nonexistent/ct-binary', args: [], timeoutMs: 3000, signal: abort.signal });
+    abort.abort(); // before the async ENOENT 'error' event
+    const out = await pending;
+    expect(out.spawnError).toBe(true);
+    expect(out.aborted).toBeUndefined();
+  });
+
+  it('an abort after the child already exited reports the real result, not aborted (PR #71 review)', async () => {
+    if (process.platform === 'win32') return;
+    const { mkdtempSync, writeFileSync, chmodSync, rmSync, existsSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const dir = mkdtempSync(join(tmpdir(), 'ct-spawn-exited-'));
+    const script = join(dir, 'ct');
+    // Exits 0 at once, but a background grandchild keeps stdout open, so
+    // 'close' has not fired yet when the abort lands.
+    const exiting = join(dir, 'exiting');
+    writeFileSync(script, `#!/bin/sh\nprintf '{"entries": []}'\nsleep 30 &\ntouch '${exiting}'\nexit 0\n`);
+    chmodSync(script, 0o755);
+    try {
+      const abort = new AbortController();
+      const started = Date.now();
+      const pending = nodeSpawnFn()({ command: script, args: [], timeoutMs: 30_000, signal: abort.signal });
+      const end = Date.now() + 10_000;
+      while (!existsSync(exiting) && Date.now() < end) await new Promise((r) => setTimeout(r, 25));
+      await new Promise((r) => setTimeout(r, 300)); // the child's exit is reaped
+      abort.abort();
+      const out = await pending;
+      expect(out.aborted).toBeUndefined();
+      expect(out.code).toBe(0);
+      expect(out.stdout).toBe('{"entries": []}');
+      expect(Date.now() - started).toBeLessThan(20_000); // the straggler was still killed
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('DshWisdomAdapter.wisdomMatch passes the signal: abort → outcome aborted, capability not latched', async () => {
     if (process.platform === 'win32') return;
     const ct = await hangingCt();
@@ -360,6 +437,59 @@ describe('capability probe + wisdomMatch', () => {
   it('discovery miss → spawn class (n3 retry next turn)', async () => {
     const { a } = adapter({ discover: () => ({ path: null, failure: null }) });
     expect((await a.wisdomMatch('q', 2, [])).outcome).toBe('spawn');
+  });
+
+  it('probes the capability once per resolved ct path, not on every call (PR #71 review)', async () => {
+    const { a, spawns } = adapter();
+    await a.wisdomMatch('q1', 1, []);
+    await a.wisdomMatch('q2', 1, []);
+    await a.wisdomMatch('q3', 1, []);
+    expect(spawns.filter((s) => s.args[2] === '--help')).toHaveLength(1);
+    expect(spawns.filter((s) => s.args[2] === '--json')).toHaveLength(3);
+  });
+
+  it('re-probes after a discovery reset and when the resolved path changes', async () => {
+    let path = '/bin/ct';
+    const { a, spawns } = adapter({ discover: () => ({ path, failure: null }) });
+    const helps = () => spawns.filter((s) => s.args[2] === '--help').map((s) => s.command);
+    await a.wisdomMatch('q', 1, []);
+    a.resetDiscoveryAndProbeCaches();
+    await a.wisdomMatch('q', 1, []);
+    path = '/opt/ct';
+    await a.wisdomMatch('q', 1, []);
+    await a.wisdomMatch('q', 1, []);
+    expect(helps()).toEqual(['/bin/ct', '/bin/ct', '/opt/ct']);
+    a._resetForTests();
+    await a.wisdomMatch('q', 1, []);
+    expect(helps()).toHaveLength(4);
+  });
+
+  it('a spawn error with an aborted signal is class spawn, not aborted, and drops the probe cache (PR #71 review)', async () => {
+    let failMatch = false;
+    const seen: string[][] = [];
+    const spawnFn: SpawnFn = (spec) => {
+      seen.push(spec.args);
+      if (spec.args[2] === '--help') return Promise.resolve(spawnOutcome({}));
+      if (failMatch) return Promise.resolve({ ...spawnOutcome({ code: null, spawnError: true }), aborted: true });
+      return Promise.resolve(spawnOutcome({ stdout: '{"entries": [], "corrections": []}' }));
+    };
+    const { a } = adapter({ spawnFn });
+    expect((await a.wisdomMatch('q', 1, [])).outcome).toBe('ok');
+    failMatch = true;
+    const abort = new AbortController();
+    abort.abort();
+    expect((await a.wisdomMatch('q', 1, [], abort.signal)).outcome).toBe('spawn');
+    failMatch = false;
+    await a.wisdomMatch('q', 1, []);
+    expect(seen.filter((x) => x[2] === '--help')).toHaveLength(2); // probed again after the spawn error
+  });
+
+  it('a probe spawn error with an aborted signal is class spawn, not aborted', async () => {
+    const spawnFn: SpawnFn = () => Promise.resolve({ ...spawnOutcome({ code: null, spawnError: true }), aborted: true });
+    const { a } = adapter({ spawnFn });
+    const abort = new AbortController();
+    abort.abort();
+    expect((await a.wisdomMatch('q', 1, [], abort.signal)).outcome).toBe('spawn');
   });
 });
 

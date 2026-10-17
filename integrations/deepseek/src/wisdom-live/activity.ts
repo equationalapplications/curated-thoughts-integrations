@@ -186,6 +186,12 @@ interface Plan {
   promise: Promise<ActivityMatch>;
   /** Aborted on budget expiry: kills the `ct` child (the core counts the miss once). */
   abort: AbortController;
+  /**
+   * Aborted when the plan is abandoned (slot replaced or evicted, a turn
+   * the host would not extend): kills the child too, but is no budget miss
+   * and no breaker failure (adapter `linkCancel`).
+   */
+  cancel: AbortController;
   consumed: boolean;
 }
 
@@ -264,6 +270,29 @@ export class DshActivity {
     this.adapter.snapshotMessages(agentId, messages);
   }
 
+  /**
+   * Abandon a plan that will never be delivered: kill its `ct` child and
+   * free its key so a later step can retry it. A consumed plan was already
+   * settled (or released) by its pre-step.
+   */
+  private abandon(agentId: string, slot: AgentSlot | undefined): void {
+    const plan = slot?.plan;
+    if (plan == null || plan.consumed) return;
+    plan.consumed = true;
+    plan.cancel.abort();
+    this.release(agentId, plan);
+  }
+
+  /** Store a slot; a replaced slot or the LRU-evicted one is abandoned. */
+  private storeSlot(agentId: string, slot: AgentSlot): void {
+    this.abandon(agentId, this.slots.get(agentId));
+    if (!this.slots.has(agentId) && this.slots.size >= ACTIVITY_SESSIONS_MAX) {
+      const oldest = this.slots.keys().next();
+      if (!oldest.done) this.abandon(oldest.value, this.slots.get(oldest.value));
+    }
+    lruSet(this.slots, agentId, slot, ACTIVITY_SESSIONS_MAX);
+  }
+
   private slotFor(agentId: string, messageId: string): AgentSlot | null {
     const slot = this.slots.get(agentId);
     if (slot === undefined || slot.messageId !== messageId) return null;
@@ -313,12 +342,16 @@ export class DshActivity {
     const existing = this.slotFor(agentId, step.messageId);
     if (existing !== null) return existing.plan;
     const slot: AgentSlot = { messageId: step.messageId, plan: null, callIds: new Set(step.calls.map((c) => c.id)) };
-    lruSet(this.slots, agentId, slot, ACTIVITY_SESSIONS_MAX);
+    // Only the newest step matters: an older plan still running is
+    // abandoned (child killed, key freed) before this step looks for keys.
+    this.storeSlot(agentId, slot);
     const activity = this.firstNewActivity(agent, agentId, step);
     if (activity === null) return null;
     const session = { id: agentId };
     this.publish(agentId, messages);
     const abort = new AbortController();
+    const cancel = new AbortController();
+    this.adapter.linkCancel(abort.signal, cancel.signal);
     const start = startActivity(this.adapter, session, activity, this.breaker, abort.signal);
     if (start.failure !== null) {
       this.debug(agentId, start.failure);
@@ -326,7 +359,7 @@ export class DshActivity {
       return null;
     }
     this.tracker.admit(agentId, step.messageId, activity.key);
-    slot.plan = { activity, deadline: this.now() + TIMEOUT_MS, promise: start.match, abort, consumed: false };
+    slot.plan = { activity, deadline: this.now() + TIMEOUT_MS, promise: start.match, abort, cancel, consumed: false };
     return slot.plan;
   }
 
@@ -397,8 +430,9 @@ export class DshActivity {
       plan.consumed = true;
       if ((claimed?.length ?? 0) > 0 && (decisionMessages?.length ?? 0) === 0) {
         reportActivity(this.adapter, session, plan.activity, { kind: 'skip', reason: 'would_extend_turn' });
-        // No budget miss: the query may still answer in the background and
-        // its result (success or a CT failure) feeds the breaker as usual.
+        // Nothing will use the answer: kill the query (a cancel, not a
+        // budget miss, so no breaker failure) and free the key.
+        plan.cancel.abort();
         this.release(agentId, plan);
         return null;
       }

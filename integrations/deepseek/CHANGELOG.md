@@ -5,13 +5,26 @@
 ## 0.6.2 — 2026-10-17
 
 - Fixed: an autonomous-work query that runs past its 3 s budget is now
-  stopped. The pre-step aborts it on expiry and the `ct` child (its whole
-  process tree, the capability probe included) is killed, so it no longer
-  keeps running in the background. The miss counts as exactly one failure
-  toward the five-minute failure pause (the shared core rule
+  stopped. The pre-step aborts it on expiry and the `ct` child is killed
+  (on macOS and Linux its whole process group, so anything it started goes
+  too; on Windows the direct child), the capability probe included, so it
+  no longer keeps running in the background. The miss counts as exactly one
+  failure toward the five-minute failure pause (the shared core rule
   `recordActivityBudgetMiss`, the same on every host). The activity can
   still trigger again at a later step; the step that missed keeps its one
   query (the key is freed, the step is not).
+- Fixed: a query nobody will use is stopped too, without counting as a
+  failure: when a newer step replaces an agent's pending query, when that
+  query is evicted (more than 256 agents), or when the host would not extend
+  the turn. Its activity can trigger again later.
+- Fixed: the `ct wisdom match --help` capability check runs once per `ct`
+  path instead of before every query, so the query gets the whole 3 s
+  budget. A `ct` that cannot start clears that cache and is never counted
+  as a budget miss.
+- Fixed: a `ct` child that already exited when the budget ran out keeps its
+  real result; an already-expired budget starts no child at all; and a `ct`
+  that failed to start is never signalled (signalling a child with no
+  process id would have hit the harness's own process group).
 
 ## 0.6.1 — 2026-10-17
 
