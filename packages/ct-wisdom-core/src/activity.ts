@@ -39,6 +39,7 @@ import {
   EXCLUDE_MAX,
 } from './constants.js';
 import { marker, stripForged, validId } from './ledger.js';
+import { ELLIPSIS, sanitizeField } from './render.js';
 import { lruGet, lruSet } from './lru.js';
 import { cpLen, cpSlice } from './text.js';
 import type {
@@ -80,7 +81,6 @@ const VERB_CLASS: Record<ActivityVerb, string> = {
   run: 'run',
 };
 
-const ELLIPSIS = '…';
 /** Never used as a target: our own block text (self-trigger guard). */
 const OWN_TEXT = ['ct-fact:', '## Curated Thoughts —'];
 const ASSIGN_RE = /^[A-Za-z_][A-Za-z0-9_]*=/;
@@ -1041,9 +1041,6 @@ interface TrackerSession {
   reported: Map<string, true>;
 }
 
-function bump(map: Map<string, true>, key: string, max: number): void {
-  lruSet(map, key, true, max);
-}
 
 /**
  * Per session: recent activity keys (LRU) and steps that already started a
@@ -1058,24 +1055,42 @@ export class ActivityTracker {
     return s;
   }
 
-  /** null when this call may start the step's query (and records it); a rejected call changes nothing. */
+  /**
+   * null when this call may start the step's query (and records it); a
+   * rejected call changes nothing, not even the key's recency.
+   */
   admit(sessionId: string, stepId: string, key: string): ActivityRefusal | null {
+    const refused = this.peek(sessionId, stepId, key);
+    if (refused !== null) return refused;
     const s = this.state(sessionId);
-    if (s.steps.has(stepId)) return 'step_used';
-    if (s.keys.has(key)) {
-      bump(s.keys, key, ACTIVITY_RECENT_KEYS_MAX);
-      return 'seen_key';
-    }
-    bump(s.keys, key, ACTIVITY_RECENT_KEYS_MAX);
-    bump(s.steps, stepId, ACTIVITY_STEP_IDS_MAX);
+    lruSet(s.keys, key, true, ACTIVITY_RECENT_KEYS_MAX);
+    lruSet(s.steps, stepId, true, ACTIVITY_STEP_IDS_MAX);
     return null;
   }
 
-  /** What admit() would answer, without recording anything. */
+  /** What admit() would answer. Pure: creates no session and bumps no recency. */
   peek(sessionId: string, stepId: string, key: string): ActivityRefusal | null {
-    const s = this.state(sessionId);
+    const s = this.sessions.get(sessionId);
+    if (s === undefined) return null;
     if (s.steps.has(stepId)) return 'step_used';
     return s.keys.has(key) ? 'seen_key' : null;
+  }
+
+  /**
+   * Undo an admit whose query failed after it started (budget, a CT
+   * failure, a turn the host would not extend): the key and the step are
+   * free again, so a later step can retry the same activity.
+   */
+  release(sessionId: string, stepId: string, key: string): void {
+    const s = this.sessions.get(sessionId);
+    if (s === undefined) return;
+    s.keys.delete(key);
+    s.steps.delete(stepId);
+  }
+
+  /** Sessions tracked (tests). */
+  sessionCount(): number {
+    return this.sessions.size;
   }
 
   /**
@@ -1088,7 +1103,7 @@ export class ActivityTracker {
   firstReport(sessionId: string, stepId: string): boolean {
     const s = this.state(sessionId);
     if (s.reported.has(stepId)) return false;
-    bump(s.reported, stepId, ACTIVITY_STEP_IDS_MAX);
+    lruSet(s.reported, stepId, true, ACTIVITY_STEP_IDS_MAX);
     return true;
   }
 
@@ -1102,7 +1117,7 @@ export class ActivityTracker {
 // ─────────────────────────────────────────────────────────────────────────
 
 function oneLine(value: unknown): string {
-  return stripForged(typeof value === 'string' ? value : '').trim().replace(/[\n\r]/g, ' ');
+  return sanitizeField(value).trim().replace(/[\n\r]/g, ' ');
 }
 
 export interface ActivityCandidate {
@@ -1154,7 +1169,7 @@ export function renderActivityBlock(
   if (cpLen(label) > ACTIVITY_LABEL_CHARS) label = cpSlice(label, 0, ACTIVITY_LABEL_CHARS - 1) + ELLIPSIS;
   const head = `${ACTIVITY_HEADING}\n_for: ${label}_\n\n`;
   const title = oneLine(item.title);
-  const text = stripForged(typeof item.text === 'string' ? item.text : '');
+  const text = sanitizeField(item.text);
   if (!title && !text.trim()) return '';
   const provenance = oneLine(typeof item.provenance === 'string' && item.provenance ? item.provenance : 'unlabeled');
   let titleLine = `${marker(item.id)} **${title}** (provenance: ${provenance})`;
@@ -1315,8 +1330,38 @@ export function finishActivity(
   activity: Activity,
   match: ActivityMatch | null,
 ): string | null {
-  const skip = (reason: string, extra: Partial<VerboseTurn> = {}): null => {
-    reportActivity(host, session, activity, { kind: 'skip', reason, ...extra });
+  return finishActivityOutcome(host, session, activity, match).block;
+}
+
+/** What finishActivity did: the block, or why not, and whether the key may be retried. */
+export interface ActivityOutcome {
+  block: string | null;
+  /** null for a delivery; else the reported skip reason. */
+  reason: string | null;
+  /**
+   * True when the activity never got a genuine answer (budget, a CT
+   * failure, a gate that closed): the host should release the key so a
+   * later step can retry. False for a delivery and for `zero_hits` (CT
+   * answered and nothing new was relevant: no_match, deduped, ...).
+   */
+  retry: boolean;
+}
+
+/** finishActivity with the outcome spelled out (hosts release retryable keys). */
+export function finishActivityOutcome(
+  host: HostAdapter,
+  session: SessionRef,
+  activity: Activity,
+  match: ActivityMatch | null,
+): ActivityOutcome {
+  let reason: string | null = null;
+  const block = finish();
+  return { block, reason, retry: block === null && reason !== 'zero_hits' };
+
+  function finish(): string | null {
+  const skip = (why: string, extra: Partial<VerboseTurn> = {}): null => {
+    reason = why;
+    reportActivity(host, session, activity, { kind: 'skip', reason: why, ...extra });
     return null;
   };
   try {
@@ -1355,5 +1400,6 @@ export function finishActivity(
     return sel.block;
   } catch {
     return skip('hook_failed');
+  }
   }
 }

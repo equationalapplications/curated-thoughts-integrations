@@ -35,6 +35,7 @@ import {
   shellWords,
   startActivity,
   finishActivity,
+  finishActivityOutcome,
   userNames,
 } from '../src/index.js';
 import type {
@@ -481,6 +482,28 @@ describe('ActivityTracker (rate rule)', () => {
     st.reset();
     expect(st.admit('s', 'r1', k)).toBeNull();
   });
+
+  it('peek is pure: no session created, no recency bump (review of PR #56)', () => {
+    const st = new ActivityTracker();
+    expect(st.peek('ghost', 'r1', 'k')).toBeNull();
+    expect(st.sessionCount()).toBe(0);
+    // fill to the cap, then peek the oldest key: it must still be the first evicted
+    for (let i = 0; i < ACTIVITY_RECENT_KEYS_MAX; i++) st.admit('s', `r${i}`, `k${i}`);
+    expect(st.peek('s', 'rx', 'k0')).toBe('seen_key');
+    expect(st.admit('s', 'ry', 'k0')).toBe('seen_key'); // seen_key does not bump either
+    st.admit('s', 'rz', 'fresh'); // evicts the oldest: k0
+    expect(st.peek('s', 'rq', 'k0')).toBeNull();
+  });
+
+  it('release frees a key and its step after a failed start (review of PR #56)', () => {
+    const st = new ActivityTracker();
+    expect(st.admit('s', 'r1', 'k')).toBeNull();
+    st.release('s', 'r1', 'k');
+    expect(st.peek('s', 'r1', 'k')).toBeNull();
+    expect(st.admit('s', 'r2', 'k')).toBeNull();
+    st.release('nobody', 'r', 'k'); // no-op
+    expect(st.sessionCount()).toBe(1);
+  });
 });
 
 const item = (id: string, over: Record<string, unknown> = {}) => ({
@@ -673,6 +696,21 @@ describe('core activity gates (startActivity / finishActivity)', () => {
     const boom = { ...host, rebuildLedger: () => { throw new Error('boom'); } } as HostAdapter;
     expect(finishActivity(boom, S, READ, { failure: null, result: state.result })).toBeNull();
     expect(startActivity(boom, S, READ, new Breaker()).failure).toBe('hook_failed');
+  });
+
+  it('finishActivityOutcome names why nothing was delivered, and whether the key may be retried', () => {
+    const { host, state } = gateHost({ ids: ['f1'] });
+    expect(finishActivityOutcome(host, S, READ, null)).toEqual({ block: null, reason: 'budget', retry: true });
+    expect(finishActivityOutcome(host, S, READ, { failure: 'timeout_or_exit' }))
+      .toEqual({ block: null, reason: 'timeout_or_exit', retry: true });
+    // CT answered and nothing new was relevant: keep the key (no retry)
+    expect(finishActivityOutcome(host, S, READ, { failure: null, result: state.result }))
+      .toEqual({ block: null, reason: 'zero_hits', retry: false });
+    const ok = gateHost();
+    const out = finishActivityOutcome(ok.host, S, READ, { failure: null, result: ok.state.result });
+    expect(out.reason).toBeNull();
+    expect(out.retry).toBe(false);
+    expect(scanIds(out.block)).toEqual(['f1']);
   });
 });
 

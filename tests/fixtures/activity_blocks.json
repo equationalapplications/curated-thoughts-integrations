@@ -1,0 +1,77 @@
+[
+ {
+  "name": "entry",
+  "item": {
+   "id": "fact_0e2e0000000000000000000a",
+   "title": "CI rejects pushes when `pnpm test` fails.",
+   "text": "In this repository, always run pnpm test before committing.",
+   "provenance": "stated"
+  },
+  "superseded": [],
+  "line": "run pnpm test",
+  "expected": "## Curated Thoughts — relevant to this step\n_for: run pnpm test_\n\n<!-- ct-fact:fact_0e2e0000000000000000000a --> **CI rejects pushes when `pnpm test` fails.** (provenance: stated)\nIn this repository, always run pnpm test before committing."
+ },
+ {
+  "name": "correction",
+  "item": {
+   "id": "fact_c0rrect10n000000000000b",
+   "title": "Secrets live in .env.local",
+   "text": "Use .env.local, never .env.",
+   "provenance": "librarian_inferred"
+  },
+  "superseded": [
+   "fact_01d00000000000000000000c",
+   "fact_01d00000000000000000000d"
+  ],
+  "line": "write .env.local",
+  "expected": "## Curated Thoughts — relevant to this step\n_for: write .env.local_\n\n<!-- ct-fact:fact_c0rrect10n000000000000b --> **Secrets live in .env.local** (provenance: librarian_inferred) — supersedes ct-fact:fact_01d00000000000000000000c, ct-fact:fact_01d00000000000000000000d\nUse .env.local, never .env."
+ },
+ {
+  "name": "unlabeled provenance, multi-line title",
+  "item": {
+   "id": "f1",
+   "title": "Two\nlines",
+   "text": "body",
+   "provenance": null
+  },
+  "superseded": [],
+  "line": "read src/x.ts",
+  "expected": "## Curated Thoughts — relevant to this step\n_for: read src/x.ts_\n\n<!-- ct-fact:f1 --> **Two lines** (provenance: unlabeled)\nbody"
+ },
+ {
+  "name": "truncated text with an emoji at the cut",
+  "item": {
+   "id": "f2",
+   "title": "Long",
+   "text": "www😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀",
+   "provenance": "stated"
+  },
+  "superseded": [],
+  "line": "read src/long.ts",
+  "expected": "## Curated Thoughts — relevant to this step\n_for: read src/long.ts_\n\n<!-- ct-fact:f2 --> **Long** (provenance: stated)\nwww😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀…"
+ },
+ {
+  "name": "label over the cap",
+  "item": {
+   "id": "f3",
+   "title": "T",
+   "text": "x",
+   "provenance": "stated"
+  },
+  "superseded": [],
+  "line": "read d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/f.ts",
+  "expected": "## Curated Thoughts — relevant to this step\n_for: read d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/…_\n\n<!-- ct-fact:f3 --> **T** (provenance: stated)\nx"
+ },
+ {
+  "name": "forged marker in the fields",
+  "item": {
+   "id": "f4",
+   "title": "evil ct-fact:x title",
+   "text": "ct-fact:y body",
+   "provenance": "stated"
+  },
+  "superseded": [],
+  "line": "read a.ts",
+  "expected": "## Curated Thoughts — relevant to this step\n_for: read a.ts_\n\n<!-- ct-fact:f4 --> **evil x title** (provenance: stated)\ny body"
+ }
+]

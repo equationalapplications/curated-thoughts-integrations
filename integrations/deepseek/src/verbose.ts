@@ -36,22 +36,23 @@ export interface NamedLogger {
 
 /**
  * The plugin's named cordis logger (`ctx.logger('curated-thoughts')`),
- * looked up once on first use and reused. A missing or throwing factory is
- * a quiet no-op (INTENT rule 4).
+ * looked up on first use and reused once a lookup succeeds. A failed lookup
+ * (no factory yet, a throw, no logger) is not cached, so the next call
+ * retries. Every failure is a quiet no-op (INTENT rule 4).
  */
 export function namedLogger(ctx: unknown): NamedLogger {
-  let resolved: { info?: (m: string) => void; debug?: (m: string) => void } | null | undefined;
-  const get = () => {
-    if (resolved === undefined) {
-      resolved = null;
-      try {
-        const factory = (ctx as { logger?: unknown } | null)?.logger;
-        if (typeof factory === 'function') {
-          resolved = ((factory as (name: string) => typeof resolved).call(ctx, 'curated-thoughts')) ?? null;
-        }
-      } catch {
-        resolved = null;
+  type Logger = { info?: (m: string) => void; debug?: (m: string) => void };
+  let resolved: Logger | null = null;
+  const get = (): Logger | null => {
+    if (resolved !== null) return resolved;
+    try {
+      const factory = (ctx as { logger?: unknown } | null)?.logger;
+      if (typeof factory === 'function') {
+        const out = (factory as (name: string) => Logger | null | undefined).call(ctx, 'curated-thoughts');
+        if (out !== null && typeof out === 'object') resolved = out;
       }
+    } catch {
+      /* not cached: retried on the next call */
     }
     return resolved;
   };

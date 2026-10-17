@@ -164,6 +164,9 @@ describe('DSH tool map (spec table)', () => {
     expect(dshActivitySpec('str_replace_editor', { command: 'str_replace', path: 'b', old_str: 'S' })).toEqual({ verb: 'edit', path: 'b' });
     expect(dshActivitySpec('str_replace_editor', { command: 'insert', path: 'b', new_str: 'S' })).toEqual({ verb: 'edit', path: 'b' });
     expect(dshActivitySpec('str_replace_editor', { command: 'undo_edit', path: 'b' })).toBeNull();
+    for (const command of ['constructor', 'toString', '__proto__', 'hasOwnProperty', 7]) {
+      expect(dshActivitySpec('str_replace_editor', { command, path: 'b' }), String(command)).toBeNull();
+    }
     expect(dshActivitySpec('grep', { pattern: 'TODO', path: 'src', include: '*.ts' })).toEqual({ verb: 'search', pattern: 'TODO', path: 'src' });
     expect(dshActivitySpec('glob', { pattern: '**/*.ts' })).toEqual({ verb: 'search', pattern: '**/*.ts', path: undefined });
     expect(dshActivitySpec('bash', { command: 'pnpm test', description: 'SECRET' })).toEqual({ verb: 'run', command: 'pnpm test' });
@@ -247,9 +250,16 @@ describe('per-step plan and delivery', () => {
     expect(s.ct.calls.map((c) => c.query)).toEqual(['a.ts', 'TODO']);
   });
 
-  it('prefetch and pre-step share one plan; pre-step plans itself when no prefetch ran', async () => {
+  it('pre-step never plans: without an approved pre-execute there is no CT call and no wait', async () => {
     const s = setup();
     s.log.push(assistant([['bash', { command: 'make build' }]])); // no pre-execute
+    const started = Date.now();
+    expect(await s.pre()).toBeNull();
+    expect(Date.now() - started).toBeLessThan(500);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(s.ct.calls).toHaveLength(0);
+    // the key was never admitted: a later approved step can still trigger it
+    s.step([['bash', { command: 'make build' }]]);
     expect(await s.pre()).not.toBeNull();
     expect(s.ct.calls).toHaveLength(1);
     expect(await s.pre()).toBeNull(); // same step again: consumed, no second CT call
@@ -293,6 +303,8 @@ describe('per-step plan and delivery', () => {
     await s.pre();
     const childLog: Msg[] = [assistant([['bash', { command: 'pnpm test' }]])];
     const child = { id: 'child-1', session: { deriveMessages: () => [...childLog] } };
+    const b = (childLog[0].content as Array<{ id: string }>)[0];
+    s.activity.prefetch({ callId: b.id, name: 'bash', arguments: { command: 'pnpm test' }, agent: child });
     expect(await s.activity.deliver(child, [], [])).not.toBeNull();
     expect(s.ct.calls).toHaveLength(2);
   });
@@ -446,6 +458,8 @@ describe('session cwd (DSH SessionHeader.cwd, never process.cwd())', () => {
     const s = setup();
     const childLog: Msg[] = [assistant([['read', { file_path: `${CHILD}/lib/a.ts` }]])];
     const child = { id: 'child-cwd', session: { deriveMessages: () => [...childLog], header: { cwd: CHILD } } };
+    const b = (childLog[0].content as Array<{ id: string }>)[0];
+    s.activity.prefetch({ callId: b.id, name: 'read', arguments: { file_path: `${CHILD}/lib/a.ts` }, agent: child });
     await s.activity.deliver(child, [], []);
     expect(s.ct.calls.map((c) => c.query)).toEqual(['lib/a.ts']);
   });
@@ -475,6 +489,55 @@ describe('plan bookkeeping (review of PR #56)', () => {
     };
     s.step([['read', { file_path: 'a.ts' }], ['read', { file_path: 'b.ts' }], ['grep', { pattern: 'x' }]]);
     expect(reads).toBe(1);
+  });
+});
+
+describe('keys burned by a post-start failure are released (review of PR #56)', () => {
+  it('budget: the same activity retries at a later step', async () => {
+    let now = 1000;
+    let hang = true;
+    const s = setup(() => (hang ? 'hang' : { entries: [fact('f1')], corrections: [] }), { now: () => now });
+    s.step([['bash', { command: 'pnpm test' }]]);
+    now += 3001;
+    expect(await s.pre()).toBeNull(); // budget
+    hang = false;
+    s.step([['bash', { command: 'pnpm test' }]]);
+    expect(await s.pre()).not.toBeNull();
+    expect(s.ct.calls.map((c) => c.query)).toEqual(['pnpm test', 'pnpm test']);
+  });
+
+  it('a CT failure (timeout) retries; a genuine "nothing relevant" does not', async () => {
+    let answer: 'timeout' | 'none' | 'fact' = 'timeout';
+    const s = setup(() => (answer === 'timeout' ? 'timeout' : answer === 'none' ? { entries: [], corrections: [] }
+      : { entries: [fact('f1')], corrections: [] }));
+    s.step([['bash', { command: 'pnpm test' }]]);
+    expect(await s.pre()).toBeNull();
+    answer = 'none';
+    s.step([['bash', { command: 'pnpm test' }]]);
+    expect(await s.pre()).toBeNull(); // retried, CT answered nothing relevant: key kept
+    answer = 'fact';
+    s.step([['bash', { command: 'pnpm test' }]]);
+    expect(await s.pre()).toBeNull(); // not queried again
+    expect(s.ct.calls).toHaveLength(2);
+  });
+
+  it('would_extend_turn releases the key', async () => {
+    const s = setup();
+    s.step([['bash', { command: 'pnpm test' }]]);
+    expect(await s.pre([{ id: 'steer' }], [])).toBeNull();
+    s.step([['bash', { command: 'pnpm test' }]]);
+    expect(await s.pre()).not.toBeNull();
+    expect(s.ct.calls).toHaveLength(2);
+  });
+
+  it('a deduped answer keeps the key', async () => {
+    const s = setup();
+    s.log.push({ id: 'u1', role: 'user', source: { kind: 'user' }, content: [text(marker('f1'))] });
+    s.step([['bash', { command: 'pnpm test' }]]);
+    expect(await s.pre()).toBeNull(); // deduped
+    s.step([['bash', { command: 'pnpm test' }]]);
+    await s.pre();
+    expect(s.ct.calls).toHaveLength(1);
   });
 });
 
@@ -637,6 +700,15 @@ describe('verbose (channel activity)', () => {
     s.step([['web_fetch', { url: 'x' }], ['curated-thoughts__curated_recall_context', { query: 'x' }]]);
     await s.pre();
     expect(v.events()).toHaveLength(1);
+  });
+
+  it('on: a step with no plan records no_plan for its would-be trigger, and makes no CT call', async () => {
+    const v = recorder(true);
+    const s = setup(undefined, { recordVerbose: v.rec });
+    s.log.push(assistant([['read', { file_path: 'a.ts' }]])); // never approved / pre-executed
+    expect(await s.pre()).toBeNull();
+    expect(v.events().map((e) => [e.channel, e.event, e.reason, e.query])).toEqual([['activity', 'skip', 'no_plan', 'a.ts']]);
+    expect(s.ct.calls).toEqual([]);
   });
 
   it('on: breaker_open is recorded once per step for a would-be trigger', async () => {

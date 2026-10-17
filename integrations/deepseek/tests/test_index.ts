@@ -201,6 +201,30 @@ describe('apply', () => {
     prefetch.mockRestore();
   });
 
+  it('pre-execute prefetches only AFTER the waterfall approved the call (deny/cancel/ask/throw send nothing)', async () => {
+    const prefetch = vi.spyOn(DshActivity.prototype, 'prefetch');
+    apply(m.ctx as unknown as Parameters<typeof apply>[0], {} as Parameters<typeof apply>[1]);
+    const exec = { callId: 'c1', name: 'bash', arguments: { command: 'ls' }, agent: { id: 'a' } };
+    for (const decision of [{ kind: 'deny', reason: 'no' }, { kind: 'cancel' }, { kind: 'ask', reason: '?' }]) {
+      expect(await m.preExecuteListeners[0](exec, async () => decision)).toBe(decision);
+    }
+    await expect(m.preExecuteListeners[0](exec, async () => {
+      throw new Error('downstream');
+    })).rejects.toThrow('downstream');
+    expect(prefetch).not.toHaveBeenCalled();
+    // order: next() resolves first, then the prefetch
+    const order: string[] = [];
+    prefetch.mockImplementation(() => {
+      order.push('prefetch');
+    });
+    await m.preExecuteListeners[0](exec, async () => {
+      order.push('next');
+      return { kind: 'allow' };
+    });
+    expect(order).toEqual(['next', 'prefetch']);
+    prefetch.mockRestore();
+  });
+
   it('step >= 2: appends the activity block as an identified user message with its own source kind', async () => {
     const block = '## Curated Thoughts — relevant to this step\n_for: run pnpm test_\n\n<!-- ct-fact:f1 --> **T** (provenance: stated)\nbody';
     const deliver = vi.spyOn(DshActivity.prototype, 'deliver').mockResolvedValue(block);

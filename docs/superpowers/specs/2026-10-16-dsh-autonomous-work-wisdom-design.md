@@ -423,13 +423,31 @@ rule; opencode and openclaw get patch bumps for it.
   turn-scoped N3 cache. `plan()` gates once (`startActivity`) and admits the key only when the start
   succeeded. Every cap (activity block, label, both query caps, the user-turn block truncation) counts
   and cuts by code point and never splits a surrogate pair. The named logger is resolved once.
-- **Hot path (kept as is, on purpose).** Per step the DSH path derives the log twice (the first
-  `tools/pre-execute` of the step, then the next `agent/pre-step`) and rebuilds the ledger twice;
-  other calls of a planned step return before touching the log. The pre-step re-derive cannot be
-  cached away: the step's tool results, CT recall markers included, land between the plan and the
-  delivery, and a stale ledger could show a recalled fact again (test "a recall in the previous step
-  is in the fresh ledger"). `deriveMessages()` itself is incremental at the pin ("pure tail growth
-  costs O(new nodes)", dsh-session `Session.deriveMessages`).
+- **Hot path.** Per step the DSH path reads the log at the first approved `tools/pre-execute` and at
+  the next `agent/pre-step`; other calls of a planned step return before touching the log (the slot
+  remembers its call ids). The pre-step read and ledger rebuild must stay: the step's tool results, CT
+  recall markers included, land between the plan and the delivery, and a stale ledger could show a
+  recalled fact again (test "a recall in the previous step is in the fresh ledger"). The rebuild is
+  cheap: marker ids are memoized per message by object identity. DSH's `deriveMessages()` returns
+  shared, deep-frozen Message objects reused for unchanged history ("pure tail growth costs O(new
+  nodes)", dsh-session `Session.deriveMessages`), so a rebuild rescans only new messages, and a frozen
+  object cannot change, so the memo can never go stale (a mutable message is always rescanned). This
+  replaces a per-(agent, messageId) ledger cache: keyed by message identity it needs no invalidation
+  rule for new tool or user messages, compaction or projections.
+- **Final review (PR #56 @ 6962448).** The pre-step never plans: with no plan from an approved
+  pre-execute there is no CT call and no wait, and a would-be trigger is reported as `no_plan`.
+  Prefetch runs only after `next()` resolves to `{kind: 'allow'}` (`PreToolDecision` is
+  `allow | deny | cancel | ask`, dsh-tools `types/index.d.ts:445`), so a denied, cancelled or pending
+  call sends nothing. A started query that got no genuine answer (budget, a CT failure, a gate that
+  closed, a turn the host would not extend) releases its key and step (`ActivityTracker.release`,
+  `finishActivityOutcome().retry`); CT's "nothing relevant" (`zero_hits`: no_match, deduped) keeps
+  it. `peek` is pure and a `seen_key` refusal no longer bumps recency (a deliberate difference from
+  Hermes's `move_to_end`, which only affects LRU eviction order). The named logger caches only a
+  successful lookup. The `str_replace_editor` verb map is a Map. The activity block was compared with
+  Hermes `render_activity_block` and already matched; `tests/fixtures/activity_blocks.json` (generated
+  from the Hermes renderer by `tests/fixtures/make_activity_blocks.py`) is now a golden test in both
+  languages, one correction and one entry included. Hermes's `_sanitize` also defuses its own
+  `## Plugin Context:` prompt frame, which DSH does not have; the fixture avoids that text.
 - **One plan slot per agent** (only the newest step matters), LRU-bounded at 256 agents like the key
   tracker, instead of one 64-entry LRU across agents; prefetch remembers a planned step's call ids and
   skips the log read for its other calls; one adapter method (`snapshotMessages`) publishes log

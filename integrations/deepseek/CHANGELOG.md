@@ -12,7 +12,11 @@
   - Trigger: `agent/pre-step` at step 2 and later of a turn, from the
     previous step's tool calls (`read`, `write`, `edit`,
     `str_replace_editor`, `grep`, `glob`, `bash`, `pwsh`). The CT call is
-    prefetched at `tools/pre-execute`, so it overlaps the tool's own work.
+    prefetched at `tools/pre-execute` once the call is approved (a denied,
+    cancelled or pending call sends nothing), so it overlaps the tool's own
+    work; the pre-step only delivers a prefetched answer and never starts a
+    query itself. A query that got no answer (a timeout, CT down, the 3 s
+    budget) leaves the activity free to trigger again at a later step.
   - At most one CT call per model step, and only when the activity key is
     new (a new file, command or search; reading then editing a file is one
     key). No per-message ceiling and no session cap.

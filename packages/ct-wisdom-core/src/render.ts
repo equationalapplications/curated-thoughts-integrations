@@ -19,10 +19,16 @@ export interface RenderedBlock {
   deliveredIds: string[];
 }
 
-const ELLIPSIS = '…';
+/** The one ellipsis every cut in the core appends. */
+export const ELLIPSIS = '…';
 
 function safeString(value: unknown): string {
   return typeof value === 'string' ? value : '';
+}
+
+/** A fact field as rendered: a string (else ''), forged `ct-fact:` tokens stripped. */
+export function sanitizeField(value: unknown): string {
+  return stripForged(safeString(value));
 }
 
 interface RenderedEntry {

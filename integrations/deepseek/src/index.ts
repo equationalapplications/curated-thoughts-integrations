@@ -497,16 +497,22 @@ export function apply(ctx: Context, config: Config): void {
   const liveTurns = new Map<string, true>();
 
   // Autonomous-work prefetch — `tools/pre-execute` (waterfall). The first
-  // call of a step with a new activity key starts the step's one CT match so
-  // it overlaps tool execution; the next pre-step awaits it. Observe only:
-  // the tool decision is always next()'s, untouched.
+  // APPROVED call of a step with a new activity key starts the step's one CT
+  // match so it overlaps tool execution; the next pre-step awaits it.
+  // `next()` resolves to the PreToolDecision (`allow | deny | cancel | ask`,
+  // dsh-tools types/index.d.ts:445 at 0.2.0-rc.2): only `allow` prefetches,
+  // so a denied, cancelled or pending call sends nothing to CT. Observe
+  // only: the tool decision is always next()'s, untouched.
   dsh.on('tools/pre-execute', async (exec: ToolExecutionLike, next: () => Promise<unknown>) => {
-    try {
-      activity.prefetch(exec);
-    } catch {
-      // Fail-open: prefetch never blocks or changes a tool call.
+    const decision = await next();
+    if ((decision as { kind?: unknown } | null)?.kind === 'allow') {
+      try {
+        activity.prefetch(exec);
+      } catch {
+        // Fail-open: prefetch never blocks or changes a tool call.
+      }
     }
-    return next();
+    return decision;
   });
 
   // (4) Skills. dsh skills are kebab-case Markdown; the three SKILL.md files

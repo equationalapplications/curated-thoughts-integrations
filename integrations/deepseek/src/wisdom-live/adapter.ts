@@ -216,6 +216,35 @@ function stubEntry(factId: string): Record<string, unknown> {
   };
 }
 
+/**
+ * Marker ids of one frozen message, memoized by object identity. DSH's
+ * `deriveMessages()` returns shared, deep-frozen Message objects that are
+ * reused across calls for unchanged history ("pure tail growth costs O(new
+ * nodes)", dsh-session `Session.deriveMessages` at 0.2.0-rc.2), so a ledger
+ * rebuild rescans only messages that are new since the last one: the tool
+ * results that arrived after a plan, a compaction's replacement. A frozen
+ * object cannot change, so the memo can never go stale; a mutable message is
+ * scanned every time.
+ */
+const messageIdMemo = new WeakMap<object, readonly string[]>();
+
+function messageIds(message: unknown): readonly string[] {
+  if (message === null || typeof message !== 'object') return [];
+  const memo = messageIdMemo.get(message);
+  if (memo !== undefined) return memo;
+  const msg = message as { role?: unknown; content?: unknown };
+  const ids: string[] = [];
+  if (msg.role === 'user' || msg.role === 'tool') { // N4 scan roles
+    for (const text of blockTexts(msg.content)) {
+      const re = /ct-fact:([A-Za-z0-9._:-]{1,128})/g;
+      let m: RegExpExecArray | null;
+      while ((m = re.exec(text)) !== null) if (!ids.includes(m[1])) ids.push(m[1]);
+    }
+  }
+  if (Object.isFrozen(message)) messageIdMemo.set(message, ids);
+  return ids;
+}
+
 /** Valid fact id per the core's CT guarantee (mirrors validId's charset). */
 function isValidId(value: unknown): value is string {
   return typeof value === 'string' && /^[A-Za-z0-9._:-]{1,128}$/.test(value);
@@ -331,21 +360,10 @@ export class DshWisdomAdapter implements HostAdapter {
     const out: string[] = [];
     const seen = new Set<string>();
     for (let i = messages.length - 1; i >= 0; i--) {
-      const msg = messages[i] as {
-        role?: unknown;
-        content?: unknown;
-      };
-      if (msg === null || typeof msg !== 'object') continue;
-      const role = msg.role;
-      if (role !== 'user' && role !== 'tool') continue; // N4 scan roles
-      for (const text of blockTexts(msg.content)) {
-        const re = /ct-fact:([A-Za-z0-9._:-]{1,128})/g;
-        let m: RegExpExecArray | null;
-        while ((m = re.exec(text)) !== null) {
-          if (!seen.has(m[1])) {
-            seen.add(m[1]);
-            out.push(m[1]);
-          }
+      for (const id of messageIds(messages[i])) {
+        if (!seen.has(id)) {
+          seen.add(id);
+          out.push(id);
         }
       }
     }

@@ -108,6 +108,26 @@ describe('namedLogger (resolved once)', () => {
     expect(lines).toEqual(['info curated-thoughts a', 'debug curated-thoughts b', 'debug curated-thoughts c']);
   });
 
+  it('a failed lookup is not cached: the next call retries (review of PR #56)', () => {
+    let up = false;
+    let lookups = 0;
+    const lines: string[] = [];
+    const ctx = {
+      logger: () => {
+        lookups++;
+        if (!up) throw new Error('not ready');
+        return { debug: (m: string) => lines.push(m) };
+      },
+    };
+    const log = namedLogger(ctx);
+    log.debug('lost');
+    up = true;
+    log.debug('a');
+    log.debug('b');
+    expect(lines).toEqual(['a', 'b']);
+    expect(lookups).toBe(2); // one failure, then one success, cached
+  });
+
   it('a missing or throwing factory is a quiet no-op', () => {
     expect(() => namedLogger({}).info('x')).not.toThrow();
     expect(() => namedLogger({ logger: () => { throw new Error('down'); } }).debug('x')).not.toThrow();

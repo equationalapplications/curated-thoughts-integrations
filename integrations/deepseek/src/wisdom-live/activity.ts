@@ -31,7 +31,7 @@ import {
   TIMEOUT_MS,
   activityQuery,
   buildActivity,
-  finishActivity,
+  finishActivityOutcome,
   isCtTool,
   lruSet,
   reportActivity,
@@ -60,6 +60,14 @@ function obj(value: unknown): Record<string, unknown> | null {
  * argument names at the 0.2.0-rc.2 pin). Only the TARGET argument is read,
  * never content, replacement text, descriptions or options.
  */
+/** `str_replace_editor` commands → verbs (a Map: no prototype keys such as `constructor`). */
+const EDITOR_VERBS: ReadonlyMap<string, 'read' | 'write' | 'edit'> = new Map([
+  ['view', 'read'],
+  ['create', 'write'],
+  ['str_replace', 'edit'],
+  ['insert', 'edit'],
+]);
+
 export function dshActivitySpec(name: unknown, args: unknown): ActivitySpec | null {
   const a = obj(args);
   if (a === null || typeof name !== 'string') return null;
@@ -69,9 +77,7 @@ export function dshActivitySpec(name: unknown, args: unknown): ActivitySpec | nu
     case 'edit':
       return { verb: name, path: a.file_path };
     case 'str_replace_editor': {
-      const verb = ({ view: 'read', create: 'write', str_replace: 'edit', insert: 'edit' } as const)[
-        a.command as 'view' | 'create' | 'str_replace' | 'insert'
-      ];
+      const verb = typeof a.command === 'string' ? EDITOR_VERBS.get(a.command) : undefined;
       return verb === undefined ? null : { verb, path: a.path };
     }
     case 'grep':
@@ -175,6 +181,8 @@ export function sessionCwd(agent: AgentLike | null | undefined): string | null {
 
 interface Plan {
   activity: Activity;
+  /** The step id the key was admitted under (released on a retryable failure). */
+  stepId: string;
   deadline: number;
   promise: Promise<ActivityMatch>;
   consumed: boolean;
@@ -263,19 +271,11 @@ export class DshActivity {
   }
 
   /**
-   * The step's plan, made once per (agent, step) and then reused. Walks the
-   * step's calls in model order: CT tools and calls without a safe activity
-   * are skipped, a seen key moves on, and the first new key is the step's
-   * would-be trigger. The core gates (delivery latch, restored-session rule,
-   * capability, breaker) decide whether it may run; a refusal is reported
-   * once (this runs once per step) and records no key.
+   * The step's would-be trigger: the first call in model order that is not
+   * a CT tool, has a safe activity, and whose key is new. Pure: records
+   * nothing.
    */
-  private plan(agent: AgentLike, agentId: string, messages: unknown[], step: StepCalls): Plan | null {
-    const existing = this.slotFor(agentId, step.messageId);
-    if (existing !== null) return existing.plan;
-    const slot: AgentSlot = { messageId: step.messageId, plan: null, callIds: new Set(step.calls.map((c) => c.id)) };
-    lruSet(this.slots, agentId, slot, ACTIVITY_SESSIONS_MAX);
-    const session = { id: agentId };
+  private firstNewActivity(agent: AgentLike, agentId: string, step: StepCalls): Activity | null {
     let cwd: string | null = null;
     try {
       cwd = this.cwd(agent);
@@ -297,28 +297,48 @@ export class DshActivity {
         this.debug(agentId, seen);
         continue;
       }
-      if (seen === 'step_used') break;
-      // One gate: startActivity checks every core precondition and starts
-      // the match. The key is admitted only when the start succeeded, so a
-      // refusal records nothing and the same activity can trigger later.
-      this.publish(agentId, messages);
-      const start = startActivity(this.adapter, session, activity, this.breaker);
-      if (start.failure !== null) {
-        this.debug(agentId, start.failure);
-        reportActivity(this.adapter, session, activity, { kind: 'skip', reason: start.failure });
-        break;
-      }
-      this.tracker.admit(agentId, step.messageId, activity.key);
-      slot.plan = { activity, deadline: this.now() + TIMEOUT_MS, promise: start.match, consumed: false };
-      break;
+      return seen === 'step_used' ? null : activity;
     }
+    return null;
+  }
+
+  /**
+   * The step's plan, made once per (agent, step), ONLY from an approved
+   * `tools/pre-execute`. The core gates (delivery latch, restored-session
+   * rule, capability, breaker) decide whether it may start; the key is
+   * admitted only when the start succeeded, so a refusal records nothing.
+   */
+  private plan(agent: AgentLike, agentId: string, messages: unknown[], step: StepCalls): Plan | null {
+    const existing = this.slotFor(agentId, step.messageId);
+    if (existing !== null) return existing.plan;
+    const slot: AgentSlot = { messageId: step.messageId, plan: null, callIds: new Set(step.calls.map((c) => c.id)) };
+    lruSet(this.slots, agentId, slot, ACTIVITY_SESSIONS_MAX);
+    const activity = this.firstNewActivity(agent, agentId, step);
+    if (activity === null) return null;
+    const session = { id: agentId };
+    this.publish(agentId, messages);
+    const start = startActivity(this.adapter, session, activity, this.breaker);
+    if (start.failure !== null) {
+      this.debug(agentId, start.failure);
+      reportActivity(this.adapter, session, activity, { kind: 'skip', reason: start.failure });
+      return null;
+    }
+    this.tracker.admit(agentId, step.messageId, activity.key);
+    slot.plan = { activity, stepId: step.messageId, deadline: this.now() + TIMEOUT_MS, promise: start.match, consumed: false };
     return slot.plan;
+  }
+
+  /** Free a key whose started query never got a genuine answer, so a later step can retry. */
+  private release(agentId: string, plan: Plan): void {
+    this.tracker.release(agentId, plan.stepId, plan.activity.key);
   }
 
   /**
    * `tools/pre-execute` prefetch for a model-direct call of the newest step.
-   * Never throws and returns nothing: the caller passes `next()` through.
-   * Once a step is planned, its other calls return without reading the log.
+   * index.ts calls it only after the waterfall APPROVED the call
+   * (`kind: 'allow'`): a denied, cancelled or pending (`ask`) call sends
+   * nothing to CT. Never throws. Once a step is planned, its other calls
+   * return before reading the log.
    */
   prefetch(exec: { callId?: unknown; name?: unknown; arguments?: unknown; parent?: unknown; agent?: AgentLike } | null | undefined): void {
     try {
@@ -337,11 +357,14 @@ export class DshActivity {
   }
 
   /**
-   * `agent/pre-step` (step ≥ 2): the block for the previous step's activity,
-   * or null. `claimed` is the inbox batch, `decisionMessages` what the
-   * waterfall decided; when a listener stripped claimed input to nothing,
-   * appending would turn a concluded turn into an extra model call, so
-   * nothing is delivered.
+   * `agent/pre-step` (step ≥ 2): the block for the previous step's planned
+   * activity, or null. It NEVER plans: without a plan from an approved
+   * pre-execute there is no CT call and no wait (a would-be trigger is
+   * reported as `no_plan`). `claimed` is the inbox batch, `decisionMessages`
+   * what the waterfall decided; when a listener stripped claimed input to
+   * nothing, appending would turn a concluded turn into an extra model
+   * call, so nothing is delivered. A started query that got no genuine
+   * answer releases its key.
    */
   async deliver(agent: AgentLike, claimed: readonly unknown[], decisionMessages: readonly unknown[]): Promise<string | null> {
     const agentId = typeof agent?.id === 'string' ? agent.id : '';
@@ -354,19 +377,31 @@ export class DshActivity {
       }
       const step = lastAssistantStep(messages);
       if (step === null) return null;
-      const plan = this.plan(agent, agentId, messages, step);
+      const session = { id: agentId };
+      const slot = this.slotFor(agentId, step.messageId);
+      if (slot === null) {
+        const wouldBe = this.firstNewActivity(agent, agentId, step);
+        if (wouldBe !== null) {
+          this.debug(agentId, 'no_plan');
+          reportActivity(this.adapter, session, wouldBe, { kind: 'skip', reason: 'no_plan' });
+        }
+        return null;
+      }
+      const plan = slot.plan;
       if (plan === null || plan.consumed) return null;
       plan.consumed = true;
-      const session = { id: agentId };
       if ((claimed?.length ?? 0) > 0 && (decisionMessages?.length ?? 0) === 0) {
         reportActivity(this.adapter, session, plan.activity, { kind: 'skip', reason: 'would_extend_turn' });
+        this.release(agentId, plan);
         return null;
       }
       const match = await settleWithin(plan.promise, Math.max(0, plan.deadline - this.now()));
-      // The core re-checks every gate against the log the model sees now,
-      // records the delivered id and reports the outcome.
+      // The core re-checks every gate against the log the model sees now
+      // (tool results of the step included), selects and reports.
       this.publish(agentId, messages);
-      return finishActivity(this.adapter, session, plan.activity, match);
+      const outcome = finishActivityOutcome(this.adapter, session, plan.activity, match);
+      if (outcome.retry) this.release(agentId, plan);
+      return outcome.block;
     } catch {
       this.debug(agentId, 'hook_failed');
       return null;
