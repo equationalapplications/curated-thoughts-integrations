@@ -86,4 +86,17 @@ describe('lruSet', () => {
     lruSet(m, 'c', 4, 2); // evicts b
     expect([...m.entries()]).toEqual([['a', 3], ['c', 4]]);
   });
+
+  it('reports each evicted entry to onEvict (never a refreshed or replaced key)', () => {
+    const m = new Map<string, number>();
+    const evicted: Array<[string, number]> = [];
+    const onEvict = (k: string, v: number) => evicted.push([k, v]);
+    lruSet(m, 'a', 1, 2, onEvict);
+    lruSet(m, 'b', 2, 2, onEvict);
+    lruSet(m, 'a', 3, 2, onEvict); // refresh: no eviction
+    expect(evicted).toEqual([]);
+    lruSet(m, 'c', 4, 2, onEvict); // evicts b
+    expect(evicted).toEqual([['b', 2]]);
+    expect([...m.keys()]).toEqual(['a', 'c']);
+  });
 });
