@@ -88,13 +88,14 @@ _ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 _KEY_PREFIXES = ("sk-", "sk_", "pk_", "rk_", "ghp_", "gho_", "ghs_", "ghu_", "github_pat_",
                  "xox", "akia", "asia", "aiza", "glpat-", "eyj")
 _OPERATOR_CHARS = set(";|&<>()`")
-# Programs whose first argument is free text or a value: keep only the name.
-_FREE_TEXT_PROGRAMS = {"echo", "printf", "export", "set", "unset", "alias", "eval",
-                       "exec", "env", "sudo", "su", "doas", "ssh", "scp", "curl", "wget",
-                       "http", "https", "nc", "telnet", "openssl", "gpg", "pass",
-                       "security", "op", "vault"}
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
-_PYTHON_RE = re.compile(r"^python[0-9.]*$")
+_PYTHON_RE = re.compile(r"^python(\d+(\.\d+)?)?$")
+# Interpreter flags skipped before `-m`; the second set takes a value.
+_PYTHON_FLAGS = frozenset({"-u", "-B", "-O", "-OO", "-E", "-s", "-S", "-I", "-q", "-b", "-bb",
+                           "-d", "-v", "-P"})
+_PYTHON_VALUE_FLAGS = frozenset({"-X", "-W"})
+# Windows executable suffixes stripped from the program (`git.exe` is `git`).
+_EXE_SUFFIXES = (".exe", ".cmd", ".bat", ".com")
 
 
 def is_ct_tool(name):
@@ -308,6 +309,7 @@ _root_clock = time.monotonic
 _root_cache = _TTLCache(64)
 _sln_cache = _TTLCache(256)
 _homes_cache = _TTLCache(16)
+_module_cache = _TTLCache(256)
 
 
 def _fold(text):
@@ -540,15 +542,20 @@ def _stop_dir(directory):
     return _fold(os.path.basename(directory)) == "mnt" and _fs_root(parent)
 
 
-Homes = namedtuple("Homes", "all real blocking")
+Homes = namedtuple("Homes", "all real blocking user")
+# A HOME inside a project root counts as a sandbox (and does not block that
+# root) only at one of these paths relative to the root, or as any
+# dot-directory directly under it.
+_SANDBOX_HOMES = frozenset({".cache/home", "tmp/home"})
 
 
 def _homes(env):
-    """The home directories, cached per (HOME, USERPROFILE, process homes):
-    `all` in normalized and canonical forms (each is never a root), `real`
-    canonical only, and `blocking`, the real user homes that also block
-    every ancestor: a home inside a known homes location, or pw_dir. A HOME
-    elsewhere (a sandbox or Nix HOME inside a project) blocks only itself."""
+    """The home directories, cached per (HOME, USERPROFILE, process homes).
+    `all`: every home in normalized and canonical forms (each is never a
+    root); `real`: canonical forms; `blocking`: the homes that block their
+    ancestors (HOME, USERPROFILE, `~` and pw_dir, both forms); `user`: the
+    real user homes among them (inside a known homes location, pw_dir, or,
+    where there is no pwd (Windows), USERPROFILE)."""
     identity = _system_identity()
     key = (_env_str(env, "HOME"), _env_str(env, "USERPROFILE"), tuple(identity[1]),
            tuple(identity[2]))
@@ -557,39 +564,60 @@ def _homes(env):
         return value
     values = [v for v in _home_values(env, identity) if os.path.isabs(v)]
     pw_dirs = [c for c in (_canon(v) for v in identity[2] if os.path.isabs(v)) if c]
-    real, blocking = [], []
+    profile = _env_str(env, "USERPROFILE")
+    if not identity[2] and profile:
+        profile = _git_bash(profile)
+        pw_dirs += [c for c in (_canon(profile),) if c and os.path.isabs(profile)]
+    real, blocking, user = [], [], []
     for v in values:
         logical, canon = os.path.normpath(v), _canon(v)
+        forms = [f for f in (logical, canon) if f]
         if canon:
             real.append(canon)
-        is_user_home = (_homes_location(os.path.dirname(logical))
-                        or (canon and (_homes_location(os.path.dirname(canon))
-                                       or any(_same(canon, p) for p in pw_dirs))))
-        if is_user_home:
-            blocking.extend(f for f in (logical, canon) if f)
-    value = Homes(real + [os.path.normpath(v) for v in values], real, blocking)
+        blocking.extend(forms)
+        if (_homes_location(os.path.dirname(logical))
+                or (canon and (_homes_location(os.path.dirname(canon))
+                               or any(_same(canon, d) for d in pw_dirs)))):
+            user.extend(forms)
+    value = Homes(real + [os.path.normpath(v) for v in values], real, blocking, user)
     _homes_cache.put(key, value)
     return value
 
 
-def _blocked(directory, homes, blocking):
-    """Never a root (the walk stops here): a `_stop_dir`, any home directory
-    in `homes`, or any ancestor of a home in `blocking`."""
+def _sandbox_home(home, root, user):
+    """True when `home` (strictly inside `root`) is a sandbox HOME, which
+    does not block `root`: not a real user home, and at a dot-directory
+    directly under the root or at `.cache/home` / `tmp/home`."""
+    if any(_same(home, u) for u in user):
+        return False
+    rel = _below(home, root)
+    if not rel:
+        return False
+    if len(rel) == 1:
+        return rel[0].startswith(".") and rel[0] not in (".", "..")
+    return "/".join(_fold_path(c) for c in rel) in _SANDBOX_HOMES
+
+
+def _blocked(directory, homes, blocking, user=()):
+    """Never a root (the walk stops here): a `_stop_dir`, any home in
+    `homes`, or any ancestor of a home in `blocking`, unless that home is a
+    sandbox HOME inside it (`_sandbox_home`)."""
     if _stop_dir(directory):
         return True
     if any(_same(directory, h) for h in homes):
         return True
-    return any(_below(h, directory) is not None for h in blocking)
+    return any(_below(h, directory) is not None and not _sandbox_home(h, directory, user)
+               for h in blocking)
 
 
-def _find_root(start, homes, blocking):
+def _find_root(start, homes, blocking, user=()):
     """Nearest ancestor-or-self of `start` holding a marker, stopping (None)
     at the first `_blocked` directory. The fixed markers are checked for the
     whole walk first; `*.sln` is scanned only in directories nearer than the
     nearest fixed-marker hit."""
     chain = []
     directory = start
-    while not _blocked(directory, homes, blocking):
+    while not _blocked(directory, homes, blocking, user):
         chain.append(directory)
         parent = os.path.dirname(directory)
         if parent == directory:
@@ -620,12 +648,12 @@ def project_root(cwd, env=None, start=None):
         # Walk the logical path (normalized, symlinks NOT resolved), so the
         # stop rules see `/home/bob` even where it resolves elsewhere (macOS:
         # /System/Volumes/Data/home).
-        found = _find_root(os.path.normpath(start), homes.all, homes.blocking)
+        found = _find_root(os.path.normpath(start), homes.all, homes.blocking, homes.user)
         root = _canon(found) if found else None
         # A symlinked or aliased cwd can resolve into HOME, an ancestor of a
         # user home or a homes location: every stop rule applies again to the
         # real root, against real homes. Failing any, there is no root.
-        if root is not None and _blocked(root, homes.real, homes.blocking):
+        if root is not None and _blocked(root, homes.real, homes.blocking, homes.user):
             root = None
     _root_cache.put(key, root)
     return root
@@ -743,17 +771,21 @@ def _tokens(command):
         return command.split()
 
 
-def _project_module(module, root):
-    """`module`'s top package resolves inside the project root: a package
-    directory or a `.py` file at the root or under `src/`."""
+def _project_package(module, root):
+    """The top package of `module` when it resolves inside the project root
+    (a package directory or a `.py` file at the root or under `src/`), else
+    None. Only the top package is ever sent, never a submodule path. Cached
+    per (root, top)."""
     if not root:
-        return False
+        return None
     top = module.split(".", 1)[0]
-    for base in (root, os.path.join(root, "src")):
-        if (os.path.isdir(os.path.join(base, top))
-                or os.path.isfile(os.path.join(base, top + ".py"))):
-            return True
-    return False
+    fresh, found = _module_cache.get((root, top), _ROOT_CACHE_TTL)
+    if not fresh:
+        found = any(os.path.isdir(os.path.join(base, top))
+                    or os.path.isfile(os.path.join(base, top + ".py"))
+                    for base in (root, os.path.join(root, "src")))
+        _module_cache.put((root, top), found)
+    return top if found else None
 
 
 def command_target(command, env=None, names=None, root=None):
@@ -761,16 +793,18 @@ def command_target(command, env=None, names=None, root=None):
     known subcommand tool, or None.
 
     - The first word must be a bare command: no path separator, `~` or `:`,
-      and no dot (scripts are never sent; `python3.11` is the one dotted
-      form); it matches `^[A-Za-z0-9][A-Za-z0-9_+-]{0,40}$`, is not
-      credential-shaped and does not name the user. Otherwise no query.
+      and, after a Windows `.exe`/`.cmd`/`.bat`/`.com` suffix is dropped, no
+      dot (scripts are never sent; `python3.11` is the one dotted form); it
+      matches `^[A-Za-z0-9][A-Za-z0-9_+-]{0,40}$`, is not credential-shaped
+      and does not name the user. Otherwise no query.
     - For a program in `_SUBCOMMAND_TOOLS`, the next word is sent when it is
       in that tool's verb list (for make/just/rake, a common target) and
       passes `word_check`. Every other program is sent alone: `rm`, `cat`,
       `cd`, `less`, `mkdir`, `cp`, `mv`, `vim`, ...
-    - `python -m <module>` sends the module when it is a known module or one
-      that resolves to a package inside the project root (`root()`, called
-      only then), and passes the name check.
+    - `python [flags] -m <module>` (interpreter flags skipped) sends a known
+      module as listed, or only the TOP package of a module that resolves
+      inside the project root (`root()`, called only then); either must pass
+      the name check.
     A name in a subcommand or module sends the program alone."""
     command = _clean_target(command) if isinstance(command, str) else None
     if command is None:
@@ -788,19 +822,27 @@ def command_target(command, env=None, names=None, root=None):
     program = words[0]
     if any(ch in program for ch in "/\\:~"):
         return None
-    if not (_PROGRAM_RE.match(program) or _PYTHON_RE.match(program)):
+    if program.lower().endswith(_EXE_SUFFIXES):
+        program = program[:-4]
+    is_python = _PYTHON_RE.match(program) is not None
+    if not (is_python or _PROGRAM_RE.match(program)):
         return None
     if _credential_shaped(program) or name_hit(program, names):
         return None
     rest = words[1:]
-    if _PYTHON_RE.match(program):
+    if is_python:
+        while rest and (rest[0] in _PYTHON_FLAGS
+                        or (rest[0] in _PYTHON_VALUE_FLAGS and len(rest) > 1)):
+            rest = rest[2:] if rest[0] in _PYTHON_VALUE_FLAGS else rest[1:]
         if rest[:1] == ["-m"] and len(rest) > 1:
             module = rest[1]
             if (_MODULE_RE.match(module) and not _credential_shaped(module)
-                    and not name_hit(module, names)
-                    and (module in _PYTHON_MODULES
-                         or _project_module(module, root() if root else None))):
-                return program + " " + module
+                    and not name_hit(module, names)):
+                if module in _PYTHON_MODULES:
+                    return program + " " + module
+                top = _project_package(module, root() if root else None)
+                if top:
+                    return program + " " + top
         return program
     verbs = _SUBCOMMAND_TOOLS.get(program.lower())
     if verbs is not None and rest and word_check(rest[0], names, verbs):
@@ -973,7 +1015,7 @@ def reset_state():
     """TEST-ONLY: forget keys, steps, pending prefetches, the root, *.sln and
     homes caches and the pwd lookup."""
     _STATE.reset()
-    for cache in (_root_cache, _sln_cache, _homes_cache):
+    for cache in (_root_cache, _sln_cache, _homes_cache, _module_cache):
         cache.clear()
     _pwd_identity.cache_clear()
     with _pending_lock:
