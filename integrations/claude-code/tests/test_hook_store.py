@@ -52,7 +52,8 @@ class HookStoreTests(unittest.TestCase):
         self.age(self.store, 40)
         hs.prune(self.dir)
         self.assertFalse(os.path.exists(self.store))
-        self.assertFalse(os.path.exists(self.store + ".lock"))
+        if POSIX:  # Windows cannot unlink an open file: the lock file stays there
+            self.assertFalse(os.path.exists(self.store + ".lock"))
         self.assertTrue(os.path.exists(fresh))
         self.assertTrue(os.path.exists(fresh + ".lock"))  # its store is still there
 
