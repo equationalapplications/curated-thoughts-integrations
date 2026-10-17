@@ -7,7 +7,9 @@
  * SIGKILL, a POSIX process group so a kill takes the tree down, bounded byte
  * accumulation (the async spawn has no maxBuffer). `spec.signal` aborts: on
  * POSIX the child's process group is killed; on Windows only the direct
- * child. Every end path settles: after a kill, 'close' gets a short grace.
+ * child. Every end path settles: once the child has exited (for any
+ * reason), 'close' gets at most a short grace, then the pipes are destroyed
+ * and the real exit code is reported.
  */
 
 import { spawn } from 'node:child_process';
@@ -36,16 +38,18 @@ export function spawnOutcomeOf(raw: {
 }
 
 /**
- * After a kill, how long to wait for 'close' once the child has exited. A
- * kill cannot always close the pipes (Windows kills only the direct child;
- * a descendant that left the process group keeps stdout open), and a
- * promise that never settles would leak the plan and skip the budget miss.
+ * Once the child has exited (normally or killed), how long to wait for
+ * 'close'. A descendant that inherited stdout can hold the pipe open long
+ * after the child is gone (a background helper, Windows killing only the
+ * direct child, a process that left the group), and a promise that never
+ * settles would leak the plan, skip the budget miss, or report a working
+ * run as timed out.
  */
 export const DEFAULT_KILL_GRACE_MS = 250;
 export const DEFAULT_CAP_BYTES = 4 * 1024 * 1024;
 
 export interface NodeSpawnOptions {
-  /** After a kill, how long to wait for 'close' once the child has exited. */
+  /** Once the child has exited (any reason), how long to wait for 'close'. */
   killGraceMs?: number;
   /** Byte cap for stdout and for stderr; past it the child is killed (spawnError). */
   capBytes?: number;
@@ -100,19 +104,9 @@ export function nodeSpawnFn(
       let timedOut = false;
       let aborted = false;
       let settled = false;
-      let killed = false;
       let exitCode: number | null = null;
       let exited = false;
       let grace: ReturnType<typeof setTimeout> | undefined;
-      /** Killed and exited: give 'close' a short grace, then settle anyway. */
-      function armGrace(): void {
-        if (grace !== undefined || settled) return;
-        grace = setTimeout(() => {
-          child.stdout?.destroy();
-          child.stderr?.destroy();
-          finish(exitCode, false);
-        }, killGraceMs);
-      }
       /**
        * The one kill path (timeout, abort, overflow). POSIX: the process
        * group (negative pid), falling back to the direct child when the
@@ -123,14 +117,11 @@ export function nodeSpawnFn(
       function killTree(): void {
         const pid = child.pid;
         if (typeof pid !== 'number' || pid <= 0) return;
-        killed = true;
-        // Already exited: never signal (the leader is reaped, so -pid could
-        // hit a reused group); only bound the wait for pipes others hold,
-        // keeping the output read so far.
-        if (exited) {
-          armGrace();
-          return;
-        }
+        // Already exited: never signal. The leader is reaped, so its group
+        // may be empty and its id reused by an unrelated process group
+        // (PR #71); a straggler it started can therefore outlive the call.
+        // The exit-time grace alone bounds the wait.
+        if (exited) return;
         if (process.platform !== 'win32') {
           try {
             process.kill(-pid, 'SIGKILL');
@@ -141,6 +132,7 @@ export function nodeSpawnFn(
         }
         child.kill('SIGKILL');
       }
+      // Cleared at exit, so `timedOut` means the timer fired BEFORE exit.
       const timer = setTimeout(() => {
         timedOut = true;
         killTree();
@@ -150,7 +142,7 @@ export function nodeSpawnFn(
         settled = true;
         clearTimeout(timer);
         if (grace !== undefined) clearTimeout(grace);
-        // Every end path ('close', 'error', the kill grace) drops the abort listener.
+        // Every end path ('close', 'error', the exit grace) drops the abort listener.
         spec.signal?.removeEventListener('abort', onAbort);
         resolve(spawnOutcomeOf({
           code,
@@ -162,22 +154,42 @@ export function nodeSpawnFn(
           aborted,
         }));
       };
-      child.on('error', () => finish(null, true));
+      // 'error' is a failed start only when the child never got a pid. Node
+      // also emits it on a started child (e.g. a kill that fails); then
+      // exit/close/the grace settle as usual.
+      child.on('error', () => {
+        if (typeof child.pid !== 'number') finish(null, true);
+      });
+      // One settle rule after exit, whatever the reason: the outcome is
+      // fixed now (a later timer or abort cannot change it), and 'close'
+      // gets at most killGraceMs before the pipes are destroyed and the
+      // real exit code is reported (a descendant may hold stdout open).
       child.on('exit', (code) => {
         exited = true;
         exitCode = code;
-        if (killed) armGrace();
+        clearTimeout(timer);
+        spec.signal?.removeEventListener('abort', onAbort);
+        if (settled || grace !== undefined) return;
+        grace = setTimeout(() => {
+          child.stdout?.destroy();
+          child.stderr?.destroy();
+          finish(exitCode, false);
+        }, killGraceMs);
       });
       // The caller's budget ran out (activity delivery, `spec.signal`): kill
       // the tree now and report `aborted`, which the core classifies as its
       // own outcome (OpenCode / OpenClaw parity). A child that already
-      // exited keeps its real result (killTree then only bounds the wait).
+      // exited keeps its real result (the listener is removed at exit; the
+      // guard covers an abort dispatched in the same tick).
       function onAbort(): void {
         if (!exited) aborted = true;
         killTree();
       }
       spec.signal?.addEventListener('abort', onAbort, { once: true });
+      // Past the cap, nothing more is collected on EITHER stream (no gap in
+      // the kept prefix) and the tree is killed once.
       child.stdout?.on('data', (chunk: Buffer) => {
+        if (overflow) return;
         if (outBytes + chunk.length > CAP) {
           overflow = true;
           killTree();
@@ -187,6 +199,7 @@ export function nodeSpawnFn(
         out.push(chunk);
       });
       child.stderr?.on('data', (chunk: Buffer) => {
+        if (overflow) return;
         if (errBytes + chunk.length > CAP) {
           overflow = true;
           killTree();

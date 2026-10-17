@@ -18,7 +18,7 @@ Tags: **[V]** verified in this session by reading the repo at `fb66034`.
   - `spawnOutcomeOf` normalization;
   - one kill path, `killTree`, for timeout, abort and overflow;
   - a child with no pid, or one that already exited, is never signalled;
-  - after a kill, `close` gets a 250 ms grace;
+  - once the child has exited (for any reason), `close` gets a 250 ms grace;
   - an abort after exit keeps the real result;
   - a call whose signal is already aborted starts nothing.
 - OpenCode's binding ([V] `integrations/opencode/src/wisdom-live/adapter.ts:181-267`) and OpenClaw's
@@ -82,10 +82,15 @@ export function spawnOutcomeOf(raw: {
   process group).
 - An already-aborted signal resolves `{aborted: true}` without spawning.
 - One `killTree`. On POSIX it kills the process group (`-pid`) and falls back to the direct child. On Windows it kills
-  the direct child. A child with no pid is never signalled. A child that already exited is never signalled; only the
-  grace is armed.
-- After a kill, once the child has exited, `close` gets `killGraceMs`. Then the pipes are destroyed and the promise
-  settles with the output read so far.
+  the direct child. A child with no pid is never signalled. A child that already exited is never signalled (its
+  group id may have been reused); only the exit-time grace bounds the wait.
+- Once the child has exited, for any reason (normal exit or a kill), `close` gets `killGraceMs`. Then the pipes are
+  destroyed and the promise settles with the real exit code and the output read so far. The outcome is fixed at exit:
+  `timedOut` and `aborted` are set only when the timer or abort lands before exit, so a child that exits normally while
+  a descendant holds stdout is never reported as timed out.
+- `'error'` is a failed start only when the child never got a pid; on a started child (e.g. a failed kill) it is
+  ignored and exit, `close` or the grace settle.
+- Past the byte cap, nothing more is collected on either stream and the tree is killed once.
 - An abort after exit keeps the real result. An overflow is `spawnError`, never `aborted` (`spawnOutcomeOf`).
 - **New, from OpenClaw:** raw Buffers are accumulated and decoded once at settle, and the cap counts real bytes.
 - **New, from OpenClaw:** `env` may be a getter, resolved per spawn.

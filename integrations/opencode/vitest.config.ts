@@ -3,6 +3,9 @@ import { defineConfig } from 'vitest/config';
 export default defineConfig({
   test: {
     include: ['tests/**/*.test.ts', 'tests/**/test_*.ts'],
+    // A scratch HOME/XDG/CURATED_BRAIN_DIR for every test file (and every
+    // child it spawns): no test can reach the real home or brain.
+    setupFiles: ['tests/setup-home.ts'],
     // tests/host/** is the Bun-only OpenCode host contract (`bun test
     // tests/host/contract.test.ts`, checks.host); it imports bun:test and
     // spawns a real OpenCode binary, so vitest must never collect it.

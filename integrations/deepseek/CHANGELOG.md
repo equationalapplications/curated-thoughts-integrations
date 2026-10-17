@@ -4,7 +4,7 @@
 
 ## 0.6.3 — 2026-10-17
 
-- The spawn binding moved into the shared core (no behavior change), and multi-byte output split across pipe chunks is now decoded correctly.
+- The spawn binding moved into the shared core, and multi-byte output split across pipe chunks is now decoded correctly. Once `ct` has exited, its output now gets at most a 250 ms grace to close (before, a background helper holding the output open made a finished call wait out the full timeout and count as timed out), and output past the cap is no longer collected.
 
 ## 0.6.2 — 2026-10-17
 

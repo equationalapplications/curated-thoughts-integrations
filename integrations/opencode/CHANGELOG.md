@@ -4,7 +4,7 @@
 
 ## 0.4.3 — 2026-10-17
 
-- **Fix: no more hang when a killed `ct` never closes its output** (Windows, or a child process that escaped its process group). The spawn binding now lives in the shared core: one kill path, a 250 ms grace after a kill, no signal to a child that never started or already exited, and a call aborted before it starts spawns nothing.
+- **Fix: no more hang when a killed `ct` never closes its output** (Windows, or a child process that escaped its process group). The spawn binding now lives in the shared core: one kill path, a 250 ms grace for the output to close once `ct` has exited (for any reason, so a background helper holding the output open no longer turns a finished call into a timeout), no signal to a child that never started or already exited, output capped with no gap after the cap, and a call aborted before it starts spawns nothing.
 
 ## 0.4.2 — 2026-10-17
 
