@@ -262,18 +262,20 @@ def _one_line(value):
     return ct_wisdom._sanitize(value).strip().replace("\n", " ")
 
 
-def _title_line(item, superseded):
-    line = "**%s** %s (provenance: %s)" % (
-        _one_line(item["title"]),
-        ct_ledger.marker(item["id"]),
-        _one_line(item["provenance"] or "unlabeled"),
-    )
+def _title_line(item, superseded, marker_first=False):
+    title = _one_line(item["title"])
+    marker = ct_ledger.marker(item["id"])
+    provenance = _one_line(item["provenance"] or "unlabeled")
+    if marker_first:
+        line = "%s **%s** (provenance: %s)" % (marker, title, provenance)
+    else:
+        line = "**%s** %s (provenance: %s)" % (title, marker, provenance)
     if superseded:
         line += " — supersedes " + ", ".join("ct-fact:%s" % s for s in superseded)
     return line
 
 
-def render_live_block(entries, corrections, ledger):
+def render_live_block(entries, corrections, ledger, marker_first=False):
     """Render corrections (first) then entries not already in `ledger`.
 
     Returns (block, delivered_ids); ("", []) when nothing survives. Same
@@ -281,6 +283,11 @@ def render_live_block(entries, corrections, ledger):
     LIVE_MAX_BLOCK_CHARS; corrections come first so an entry can never take
     a correction's budget. A correction survives only if it supersedes
     something actually in context.
+
+    `marker_first` puts each fact's `ct-fact` marker before its title, for
+    hosts that deliver the block inside a tool result a size limiter may
+    cut (Docker Agent): a cut then shows a marker or nothing of the fact.
+    The Hermes user-turn layout (marker after the title) is the default.
     """
     chosen = []
     seen = set(ledger)
@@ -303,7 +310,7 @@ def render_live_block(entries, corrections, ledger):
         text = ct_wisdom._sanitize(item["text"])
         if not item["title"].strip() and not text.strip():
             continue
-        title_line = _title_line(item, superseded)
+        title_line = _title_line(item, superseded, marker_first)
         body = title_line + "\n" + text
         sep = 2 if parts else 0
         remaining = LIVE_MAX_BLOCK_CHARS - used - sep

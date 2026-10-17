@@ -1,4 +1,4 @@
-"""Shared-script parity gate: Hermes vs Claude Code (issue #33).
+"""Shared-script parity gate: Hermes vs Claude Code and Docker Agent (issue #33).
 
 `integrations/hermes/scripts/` and `integrations/claude-code/scripts/` carry
 copies of the same stdlib scripts. Each integration ships standalone (no
@@ -35,7 +35,10 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
 REFERENCE = REPO / "integrations" / "hermes" / "scripts"
-COPIES = (REPO / "integrations" / "claude-code" / "scripts",)
+COPIES = (
+    REPO / "integrations" / "claude-code" / "scripts",
+    REPO / "integrations" / "docker-agent" / "scripts",
+)
 
 IDENTICAL = (
     "ct_env.py",
@@ -54,6 +57,22 @@ IDENTICAL = (
     "ct_wisdom_verbose.py",
     "ct_wisdom_log.py",
 )
+# Shared scripts only some copies vendor: {copy integration: (names,)}.
+# Docker Agent reuses the Hermes activity builder (privacy amendment R1-R4,
+# command targets, block render and splice) through a byte-identical copy
+# (spec 2026-10-16-docker-agent-integration-design.md, D1, D7).
+IDENTICAL_EXTRA = {
+    "docker-agent": ("ct_wisdom_activity.py",),
+}
+# Hook-side modules shared by the command-hook adapters (no Hermes copy:
+# Hermes keeps this state in process). Every listed tree must carry an
+# identical copy (PR #59 review: the store/lock/prune/breaker primitives).
+HOOK_SHARED = {
+    "ct_hook_store.py": (
+        REPO / "integrations" / "claude-code" / "hooks",
+        REPO / "integrations" / "docker-agent" / "hooks",
+    ),
+}
 REGIONED = {
     "ct_doctor.py": ("module-docstring", "harness-config", "registration-check"),
 }
@@ -119,7 +138,7 @@ def drift_report(reference, copy, ref_label, copy_label):
 class SharedScriptParityTests(unittest.TestCase):
     def test_identical_scripts_are_byte_identical(self):
         for copy_dir in COPIES:
-            for name in IDENTICAL:
+            for name in IDENTICAL + IDENTICAL_EXTRA.get(copy_dir.parent.name, ()):
                 with self.subTest(copy=copy_dir.parent.name, script=name):
                     ref, copy = read(REFERENCE / name), read(copy_dir / name)
                     # normalize() with no allowed regions also rejects a
@@ -155,6 +174,24 @@ class SharedScriptParityTests(unittest.TestCase):
                             f"harness-specific regions:\n"
                             + drift_report(ref, copy, f"hermes/{name}",
                                            f"{copy_dir.parent.name}/{name}")
+                        )
+
+
+class HookSharedParityTests(unittest.TestCase):
+    def test_hook_modules_are_byte_identical(self):
+        for name, dirs in HOOK_SHARED.items():
+            ref_dir = dirs[0]
+            ref = read(ref_dir / name)
+            normalize(ref)
+            for other in dirs[1:]:
+                with self.subTest(script=name, copy=other.parent.name):
+                    copy = read(other / name)
+                    if ref != copy:
+                        self.fail(
+                            f"{name} drifted between {ref_dir.parent.name} and "
+                            f"{other.parent.name}:\n"
+                            + drift_report(ref, copy, f"{ref_dir.parent.name}/{name}",
+                                           f"{other.parent.name}/{name}")
                         )
 
 
