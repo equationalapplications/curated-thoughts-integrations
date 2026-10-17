@@ -1545,6 +1545,53 @@ def _refused(result, data, status=None, error_type=None, error_message=None):
     return isinstance(data, dict) and _refusal_value(data)
 
 
+# Proof that a tool ran (INTENT rule 9, spec 2026-10-17-hermes-fail-closed-
+# ran-check-design.md): the success shape of each activity tool's result at
+# the Hermes pin (tests/e2e/Dockerfile HERMES_COMMIT). Every result needs to
+# be a JSON object whose `error` is absent or null; then, per tool:
+#   - terminal: `exit_code` an int >= 0 and no `status` (foreground run,
+#     non-zero exit included, or background spawn); or `status`
+#     "yielded_to_background" with a `session_id` (terminal_tool.py,
+#     terminal_tool_result.py, terminal_tool_background.py);
+#   - read_file: `content` a str, no `status` (the dedup stub has one), and
+#     `is_binary` not true (ReadResult.to_dict);
+#   - write_file: `bytes_written` an int >= 0 (WriteResult.to_dict);
+#   - patch: `success` is True (PatchResult.to_dict);
+#   - search_files: `total_count` an int >= 0 (SearchResult.to_dict).
+# Anything else (plain text, unknown fields, another tool) proves nothing,
+# so nothing is sent. Fields are checked for presence and type only; no tool
+# output is read. Hermes's status kwarg is not used: it says "error" for any
+# non-zero exit, a command that ran (agent/display.py).
+
+
+def _is_count(value):
+    """An int >= 0 that is not a bool."""
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def proves_ran(tool_name, data):
+    """True only when `data` (the parsed tool result) proves the tool ran.
+    Fails closed: any shape not listed above is False."""
+    if not isinstance(data, dict) or data.get("error") is not None:
+        return False
+    if tool_name == "terminal":
+        if "status" not in data:
+            return _is_count(data.get("exit_code"))
+        session = data.get("session_id")
+        return (data.get("status") == "yielded_to_background"
+                and isinstance(session, str) and bool(session))
+    if tool_name == "read_file":
+        return (isinstance(data.get("content"), str) and "status" not in data
+                and data.get("is_binary") is not True)
+    if tool_name == "write_file":
+        return _is_count(data.get("bytes_written"))
+    if tool_name == "patch":
+        return data.get("success") is True
+    if tool_name == "search_files":
+        return _is_count(data.get("total_count"))
+    return False
+
+
 def is_refusal(result, status=None, error_type=None, error_message=None):
     """True when the tool result (or Hermes's status / error kwargs for it)
     is Hermes refusing the call (the call did not run, or ran nothing the
