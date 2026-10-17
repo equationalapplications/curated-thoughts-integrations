@@ -7,21 +7,23 @@ While the agent works on its own between user messages, what it is doing
 (the file it reads or edits, the command it runs, the pattern it searches)
 can trigger one relevant CT fact:
 
-  * `pre_tool_call` SENDS NOTHING (amendment 8: Hermes resolves approvals
-    and other plugins' blocks only after every pre_tool_call callback has
-    returned). It builds an activity from the tool's ARGS only (never
-    contents, output, diffs, reasoning or full command lines) and, if its
-    key is new for the session, claims the model step (`api_request_id`)
-    for this call.
-  * `transform_tool_result` of the claiming call (Hermes let it run): unless
-    the result is Hermes's refusal (`is_refusal`), rebuild the activity from
-    the args that ran, record the key, start `ct wisdom match --max 1` and
-    wait for it within the 3 s budget, claim one fact atomically in the
-    in-turn ledger, and splice a marker-first block into the tool result.
-    The query is the bare target (A6 real-gate results): a relative path, a
-    search pattern, or program plus subcommand.
+  * No `pre_tool_call` hook (amendment 8): Hermes resolves approvals and
+    other plugins' blocks only after every pre_tool_call callback has
+    returned, and a call it blocks there never reaches the transform.
+  * `transform_tool_result` (Hermes let the call run): unless the result is
+    Hermes's refusal (`is_refusal`), build the activity from the tool's ARGS
+    that ran (never contents, output, diffs, reasoning or full command
+    lines), claim the model step (`api_request_id`) and the activity key in
+    one atomic step, start `ct wisdom match --max 1` and wait for it within
+    the 3 s budget, claim one fact atomically in the in-turn ledger, and
+    splice a marker-first block into the tool result. The query is the bare
+    target (A6 real-gate results): a relative path, a search pattern, or
+    program plus subcommand.
   * A started query that delivers nothing for any reason but zero_hits
-    frees its key for a later step; a budget miss is one breaker failure.
+    frees its key for a later step. A budget miss is one breaker failure
+    when discovery and the capability probe were already cached (the match
+    had the whole budget); on a cold process the worker's own outcome
+    settles the breaker instead.
 
 Fail-closed classes (no CT call or no delivery, one debug line):
   empty_id, ct_tool, no_activity, no_ledger, breaker_open, seen_key,
@@ -34,8 +36,7 @@ and each query that delivered nothing with channel "activity"; per-call rate
 and filter skips are not recorded.
 
 Read-only: `ct` subprocess only (via ct_wisdom_live.match_wisdom). Stdlib
-only. Neither hook ever raises; the pre-hook always returns None (Hermes
-blocks a tool whose pre_tool_call callback raises).
+only. The hook never raises.
 """
 
 from __future__ import annotations
@@ -71,7 +72,6 @@ LABEL_CHARS = 120
 RECENT_KEYS_MAX = 32
 STEP_IDS_MAX = 16
 SESSIONS_MAX = 256
-PENDING_MAX = 256
 
 ACTIVITY_HEADING = "## Curated Thoughts — relevant to this step"
 ACTIVITY_RESULT_KEY = "curated_thoughts_wisdom"
@@ -873,7 +873,9 @@ def command_target(command, env=None, names=None, root=None):
     - `python [flags] -m <module>` (`_python_module` parses the flags) sends
       a known module as listed, or only the TOP package of a real package
       inside the project root (`root()`, called only then). The full module
-      and the sent string must both pass the name check.
+      must pass the name check, which checks each of its parts; the sent
+      string is built only from the program and that module, so it is not
+      checked again.
     A name in a subcommand or module sends the program alone."""
     command = _clean_target(command) if isinstance(command, str) else None
     if command is None:
@@ -980,12 +982,13 @@ def query_for(activity):
 
 
 class ActivityState:
-    """Per session: recent activity keys (LRU), the model steps claimed by a
-    call (step id -> tool_call_id) and the steps already reported. One lock.
+    """Per session: recent activity keys (LRU), the model steps that started
+    a query and the steps already reported. One lock.
 
-    Amendment 8: `pre_tool_call` only CLAIMS the step (`claim_step`, which
-    records no key); `transform_tool_result`, after Hermes decided the call
-    may run, records the key (`start_key`) just before the query starts."""
+    Amendment 8: everything happens in `transform_tool_result`, after Hermes
+    decided the call may run. `start` claims the step and the key together,
+    just before the query starts, so a call Hermes blocks earlier never holds
+    the step."""
 
     def __init__(self):
         self._lock = threading.Lock()
@@ -1001,10 +1004,10 @@ class ActivityState:
         self._sessions.move_to_end(session_id)
         return state
 
-    def claim_step(self, session_id, api_request_id, key, tool_call_id):
-        """None when this call claims the step (recorded with its
-        tool_call_id; the key is NOT recorded); else the failure class. A
-        rejected call changes nothing but the key's recency."""
+    def start(self, session_id, api_request_id, key):
+        """None when this call may start the step's query (the step and the
+        key are both recorded); else "step_used" or "seen_key". A rejected
+        call changes nothing but the key's recency."""
         with self._lock:
             keys, steps, _ = self._state(session_id)
             if api_request_id in steps:
@@ -1012,26 +1015,9 @@ class ActivityState:
             if key in keys:
                 keys.move_to_end(key)
                 return "seen_key"
-            steps[api_request_id] = tool_call_id
+            steps[api_request_id] = True
             while len(steps) > STEP_IDS_MAX:
                 steps.popitem(last=False)
-            return None
-
-    def release_step(self, session_id, api_request_id, tool_call_id):
-        """Free the step, only when `tool_call_id` holds it (nothing was sent,
-        so a later call of the step may claim it)."""
-        with self._lock:
-            state = self._sessions.get(session_id)
-            if state is not None and state[1].get(api_request_id) == tool_call_id:
-                del state[1][api_request_id]
-
-    def start_key(self, session_id, key):
-        """None when the key is new (and records it); else "seen_key"."""
-        with self._lock:
-            keys, _, _ = self._state(session_id)
-            if key in keys:
-                keys.move_to_end(key)
-                return "seen_key"
             keys[key] = True
             while len(keys) > RECENT_KEYS_MAX:
                 keys.popitem(last=False)
@@ -1046,9 +1032,13 @@ class ActivityState:
                 state[0].pop(key, None)
 
     def peek(self, session_id, api_request_id, key):
-        """What claim_step() would answer, without recording anything."""
+        """What start() would answer. Pure: records nothing, not even the
+        session's or the key's recency."""
         with self._lock:
-            keys, steps, _ = self._state(session_id)
+            state = self._sessions.get(session_id)
+            if state is None:
+                return None
+            keys, steps, _ = state
             if api_request_id in steps:
                 return "step_used"
             return "seen_key" if key in keys else None
@@ -1072,7 +1062,7 @@ class ActivityState:
 _STATE = ActivityState()
 
 # ---------------------------------------------------------------------------
-# step claims (pre_tool_call) and the query (transform_tool_result)
+# the query (started and joined in transform_tool_result)
 # ---------------------------------------------------------------------------
 
 _clock = time.monotonic
@@ -1082,16 +1072,24 @@ def _spawn(target):
     threading.Thread(target=target, name="ct-wisdom-activity", daemon=True).start()
 
 
-# The step a call claimed in pre_tool_call; nothing is sent until its
-# transform_tool_result, i.e. until Hermes let the call run.
-_Claim = namedtuple("_Claim", "session_id api_request_id")
+def _ct_warm():
+    """True when discovery and the capability probe are both cached, so the
+    whole budget goes to `ct wisdom match` (finding 1: on a cold process the
+    3 s wait also covers `ct --help` and `ct wisdom match --help`). Reads the
+    two caches only; runs nothing."""
+    path = ct_wisdom._accepted_ct_path
+    if path is None:
+        return False
+    with ct_wisdom_live._capability_lock:
+        return ct_wisdom_live._capability.get(path) is True
 
 
 class _Prefetch:
     __slots__ = ("session_id", "api_request_id", "tool_name", "activity", "query",
-                 "exclude", "deadline", "done", "result", "failure", "lock", "settled")
+                 "exclude", "deadline", "warm", "done", "result", "failure", "lock",
+                 "settled")
 
-    def __init__(self, session_id, api_request_id, tool_name, activity, exclude):
+    def __init__(self, session_id, api_request_id, tool_name, activity, exclude, warm):
         self.session_id = session_id
         self.api_request_id = api_request_id
         self.tool_name = tool_name
@@ -1099,6 +1097,7 @@ class _Prefetch:
         self.query = query_for(activity)
         self.exclude = exclude
         self.deadline = _clock() + ct_wisdom_live.LIVE_TIMEOUT
+        self.warm = warm
         self.done = threading.Event()
         self.result = None
         self.failure = None
@@ -1106,75 +1105,86 @@ class _Prefetch:
         self.settled = False
 
 
-_pending = OrderedDict()
-_pending_lock = threading.Lock()
-
-
-def pending_count():
-    with _pending_lock:
-        return len(_pending)
-
-
 def reset_state():
-    """TEST-ONLY: forget keys, steps, pending claims, the root, *.sln, homes
-    and module caches and the pwd lookup."""
+    """TEST-ONLY: forget keys, steps, the root, *.sln, homes and module
+    caches and the pwd lookup."""
     _STATE.reset()
     for cache in (_root_cache, _sln_cache, _homes_cache, _module_cache):
         cache.clear()
     _pwd_identity.cache_clear()
-    with _pending_lock:
-        _pending.clear()
 
 
-def _settle(p, outcome):
-    """Record one query's outcome on the shared breaker EXACTLY once:
-    "failure", "success" or None (nothing). Whoever comes first wins: the
-    worker with CT's answer, or the transform when the budget ran out (one
-    failure, the core's recordActivityBudgetMiss); the other is ignored."""
-    with p.lock:
-        if p.settled:
-            return
-        p.settled = True
+def _record_breaker(outcome):
     if outcome == "failure":
         ct_wisdom_live._BREAKER.record_failure()
     elif outcome == "success":
         ct_wisdom_live._BREAKER.record_success()
 
 
+def _finish(p, result, failure, outcome):
+    """The worker's end, under the query lock: publish the result, mark the
+    query done and settle the breaker unless the transform already did. The
+    shared breaker hears of each query EXACTLY once."""
+    with p.lock:
+        p.result, p.failure = result, failure
+        p.done.set()
+        record = None if p.settled else outcome
+        p.settled = True
+    _record_breaker(record)
+
+
 def _run_prefetch(p):
-    """Discovery, probe and match for one query (worker thread)."""
+    """Discovery, probe and match for one query (worker thread). Outcome for
+    the breaker: timeout/exit a failure, an answer a success, else nothing."""
+    result, failure, outcome = None, None, None
     try:
         path, dclass = ct_wisdom.discover_ct()
         if path is None:
-            p.failure = dclass or "discovery_miss"
+            failure = dclass or "discovery_miss"
             return
         capable = ct_wisdom_live.has_match_capability(path)
         if not capable:
-            p.failure = "probe_timeout" if capable is None else "capability_missing"
+            failure = "probe_timeout" if capable is None else "capability_missing"
             return
-        result, rclass = ct_wisdom_live.match_wisdom(
+        answer, rclass = ct_wisdom_live.match_wisdom(
             path, p.query, ACTIVITY_MAX_PER_STEP, p.exclude)
         if rclass is not None:
             if rclass in ("timeout", "exit"):
-                _settle(p, "failure")
+                outcome = "failure"
             elif rclass == "spawn":
                 ct_wisdom.reset_discovery_cache()
                 ct_wisdom_live.reset_capability_cache()
-            p.failure = rclass
+            failure = rclass
             return
-        _settle(p, "success")
-        p.result = result
+        result, outcome = answer, "success"
     except Exception:
         logger.debug("wisdom-activity: prefetch failed", exc_info=True)
-        p.failure = "hook_failed"
+        result, failure, outcome = None, "hook_failed", None
     finally:
-        _settle(p, None)
-        p.done.set()
+        _finish(p, result, failure, outcome)
 
 
 def _wait(p):
     """Wait for the query within what is left of its budget; True when done."""
     return p.done.wait(max(0.0, p.deadline - _clock()))
+
+
+def _budget_ran_out(p):
+    """The transform's wait ran out. Under the query lock: False when the
+    worker finished meanwhile (its result is used and it settled the
+    breaker). Else True; a warm query then records ONE budget failure (the
+    core's recordActivityBudgetMiss) and the worker's later outcome is
+    ignored. A cold query (discovery or probe ran in this budget) records
+    nothing here: the worker's own outcome settles the breaker later."""
+    with p.lock:
+        if p.done.is_set():
+            return False
+        record = None
+        if p.warm and not p.settled:
+            p.settled = True
+            record = "failure"
+    _record_breaker(record)
+    return True
 
 
 def _skip(session_id, failure_class, record=False, **detail):
@@ -1193,18 +1203,6 @@ def _nonempty(value):
     return isinstance(value, str) and bool(value)
 
 
-def on_pre_tool_call(**kwargs):
-    """Hermes `pre_tool_call` callback. Always returns None (never blocks,
-    never modifies args); never raises; never sends anything to CT."""
-    try:
-        _pre_tool_call(kwargs.get("tool_name"), kwargs.get("args"),
-                       kwargs.get("session_id"), kwargs.get("tool_call_id"),
-                       kwargs.get("api_request_id"), kwargs.get("task_id"))
-    except Exception:
-        logger.debug("wisdom-activity: pre hook failed", exc_info=True)
-    return None
-
-
 def _blocked_report(session_id, api_request_id, activity, blocked):
     """A would-be trigger that cannot run (no ledger, open breaker): verbose
     mode hears of it once per step. Nothing is recorded in the key tracker."""
@@ -1220,27 +1218,6 @@ def _gate_blocked(session_id):
     if ledger is None:
         return "no_ledger", None
     return ("breaker_open" if ct_wisdom_live._BREAKER.is_open() else None), ledger
-
-
-def _pre_tool_call(tool_name, args, session_id, tool_call_id, api_request_id, task_id=None):
-    if not (_nonempty(session_id) and _nonempty(tool_call_id) and _nonempty(api_request_id)):
-        return _skip(session_id, "empty_id")
-    if is_ct_tool(tool_name):
-        return _skip(session_id, "ct_tool")
-    activity = activity_for(tool_name, args, task_id=task_id)
-    if activity is None or not query_for(activity):
-        return _skip(session_id, "no_activity")
-    blocked, _ = _gate_blocked(session_id)
-    if blocked is not None:
-        return _blocked_report(session_id, api_request_id, activity, blocked)
-    refused = _STATE.claim_step(session_id, api_request_id, activity.key, tool_call_id)
-    if refused is not None:
-        return _skip(session_id, refused)
-    with _pending_lock:
-        _pending[tool_call_id] = _Claim(session_id, api_request_id)
-        while len(_pending) > PENDING_MAX:
-            _pending.popitem(last=False)
-    return None
 
 
 # ---------------------------------------------------------------------------
@@ -1364,71 +1341,87 @@ def on_transform_tool_result(**kwargs):
     try:
         return _transform(kwargs.get("result"), kwargs.get("session_id"),
                           kwargs.get("tool_call_id"), kwargs.get("tool_name"),
-                          kwargs.get("args"), kwargs.get("task_id"))
+                          kwargs.get("args"), kwargs.get("task_id"),
+                          kwargs.get("api_request_id"))
     except Exception:
         logger.debug("wisdom-activity: transform failed", exc_info=True)
         return None
 
 
-# Hermes's own refusal envelopes (pin ee8dd6c8): the terminal tool's
-# `_error_json(..., status="blocked" | "pending_approval")` for a denied or
-# unanswered approval, a deny rule or a hardline floor; the file tools'
-# `tool_error("BLOCKED: ...")` / `tool_error("Refusing to write ...")`.
-_REFUSED_STATUSES = frozenset({"blocked", "pending_approval"})
-_REFUSED_ERROR_PREFIXES = ("BLOCKED", "Refusing")
+# Hermes's own refusal envelopes (pin ee8dd6c8), matched case-insensitively:
+#   - terminal_tool.py `_error_json(..., status="blocked" | "pending_approval")`
+#     for a denied or unanswered approval, an `approvals.deny` rule or a
+#     hardline floor (message "BLOCKED: ..." or the fallback "Command denied:
+#     ..."); approval.py's action gate `"status": "approval_required"`,
+#     `"approved": false`, and its "denied by user" / "was not approved"
+#     reasons;
+#   - the file tools' `tool_error("BLOCKED: ...")` / `tool_error("Refusing to
+#     write ...")` (write guards, protected and SSH-config writes);
+#   - other tools' "Blocked: ..." and "did not approve ... was NOT run", and
+#     the generic statuses denied / rejected / refused / cancelled.
+# The error / message fields and plain-text results are checked; tool OUTPUT
+# fields are not (a command that ran may print "Permission denied").
+_REFUSED_STATUSES = frozenset({
+    "blocked", "pending_approval", "approval_required", "denied", "rejected",
+    "refused", "cancelled", "canceled", "not_approved"})
+_REFUSED_PREFIXES = ("blocked", "refusing", "denied", "command denied", "access denied",
+                     "not approved")
+_REFUSED_PHRASES = ("not approved", "did not approve", "denied by", "user denied",
+                    "was not run", "not executed")
+
+
+def _refusal_text(text):
+    if not isinstance(text, str):
+        return False
+    low = text.lstrip().lower()
+    return low.startswith(_REFUSED_PREFIXES) or any(p in low for p in _REFUSED_PHRASES)
 
 
 def is_refusal(result):
     """True when the tool result is Hermes refusing the call (the call did
-    not run, or ran nothing the user approved): nothing may be sent."""
+    not run, or ran nothing the user approved): nothing may be sent. Leans
+    closed: a false positive only skips one delivery."""
     if not isinstance(result, str):
         return False
     try:
         data = json.loads(result)
     except ValueError:
-        return False
+        return _refusal_text(result)  # plain text: only its own wording
     if not isinstance(data, dict):
         return False
-    if data.get("status") in _REFUSED_STATUSES:
+    status = data.get("status")
+    if isinstance(status, str) and status.strip().lower() in _REFUSED_STATUSES:
         return True
-    error = data.get("error")
-    return isinstance(error, str) and error.lstrip().startswith(_REFUSED_ERROR_PREFIXES)
+    if data.get("approved") is False or data.get("approval_pending") is True:
+        return True
+    return _refusal_text(data.get("error")) or _refusal_text(data.get("message"))
 
 
-def _transform(result, session_id, tool_call_id, tool_name=None, args=None, task_id=None):
-    if not _nonempty(tool_call_id):
-        return None
-    with _pending_lock:
-        claim = _pending.get(tool_call_id)
-        if claim is None or claim.session_id != session_id:
-            return None
-        del _pending[tool_call_id]
-    api_request_id = claim.api_request_id
-
-    def free(failure_class):
-        # Nothing was sent: the step is free for a later call of this step.
-        _STATE.release_step(session_id, api_request_id, tool_call_id)
-        return _skip(session_id, failure_class)
-
+def _transform(result, session_id, tool_call_id, tool_name=None, args=None, task_id=None,
+               api_request_id=None):
+    if not (_nonempty(session_id) and _nonempty(tool_call_id) and _nonempty(api_request_id)):
+        return _skip(session_id, "empty_id")
+    if is_ct_tool(tool_name):
+        return _skip(session_id, "ct_tool")
     # Hermes decided by now (approvals, other plugins' blocks, guardrails):
-    # a refusal sends nothing (amendment 8).
+    # a refusal sends nothing (amendment 8). Nothing is recorded, so the step
+    # stays free for a later call of the same step.
     if is_refusal(result):
-        return free("refused")
+        return _skip(session_id, "refused")
     if _splice_mode(result) is None:
-        return free("unsupported_result")
+        return _skip(session_id, "unsupported_result")
     # The args that actually ran (after any plugin `modify`).
     activity = activity_for(tool_name, args, task_id=task_id)
     if activity is None or not query_for(activity):
-        return free("no_activity")
+        return _skip(session_id, "no_activity")
     blocked, ledger = _gate_blocked(session_id)
     if blocked is not None:
-        _STATE.release_step(session_id, api_request_id, tool_call_id)
         return _blocked_report(session_id, api_request_id, activity, blocked)
-    refused = _STATE.start_key(session_id, activity.key)
+    refused = _STATE.start(session_id, api_request_id, activity.key)
     if refused is not None:
-        return free(refused)
+        return _skip(session_id, refused)
     p = _Prefetch(session_id, api_request_id, tool_name, activity,
-                  sorted(ledger)[:ct_wisdom_live.EXCLUDE_MAX])
+                  sorted(ledger)[:ct_wisdom_live.EXCLUDE_MAX], _ct_warm())
     _spawn(lambda: _run_prefetch(p))
     return _deliver(p, result)
 
@@ -1443,8 +1436,7 @@ def _deliver(p, result):
         _STATE.release_key(session_id, p.activity.key)
         return _skip(session_id, failure_class, record=True, **base)
 
-    if not _wait(p):
-        _settle(p, "failure")  # a budget miss is one breaker failure
+    if not _wait(p) and _budget_ran_out(p):
         return miss("budget")
     if p.failure is not None:
         return miss(p.failure)

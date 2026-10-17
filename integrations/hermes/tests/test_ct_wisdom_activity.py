@@ -33,6 +33,11 @@ import ct_wisdom_verbose  # noqa: E402
 ORIGINAL_SEAM = act._record_activity_delivery
 
 
+class HarnessFree:
+    """The real _ct_warm, captured before any Harness stub replaces it."""
+    real_ct_warm = staticmethod(getattr(act, "_ct_warm", lambda: None))
+
+
 def make_tree(base, entries):
     """Create `entries` under `base`: "x/" a directory, "x" an empty file."""
     for entry in entries:
@@ -976,10 +981,9 @@ class TestActivityState(unittest.TestCase):
         return act.activity_for(tool, {"path": path}, cwd=PROJ).key
 
     @staticmethod
-    def admit(st, sid, req, key, call="c"):
-        """Claim the step, then start the key (what the two hooks do)."""
-        refused = st.claim_step(sid, req, key, call)
-        return refused if refused is not None else st.start_key(sid, key)
+    def admit(st, sid, req, key):
+        """What transform_tool_result does: claim the step and the key at once."""
+        return st.start(sid, req, key)
 
     def test_one_start_per_step(self):
         st = act.ActivityState()
@@ -1012,20 +1016,30 @@ class TestActivityState(unittest.TestCase):
         self.assertEqual(self.admit(st, "s", "r3", act.activity_for(
             "terminal", {"command": "make test -j4"}, cwd=PROJ).key), "seen_key")
 
-    def test_claim_records_no_key_and_release(self):
+    def test_start_records_step_and_key_and_release_key(self):
         st = act.ActivityState()
         k = self.key("read_file", "a.py")
-        self.assertIsNone(st.claim_step("s", "r1", k, "c1"))
-        self.assertIsNone(st.peek("s", "r2", k), "a claim alone records no key")
-        self.assertEqual(st.claim_step("s", "r1", k, "c2"), "step_used")
-        st.release_step("s", "r1", "c2")  # not the owner: nothing changes
-        self.assertEqual(st.claim_step("s", "r1", k, "c3"), "step_used")
-        st.release_step("s", "r1", "c1")
-        self.assertIsNone(st.claim_step("s", "r1", k, "c3"))
-        self.assertIsNone(st.start_key("s", k))
-        self.assertEqual(st.start_key("s", k), "seen_key")
-        st.release_key("s", k)
-        self.assertIsNone(st.start_key("s", k))
+        self.assertIsNone(st.start("s", "r1", k))
+        self.assertEqual(st.peek("s", "r1", k), "step_used")
+        self.assertEqual(st.peek("s", "r2", k), "seen_key")
+        st.release_key("s", k)  # the step stays used, the key is free
+        self.assertEqual(st.start("s", "r1", k), "step_used")
+        self.assertIsNone(st.start("s", "r2", k))
+
+    def test_peek_is_pure(self):
+        """Finding 6: a peek records nothing, not even session or key recency."""
+        st = act.ActivityState()
+        k = self.key("read_file", "a.py")
+        self.assertIsNone(st.start("s", "r1", k))
+        for i in range(act.SESSIONS_MAX + 1):
+            self.assertIsNone(st.peek("other%d" % i, "r1", k))
+        self.assertEqual(st.peek("s", "r2", k), "seen_key", "peeks evicted a real session")
+        keys = [self.key("read_file", "f%d.py" % i) for i in range(act.RECENT_KEYS_MAX)]
+        for i, key in enumerate(keys[1:], 2):
+            self.assertIsNone(st.start("s", "r%d" % i, key))
+        st.peek("s", "rx", k)  # must not refresh k's recency
+        self.assertIsNone(st.start("s", "ry", self.key("read_file", "new.py")))
+        self.assertIsNone(st.peek("s", "rz", k), "a peek refreshed the key's recency")
 
 
 # ---------------------------------------------------------------------------
@@ -1067,16 +1081,18 @@ class Harness(unittest.TestCase):
             (ct_wisdom_live, "match_wisdom", fake_match),
             (act, "_spawn", lambda target: target()),
             (act, "_record_activity_delivery", lambda event: self.deliveries.append(event)),
+            (act, "_ct_warm", lambda: True),
         ]:
             orig = getattr(mod, name)
             setattr(mod, name, value)
             self.addCleanup(setattr, mod, name, orig)
 
     def pre(self, tool="read_file", args=None, sid="s1", call="c1", req="t:api:1"):
-        return act.on_pre_tool_call(
-            tool_name=tool, args={"path": "src/x.py"} if args is None else args,
-            task_id="", session_id=sid, tool_call_id=call, turn_id="t",
-            api_request_id=req, middleware_trace=[])
+        """Hermes's pre_tool_call pass for a call. Since amendment 8 (finding 2)
+        the plugin registers no pre_tool_call hook, so nothing of ours runs:
+        kept so each test reads as the host's sequence of events."""
+        self.assertFalse(hasattr(act, "on_pre_tool_call"))
+        return None
 
     def post(self, result, tool="read_file", args=None, sid="s1", call="c1", req="t:api:1"):
         return act.on_transform_tool_result(
@@ -1201,12 +1217,13 @@ class TestDelivery(Harness):
         self.assertIsNone(ORIGINAL_SEAM({"host": "hermes", "channel": "activity"}))
 
     def test_other_calls_in_step_pass_through(self):
+        """The first transform of the step queries; the others pass through."""
         ct_ledger.LEDGER_CACHE.put("s1", set())
         self.pre(call="c1")
         self.pre(call="c2", args={"path": "src/y.py"})
-        self.assertIsNone(self.post(READ_RESULT, call="c2", args={"path": "src/y.py"}))
-        self.assertIsNotNone(self.post(READ_RESULT, call="c1"))
-        self.assertEqual(len(self.calls), 1)
+        self.assertIsNotNone(self.post(READ_RESULT, call="c2", args={"path": "src/y.py"}))
+        self.assertIsNone(self.post(READ_RESULT, call="c1"))
+        self.assertEqual([c["text"] for c in self.calls], ["src/y.py"])
 
     def test_second_claim_of_same_fact_skipped(self):
         ct_ledger.LEDGER_CACHE.put("s1", set())
@@ -1219,6 +1236,7 @@ class TestDelivery(Harness):
 class TestFailClosed(Harness):
     def assert_no_query(self, **kw):
         self.assertIsNone(self.pre(**kw))
+        self.assertIsNone(self.post(READ_RESULT, **kw))
         self.assertEqual(self.calls, [])
 
     def test_no_ledger(self):
@@ -1235,15 +1253,18 @@ class TestFailClosed(Harness):
         ct_ledger.LEDGER_CACHE.put("s1", set())
         self.assert_no_query(req="")
         self.assert_no_query(call="")
-        self.assertIsNone(act.on_pre_tool_call(tool_name="read_file", args={"path": "a"},
-                                               session_id="", tool_call_id="c",
-                                               api_request_id="r"))
+        self.assertIsNone(self.post(READ_RESULT, req=""))
+        self.assertIsNone(self.post(READ_RESULT, call=""))
+        self.assertIsNone(self.post(READ_RESULT, sid=""))
         self.assertEqual(self.calls, [])
 
     def test_ct_tool_never_triggers(self):
         ct_ledger.LEDGER_CACHE.put("s1", set())
         self.assert_no_query(tool="mcp__curated-thoughts__curated_recall_context",
                              args={"query": "src/x.py", "path": "src/x.py"})
+        self.assertIsNone(self.post(READ_RESULT, tool="mcp__curated-thoughts__curated_recall_context",
+                                    args={"query": "src/x.py", "path": "src/x.py"}, req="r2"))
+        self.assertEqual(self.calls, [])
 
     def test_breaker_open(self):
         ct_ledger.LEDGER_CACHE.put("s1", set())
@@ -1312,7 +1333,7 @@ class TestFailClosed(Harness):
         self.assertEqual(ct_ledger.LEDGER_CACHE.get("s1"), set())
         self.assertEqual(self.deliveries, [])
 
-    def test_pre_hook_never_raises(self):
+    def test_transform_never_raises_when_the_builder_does(self):
         ct_ledger.LEDGER_CACHE.put("s1", set())
         orig = act.activity_for
 
@@ -1321,8 +1342,7 @@ class TestFailClosed(Harness):
 
         act.activity_for = boom
         self.addCleanup(setattr, act, "activity_for", orig)
-        self.assertIsNone(self.pre())
-        self.assertIsNone(act.on_pre_tool_call())  # no kwargs at all
+        self.assertIsNone(self.post(READ_RESULT))
 
     def test_transform_never_raises(self):
         self.assertIsNone(act.on_transform_tool_result())
@@ -1333,22 +1353,12 @@ class TestFailClosed(Harness):
         self.addCleanup(setattr, act, "splice", orig)
         self.assertIsNone(self.post(READ_RESULT))
 
-    def test_no_prefetch_for_call(self):
-        ct_ledger.LEDGER_CACHE.put("s1", set())
-        self.assertIsNone(self.post(READ_RESULT, call="never-pre"))
-
-    def test_prefetch_from_other_session_ignored(self):
+    def test_steps_are_per_session(self):
         ct_ledger.LEDGER_CACHE.put("s1", set())
         ct_ledger.LEDGER_CACHE.put("s2", set())
-        self.pre(sid="s1")
-        self.assertIsNone(self.post(READ_RESULT, sid="s2"))
-
-    def test_pending_bounded(self):
-        ct_ledger.LEDGER_CACHE.put("s1", set())
-        act._spawn = lambda target: None
-        for i in range(act.PENDING_MAX + 10):
-            self.pre(call="c%d" % i, req="r%d" % i, args={"path": "f%d.py" % i})
-        self.assertLessEqual(act.pending_count(), act.PENDING_MAX)
+        self.assertIsNotNone(self.post(READ_RESULT, sid="s1"))
+        self.assertIsNotNone(self.post(READ_RESULT, sid="s2"))
+        self.assertEqual(len(self.calls), 2)
 
 
 class TestParallelThreads(Harness):
@@ -1392,6 +1402,32 @@ REFUSALS = (
     json.dumps({"error": "BLOCKED: write to SSH config file(s) (x) denied."}),
     json.dumps({"error": "Refusing to write to sensitive system path: /etc/hosts"}),
 )
+# Finding 4: wording and statuses beyond the exact prefixes above. Real
+# strings at the pin: terminal_tool.py's fallback "Command denied: ...",
+# approval.py's "approval_required" action-gate status and its "denied by
+# user" / "was not approved" reasons, the MCP trust gate's "did not approve
+# ... was NOT run", async delegation's "rejected", plus case variants.
+MORE_REFUSALS = (
+    json.dumps({"output": "", "exit_code": -1, "error": "Command denied: rm -rf. Use the "
+                "approval prompt to allow it, or rephrase the command.", "status": "blocked"}),
+    json.dumps({"error": "Command denied: flagged"}),
+    json.dumps({"approved": False, "status": "approval_required", "command": "x",
+                "description": "dangerous", "message": "Asking the user for approval."}),
+    json.dumps({"status": "Blocked"}),
+    json.dumps({"status": "DENIED"}),
+    json.dumps({"status": "rejected", "error": "capacity"}),
+    json.dumps({"status": "refused"}),
+    json.dumps({"error": "blocked: lower-case prefix"}),
+    json.dumps({"error": "  refusing to write"}),
+    json.dumps({"error": "Action was not approved: the approval prompt was not answered."}),
+    json.dumps({"error": "Command denied by user."}),
+    json.dumps({"message": "Write denied by the user's policy."}),
+    json.dumps({"error": "The user did not approve running write-capable MCP tool 'x'. "
+                "The command was NOT run."}),
+    json.dumps({"output": "", "approval_pending": True}),
+    "BLOCKED: plain-text refusal",
+    "  blocked by policy",
+)
 GIT_PUSH = {"command": "git push origin main"}
 
 
@@ -1418,11 +1454,22 @@ class TestApprovalGate(Harness):
         ct_ledger.LEDGER_CACHE.put("s1", set())
 
     def test_pre_tool_call_alone_never_runs_ct(self):
+        """No pre_tool_call hook is registered (registration test); a call
+        that never reaches its transform starts nothing and records nothing."""
         discovered = []
         ct_wisdom.discover_ct = lambda env=None: discovered.append(1) or ("/fake/ct", None)
         self.pre()
         self.pre(tool="terminal", args=GIT_PUSH, call="c2", req="r2")
-        self.assertEqual((self.calls, discovered, act.pending_count()), ([], [], 2))
+        self.assertEqual((self.calls, discovered), ([], []))
+
+    def test_blocked_call_does_not_hold_the_step(self):
+        """Finding 2: a call Hermes blocks before it runs (another plugin, a
+        denied approval directive, guardrails) never reaches the transform. It
+        must not use the step: the next call of the same step queries."""
+        self.pre(tool="terminal", args=GIT_PUSH, call="c1")  # blocked: no transform
+        self.pre(call="c2")
+        self.assertIsNotNone(self.post(READ_RESULT, call="c2"))
+        self.assertEqual([c["text"] for c in self.calls], ["src/x.py"])
 
     def test_refused_call_sends_nothing_and_frees_the_step(self):
         for result in REFUSALS:
@@ -1446,11 +1493,15 @@ class TestApprovalGate(Harness):
         self.assertEqual(self.breaker.failures, 0)
 
     def test_refusal_shapes(self):
-        for result in REFUSALS:
+        for result in REFUSALS + MORE_REFUSALS:
             self.assertTrue(act.is_refusal(result), result)
-        for result in (READ_RESULT, "BLOCKED plain text", "{}", json.dumps({"error": "boom"}),
+        for result in (READ_RESULT, "{}", json.dumps({"error": "boom"}),
                        json.dumps({"output": "x", "exit_code": 1, "error": "", "status": "ok"}),
-                       json.dumps({"error": {"BLOCKED": 1}}), "[1]", None, 42):
+                       json.dumps({"output": "Permission denied (publickey).", "exit_code": 255,
+                                   "error": ""}),
+                       json.dumps({"content": "the deploy was blocked last week", "total_lines": 1}),
+                       json.dumps({"error": {"BLOCKED": 1}}), json.dumps({"status": 3}),
+                       "ok 3 passed", "[1]", None, 42):
             self.assertFalse(act.is_refusal(result), result)
 
     def test_blocked_call_never_reaching_transform_sends_nothing(self):
@@ -1583,6 +1634,66 @@ class TestBudgetBreaker(Harness):
         self.post(READ_RESULT)
         self.assertEqual(self.breaker.failures, 1)
 
+    def test_cold_budget_miss_is_not_a_breaker_failure(self):
+        """Finding 1: on a cold process the 3 s wait also covers discovery and
+        the capability probe. A miss then says nothing about CT's health: the
+        transform records nothing and the worker's own outcome settles."""
+        act._ct_warm = lambda: False
+        for i in range(ct_wisdom_live.BREAKER_FAILS):
+            args = {"path": "f%d.py" % i}
+            self.pre(call="c%d" % i, req="r%d" % i, args=args)
+            self.assertIsNone(self.post(READ_RESULT, call="c%d" % i, req="r%d" % i, args=args))
+        self.assertEqual((self.breaker.failures, self.breaker.successes), (0, 0))
+        self.assertFalse(ct_wisdom_live._BREAKER.is_open())
+        self.started[0]()  # CT answers late: a genuine success
+        self.match_result = (None, "timeout")
+        self.started[1]()  # CT itself timed out: one genuine failure
+        self.assertEqual((self.breaker.failures, self.breaker.successes), (1, 1))
+        # The cold miss freed its key: a later step retries it.
+        act._spawn = lambda target: target()
+        act._wait = lambda p: p.done.wait(0)
+        self.match_result = ({"entries": [item("f1")], "corrections": []}, None)
+        self.assertIsNotNone(self.post(READ_RESULT, call="c9", req="r9", args={"path": "f0.py"}))
+
+    def test_warm_flag_reads_the_discovery_and_probe_caches(self):
+        real = HarnessFree.real_ct_warm  # the Harness stubs act._ct_warm
+        orig_path = ct_wisdom._accepted_ct_path
+        self.addCleanup(setattr, ct_wisdom, "_accepted_ct_path", orig_path)
+        self.addCleanup(ct_wisdom_live.reset_capability_cache)
+        ct_wisdom._accepted_ct_path = None
+        ct_wisdom_live.reset_capability_cache()
+        self.assertFalse(real())
+        ct_wisdom._accepted_ct_path = "/fake/ct"
+        self.assertFalse(real(), "discovery cached, probe not run yet")
+        with ct_wisdom_live._capability_lock:
+            ct_wisdom_live._capability["/fake/ct"] = True
+        self.assertTrue(real())
+        with ct_wisdom_live._capability_lock:
+            ct_wisdom_live._capability["/fake/ct"] = False
+        self.assertFalse(real())
+
+    def test_worker_finishing_as_the_wait_times_out_is_used(self):
+        """Finding 5: the worker settles just after _wait() gave up. Its ready
+        result is delivered and its success settles the breaker, with no
+        budget failure."""
+        def wait_then_finish(p):
+            self.started.pop()()  # the worker wins the race
+            return False          # ...but the wait already reported a timeout
+        act._wait = wait_then_finish
+        out = self.post(READ_RESULT)
+        self.assertIsNotNone(out)
+        self.assertEqual(ct_ledger.scan_ids(out), ["f1"])
+        self.assertEqual((self.breaker.failures, self.breaker.successes), (0, 1))
+
+    def test_worker_failure_as_the_wait_times_out_counts_once(self):
+        def wait_then_finish(p):
+            self.started.pop()()
+            return False
+        act._wait = wait_then_finish
+        self.match_result = (None, "timeout")
+        self.assertIsNone(self.post(READ_RESULT))
+        self.assertEqual((self.breaker.failures, self.breaker.successes), (1, 0))
+
     def test_refused_and_unrun_calls_count_zero(self):
         self.pre(tool="terminal", args=GIT_PUSH)
         self.post(REFUSALS[0], tool="terminal", args=GIT_PUSH)
@@ -1658,7 +1769,9 @@ class TestRegistration(unittest.TestCase):
         self.plugin = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(self.plugin)
 
-    def test_registers_pre_tool_call_and_transform(self):
+    def test_registers_transform_and_no_pre_tool_call(self):
+        """Finding 2: the step is claimed in transform_tool_result, so the
+        plugin needs (and registers) no pre_tool_call hook."""
         hooks = {}
 
         class Ctx:
@@ -1669,9 +1782,8 @@ class TestRegistration(unittest.TestCase):
                 hooks[name] = cb
 
         self.plugin.register(Ctx())
-        self.assertIn("pre_tool_call", hooks)
+        self.assertNotIn("pre_tool_call", hooks)
         self.assertIn("transform_tool_result", hooks)
-        self.assertIsNone(hooks["pre_tool_call"](tool_name="read_file", args={"path": "a"}))
 
     def test_transform_composes_dedup_then_activity(self):
         import ct_tool_dedup
@@ -1802,7 +1914,8 @@ class TestVerboseWiring(Harness):
             self.assertNotIn(leak, out)
         # A file outside the project is never a query at all.
         self.calls.clear()
-        self.pre(call="c9", req="r9", args={"path": os.path.join(os.path.dirname(PROJ), "x.md")})
+        self.post(READ_RESULT, call="c9", req="r9",
+                  args={"path": os.path.join(os.path.dirname(PROJ), "x.md")})
         self.assertEqual(self.calls, [])
 
     def test_breaker_open_recorded_once_for_a_would_be_trigger(self):
@@ -1810,8 +1923,8 @@ class TestVerboseWiring(Harness):
         ct_ledger.LEDGER_CACHE.put("s1", set())
         for _ in range(ct_wisdom_live.BREAKER_FAILS):
             ct_wisdom_live._BREAKER.record_failure()
-        self.pre(call="c1")
-        self.pre(call="c2", args={"path": "y.py"})  # same step: not a second record
+        self.post(READ_RESULT, call="c1")
+        self.post(READ_RESULT, call="c2", args={"path": "y.py"})  # same step: not a second record
         ev = self.events()
         self.assertEqual([(e["event"], e["reason"]) for e in ev], [("skip", "breaker_open")])
         self.assertEqual(ev[0]["query"], "src/x.py")

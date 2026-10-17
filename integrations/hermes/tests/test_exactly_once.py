@@ -246,7 +246,6 @@ class TestExactlyOnceWithActivity(unittest.TestCase):
                 name, args = "read_file", {"path": rng_local[n]}
             kw = dict(tool_name=name, args=args, session_id=sid, tool_call_id=call,
                       turn_id="t", api_request_id=req, task_id="")
-            self.assertIsNone(ct_wisdom_activity.on_pre_tool_call(**kw))
             new = ct_tool_dedup.on_transform_tool_result(result=raw, **kw)
             if new is None:
                 new = ct_wisdom_activity.on_transform_tool_result(result=raw, **kw)
