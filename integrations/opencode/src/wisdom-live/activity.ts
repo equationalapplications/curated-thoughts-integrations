@@ -324,8 +324,10 @@ export class OpenCodeActivity {
     hold(start.match);
     // On expiry the ct child is killed (abort); the query reports `budget`.
     // The shared core counts that miss as ONE breaker failure
-    // (recordActivityBudgetMiss, the same rule on every host), never here;
-    // an `aborted` outcome from anywhere else never counts.
+    // (recordActivityBudgetMiss: one failure per miss on every host; DSH
+    // charges it host-side and clears it when the child had already
+    // answered), never here; an `aborted` outcome from anywhere else never
+    // counts.
     const match = await settleWithin(start.match, left(), () => abort.abort());
     // No second fetch: ids that can join the context during the query are
     // recorded in memory (adapter `refresh`).

@@ -4,8 +4,10 @@
 
 ## 0.4.2 — 2026-10-17
 
-- Budget misses now count once toward the failure pause (shared core rule);
-  no other change.
+- Budget misses now count once toward the failure pause (shared core rule
+  `recordActivityBudgetMiss`: one failure per miss on every host; DeepSeek
+  Harness additionally clears it when the `ct` child had already
+  answered). No other change.
 
 ## 0.4.1 — 2026-10-17
 
