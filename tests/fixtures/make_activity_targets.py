@@ -168,44 +168,60 @@ v("search: 80 chars", "search_files", srch("x" * 80), "x" * 80)
 v("search: dots and dashes", "search_files", srch("ct_wisdom.py fail-closed"), "ct_wisdom.py fail-closed")
 v("search: unicode letters", "search_files", srch("a\u00f1o fiscal"), "a\u00f1o fiscal")
 v("search: error 404", "search_files", srch("error 404"), "error 404")
-# ---- P3: commands (allowlist: program + a plain verb-like subcommand) ----
-for name, cmd, q in (("program + subcommand", "pnpm test", "pnpm test"), ("npm run", "npm run build", "npm run"),
-                     ("hyphenated verb", "npm run-script lint", "npm run-script"), ("git rebase", "git rebase -i main", "git rebase"),
-                     ("path subcommand is never sent", "pytest tests/billing -q", "pytest"),
-                     ("file subcommand is never sent", "API_KEY=sk-123 python deploy.py --token x", "python"),
-                     ("dotfile subcommand is never sent", "cat .env.local | grep KEY", "cat"),
-                     ("capitalized subcommand is never sent", "make Build", "make"),
-                     ("quoted value", "git commit -m 'msg SECRET'", "git commit"), ("curl", "curl -H 'A: b' https://h", "curl"),
-                     ("python -m", "python -m mypkg.cli --key v", "python mypkg.cli"),
-                     ("absolute python", "/usr/local/bin/python3 -m pytest", "python3 pytest"),
-                     ("python -m quoted module", "python -m 'secretmod'", "python"),
-                     ("python -m capitalized module", "python -m MyPkg", "python"),
-                     ("echo", "echo sk-live-abcdef", "echo"),
-                     ("flag value", "psql -W secretpw", "psql"), ("absolute program", "/Users/alice/bin/deploy --token x", "deploy"),
-                     ("script program", "./scripts/deploy.sh prod", "deploy.sh prod"),
-                     (".. subcommand", "pytest ../x/t.py", "pytest"), ("colon subcommand", "cat C:foo", "cat"),
-                     ("rooted subcommand", "cat /etc/passwd", "cat"), ("~ subcommand", "cat ~/notes.md", "cat"),
-                     ("credential-shaped subcommand", "deploy ghp_abcdefghijklmnop1234", "deploy"),
-                     ("digits-heavy subcommand", "tool a1b2c3d4e5f6g7h8i9", "tool")):
+# ---- P3: commands (Privacy amendment 5: program allowlist) ----
+for name, cmd, q in (
+        # known subcommand tools + a known verb
+        ("pnpm test", "pnpm test", "pnpm test"), ("npm run", "npm run build", "npm run"),
+        ("npm run-script", "npm run-script lint", "npm run-script"), ("git rebase", "git rebase -i main", "git rebase"),
+        ("git commit quoted", "git commit -m 'msg SECRET'", "git commit"), ("cargo clippy", "cargo clippy --fix", "cargo clippy"),
+        ("docker compose", "docker compose up -d", "docker compose"), ("kubectl get", "kubectl get pods", "kubectl get"),
+        ("terraform plan", "terraform plan -out x", "terraform plan"), ("go test", "go test ./...", "go test"),
+        ("gh pr", "gh pr create", "gh pr"), ("uv run", "uv run pytest", "uv run"),
+        ("make test", "make test", "make test"), ("just fmt", "just fmt", "just fmt"), ("rake build", "rake build", "rake build"),
+        # known tool, unknown or non-verb next word: the program alone
+        ("git unknown verb", "git frobnicate", "git"), ("git flag first", "git -C somedir status", "git"),
+        ("make uncommon target", "make deploy-prod", "make"), ("make capitalized", "make Build", "make"),
+        ("rake path target", "rake db/migrate", "rake"), ("npm file", "npm acme.tgz", "npm"),
+        # every other program: alone, whatever follows (0.6.5 sent these words)
+        ("rm", "rm divorce-papers", "rm"), ("less", "less medical-records", "less"), ("cd", "cd acme-merger", "cd"),
+        ("cat", "cat contract", "cat"), ("mkdir", "mkdir clients", "mkdir"), ("cp", "cp a b", "cp"), ("mv", "mv x y", "mv"),
+        ("vim", "vim notes", "vim"), ("npx", "npx create-app", "npx"), ("pytest", "pytest tests/billing -q", "pytest"),
+        ("cat dotfile", "cat .env.local | grep KEY", "cat"), ("curl", "curl -H 'A: b' https://h", "curl"),
+        ("echo", "echo sk-live-abcdef", "echo"), ("psql flag value", "psql -W secretpw", "psql"),
+        ("env assignment skipped", "API_KEY=sk-123 python deploy.py --token x", "python"),
+        ("credential-shaped word", "deploy ghp_abcdefghijklmnop1234", "deploy"),
+        ("cat under another home", "cat Bob/secret.txt", "cat"),
+        # python -m: known modules
+        ("python -m pytest", "python -m pytest -q", "python pytest"), ("python3 -m http.server", "python3 -m http.server 8000", "python3 http.server"),
+        ("python3.11 -m pip", "python3.11 -m pip install x", "python3.11 pip"),
+        ("python -m unknown module", "python -m acme_secret_tool", "python"),
+        ("python -m quoted module", "python -m 'secretmod'", "python"), ("python -m capitalized module", "python -m MyPkg", "python"),
+        ("python script", "python deploy.py", "python")):
     v("cmd: " + name, "terminal", run(cmd), q)
-v("cmd: a file under another user's home is never sent", "terminal", run("cat Bob/secret.txt"), "cat",
-  cwd="/mnt/c/Users", env={"USER": "alice", "HOME": "/home/alice"}, fs=[])
-for name, cmd, env, q in (("user name in a subcommand path", "cat alice/notes.txt", A, "cat"),
-                          ("user name subcommand", "finger alice", A, "finger"),
-                          ("user name inside a subcommand", "cat alice_notes.txt", A, "cat"),
-                          ("user name in a .. subcommand", "pytest ../Users/alice/t.py", A, "pytest"),
+v("cmd: python -m a project package", "terminal", run("python -m mypkg.cli --key v"), "python mypkg.cli", fs=PFS + [P + "/mypkg/__init__.py"])
+v("cmd: python -m a src-layout package", "terminal", run("python -m app"), "python app", fs=PFS + [P + "/src/app/__init__.py"])
+v("cmd: python -m a module file in the project", "terminal", run("python -m tool"), "python tool", fs=PFS + [P + "/tool.py"])
+v("cmd: python -m a package outside the project", "terminal", run("python -m mypkg"), "python", cwd="/srv/none", fs=["/srv/mypkg/__init__.py"])
+# scripts and paths as the program: no query at all
+for name, cmd in (("./script", "./acme_export.sh"), ("absolute script", "/opt/tools/acme_export.sh --all"),
+                  ("bare script name", "acme_export.sh"), ("python file as program", "deploy.py"),
+                  ("../bin", "../bin/run"), ("~ path", "~/bin/tool x"), ("Windows path", "C:\\tools\\x.exe"),
+                  ("absolute python", "/usr/local/bin/python3 -m pytest"), ("absolute program", "/Users/alice/bin/deploy --token x"),
+                  ("program with odd chars", "f(x) now"), ("program starting with a dot", ".hidden run")):
+    v("cmd: %s gives nothing" % name, "terminal", run(cmd), None)
+for name, cmd, env, q in (("user name subcommand", "finger alice", A, "finger"),
+                          ("user name git subcommand", "git alice", A, "git"),
                           ("user name python module", "python -m alice_tools", A, "python"),
                           ("short name subcommand", "finger jo", {"USER": "jo"}, "finger"),
-                          ("short name token", "cat jo.md", {"USER": "jo"}, "cat")):
-    v("cmd: %s drops the subcommand" % name, "terminal", run(cmd), q, env=env)
-for name, cmd, env in (("user name program", "alice --help", A), ("user name inside the program", "alice-deploy now", A),
-                       ("program with odd chars", "f(x) now", A), ("program starting with a dot", ".hidden run", A)):
-    v("cmd: %s gives nothing" % name, "terminal", run(cmd), None, env=env)
-for name, cmd, env, q in (("service USER=node", "node server.js", {"USER": "node", "HOME": "/home/node"}, "node"),
+                          ("short name token", "cat jo.md", {"USER": "jo"}, "cat"),
+                          ("service USER=node", "node server.js", {"USER": "node", "HOME": "/home/node"}, "node"),
                           ("service USER=test", "npm test", {"USER": "test", "HOME": "/home/test"}, "npm test"),
-                          ("service USER=docker", "docker build", {"USER": "docker"}, "docker build"),
-                          ("short name inside a word", "git join", {"USER": "jo"}, "git join")):
+                          ("service USER=docker", "docker build", {"USER": "docker"}, "docker build")):
     v("cmd: " + name, "terminal", run(cmd), q, env=env)
+for name, cmd in (("user name program", "alice --help"), ("user name inside the program", "alice-deploy now")):
+    v("cmd: %s gives nothing" % name, "terminal", run(cmd), None)
+v("cmd: a file under another user's home is never sent", "terminal", run("cat Bob/secret.txt"), "cat",
+  cwd="/mnt/c/Users", env={"USER": "alice", "HOME": "/home/alice"}, fs=[])
 
 # ---- review of PR #61 ----
 # 1: home dirs come from HOME, USERPROFILE, expanduser("~") and pw_dir
@@ -275,7 +291,7 @@ BOB = {"USER": "bob", "HOME": "/Users/bob"}
 v("realpath: cwd symlink into HOME", "read_file", rd("Documents/taxes.pdf"), None, cwd="/work/link", env=BOB,
   fs=["/Users/bob/.git/", "/Users/bob/Documents/", {"symlink": "/work/link", "to": "/Users/bob"}])
 v("realpath: cwd symlink to an ancestor of HOME", "read_file", rd("alice/notes.md"), None, cwd="/work/up",
-  env={"USER": "svc", "HOME": "/data/u/alice"},
+  env={"USER": "svc", "HOME": "/data/u/alice"}, system_home="/data/u/alice",
   fs=["/data/u/.git/", "/data/u/alice/", {"symlink": "/work/up", "to": "/data/u"}])
 v("realpath: cwd symlink to a homes location", "read_file", rd("carol/notes.md"), None, cwd="/work/all",
   env=SVC, fs=["/Users/package.json", "/Users/carol/", {"symlink": "/work/all", "to": "/Users"}])
@@ -284,6 +300,14 @@ v("realpath: macOS firmlink-style alias of HOME", "read_file", rd("Documents/tax
   fs=["/Users/bob/.git/", "/Users/bob/Documents/", {"symlink": "/System/Volumes/Data", "to": "/"}])
 v("realpath: symlink into a project inside HOME is fine", "read_file", rd("src/a.py"), "src/a.py", cwd="/work/p", env=BOB,
   fs=["/Users/bob/.git/", "/Users/bob/code/proj/.git/", {"symlink": "/work/p", "to": "/Users/bob/code/proj"}])
+
+# ---- 0.6.6: a HOME that is not a real user home blocks only itself ----
+v("sandbox HOME inside the project", "read_file", rd("src/x.py"), "src/x.py", cwd="/srv/repo",
+  env={"USER": "svc", "HOME": "/srv/repo/.home"}, fs=["/srv/repo/.git/"])
+v("sandbox HOME is still never a root", "read_file", rd("/srv/repo/.home/x/a.md"), None, cwd="/srv/repo/.home/x",
+  env={"USER": "svc", "HOME": "/srv/repo/.home"}, fs=["/srv/repo/.git/", "/srv/repo/.home/.git/"])
+v("pw_dir outside a homes location still blocks its ancestors", "read_file", rd("svc/notes.md"), None, cwd="/opt",
+  env={"USER": "ci"}, fs=["/opt/.git/", "/opt/svc/"], system_home="/opt/svc")
 
 names = [c["name"] for c in V]
 assert len(names) == len(set(names)), [n for n in names if names.count(n) > 1]
