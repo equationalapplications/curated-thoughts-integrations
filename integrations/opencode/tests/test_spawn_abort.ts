@@ -16,6 +16,23 @@ describe.skipIf(process.platform === 'win32')('nodeSpawnFn abort', () => {
     const out = await pending;
     expect(Date.now() - t0).toBeLessThan(5000);
     expect(out.code).toBeNull();
+    expect(out.aborted).toBe(true); // 0.4.1: distinguishable, never a breaker failure
+  });
+
+  it('a run that ends normally is not marked aborted, and leaves no abort listener', async () => {
+    const { getEventListeners } = await import('node:events');
+    const ac = new AbortController();
+    const out = await nodeSpawnFn({ ...process.env })({ command: '/bin/sh', args: ['-c', 'true'], timeoutMs: 5000, signal: ac.signal });
+    expect(out.aborted ?? false).toBe(false);
+    expect(getEventListeners(ac.signal, 'abort')).toHaveLength(0);
+  });
+
+  it('a spawn error removes the abort listener too', async () => {
+    const { getEventListeners } = await import('node:events');
+    const ac = new AbortController();
+    const out = await nodeSpawnFn({ ...process.env })({ command: '/no/such/ct-binary', args: [], timeoutMs: 5000, signal: ac.signal });
+    expect(out.spawnError).toBe(true);
+    expect(getEventListeners(ac.signal, 'abort')).toHaveLength(0);
   });
 
   it('a signal aborted before the spawn kills the child immediately', async () => {
