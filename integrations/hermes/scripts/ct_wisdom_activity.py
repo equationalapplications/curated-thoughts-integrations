@@ -42,6 +42,7 @@ import re
 import shlex
 import threading
 import time
+import unicodedata
 from collections import OrderedDict, namedtuple
 
 import ct_ledger
@@ -92,6 +93,10 @@ _FREE_TEXT_PROGRAMS = {"echo", "printf", "export", "set", "unset", "alias", "eva
                        "security", "op", "vault"}
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 _PYTHON_RE = re.compile(r"^python[0-9.]*$")
+_DRIVE_RE = re.compile(r"^[A-Za-z]:(/|$)")
+_DRIVE_PART_RE = re.compile(r"^[A-Za-z]:$")
+_QUOTE_CHARS = frozenset("\"'`‘’“”")
+_HOME_PARENTS = frozenset({"users", "home"})
 
 
 def is_ct_tool(name):
@@ -129,37 +134,162 @@ def _clean_target(value):
     return value
 
 
-def normalize_path(raw, cwd=None):
+# Privacy amendment (spec "Privacy amendment", R1-R4; shared test vectors in
+# tests/fixtures/activity_targets.json). A user name never leaves the machine.
+
+
+def _fold(text):
+    """Comparison form: NFC (macOS paths are often NFD) and casefolded."""
+    return unicodedata.normalize("NFC", text).casefold()
+
+
+def _environ(env):
+    return os.environ if env is None else env
+
+
+def _env_str(env, name):
+    value = env.get(name)
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def _home(env):
+    return _env_str(env, "HOME") or _env_str(env, "USERPROFILE")
+
+
+def user_names(env=None):
+    """Folded names of the current user: USER, LOGNAME, USERNAME and the
+    basename of HOME / USERPROFILE."""
+    env = _environ(env)
+    names = set()
+    for name in ("USER", "LOGNAME", "USERNAME"):
+        value = _env_str(env, name)
+        if value:
+            names.add(_fold(value))
+    for name in ("HOME", "USERPROFILE"):
+        value = _env_str(env, name)
+        if value:
+            base = posixpath.basename(value.replace("\\", "/").rstrip("/"))
+            if base and not base.endswith(":"):
+                names.add(_fold(base))
+    return frozenset(names - {"", ".", ".."})
+
+
+def _abs_norm(path, env):
+    """Normalized '/' form of an absolute path (drive letter lowercased, a
+    leading `~` or `~/` expanded from HOME), or None when it is not one."""
+    path = path.replace("\\", "/")
+    if path == "~" or path.startswith("~/"):
+        home = _home(env)
+        if home is None:
+            return None
+        path = home.replace("\\", "/").rstrip("/") + path[1:]
+    if _DRIVE_RE.match(path):
+        path = path[0].lower() + path[1:]
+    elif not path.startswith("/"):
+        return None
+    return posixpath.normpath(path)
+
+
+def _depth(norm):
+    parts = [p for p in norm.split("/") if p]
+    if parts and _DRIVE_PART_RE.match(parts[0]):
+        parts = parts[1:]
+    return len(parts)
+
+
+def valid_cwd(cwd, env=None):
+    """R1: the normalized cwd, or None when it does not count: empty, not
+    absolute, `/`, a drive root, any cwd of depth < 2 (`/Users`, `/home`,
+    `C:/Users`) or the parent of the user's home directory."""
+    if not isinstance(cwd, str) or not cwd.strip():
+        return None
+    env = _environ(env)
+    norm = _abs_norm(cwd.strip(), env)
+    if norm is None or _depth(norm) < 2:
+        return None
+    home = _home(env)
+    home_norm = _abs_norm(home, env) if home else None
+    if home_norm and _fold(posixpath.dirname(home_norm)) == _fold(norm):
+        return None
+    return norm
+
+
+def _drop_names(parts, names):
+    """R2: drop every user-name component, and `Users`/`home` right before one."""
+    out = []
+    for i, part in enumerate(parts):
+        folded = _fold(part)
+        if folded in names:
+            continue
+        if (folded in _HOME_PARENTS and i + 1 < len(parts)
+                and _fold(parts[i + 1]) in names):
+            continue
+        out.append(part)
+    return out
+
+
+def path_token_ok(token, names):
+    """True when R2 would leave `token` (one word of a search pattern or a
+    command's subcommand) exactly as it is: relative, no `..`, no user-name
+    component. An absolute, `~`, drive or UNC token fails."""
+    if token.startswith(("/", "~", "\\\\")) or _DRIVE_RE.match(token.replace("\\", "/")):
+        return False
+    comps = re.split(r"[/\\]", token)
+    if ".." in comps:
+        return False
+    return not any(_fold(c) in names for c in comps)
+
+
+def normalize_path(raw, cwd=None, env=None):
     """Relative, machine-neutral form of a tool's path argument, or None.
 
-    Relative paths are kept; absolute (or ~) paths under `cwd` become relative
-    to it; any other absolute path is cut to its last two components so a home
-    directory or user name never leaves the machine. Leading `..` are dropped.
+    R2: an absolute (or `~`) path under a valid cwd (R1, `valid_cwd`) becomes
+    relative to it; any other absolute or `~` path is reduced to its basename.
+    Relative paths are kept, leading `..` dropped. Then every component equal
+    to the user's name (`user_names`), and `Users`/`home` right before one, is
+    dropped, so a user name never leaves the machine. None when nothing is left.
     """
     raw = _clean_target(raw)
     if raw is None:
         return None
+    env = _environ(env)
     path = raw.replace("\\", "/")
-    absolute = path.startswith(("/", "~")) or re.match(r"^[A-Za-z]:/", path) is not None
-    if absolute and cwd:
-        base = posixpath.normpath(str(cwd).replace("\\", "/")).rstrip("/") + "/"
-        norm = posixpath.normpath(path)
-        if norm.startswith(base):
-            path, absolute = norm[len(base):], False
-    norm = posixpath.normpath(path)
-    parts = [p for p in norm.split("/") if p not in ("", ".", "~")]
-    if absolute:
-        if parts and re.match(r"^[A-Za-z]:$", parts[0]):
-            parts = parts[1:]
-        parts = parts[-2:]
+    if path.startswith(("/", "~")) or _DRIVE_RE.match(path):
+        norm = _abs_norm(path, env)
+        base = valid_cwd(cwd, env)
+        if norm is not None and base is not None and norm.startswith(base + "/"):
+            parts = norm[len(base) + 1:].split("/")
+        else:
+            parts = [p for p in posixpath.normpath(path).split("/")
+                     if p not in ("", ".", "..") and not _DRIVE_PART_RE.match(p)]
+            parts = parts[-1:]
+            if parts and parts[0].startswith("~"):
+                parts = []
+    else:
+        parts = posixpath.normpath(path).split("/")
+    parts = [p for p in parts if p not in ("", ".", "~")]
     while parts and parts[0] == "..":
         parts = parts[1:]
+    parts = _drop_names(parts, user_names(env))
     if not parts:
         return None
     target = "/".join(parts)
     if len(target) > TARGET_CHARS:
         target = target[-TARGET_CHARS:].split("/", 1)[-1]
     return target or None
+
+
+def search_target(pattern, env=None):
+    """R3: the search pattern to send (<= TARGET_CHARS), or None when it has
+    an `=`, any quote, a credential-shaped word, or a word R2 would change."""
+    pattern = _clean_target(pattern)
+    if pattern is None or any(ch == "=" or ch in _QUOTE_CHARS for ch in pattern):
+        return None
+    names = user_names(env)
+    for word in pattern.split():
+        if _credential_shaped(word) or not path_token_ok(word, names):
+            return None
+    return pattern[:TARGET_CHARS]
 
 
 def _tokens(command):
@@ -171,13 +301,15 @@ def _tokens(command):
         return command.split()
 
 
-def command_target(command):
+def command_target(command, env=None):
     """Program plus subcommand of the first simple command (user decision 2),
     or None. The subcommand is the word right after the program, never a
-    flag's value. Everything else is dropped."""
+    flag's value. Everything else is dropped. A program named like the user
+    gives None; a subcommand R2 would change is dropped."""
     command = _clean_target(command) if isinstance(command, str) else None
     if command is None:
         return None
+    names = user_names(env)
     words = []
     for token in _tokens(command):
         if not token or any(ch in _OPERATOR_CHARS for ch in token):
@@ -188,7 +320,7 @@ def command_target(command):
     if not words:
         return None
     program = posixpath.basename(words[0].replace("\\", "/"))
-    if not _safe_word(program):
+    if not _safe_word(program) or _fold(program) in names:
         return None
     if program.lower() in _FREE_TEXT_PROGRAMS:
         return program
@@ -200,13 +332,17 @@ def command_target(command):
         rest = rest[1:]
     elif rest[:1] and rest[0].startswith("-"):
         return program
-    if rest and _safe_word(rest[0]):
+    if rest and _safe_word(rest[0]) and path_token_ok(rest[0], names):
         return program + " " + rest[0]
     return program
 
 
-def activity_for(tool_name, args, cwd=None):
-    """Activity for one tool call, built from its args only, or None."""
+def activity_for(tool_name, args, cwd=None, env=None):
+    """Activity for one tool call, built from its args only, or None.
+
+    R4: `line` (the visible `_for:` label and the verbose `activity` field)
+    and `query` are built from the same sanitized target, never a raw arg.
+    `env` defaults to os.environ (user names, HOME for `~`)."""
     if not isinstance(args, dict) or not isinstance(tool_name, str):
         return None
     if cwd is None:
@@ -214,23 +350,23 @@ def activity_for(tool_name, args, cwd=None):
             cwd = os.getcwd()
         except OSError:
             cwd = None
+    env = _environ(env)
     verb = _FILE_TOOLS.get(tool_name)
     if verb is not None:
-        target = normalize_path(args.get("path"), cwd)
+        target = normalize_path(args.get("path"), cwd, env)
         if target is None:
             return None
         line = "%s %s" % (verb, target)
         return Activity(verb, target, (_VERB_CLASS[verb], target), line, target)
     if tool_name == "search_files":
-        pattern = _clean_target(args.get("pattern"))
-        if pattern is None or any(_credential_shaped(w) for w in pattern.split()):
+        pattern = search_target(args.get("pattern"), env)
+        if pattern is None:
             return None
-        pattern = pattern[:TARGET_CHARS]
-        where = normalize_path(args.get("path"), cwd) if args.get("path") else None
+        where = normalize_path(args.get("path"), cwd, env) if args.get("path") else None
         target = pattern + (" in " + where if where else "")
         return Activity("search", target, ("search", target), "search " + target, pattern)
     if tool_name == "terminal":
-        target = command_target(args.get("command"))
+        target = command_target(args.get("command"), env)
         if target is None:
             return None
         return Activity("run", target, ("run", target), "run " + target, target)

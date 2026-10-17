@@ -1,0 +1,988 @@
+[
+  {
+    "name": "bug1: cwd / sends basename only",
+    "tool": "read_file",
+    "args": {
+      "path": "/Users/alice/clients/acme/contract.md"
+    },
+    "cwd": "/",
+    "env": {
+      "USER": "alice",
+      "HOME": "/Users/alice"
+    },
+    "expected_query": "contract.md",
+    "expected_line": "read contract.md"
+  },
+  {
+    "name": "R1: empty cwd is absent",
+    "tool": "read_file",
+    "args": {
+      "path": "/Users/alice/clients/acme/contract.md"
+    },
+    "cwd": "",
+    "env": {
+      "USER": "alice",
+      "HOME": "/Users/alice"
+    },
+    "expected_query": "contract.md",
+    "expected_line": "read contract.md"
+  },
+  {
+    "name": "R1: cwd /Users is absent",
+    "tool": "read_file",
+    "args": {
+      "path": "/Users/alice/clients/acme/contract.md"
+    },
+    "cwd": "/Users",
+    "env": {
+      "USER": "alice",
+      "HOME": "/Users/alice"
+    },
+    "expected_query": "contract.md",
+    "expected_line": "read contract.md"
+  },
+  {
+    "name": "R1: cwd /home is absent",
+    "tool": "read_file",
+    "args": {
+      "path": "/home/bob/clients/acme/brief.txt"
+    },
+    "cwd": "/home",
+    "env": {
+      "USER": "bob",
+      "HOME": "/home/bob"
+    },
+    "expected_query": "brief.txt",
+    "expected_line": "read brief.txt"
+  },
+  {
+    "name": "R1: depth-1 cwd is absent",
+    "tool": "read_file",
+    "args": {
+      "path": "/work/repo/src/x.py"
+    },
+    "cwd": "/work",
+    "env": {
+      "USER": "alice",
+      "HOME": "/Users/alice"
+    },
+    "expected_query": "x.py",
+    "expected_line": "read x.py"
+  },
+  {
+    "name": "R1: Windows drive root is absent",
+    "tool": "read_file",
+    "args": {
+      "path": "C:\\Users\\carol\\proj\\a.py"
+    },
+    "cwd": "C:/",
+    "env": {
+      "USERNAME": "carol",
+      "USERPROFILE": "C:\\Users\\carol"
+    },
+    "expected_query": "a.py",
+    "expected_line": "read a.py"
+  },
+  {
+    "name": "R1: Windows drive root with backslash is absent",
+    "tool": "write_file",
+    "args": {
+      "path": "C:\\Users\\carol\\proj\\a.py",
+      "content": "x"
+    },
+    "cwd": "C:\\",
+    "env": {
+      "USERNAME": "carol",
+      "USERPROFILE": "C:\\Users\\carol"
+    },
+    "expected_query": "a.py",
+    "expected_line": "write a.py"
+  },
+  {
+    "name": "R1: Windows C:/Users is absent",
+    "tool": "read_file",
+    "args": {
+      "path": "C:\\Users\\carol\\proj\\a.py"
+    },
+    "cwd": "C:\\Users",
+    "env": {
+      "USERNAME": "carol",
+      "USERPROFILE": "C:\\Users\\carol"
+    },
+    "expected_query": "a.py",
+    "expected_line": "read a.py"
+  },
+  {
+    "name": "R1: the parent of a deep HOME is absent",
+    "tool": "read_file",
+    "args": {
+      "path": "/var/lib/alice/svc/conf.yml"
+    },
+    "cwd": "/var/lib",
+    "env": {
+      "USER": "svc",
+      "HOME": "/var/lib/alice"
+    },
+    "expected_query": "conf.yml",
+    "expected_line": "read conf.yml"
+  },
+  {
+    "name": "R1: cwd equal to HOME counts",
+    "tool": "read_file",
+    "args": {
+      "path": "/Users/alice/notes/z.md"
+    },
+    "cwd": "/Users/alice",
+    "env": {
+      "USER": "alice",
+      "HOME": "/Users/alice"
+    },
+    "expected_query": "notes/z.md",
+    "expected_line": "read notes/z.md"
+  },
+  {
+    "name": "R1+R2: ~ under cwd equal to HOME",
+    "tool": "read_file",
+    "args": {
+      "path": "~/notes/z.md"
+    },
+    "cwd": "/Users/alice",
+    "env": {
+      "USER": "alice",
+      "HOME": "/Users/alice"
+    },
+    "expected_query": "notes/z.md",
+    "expected_line": "read notes/z.md"
+  },
+  {
+    "name": "bug2: file directly in home",
+    "tool": "read_file",
+    "args": {
+      "path": "/Users/alice/notes.txt"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USER": "alice",
+      "HOME": "/Users/alice"
+    },
+    "expected_query": "notes.txt",
+    "expected_line": "read notes.txt"
+  },
+  {
+    "name": "R2: absolute outside cwd is basename only",
+    "tool": "read_file",
+    "args": {
+      "path": "/Users/alice/other/proj/y.py"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USER": "alice",
+      "HOME": "/Users/alice"
+    },
+    "expected_query": "y.py",
+    "expected_line": "read y.py"
+  },
+  {
+    "name": "R2: ~ outside cwd is basename only",
+    "tool": "read_file",
+    "args": {
+      "path": "~/notes/z.md"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USER": "alice",
+      "HOME": "/Users/alice"
+    },
+    "expected_query": "z.md",
+    "expected_line": "read z.md"
+  },
+  {
+    "name": "R2: ~user path is basename only",
+    "tool": "read_file",
+    "args": {
+      "path": "~bob/notes/z.md"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USER": "alice",
+      "HOME": "/Users/alice"
+    },
+    "expected_query": "z.md",
+    "expected_line": "read z.md"
+  },
+  {
+    "name": "R2: the home dir itself is no query",
+    "tool": "read_file",
+    "args": {
+      "path": "/Users/alice"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USER": "alice",
+      "HOME": "/Users/alice"
+    },
+    "expected_query": null,
+    "expected_line": null
+  },
+  {
+    "name": "R2: bare ~ is no query",
+    "tool": "read_file",
+    "args": {
+      "path": "~"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USER": "alice",
+      "HOME": "/Users/alice"
+    },
+    "expected_query": null,
+    "expected_line": null
+  },
+  {
+    "name": "R2: user name inside a relative path",
+    "tool": "read_file",
+    "args": {
+      "path": "alice/drafts/plan.md"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USER": "alice",
+      "HOME": "/Users/alice"
+    },
+    "expected_query": "drafts/plan.md",
+    "expected_line": "read drafts/plan.md"
+  },
+  {
+    "name": "R2: Users/<name> inside a relative path",
+    "tool": "read_file",
+    "args": {
+      "path": "Users/alice/plan.md"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USER": "alice",
+      "HOME": "/Users/alice"
+    },
+    "expected_query": "plan.md",
+    "expected_line": "read plan.md"
+  },
+  {
+    "name": "R2: home/<name> inside a relative path",
+    "tool": "patch",
+    "args": {
+      "path": "home/bob/plan.md",
+      "old_string": "a",
+      "new_string": "b"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USER": "bob",
+      "HOME": "/home/bob"
+    },
+    "expected_query": "plan.md",
+    "expected_line": "edit plan.md"
+  },
+  {
+    "name": "R2: home not followed by a name is kept",
+    "tool": "read_file",
+    "args": {
+      "path": "home/plan.md"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USER": "alice",
+      "HOME": "/Users/alice"
+    },
+    "expected_query": "home/plan.md",
+    "expected_line": "read home/plan.md"
+  },
+  {
+    "name": "R2: user name compared case-insensitively",
+    "tool": "read_file",
+    "args": {
+      "path": "Alice/plan.md"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USER": "alice",
+      "HOME": "/Users/alice"
+    },
+    "expected_query": "plan.md",
+    "expected_line": "read plan.md"
+  },
+  {
+    "name": "R2: LOGNAME counts as the user name",
+    "tool": "read_file",
+    "args": {
+      "path": "dave/x.md"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "LOGNAME": "dave"
+    },
+    "expected_query": "x.md",
+    "expected_line": "read x.md"
+  },
+  {
+    "name": "R2: USERNAME counts as the user name",
+    "tool": "read_file",
+    "args": {
+      "path": "carol/x.md"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USERNAME": "carol",
+      "USERPROFILE": "C:\\Users\\carol"
+    },
+    "expected_query": "x.md",
+    "expected_line": "read x.md"
+  },
+  {
+    "name": "R2: basename of HOME counts as the user name",
+    "tool": "read_file",
+    "args": {
+      "path": "erin/x.md"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USER": "svc",
+      "HOME": "/home/erin"
+    },
+    "expected_query": "x.md",
+    "expected_line": "read x.md"
+  },
+  {
+    "name": "R2: leading .. then user name",
+    "tool": "read_file",
+    "args": {
+      "path": "../alice/x.py"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USER": "alice",
+      "HOME": "/Users/alice"
+    },
+    "expected_query": "x.py",
+    "expected_line": "read x.py"
+  },
+  {
+    "name": "R2: leading .. dropped",
+    "tool": "read_file",
+    "args": {
+      "path": "../../etc/passwd"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USER": "alice",
+      "HOME": "/Users/alice"
+    },
+    "expected_query": "etc/passwd",
+    "expected_line": "read etc/passwd"
+  },
+  {
+    "name": "R2: unicode user name (NFC)",
+    "tool": "read_file",
+    "args": {
+      "path": "/Users/josé/Notas/año.md"
+    },
+    "cwd": "/",
+    "env": {
+      "USER": "josé",
+      "HOME": "/Users/josé"
+    },
+    "expected_query": "año.md",
+    "expected_line": "read año.md"
+  },
+  {
+    "name": "R2: unicode user name in NFD form",
+    "tool": "read_file",
+    "args": {
+      "path": "josé/plan.md"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USER": "josé",
+      "HOME": "/Users/josé"
+    },
+    "expected_query": "plan.md",
+    "expected_line": "read plan.md"
+  },
+  {
+    "name": "R2: Windows path under cwd",
+    "tool": "read_file",
+    "args": {
+      "path": "C:\\Users\\carol\\proj\\src\\a.py"
+    },
+    "cwd": "C:\\Users\\carol\\proj",
+    "env": {
+      "USERNAME": "carol",
+      "USERPROFILE": "C:\\Users\\carol"
+    },
+    "expected_query": "src/a.py",
+    "expected_line": "read src/a.py"
+  },
+  {
+    "name": "R2: Windows path outside cwd",
+    "tool": "read_file",
+    "args": {
+      "path": "D:\\data\\carol\\report.xlsx"
+    },
+    "cwd": "C:\\Users\\carol\\proj",
+    "env": {
+      "USERNAME": "carol",
+      "USERPROFILE": "C:\\Users\\carol"
+    },
+    "expected_query": "report.xlsx",
+    "expected_line": "read report.xlsx"
+  },
+  {
+    "name": "R2: Windows drive letter case",
+    "tool": "read_file",
+    "args": {
+      "path": "c:\\Users\\carol\\proj\\src\\b.py"
+    },
+    "cwd": "C:/Users/carol/proj",
+    "env": {
+      "USERNAME": "carol",
+      "USERPROFILE": "C:\\Users\\carol"
+    },
+    "expected_query": "src/b.py",
+    "expected_line": "read src/b.py"
+  },
+  {
+    "name": "R2: UNC path is basename only",
+    "tool": "read_file",
+    "args": {
+      "path": "\\\\server\\share\\carol\\doc.txt"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USERNAME": "carol",
+      "USERPROFILE": "C:\\Users\\carol"
+    },
+    "expected_query": "doc.txt",
+    "expected_line": "read doc.txt"
+  },
+  {
+    "name": "keep: absolute under cwd becomes relative",
+    "tool": "read_file",
+    "args": {
+      "path": "/work/repo/src/x.py"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USER": "alice",
+      "HOME": "/Users/alice"
+    },
+    "expected_query": "src/x.py",
+    "expected_line": "read src/x.py"
+  },
+  {
+    "name": "keep: relative path",
+    "tool": "read_file",
+    "args": {
+      "path": "src/billing/invoice.py"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USER": "alice",
+      "HOME": "/Users/alice"
+    },
+    "expected_query": "src/billing/invoice.py",
+    "expected_line": "read src/billing/invoice.py"
+  },
+  {
+    "name": "keep: ./ prefix dropped",
+    "tool": "write_file",
+    "args": {
+      "path": "./a/b.py",
+      "content": "SECRET"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USER": "alice",
+      "HOME": "/Users/alice"
+    },
+    "expected_query": "a/b.py",
+    "expected_line": "write a/b.py"
+  },
+  {
+    "name": "keep: backslashes",
+    "tool": "read_file",
+    "args": {
+      "path": "a\\b\\c.py"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USER": "alice",
+      "HOME": "/Users/alice"
+    },
+    "expected_query": "a/b/c.py",
+    "expected_line": "read a/b/c.py"
+  },
+  {
+    "name": "keep: ./ alone is no query",
+    "tool": "read_file",
+    "args": {
+      "path": "./"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USER": "alice",
+      "HOME": "/Users/alice"
+    },
+    "expected_query": null,
+    "expected_line": null
+  },
+  {
+    "name": "bug3: quoted assignment",
+    "tool": "search_files",
+    "args": {
+      "pattern": "API_KEY=\"hunter2pass\""
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USER": "alice",
+      "HOME": "/Users/alice"
+    },
+    "expected_query": null,
+    "expected_line": null
+  },
+  {
+    "name": "bug3: bare assignment",
+    "tool": "search_files",
+    "args": {
+      "pattern": "password=letmein"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USER": "alice",
+      "HOME": "/Users/alice"
+    },
+    "expected_query": null,
+    "expected_line": null
+  },
+  {
+    "name": "R3: = anywhere",
+    "tool": "search_files",
+    "args": {
+      "pattern": "a == b"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USER": "alice",
+      "HOME": "/Users/alice"
+    },
+    "expected_query": null,
+    "expected_line": null
+  },
+  {
+    "name": "R3: double quote",
+    "tool": "search_files",
+    "args": {
+      "pattern": "say \"hi\""
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USER": "alice",
+      "HOME": "/Users/alice"
+    },
+    "expected_query": null,
+    "expected_line": null
+  },
+  {
+    "name": "R3: single quote",
+    "tool": "search_files",
+    "args": {
+      "pattern": "it's broken"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USER": "alice",
+      "HOME": "/Users/alice"
+    },
+    "expected_query": null,
+    "expected_line": null
+  },
+  {
+    "name": "R3: backtick",
+    "tool": "search_files",
+    "args": {
+      "pattern": "`whoami`"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USER": "alice",
+      "HOME": "/Users/alice"
+    },
+    "expected_query": null,
+    "expected_line": null
+  },
+  {
+    "name": "R3: credential-shaped word",
+    "tool": "search_files",
+    "args": {
+      "pattern": "token a1b2c3d4e5f6g7h8i9"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USER": "alice",
+      "HOME": "/Users/alice"
+    },
+    "expected_query": null,
+    "expected_line": null
+  },
+  {
+    "name": "R3: key prefix",
+    "tool": "search_files",
+    "args": {
+      "pattern": "find ghp_abcdefghijklmnop1234 here"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USER": "alice",
+      "HOME": "/Users/alice"
+    },
+    "expected_query": null,
+    "expected_line": null
+  },
+  {
+    "name": "R3: absolute path token",
+    "tool": "search_files",
+    "args": {
+      "pattern": "/Users/alice/secret"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USER": "alice",
+      "HOME": "/Users/alice"
+    },
+    "expected_query": null,
+    "expected_line": null
+  },
+  {
+    "name": "R3: ~ path token",
+    "tool": "search_files",
+    "args": {
+      "pattern": "grep ~/notes"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USER": "alice",
+      "HOME": "/Users/alice"
+    },
+    "expected_query": null,
+    "expected_line": null
+  },
+  {
+    "name": "R3: Windows path token",
+    "tool": "search_files",
+    "args": {
+      "pattern": "C:\\Users\\carol"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USERNAME": "carol",
+      "USERPROFILE": "C:\\Users\\carol"
+    },
+    "expected_query": null,
+    "expected_line": null
+  },
+  {
+    "name": "R3: user name in a relative path token",
+    "tool": "search_files",
+    "args": {
+      "pattern": "alice/notes"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USER": "alice",
+      "HOME": "/Users/alice"
+    },
+    "expected_query": null,
+    "expected_line": null
+  },
+  {
+    "name": "R3: the user name as a word",
+    "tool": "search_files",
+    "args": {
+      "pattern": "alice TODO"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USER": "alice",
+      "HOME": "/Users/alice"
+    },
+    "expected_query": null,
+    "expected_line": null
+  },
+  {
+    "name": "R3: .. path token",
+    "tool": "search_files",
+    "args": {
+      "pattern": "../secrets"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USER": "alice",
+      "HOME": "/Users/alice"
+    },
+    "expected_query": null,
+    "expected_line": null
+  },
+  {
+    "name": "keep: search with relative path",
+    "tool": "search_files",
+    "args": {
+      "pattern": "MCP tool name",
+      "path": "src"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USER": "alice",
+      "HOME": "/Users/alice"
+    },
+    "expected_query": "MCP tool name",
+    "expected_line": "search MCP tool name in src"
+  },
+  {
+    "name": "keep: search one word",
+    "tool": "search_files",
+    "args": {
+      "pattern": "TODO"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USER": "alice",
+      "HOME": "/Users/alice"
+    },
+    "expected_query": "TODO",
+    "expected_line": "search TODO"
+  },
+  {
+    "name": "keep: search two words",
+    "tool": "search_files",
+    "args": {
+      "pattern": "error 404"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USER": "alice",
+      "HOME": "/Users/alice"
+    },
+    "expected_query": "error 404",
+    "expected_line": "search error 404"
+  },
+  {
+    "name": "keep: search relative path token",
+    "tool": "search_files",
+    "args": {
+      "pattern": "src/billing"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USER": "alice",
+      "HOME": "/Users/alice"
+    },
+    "expected_query": "src/billing",
+    "expected_line": "search src/billing"
+  },
+  {
+    "name": "keep: regex escapes",
+    "tool": "search_files",
+    "args": {
+      "pattern": "def \\w+_target"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USER": "alice",
+      "HOME": "/Users/alice"
+    },
+    "expected_query": "def \\w+_target",
+    "expected_line": "search def \\w+_target"
+  },
+  {
+    "name": "keep: unicode pattern",
+    "tool": "search_files",
+    "args": {
+      "pattern": "año fiscal"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USER": "alice",
+      "HOME": "/Users/alice"
+    },
+    "expected_query": "año fiscal",
+    "expected_line": "search año fiscal"
+  },
+  {
+    "name": "R4: search path is sanitized in the line",
+    "tool": "search_files",
+    "args": {
+      "pattern": "TODO",
+      "path": "/Users/alice/clients/acme"
+    },
+    "cwd": "/",
+    "env": {
+      "USER": "alice",
+      "HOME": "/Users/alice"
+    },
+    "expected_query": "TODO",
+    "expected_line": "search TODO in acme"
+  },
+  {
+    "name": "R4: search path that sanitizes to nothing",
+    "tool": "search_files",
+    "args": {
+      "pattern": "TODO",
+      "path": "/home/bob"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USER": "bob",
+      "HOME": "/home/bob"
+    },
+    "expected_query": "TODO",
+    "expected_line": "search TODO"
+  },
+  {
+    "name": "keep: command",
+    "tool": "terminal",
+    "args": {
+      "command": "pnpm test"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USER": "alice",
+      "HOME": "/Users/alice"
+    },
+    "expected_query": "pnpm test",
+    "expected_line": "run pnpm test"
+  },
+  {
+    "name": "keep: python -m",
+    "tool": "terminal",
+    "args": {
+      "command": "python -m mypkg.cli --key v"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USER": "alice",
+      "HOME": "/Users/alice"
+    },
+    "expected_query": "python mypkg.cli",
+    "expected_line": "run python mypkg.cli"
+  },
+  {
+    "name": "keep: env assignment skipped",
+    "tool": "terminal",
+    "args": {
+      "command": "API_KEY=sk-123 python deploy.py --token x"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USER": "alice",
+      "HOME": "/Users/alice"
+    },
+    "expected_query": "python deploy.py",
+    "expected_line": "run python deploy.py"
+  },
+  {
+    "name": "keep: relative path subcommand",
+    "tool": "terminal",
+    "args": {
+      "command": "pytest tests/billing -q"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USER": "alice",
+      "HOME": "/Users/alice"
+    },
+    "expected_query": "pytest tests/billing",
+    "expected_line": "run pytest tests/billing"
+  },
+  {
+    "name": "keep: quoted value never sent",
+    "tool": "terminal",
+    "args": {
+      "command": "git commit -m 'msg SECRET'"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USER": "alice",
+      "HOME": "/Users/alice"
+    },
+    "expected_query": "git commit",
+    "expected_line": "run git commit"
+  },
+  {
+    "name": "R2: absolute program is basename",
+    "tool": "terminal",
+    "args": {
+      "command": "/Users/alice/bin/deploy --token x"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USER": "alice",
+      "HOME": "/Users/alice"
+    },
+    "expected_query": "deploy",
+    "expected_line": "run deploy"
+  },
+  {
+    "name": "R2: user name in subcommand path",
+    "tool": "terminal",
+    "args": {
+      "command": "cat alice/notes.txt"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USER": "alice",
+      "HOME": "/Users/alice"
+    },
+    "expected_query": "cat",
+    "expected_line": "run cat"
+  },
+  {
+    "name": "R2: .. subcommand path",
+    "tool": "terminal",
+    "args": {
+      "command": "pytest ../Users/alice/t.py"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USER": "alice",
+      "HOME": "/Users/alice"
+    },
+    "expected_query": "pytest",
+    "expected_line": "run pytest"
+  },
+  {
+    "name": "R2: user name as subcommand",
+    "tool": "terminal",
+    "args": {
+      "command": "finger alice"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USER": "alice",
+      "HOME": "/Users/alice"
+    },
+    "expected_query": "finger",
+    "expected_line": "run finger"
+  },
+  {
+    "name": "R2: user name as program",
+    "tool": "terminal",
+    "args": {
+      "command": "alice --help"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USER": "alice",
+      "HOME": "/Users/alice"
+    },
+    "expected_query": null,
+    "expected_line": null
+  }
+]

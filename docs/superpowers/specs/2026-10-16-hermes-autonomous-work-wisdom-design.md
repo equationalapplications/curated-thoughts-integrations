@@ -190,6 +190,8 @@ kept (leading `./` dropped). An absolute or `~` path under the process cwd becom
 relative to it; any other absolute path is reduced to its last two components
 (`parent/name`), so a home directory or user name never leaves the machine. Leading `..`
 components are dropped. Targets are capped at 200 chars.
+*(Superseded for paths and search patterns by the "Privacy amendment (2026-10-16,
+hermes 0.6.2)" section below: the two-component rule leaked user names.)*
 
 **Self-trigger guard on targets.** A target containing a control character (newline,
 tab), a `ct-fact:` token or a `## Curated Thoughts —` heading gives no activity, so text
@@ -414,6 +416,53 @@ the same fields and a `reason`.
   (byte-identical in both copies). Tool args other than the target never reach the log.
 - With verbose off nothing is written and the tool result bytes are unchanged (tested).
 
+## Privacy amendment (2026-10-16, hermes 0.6.2)
+
+An independent review found that the activity builder shipped in hermes 0.6.0 and
+0.6.1 could send private data to CT (which forwards the query to the brain's external
+embedding provider, e.g. OpenRouter) and show it in the `_for:` label and the verbose
+log:
+
+1. **cwd `/`.** A cwd at the filesystem root (Docker `WORKDIR /`, launchd/systemd
+   services) made every absolute path "under cwd": `/Users/alice/clients/acme/contract.md`
+   was sent as `Users/alice/clients/acme/contract.md`.
+2. **User name.** The last-two-components rule kept the user name for files directly in
+   a home directory: `/Users/alice/notes.txt` → `alice/notes.txt`; a search `path` of
+   `/home/bob` → `home/bob` in the label.
+3. **Search patterns.** Sent verbatim, filtered only per word by the credential shape:
+   `API_KEY="hunter2pass"` and `password=letmein` were sent.
+
+These rules replace the "Paths" paragraph and the `search_files` row above. They only
+tighten; every other rule stands. The shared test vectors live in
+`tests/fixtures/activity_targets.json` (`{name, tool, args, cwd, env, expected_query,
+expected_line}`; `cwd` `""` means none, a null `expected_query` means no query); Hermes
+runs them in `tests/tools/test_activity_target_vectors.py`, and the TypeScript port in
+`packages/ct-wisdom-core` adopts the same rules and file.
+
+- **User name.** The folded (NFC, casefolded) values of `USER`, `LOGNAME`, `USERNAME`
+  and the basenames of `HOME` / `USERPROFILE`.
+- **R1 (cwd).** The cwd is absent when it is empty, not absolute, `/`, a drive root
+  (`C:/`), of depth < 2 (`/Users`, `/home`, `/work`, `C:/Users`), or the parent of the
+  user's home directory. Only a cwd at depth ≥ 2 counts; a cwd equal to `HOME` counts.
+- **R2 (paths).** An absolute or `~` path (`~` expanded from `HOME`) under a valid cwd
+  becomes relative to it; any other absolute, `~`, drive or UNC path is reduced to its
+  **basename only**. Relative paths are kept, leading `..` dropped. Then every component
+  equal to the user name is dropped, and so is `Users`/`home` when followed by one. If
+  nothing remains, there is no query.
+- **R3 (search patterns).** No query when the pattern contains `=`, any quote (`"` `'`
+  `` ` `` and the curly quotes), a credential-shaped word, or a word R2 would change: an
+  absolute, `~`, drive or UNC token, a token with a `..` component, or a token with a
+  user-name component (a bare word equal to the user name included). Otherwise the
+  pattern is sent (≤ 200 chars) as before. The same token check applies to a command's
+  subcommand (dropped when it fails), and a program named like the user gives no query.
+- **R4 (one target).** The visible `_for:` label and the verbose `activity` field are
+  `Activity.line`, built from the same sanitized target as the query; a raw argument is
+  never shown or logged. Tested end to end through both hooks and the verbose log.
+
+Testing adds the shared vectors, a randomized search-pattern test and a randomized path
+test (planted secrets, quotes, assignments, absolute and `~` paths, user names, every
+cwd class), next to the existing 500-command secret-safety test.
+
 ## Alignment with INTENT.md
 
 - **Goal "During autonomous work":** this is that step for Hermes. Host events
@@ -439,6 +488,10 @@ the same fields and a `reason`.
 - **User decisions 1–7:** decision 1 → "Rate rule"; 2 → "Activity line builder" and the
   secret-safety tests; 3 and 4 → "Subagents and scheduled runs"; 5 → constants; 6 → this
   spec; 7 → `ct_tool` class.
+- **Privacy amendment:** serves "Why this repo exists" (CT is private and local-first):
+  the query names the work, never the person or their directory layout. It only removes
+  what is sent; relevance stays CT's (rule 8), limits are unchanged (rule 6), and an
+  activity that cannot be sent safely fails quietly with no query (rule 4).
 - **Departures:** none. INTENT says every host should reach every step; Hermes now does.
 
 ## Known limitations
