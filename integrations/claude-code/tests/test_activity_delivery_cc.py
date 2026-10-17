@@ -24,6 +24,7 @@ INTEGRATION = HERE.parent
 sys.path.insert(0, str(INTEGRATION / "hooks"))
 
 import ct_wisdom_cc as cc  # noqa: E402
+import ct_env  # noqa: E402
 import ct_hook_store  # noqa: E402
 import ct_ledger  # noqa: E402
 import ct_wisdom  # noqa: E402
@@ -536,10 +537,13 @@ class CtCacheTests(Base):
         self.start()
         self.batch([call()])
         wdir = os.path.join(self.data, "wisdom")
-        self.assertIsNotNone(cc.read_ct_cache(wdir, self.env))
-        self.assertIsNone(cc.read_ct_cache(wdir, dict(self.env, PATH="/elsewhere")))
+        # The hook's view is the ambient env overlaid (USERPROFILE and
+        # LOCALAPPDATA are part of the key on Windows).
+        view = ct_env.merged_env(self.env)
+        self.assertIsNotNone(cc.read_ct_cache(wdir, view))
+        self.assertIsNone(cc.read_ct_cache(wdir, dict(view, PATH="/elsewhere")))
         Path(self.ct).write_text("#!/bin/sh\n# changed\n", encoding="utf-8")
-        self.assertIsNone(cc.read_ct_cache(wdir, self.env))
+        self.assertIsNone(cc.read_ct_cache(wdir, view))
 
 
 class VerboseTests(Base):
