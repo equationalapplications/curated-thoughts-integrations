@@ -210,9 +210,9 @@ dedups). `planStep` walks the step's tool calls in model order and stops at the 
   The breaker is the **same** instance the user-turn path uses (rule 4: three failures pause both).
 - **Budget:** `deadline = plan start + TIMEOUT_MS (3 s)`. Pre-step awaits the match for
   `max(0, deadline − now)`; a match that already settled is used even past the deadline (it costs
-  nothing). Running out is class `budget`. Superseded by the 0.6.2 amendment ("Review amendments"):
-  the query is aborted on expiry and the miss counts as ONE breaker failure; the key is freed, the
-  step stays used.
+  nothing). Running out is class `budget`. Superseded by the 0.6.2 amendments ("Review amendments"):
+  the query is killed on expiry and a miss the kill really stopped counts as ONE breaker failure; the
+  key is freed, the step stays used.
 - If no prefetch happened (a tool path that skips `pre-execute`), pre-step plans and awaits itself
   within the same budget.
 
@@ -528,29 +528,35 @@ rule; opencode and openclaw get patch bumps for it.
   step can retry the activity (OpenCode / OpenClaw parity). A plan whose pre-step never runs is not
   aborted; it ends at the spawns' own timeouts as before (superseded by the next amendment: such a plan
   is cancelled once its slot is replaced or evicted).
-- **0.6.2: PR #71 review.**
+- **0.6.2: PR #71 review** (two rounds; this text is the final state).
+  - *One kill switch per plan, owned by the host.* Each plan owns a `cancel` AbortController. The core
+    gets a signal it never sees aborted; it is only the key through which the adapter finds `cancel`
+    (`linkCancel`, a WeakMap), and the spawns listen to it. This depends on the core passing
+    `wisdomMatch` the same signal object it got from `startActivity`; a host test fails if a cancel
+    stops killing the child. The clean design is a `cancel` parameter in ct-wisdom-core (not done here).
   - *Abandoned plans are cancelled, not charged to CT.* When `plan()` replaces an agent's slot for a
-    newer step, when the slot LRU (256 agents) evicts it, or on the `would_extend_turn` path, the plan's
-    query is cancelled (its `ct` child killed) and its key freed. A cancel is not a budget miss: each
-    plan owns a second `AbortController`, linked to its budget signal through the adapter
-    (`linkCancel`), and the spawns listen to both. The core sees its budget signal un-aborted, gets
-    outcome `aborted` and counts no breaker failure (core rule: an abort from anywhere but the budget
-    never counts).
+    newer step, when the slot LRU (256 agents) evicts it (`lruSet` `onEvict`, the one eviction rule), or
+    on the `would_extend_turn` path, `cancel` kills the query and the key is freed. The core gets
+    outcome `aborted` and counts nothing.
+  - *Budget expiry.* `settleWithin`'s expiry aborts `cancel`. When the late match then settles as
+    `budget` (the kill really stopped it), the host calls `recordActivityBudgetMiss` once (the core
+    rule; the core itself never sees an aborted signal, so there is no double count). A child that had
+    already exited with an answer keeps it (binding rule below) and is not charged; a `ct` that cannot
+    start is class `spawn` (caches reset, not a budget miss). This supersedes "the core then counts the
+    miss" in the 0.6.2 amendment above.
   - *Capability probe once per path.* `ct wisdom match --help` runs once per resolved `ct` path
-    (OpenCode `probedPath` parity), not before every match, so a query no longer splits its 3 s budget
-    between two processes. A spawn-class outcome clears it with the capability latch
-    (`resetDiscoveryAndProbeCaches`, `_resetForTests`).
-  - *Spawn errors are spawn errors.* A `ct` that cannot start is class `spawn` even when an abort
-    landed first (the binding never reports `aborted` with `spawnError`, and the adapter checks
-    `spawnError` first), and the adapter clears its probe cache and latch itself. Known limit: when the
-    budget signal itself has aborted, the core still counts the budget miss before it looks at the
-    spawn class (a core rule, unchanged here); an already-aborted budget starts no child, so this needs
-    an abort in the few milliseconds before the `ENOENT` event.
-  - *Binding.* An already-aborted signal resolves `aborted` without spawning. An abort that lands after
-    the child exited keeps the real result (stragglers holding the pipes are still killed). One kill
-    path (`killTree`) for timeout, abort and overflow: the POSIX process group, or the direct child on
-    Windows. A child with no pid (failed spawn) is never signalled: Node's `child.kill()` there signals
-    pid 0, the caller's own process group.
+    (OpenCode `probedPath` parity). A match that ends `timeout_or_exit` clears it, so a `ct` that lost
+    the subcommand in place is re-probed and latched OFF on the next call; that one failure still
+    counts (an exit code cannot tell "unknown command" from other usage errors reliably). A spawn-class
+    reset (`resetDiscoveryAndProbeCaches`, called by the core) clears the latch, the probe cache and
+    discovery's accepted path (`invalidateAcceptedPath`), so a moved `ct` is found again.
+  - *Binding (`nodeSpawnFn`).* One outcome normalization (`spawnOutcomeOf`): a failed start or an
+    overflow is `spawnError` and never `aborted`. An already-aborted signal resolves `aborted` without
+    spawning. An abort after the child exited keeps the real result. One kill path (`killTree`) for
+    timeout, abort and overflow: the POSIX process group, or the direct child on Windows; a child with
+    no pid (failed spawn) is never signalled, because Node's `child.kill()` there signals pid 0, the
+    caller's own process group. After a kill, once the child has exited, `close` gets a 250 ms grace
+    and the promise settles anyway (Windows, or a descendant that left the group, can hold the pipes).
 
 ## Versioning and docs
 
