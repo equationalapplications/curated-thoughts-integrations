@@ -209,7 +209,8 @@ STDLIB_ALLOWLIST = frozenset(sys.stdlib_module_names) | {
     "ct_ledger",
     "ct_wisdom_live",
     "ct_tool_dedup",
-    "ct_wisdom_activity",  # hermes autonomous-work delivery
+    "ct_wisdom_activity",  # shared autonomous-work activity builder
+    "ct_wisdom_activity_delivery",  # hermes-only delivery over the shared builder
     "ct_wisdom_verbose",  # opt-in verbose recorder (shared Hermes/Claude Code)
     "ct_wisdom_cc",  # claude-code hooks/ adapter over the vendored wisdom core
     "ct_wisdom_cc_activity",  # claude-code tool names -> the vendored activity builder

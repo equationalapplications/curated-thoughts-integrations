@@ -263,7 +263,7 @@ class TestExactlyOnceWithActivity(TestExactlyOnceClaudeCode):
                     owner[fid] = name
 
     def test_no_fact_twice_with_activity(self):
-        ct_wisdom_activity.reset_state()
+        ct_wisdom_activity.reset_caches()
         rng = self.rng
         seen = Counter()
         for s in range(SESSIONS):

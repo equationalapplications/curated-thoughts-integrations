@@ -193,12 +193,12 @@ class SharedVectorTests(unittest.TestCase):
         saved = ct_wisdom_activity._fs_root, ct_wisdom_activity._system_identity
         ct_wisdom_activity._fs_root = lambda d: d == tmp or not d.startswith(tmp + os.sep)
         ct_wisdom_activity._system_identity = lambda: identity
-        ct_wisdom_activity.reset_state()
+        ct_wisdom_activity.reset_caches()
         try:
             return act.activity_for(tool_name, args, cwd, env)
         finally:
             ct_wisdom_activity._fs_root, ct_wisdom_activity._system_identity = saved
-            ct_wisdom_activity.reset_state()
+            ct_wisdom_activity.reset_caches()
 
     def test_every_vector(self):
         cases = json.loads(self.VECTORS.read_text(encoding="utf-8"))

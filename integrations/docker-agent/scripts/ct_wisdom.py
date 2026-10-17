@@ -167,7 +167,7 @@ def discover_ct(env=None):
       (None, None)          — deterministic discovery miss (NOT memoized
                               here: every call searches again; the
                               autonomous-work path remembers a miss for a
-                              cooldown, ct_wisdom_activity.CT_UNUSABLE_PAUSE)
+                              cooldown, ct_wisdom_activity_delivery.CT_UNUSABLE_PAUSE, Hermes)
     """
     global _accepted_ct_path
     # Cache check under the lock; the probe runs outside it so a slow first

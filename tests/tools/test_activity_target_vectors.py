@@ -97,12 +97,12 @@ class World:
         saved = act._fs_root, act._system_identity
         act._fs_root = lambda d: d == tmp or not d.startswith(tmp + os.sep)
         act._system_identity = lambda: identity
-        act.reset_state()
+        act.reset_caches()
         try:
             return act.activity_for(case["tool"], args, cwd=cwd, env=env)
         finally:
             act._fs_root, act._system_identity = saved
-            act.reset_state()
+            act.reset_caches()
 
     def close(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
@@ -163,8 +163,8 @@ class TestActivityTargetVectors(unittest.TestCase):
     """Every vector against Hermes's builder, each in a fake filesystem."""
 
     def setUp(self):
-        act.reset_state()
-        self.addCleanup(act.reset_state)
+        act.reset_caches()
+        self.addCleanup(act.reset_caches)
         # No probe of the real filesystem is needed: every world treats its
         # temp dir as `/` and anything outside it as a filesystem root, so a
         # walk never leaves it (World.build patches _fs_root).
