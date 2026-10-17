@@ -639,6 +639,11 @@ describe('clean-room JSON output (Step 5.8)', () => {
     try {
       const env: NodeJS.ProcessEnv = {
         PATH: join(home, 'empty-bin'),
+        // findSidecar also checks fixed paths and mcpToolsList spawns with
+        // {...process.env, ...env}: a scratch HOME keeps any found sidecar
+        // away from the real home and brain.
+        HOME: home,
+        USERPROFILE: home,
         CURATED_BRAIN_DIR: join(home, 'no-brain'),
         XDG_CONFIG_HOME: join(home, '.config'),
       };
@@ -685,8 +690,14 @@ describe('CLI', () => {
           encoding: 'utf8',
           env: {
             ...process.env,
+            HOME: home,
+            USERPROFILE: home,
             XDG_CONFIG_HOME: join(home, '.config'),
             CURATED_BRAIN_DIR: join(home, 'brain'),
+            // Brain safety comes from the scratch HOME and CURATED_BRAIN_DIR
+            // above. PATH='' only avoids slow sidecar probes via PATH (fixed
+            // candidate paths still apply); process.execPath is absolute.
+            PATH: '',
           },
         },
       );
@@ -701,9 +712,17 @@ describe('CLI', () => {
   });
 
   it('prints help for an unknown subcommand without crashing', () => {
-    const res = spawnSync(process.execPath, [libDoctor, 'bogus'], { encoding: 'utf8' });
-    expect(res.error ?? null).toBeNull();
-    expect(res.status).toBe(0);
-    expect(res.stdout).toContain('Usage');
+    const home = makeHome();
+    try {
+      const res = spawnSync(process.execPath, [libDoctor, 'bogus'], {
+        encoding: 'utf8',
+        env: { ...process.env, HOME: home, USERPROFILE: home, CURATED_BRAIN_DIR: join(home, 'brain') },
+      });
+      expect(res.error ?? null).toBeNull();
+      expect(res.status).toBe(0);
+      expect(res.stdout).toContain('Usage');
+    } finally {
+      cleanupHome(home);
+    }
   });
 });

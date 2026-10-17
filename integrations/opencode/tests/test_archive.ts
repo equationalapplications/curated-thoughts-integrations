@@ -54,6 +54,26 @@ function run(cmd: string, args: string[], opts: { cwd?: string; env?: NodeJS.Pro
   }).trim();
 }
 
+/**
+ * Env for any child that could reach the CT doctor, installer or sidecar.
+ * HOME, USERPROFILE, XDG_* and CURATED_BRAIN_DIR all point at a scratch dir
+ * under `workdir`, so a probed `curated-thoughts-mcp` can never open the
+ * developer's real ~/.brain (live-brain incident, 2026-10-17).
+ */
+function isolatedEnv(extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
+  const home = join(workdir, 'home');
+  mkdirSync(home, { recursive: true });
+  return {
+    ...process.env,
+    HOME: home,
+    USERPROFILE: home,
+    XDG_CONFIG_HOME: join(home, '.config'),
+    XDG_DATA_HOME: join(home, '.local', 'share'),
+    CURATED_BRAIN_DIR: join(home, 'brain'),
+    ...extra,
+  };
+}
+
 /** Gated at runtime: skips when the runner lacks the Python toolchain. */
 function requireArchive(ctx: TestContext): void {
   if (!archiveBuilt) {
@@ -219,7 +239,7 @@ describe('the unpacked archive runs with no node_modules (the real user situatio
         "const m = await import(process.argv[1]); process.exit(typeof m.CuratedThoughts === 'function' ? 0 : 3);",
         entry,
       ],
-      { cwd: unpacked, encoding: 'utf8', env: { ...process.env, NODE_PATH: '' }, timeout: 60_000 },
+      { cwd: unpacked, encoding: 'utf8', env: isolatedEnv({ NODE_PATH: '' }), timeout: 60_000 },
     );
     const output = `${proc.stdout}\n${proc.stderr}`;
     expect(output).not.toContain('ERR_MODULE_NOT_FOUND');
@@ -229,10 +249,13 @@ describe('the unpacked archive runs with no node_modules (the real user situatio
 
   it('node lib/scripts/ct_doctor.js check runs; only the pre-flight check degrades without better-sqlite3', (ctx) => {
     requireArchive(ctx);
-    const proc = spawnSync('node', [join(unpacked, 'lib', 'scripts', 'ct_doctor.js'), 'check'], {
+    // Brain safety comes from the scratch HOME and CURATED_BRAIN_DIR in
+    // isolatedEnv(). PATH='' only avoids slow sidecar probes via PATH (fixed
+    // candidate paths still apply); node is spawned by absolute path.
+    const proc = spawnSync(process.execPath, [join(unpacked, 'lib', 'scripts', 'ct_doctor.js'), 'check'], {
       cwd: unpacked,
       encoding: 'utf8',
-      env: { ...process.env, NODE_PATH: '' },
+      env: isolatedEnv({ NODE_PATH: '', PATH: '' }),
       timeout: 60_000,
     });
     const output = `${proc.stdout}\n${proc.stderr}`;
@@ -248,19 +271,11 @@ describe('the unpacked archive runs with no node_modules (the real user situatio
 
   it('node lib/scripts/install.js runs its preview with jsonc-parser bundled', (ctx) => {
     requireArchive(ctx);
-    const home = join(workdir, 'home');
     const proc = spawnSync('node', [join(unpacked, 'lib', 'scripts', 'install.js')], {
       cwd: unpacked,
       encoding: 'utf8',
       timeout: 60_000,
-      env: {
-        ...process.env,
-        HOME: home,
-        USERPROFILE: home,
-        XDG_CONFIG_HOME: join(home, '.config'),
-        XDG_DATA_HOME: join(home, '.local', 'share'),
-        CT_INSTALL_EDIT: undefined,
-      },
+      env: isolatedEnv({ CT_INSTALL_EDIT: undefined }),
     });
     const output = `${proc.stdout}\n${proc.stderr}`;
     // Preview mode must not be a crash: jsonc-parser is bundled, so no

@@ -35,6 +35,7 @@
 
 import {
   marker,
+  nodeSpawnFn,
   onToolResult as coreOnToolResult,
   onUserTurn as coreOnUserTurn,
   scanIds,
@@ -48,7 +49,6 @@ import {
   type SpawnFn,
   type WisdomMatchResult,
 } from '@equational-applications/ct-wisdom-core';
-import { spawn } from 'node:child_process';
 import nodePath from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { discoverCt, invalidateAcceptedPath } from '../wisdom.js';
@@ -168,103 +168,6 @@ export function partId(now: number = Date.now()): string {
   let tail = '';
   for (let i = 0; i < 14; i++) tail += BASE62[rnd[i]! % 62];
   return `prt_${hex}${tail}`;
-}
-
-// ─────────────────────────────────────────────────────────────────────────
-// SpawnFn: async child_process binding, byte-identical hygiene to the DSH
-// binding (argument LIST — never a shell string — killSignal SIGKILL,
-// bounded accumulation standing in for maxBuffer, cwd home, no shell,
-// windowsHide, detached process-group on POSIX so the timeout kill takes
-// the whole tree).
-// ─────────────────────────────────────────────────────────────────────────
-
-export function nodeSpawnFn(env: NodeJS.ProcessEnv = process.env): SpawnFn {
-  return (spec) =>
-    new Promise((resolve) => {
-      let child: ReturnType<typeof spawn>;
-      try {
-        child = spawn(spec.command, spec.args, {
-          killSignal: 'SIGKILL' as NodeJS.Signals,
-          cwd: env.HOME || env.USERPROFILE || '.',
-          env,
-          stdio: ['ignore', 'pipe', 'pipe'],
-          shell: false,
-          windowsHide: true,
-          // Process-group leader (POSIX): the timeout kill takes the whole
-          // tree down (DSH parity — the 3 s budget must not leak a hang).
-          detached: process.platform !== 'win32',
-        });
-      } catch {
-        resolve({ code: null, stdout: '', stderr: '', spawnError: true, timedOut: false });
-        return;
-      }
-      let stdout = '';
-      let stderr = '';
-      let overflow = false;
-      const CAP = 4 * 1024 * 1024;
-      let timedOut = false;
-      let aborted = false;
-      let settled = false;
-      const timer = setTimeout(() => {
-        timedOut = true;
-        if (child.pid !== undefined && process.platform !== 'win32') {
-          try {
-            process.kill(-child.pid, 'SIGKILL');
-          } catch {
-            child.kill('SIGKILL');
-          }
-        } else {
-          child.kill('SIGKILL');
-        }
-      }, spec.timeoutMs);
-      const finish = (code: number | null, spawnError: boolean) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        // Both end paths ('close' and 'error') drop the abort listener.
-        spec.signal?.removeEventListener('abort', onAbort);
-        resolve({ code, stdout, stderr, spawnError: spawnError || overflow, timedOut, ...(aborted ? { aborted: true } : {}) });
-      };
-      child.on('error', () => finish(null, true));
-      function killTree(): void {
-        if (child.pid !== undefined && process.platform !== 'win32') {
-          try {
-            process.kill(-child.pid, 'SIGKILL');
-            return;
-          } catch {
-            /* group gone — fall through to the direct kill */
-          }
-        }
-        child.kill('SIGKILL');
-      }
-      // The caller's budget ran out (activity delivery): kill the tree now,
-      // and report the outcome as `aborted` (never a breaker failure).
-      function onAbort(): void {
-        aborted = true;
-        killTree();
-      }
-      if (spec.signal) {
-        if (spec.signal.aborted) onAbort();
-        else spec.signal.addEventListener('abort', onAbort, { once: true });
-      }
-      child.stdout?.on('data', (chunk: Buffer) => {
-        if (stdout.length + chunk.length > CAP) {
-          overflow = true;
-          killTree();
-          return;
-        }
-        stdout += chunk.toString('utf8');
-      });
-      child.stderr?.on('data', (chunk: Buffer) => {
-        if (stderr.length + chunk.length > CAP) {
-          overflow = true;
-          killTree();
-          return;
-        }
-        stderr += chunk.toString('utf8');
-      });
-      child.on('close', (code) => finish(code, false));
-    });
 }
 
 // ─────────────────────────────────────────────────────────────────────────

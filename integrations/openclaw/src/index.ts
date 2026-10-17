@@ -27,6 +27,7 @@
 import { createHash } from 'node:crypto';
 import {
   Breaker,
+  nodeSpawnFn,
   onToolResult,
   onUserTurn,
   scanIds,
@@ -50,12 +51,11 @@ import { OpenClawActivity } from './wisdom/activity.js';
 import { OpenClawWisdomAdapter, isRecallToolName } from './wisdom/adapter.js';
 import { BootstrapMemo } from './wisdom/bootstrap.js';
 import { CtLocator } from './wisdom/discover.js';
-import { nodeSpawnFn } from './wisdom/spawn.js';
 import { openclawVerboseRecorder } from './wisdom/verbose.js';
 
 export const PLUGIN_ID = 'curated-thoughts';
 /** Mirrors package.json#version (a test keeps them equal); part of the state key. */
-export const PLUGIN_VERSION = '0.3.1';
+export const PLUGIN_VERSION = '0.3.2';
 /** First-turn worst case is ~14 s (spec "Budgets"); the default is 15 s. */
 export const PROMPT_HOOK_TIMEOUT_MS = 20_000;
 /** Salvaged blocks expire if the session never takes another turn. */

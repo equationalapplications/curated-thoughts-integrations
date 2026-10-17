@@ -6,11 +6,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
-import { ACTIVITY_HEADING, BREAKER_FAILS, EXCLUDE_MAX, type SpawnFn, type SpawnLike } from '@equational-applications/ct-wisdom-core';
+import { ACTIVITY_HEADING, BREAKER_FAILS, EXCLUDE_MAX, nodeSpawnFn, type SpawnFn, type SpawnLike } from '@equational-applications/ct-wisdom-core';
 import { createPlugin } from '../src/index.js';
 import { OpenClawWisdomAdapter } from '../src/wisdom/adapter.js';
 import { CtLocator } from '../src/wisdom/discover.js';
-import { nodeSpawnFn } from '../src/wisdom/spawn.js';
 import { FakeApi, FakeCt, boot, ok, type Fact } from './fake_host.js';
 
 const PROJECT = realpathSync(mkdtempSync(join(tmpdir(), 'ocl-rev-')));

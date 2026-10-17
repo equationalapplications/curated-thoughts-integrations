@@ -85,7 +85,7 @@ describe.skipIf(!built)('cmdCheck', () => {
     // it failed with `spawnSync node ENOENT` so we resolve to the running
     // Node binary by absolute path. (Plan-bug pattern #5.)
     const out = spawnSync(process.execPath, [COMPILED_DOCTOR, 'check', '--json'], {
-      env: { ...process.env, HOME: tmpHome, USERPROFILE: tmpHome, PATH: '' },
+      env: { ...process.env, HOME: tmpHome, USERPROFILE: tmpHome, CURATED_BRAIN_DIR: join(tmpHome, 'brain'), PATH: '' },
       encoding: 'utf8',
     });
     const parsed = JSON.parse(out.stdout);
