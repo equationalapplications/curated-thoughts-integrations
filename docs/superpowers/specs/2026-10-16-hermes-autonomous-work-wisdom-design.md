@@ -191,7 +191,7 @@ relative to it; any other absolute path is reduced to its last two components
 (`parent/name`), so a home directory or user name never leaves the machine. Leading `..`
 components are dropped. Targets are capped at 200 chars.
 *(Superseded for paths and search patterns by the "Privacy amendment (2026-10-16,
-hermes 0.6.2)" and "Privacy amendment 2 (2026-10-16, hermes 0.6.3)" sections below: the
+hermes 0.6.2)", "Privacy amendment 2" (0.6.3) and "Privacy amendment 3" (0.6.4) sections below: the
 two-component rule leaked user names.)*
 
 **Self-trigger guard on targets.** A target containing a control character (newline,
@@ -508,6 +508,38 @@ first amendment:
   `/srv/b/README.md` are different keys even though both queries are `README.md`.
 - **Hot path.** `user_names` and `valid_cwd` are computed once per `activity_for` call.
 
+## Privacy amendment 3 (2026-10-16, hermes 0.6.4)
+
+A high-effort review of 0.6.3 found two more leaks and several misleading results. This
+amendment prefers simpler general rules to special cases. Every case is a vector in
+`tests/fixtures/activity_targets.json`. These rules replace the matching parts of
+amendments 1 and 2:
+
+- **R1 (cwd), check order.** A cwd counts only when it is at depth ≥ 2, is not a
+  `/Users/<x>` / `/home/<x>` home directory, and is neither HOME nor an ancestor of HOME.
+  The depth and home-directory checks come first. A HOME of depth < 2 (`/` for
+  `nobody`/`daemon` and many containers, `/root`) counts as no HOME. 0.6.3 treated every
+  cwd as "inside HOME=/", so with cwd `/home`, `/home/bob/secret.txt` was sent as
+  `bob/secret.txt`.
+- **Prefix comparison.** "Under the cwd" compares components in folded form (NFC +
+  casefold), as R1 does. The sent relative part keeps its original case:
+  `/Users/alice/proj/src/x.py` under cwd `/Users/alice/Proj` is `src/x.py`.
+- **No `:` in any component.** Such components are dropped; if nothing is left there is
+  no query. 0.6.3 sent a bare drive letter for `\\?\C:\`, `/C:/` and `/mnt/c:`.
+- **Private names, one general rule.** A name is private only when it is the value of
+  `USER`, `LOGNAME` or `USERNAME`, or the basename of `HOME` / `USERPROFILE` when that
+  directory sits directly under `/Users`, `/home` or `C:\Users` (any case). The
+  service-account list stays as an extra exemption. So `HOME=/github/home` no longer makes
+  `home` private, and neither does `HOME=/opt/build` for `build`.
+- **A name hit gives no activity.** If any sent path component, search word, program or
+  subcommand contains a private name, the whole activity is dropped. 0.6.3 dropped only
+  the component, so `src/sample.py` with `USER=sam` was sent as the misleading `src`.
+  This applies to a search's `path` too.
+- **Short names.** Names under 3 chars are private again. They match only a whole
+  component or word, never a substring: `jo/notes.md` with `USER=jo` gives nothing, while
+  `src/join.py` is sent.
+- **Lazy cwd.** `session_cwd` is resolved only for file and search tools.
+
 ## Alignment with INTENT.md
 
 - **Goal "During autonomous work":** this is that step for Hermes. Host events
@@ -533,7 +565,7 @@ first amendment:
 - **User decisions 1–7:** decision 1 → "Rate rule"; 2 → "Activity line builder" and the
   secret-safety tests; 3 and 4 → "Subagents and scheduled runs"; 5 → constants; 6 → this
   spec; 7 → `ct_tool` class.
-- **Privacy amendments 1 and 2:** serve "Why this repo exists" (CT is private and local-first):
+- **Privacy amendments 1-3:** serve "Why this repo exists" (CT is private and local-first):
   the query names the work, never the person or their directory layout. It only removes
   what is sent; relevance stays CT's (rule 8), limits are unchanged (rule 6), and an
   activity that cannot be sent safely fails quietly with no query (rule 4).

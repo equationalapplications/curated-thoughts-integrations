@@ -234,21 +234,24 @@ class TestActivityLine(unittest.TestCase):
         """Privacy amendment R1/R2: every tool path, under any cwd, drops the
         user name, and outside a valid cwd keeps the basename only."""
         rng = random.Random(20261018)
-        env = {"USER": "zelda", "LOGNAME": "zelda", "HOME": "/Users/zelda"}
+        envs = [{"USER": "zelda", "LOGNAME": "zelda", "HOME": "/Users/zelda"},
+                {"USER": "zelda", "HOME": "/"}, {"USERNAME": "zelda", "HOME": "/root"}]
         heads = ["/Users/zelda", "/home/zelda", "~", "/", "/work/repo", "C:\\Users\\zelda",
                  "/srv", "..", "", "Users/zelda", "zelda", "./", "C:", "C:..", "\\etc",
-                 "/Users/zelda/proj", "/home/runner"]
+                 "/Users/zelda/proj", "/home/runner", "\\\\?\\C:", "/C:", "/mnt/c:",
+                 "\\\\?\\C:\\Users\\zelda", "/home/bob"]
         mids = ["clients", "acme", "zelda", "Zelda", "src", "..", ".", "home", "Users",
                 "secret-plans", "d\u00e9j\u00e0", "zelda.txt", "my-zelda", "ZELDA@corp",
                 "root", "node"]
         cwds = ["", "/", "/Users", "/home", "/work", "/work/repo", "/Users/zelda", "C:/",
-                "C:\\Users\\zelda", "/Users/zelda/proj", "~"]
+                "C:\\Users\\zelda", "/Users/zelda/proj", "~", "/home/bob", "/mnt/c:"]
         for _ in range(1000):
             segs = [rng.choice(mids) for _ in range(rng.randint(0, 4))]
             head = rng.choice(heads)
             sep = "\\" if head.startswith("C:") else "/"
             raw = sep.join(([head] if head else []) + segs + ["f%d.md" % rng.randint(0, 9)])
             cwd = rng.choice(cwds)
+            env = rng.choice(envs)
             tool = rng.choice(["read_file", "write_file", "patch"])
             a = act.activity_for(tool, {"path": raw}, cwd=cwd, env=env)
             if a is None:
@@ -256,6 +259,7 @@ class TestActivityLine(unittest.TestCase):
             query = act.query_for(a)
             comps = query.split("/")
             self.assertNotIn("zelda", query.casefold(), (raw, cwd, query))
+            self.assertNotIn("bob", query, (raw, cwd, env, query))
             self.assertNotIn("\\", query, (raw, cwd))
             self.assertNotIn("~", query, (raw, cwd))
             self.assertFalse(query.startswith("/"), (raw, cwd))
@@ -313,11 +317,40 @@ class TestActivityLine(unittest.TestCase):
     def test_service_accounts_and_short_names_not_private(self):
         for user in ("root", "node", "app", "user", "admin", "test", "ubuntu", "runner",
                      "docker", "www-data", "nobody", "daemon", "ec2-user", "vscode",
-                     "codespace", "al"):
+                     "codespace"):
             self.assertEqual(act.user_names({"USER": user, "HOME": "/home/" + user}),
                              frozenset(), user)
         self.assertEqual(act.user_names({"USER": "Alice", "HOME": "/home/bob"}),
                          frozenset({"alice", "bob"}))
+        # Privacy amendment 3: HOME's basename counts only directly under
+        # /Users, /home or C:\Users; short names count (exact match only).
+        for home in ("/github/home", "/opt/build", "/var/lib/jenkins", "/", "/root",
+                     "/data/home/alice", "D:\\Profiles\\erin"):
+            self.assertEqual(act.user_names({"HOME": home}), frozenset(), home)
+        self.assertEqual(act.user_names({"USERPROFILE": "C:\\USERS\\Erin"}), frozenset({"erin"}))
+        self.assertEqual(act.user_names({"USER": "jo"}), frozenset({"jo"}))
+        names = act.user_names({"USER": "jo"})
+        self.assertTrue(act._has_name("JO", names))
+        self.assertFalse(act._has_name("join.py", names))
+        self.assertTrue(act._has_name("Sample.py", act.user_names({"USER": "sam"})))
+
+    def test_session_cwd_is_lazy(self):
+        calls = []
+        orig = act.session_cwd
+
+        def counting(task_id=None):
+            calls.append(task_id)
+            return "/srv/proj"
+
+        act.session_cwd = counting
+        self.addCleanup(setattr, act, "session_cwd", orig)
+        act.activity_for("terminal", {"command": "make all"}, env={}, task_id="t1")
+        act.activity_for("web_search", {"query": "x"}, env={}, task_id="t1")
+        self.assertEqual(calls, [])
+        a = act.activity_for("read_file", {"path": "/srv/proj/src/a.py"}, env={}, task_id="t1")
+        self.assertEqual(a.query, "src/a.py")
+        act.activity_for("search_files", {"pattern": "TODO"}, env={}, task_id="t2")
+        self.assertEqual(calls, ["t1", "t2"])
 
     def test_session_cwd_prefers_hermes_session_record(self):
         fake = type(sys)("tools.terminal_tool")
