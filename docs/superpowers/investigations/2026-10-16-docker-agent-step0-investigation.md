@@ -540,8 +540,15 @@ when an alias or agent has sandbox enabled.
   - The first run pays ≤ 3 s of recall latency before the first model call.
   - Each child sub-session pays one recall at spawn. A child is new by construction: its
     `ParentID` is set and it starts with an empty history (§4). But the hook only learns the
-    parent link afterwards, from `subagent_stop`, so under (a) the child is confirmed by the
+    parent link afterward, from `subagent_stop`, so under (a) the child is confirmed by the
     same scan.
+  - **Under (a), the run-2 path never bootstraps helpers.** A `transfer_task`, background or
+    skill child calls `RunStream` once and then finishes (`agent_delegation.go:473`,
+    `subagent_stop` on exit). It has no second run in which `session_start` could emit the
+    confirmed block. So with run-2 emission, (a) gives helpers **no** session-start block. They
+    still get activity delivery once the scan has confirmed them. Bootstrapping helpers under
+    (a) needs the run-1 `before_llm_call` insertion path, and that path is unverified (**[U]**,
+    a plan Step-0 target). Open decision 5 depends on this.
 
 ### Step 2: each user message. **Not feasible as specified on the default config; feasible with caveats as deferred delivery**
 
@@ -706,6 +713,9 @@ integrations/docker-agent/
   machine.
 - Decide the Windows hook command form (§7 [U]).
 - Check the `--fake` cassette matching rules for the host contract (§9 [U]).
+- Only if open decision 4 is (a) and helpers should get a bootstrap: check whether a run-1
+  `before_llm_call` `updated_messages` insertion matches the `session_start` extras position
+  byte-for-byte (§9, step 1 [U]).
 - Check whether `docker/sandbox-templates:shell-docker` has `python3` (§8 [U]). This only
   affects how quietly the integration fails inside a sandbox.
 
