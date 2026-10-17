@@ -70,6 +70,21 @@ class RegistrationCheckTests(unittest.TestCase):
         self.assertIsNone(ct_doctor._sidecar_env_route())
         self.assertEqual(ct_doctor.HARNESS_LABEL, "Docker Agent")
 
+    def test_env_fix_quotes_paths_like_install_sh(self):
+        need = ct_doctor.ct_env.EnvNeed("CURATED_BRAIN_DIR", ct_doctor.ct_env.NEED_PATH, "r",
+                                        '/x/a: b #c/&anchor "q"\\z')
+        ref = ct_doctor.ct_env.EnvNeed("OPENROUTER_API_KEY", ct_doctor.ct_env.NEED_REF, "r")
+        text = ct_doctor._sidecar_env_fix([need, ref])
+        self.assertIn('CURATED_BRAIN_DIR: "/x/a: b #c/&anchor \\"q\\"\\\\z"', text)
+        self.assertIn("OPENROUTER_API_KEY: ${env.OPENROUTER_API_KEY}", text)
+        self.assertEqual(ct_doctor._yaml_quote("&lead"), '"&lead"')
+        if BASH and not sys.platform.startswith("win"):
+            # Same bytes as install.sh's yaml_quote.
+            script = 'source /dev/stdin <<<"$(sed -n "/^yaml_quote()/,/^}/p" "$1")"; yaml_quote "$2"'
+            out = subprocess.run([BASH, "-c", script, "x", str(INSTALL), need.value],
+                                 capture_output=True, text=True, timeout=30).stdout
+            self.assertEqual(out, ct_doctor._yaml_quote(need.value))
+
     def test_plugin_version_comes_from_plugin_json(self):
         self.assertEqual(ct_doctor._plugin_version(), "0.1.0")
 

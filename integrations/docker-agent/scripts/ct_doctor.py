@@ -844,11 +844,18 @@ def _sidecar_env_route(cwd=None):
     return None
 
 
+def _yaml_quote(value):
+    """A YAML double-quoted scalar, exactly as install.sh's yaml_quote
+    writes one (backslash and double quote escaped), so a path holding
+    `: `, `#` or a leading `&` stays one string."""
+    return '"%s"' % value.replace("\\", "\\\\").replace('"', '\\"')
+
+
 def _sidecar_env_fix(needs):
     """The `env:` lines that forward `needs` (names only)."""
     rows = []
     for n in needs:
-        value = n.value if n.kind == ct_env.NEED_PATH else "${env." + n.name + "}"
+        value = _yaml_quote(n.value) if n.kind == ct_env.NEED_PATH else "${env." + n.name + "}"
         rows.append(f"          {n.name}: {value}")
     return (
         f"Add to the curated-thoughts MCP toolset of each agent file:\n"

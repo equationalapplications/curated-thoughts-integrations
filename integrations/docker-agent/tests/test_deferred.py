@@ -144,9 +144,23 @@ class DeferredDeliveryTests(DeferredBase):
 
     def test_prompt_provenance(self):
         self.h(llm("s1"))
-        for text in ("", "   ", "<agent-message from=x>hi"):
+        for text in ("", "   ", "<system-update>\nThe context changed\n</system-update>"):
             self.assertIsNone(self.h(prompt("s1", text)))
         self.assertEqual(self.fake.queries(), [])
+
+    def test_a_prompt_that_starts_with_a_tag_is_still_the_users(self):
+        self.h(llm("s1"))
+        self.h(prompt("s1", "<div> is not centered"))
+        self.assertEqual(self.fake.queries(), ["<div> is not centered"])
+
+    def test_attached_file_contents_never_reach_ct(self):
+        self.h(llm("s1"))
+        text = ('why does this fail?\n\n<attached_file path="notes.txt">\nSECRET-BODY\n'
+                '</attached_file>')
+        self.h(prompt("s1", text))
+        self.assertEqual(self.fake.queries(), ["why does this fail?"])
+        self.h(prompt("s1", '\n\n<attached_file path="a">\nonly\n</attached_file>'))
+        self.assertEqual(self.fake.queries(), ["why does this fail?"])
 
 
 class TransientModeTests(DeferredBase):

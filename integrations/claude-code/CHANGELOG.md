@@ -6,6 +6,17 @@ heading format below is load-bearing: `## <version> — <date>`.
 
 ## Unreleased
 
+## 0.3.3 — 2026-10-17
+
+- Fixed: the session-store prune no longer deletes `.lock` files. A lock
+  file removed while another hook process held or was about to take its
+  `flock` let two processes each hold an "exclusive" lock (on different
+  inodes), so parallel `PostToolUse` hooks could interleave store writes.
+  Old session stores are still pruned after 30 days; their empty lock files
+  are kept. The store, lock, prune and persisted-breaker primitives moved to
+  `hooks/ct_hook_store.py`, shared byte-identically with the Docker Agent
+  integration (parity-gated). No other behavior change.
+
 ## 0.3.2 — 2026-10-16
 
 - Added: doctor check `sidecar-env` (after `embedding-backend`), shared with

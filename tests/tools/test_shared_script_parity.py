@@ -64,6 +64,15 @@ IDENTICAL = (
 IDENTICAL_EXTRA = {
     "docker-agent": ("ct_wisdom_activity.py",),
 }
+# Hook-side modules shared by the command-hook adapters (no Hermes copy:
+# Hermes keeps this state in process). Every listed tree must carry an
+# identical copy (PR #59 review: the store/lock/prune/breaker primitives).
+HOOK_SHARED = {
+    "ct_hook_store.py": (
+        REPO / "integrations" / "claude-code" / "hooks",
+        REPO / "integrations" / "docker-agent" / "hooks",
+    ),
+}
 REGIONED = {
     "ct_doctor.py": ("module-docstring", "harness-config", "registration-check"),
 }
@@ -165,6 +174,24 @@ class SharedScriptParityTests(unittest.TestCase):
                             f"harness-specific regions:\n"
                             + drift_report(ref, copy, f"hermes/{name}",
                                            f"{copy_dir.parent.name}/{name}")
+                        )
+
+
+class HookSharedParityTests(unittest.TestCase):
+    def test_hook_modules_are_byte_identical(self):
+        for name, dirs in HOOK_SHARED.items():
+            ref_dir = dirs[0]
+            ref = read(ref_dir / name)
+            normalize(ref)
+            for other in dirs[1:]:
+                with self.subTest(script=name, copy=other.parent.name):
+                    copy = read(other / name)
+                    if ref != copy:
+                        self.fail(
+                            f"{name} drifted between {ref_dir.parent.name} and "
+                            f"{other.parent.name}:\n"
+                            + drift_report(ref, copy, f"{ref_dir.parent.name}/{name}",
+                                           f"{other.parent.name}/{name}")
                         )
 
 

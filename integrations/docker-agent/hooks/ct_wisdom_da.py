@@ -34,7 +34,6 @@ user's message).
 
 from __future__ import annotations
 
-import contextlib
 import hashlib
 import json
 import logging
@@ -50,6 +49,7 @@ for _p in (str(_SCRIPTS), str(_HERE)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
+import ct_hook_store  # noqa: E402
 import ct_ledger  # noqa: E402
 import ct_wisdom  # noqa: E402
 import ct_wisdom_activity  # noqa: E402
@@ -57,14 +57,6 @@ import ct_wisdom_da_activity as da_activity  # noqa: E402
 import ct_wisdom_live  # noqa: E402
 import ct_wisdom_verbose  # noqa: E402
 
-try:  # POSIX
-    import fcntl
-except ImportError:  # pragma: no cover - Windows
-    fcntl = None
-try:  # Windows
-    import msvcrt
-except ImportError:
-    msvcrt = None
 
 logger = logging.getLogger(__name__)
 
@@ -73,8 +65,8 @@ STORE_VERSION = 1
 DATA_ENV = "DOCKER_AGENT_DATA_DIR"
 SANDBOX_ENV = "SANDBOX_VM_ID"
 LIVE_MODE_ENV = "CT_WISDOM_DA_LIVE"
-LOCK_WAIT = 2.0
-STORE_MAX_AGE = 30 * 86400
+LOCK_WAIT = ct_hook_store.LOCK_WAIT
+STORE_MAX_AGE = ct_hook_store.STORE_MAX_AGE
 CT_CACHE_MAX_AGE = 86400
 RECENT_KEYS_MAX = ct_wisdom_activity.RECENT_KEYS_MAX
 # The size limiter (limit_large_tool_results) cuts results over 51 200 bytes
@@ -87,14 +79,16 @@ PRECHECK_MARGIN_LINES = 64
 
 LIVE_HEADING = ct_wisdom_live.LIVE_HEADING
 _ELLIPSIS = "…"
-_KEY_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
-_ENVELOPE_RE = re.compile(r"^<[A-Za-z][A-Za-z0-9_-]*(?=[\s>/])")
+# The one host envelope Docker Agent v1.150.0 puts at the start of a user
+# message (instruction updates, pkg/session/session.go:1113). A prompt that
+# merely starts with a tag (`<div> is not centered`) is still the user's.
+_ENVELOPE_RE = re.compile(r"^<system-update>")
+_ATTACHED_RE = re.compile(r'<attached_file path="(?:[^"\\]|\\.)*">\n.*?\n</attached_file>', re.S)
 _LIST_FIELDS = ("bootstrap_ids", "seen_ids", "delivered_ids", "tool_ids", "order", "recent_keys")
 _STATES = ("pending", "on", "off")
 
 
-class LockTimeout(Exception):
-    """The store lock could not be taken within its bounded wait."""
+LockTimeout = ct_hook_store.LockTimeout
 
 
 # ---------------------------------------------------------------------------
@@ -144,10 +138,7 @@ def transient_mode(view):
 # ---------------------------------------------------------------------------
 
 
-def session_key(session_id):
-    if _KEY_RE.match(session_id):
-        return session_id
-    return hashlib.sha256(session_id.encode("utf-8")).hexdigest()
+session_key = ct_hook_store.session_key
 
 
 def _sessions_dir(wdir):
@@ -174,7 +165,12 @@ def new_store(session_id, state="pending"):
         "activity_step": -1,
         "recent_keys": [],
         "pending_live": None,
-        "turns": 0,
+        # The bootstrap recall, cached while the session is pending: None
+        # until a recall answered (a transient failure is retried, spec D5),
+        # then the entries [[title, text, id], ...] the first model call
+        # renders and the first message's match excludes.
+        "boot_entries": None,
+        "boot_attempts": 0,
         "updated": time.time(),
     }
 
@@ -210,11 +206,16 @@ def _valid_store(data, session_id):
         return False
     if not isinstance(data.get("bootstrap_block"), str):
         return False
-    for field in ("step", "activity_step", "turns"):
+    for field in ("step", "activity_step", "boot_attempts"):
         if not isinstance(data.get(field), int) or isinstance(data.get(field), bool):
             return False
     pending = data.get("pending_live")
     if pending is not None and not isinstance(pending, dict):
+        return False
+    entries = data.get("boot_entries")
+    if entries is not None and not (isinstance(entries, list) and all(
+            isinstance(e, list) and len(e) == 3 and all(isinstance(x, str) for x in e)
+            for e in entries)):
         return False
     return all(
         isinstance(data.get(f), list) and all(isinstance(i, str) for i in data[f])
@@ -232,12 +233,7 @@ def load_store(wdir, session_id):
     return data if _valid_store(data, session_id) else None
 
 
-def _atomic_write(path, data):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = "%s.%d.tmp" % (path, os.getpid())
-    with open(tmp, "w", encoding="utf-8") as handle:
-        json.dump(data, handle, ensure_ascii=False)
-    os.replace(tmp, path)
+_atomic_write = ct_hook_store.atomic_write
 
 
 def save_store(wdir, session_id, store):
@@ -252,58 +248,13 @@ def forget(wdir, session_id):
         pass
 
 
-@contextlib.contextmanager
-def locked(path, wait=LOCK_WAIT):
-    """Exclusive advisory lock on `<path>.lock`, waiting at most `wait` s."""
-    lock_path = path + ".lock"
-    os.makedirs(os.path.dirname(lock_path), exist_ok=True)
-    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
-    deadline = time.monotonic() + wait
-    try:
-        while True:
-            try:
-                if fcntl is not None:
-                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                elif msvcrt is not None:  # pragma: no cover - Windows
-                    os.lseek(fd, 0, 0)
-                    msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
-                break
-            except OSError:
-                if time.monotonic() >= deadline:
-                    raise LockTimeout(lock_path)
-                time.sleep(0.01)
-        try:
-            yield
-        finally:
-            try:
-                if fcntl is not None:
-                    fcntl.flock(fd, fcntl.LOCK_UN)
-                elif msvcrt is not None:  # pragma: no cover - Windows
-                    os.lseek(fd, 0, 0)
-                    msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
-            except OSError:
-                pass
-    finally:
-        os.close(fd)
+locked = ct_hook_store.locked
 
 
 def prune(wdir, now=None, max_age=STORE_MAX_AGE):
-    """Remove session files (and lock files) not touched in max_age."""
-    now = time.time() if now is None else now
-    directory = _sessions_dir(wdir)
-    try:
-        names = os.listdir(directory)
-    except OSError:
-        return
-    for name in names:
-        if not name.endswith((".json", ".lock")):
-            continue
-        path = os.path.join(directory, name)
-        try:
-            if now - os.path.getmtime(path) > max_age:
-                os.remove(path)
-        except OSError:
-            pass
+    """Remove session stores not touched in max_age (lock files are kept:
+    see ct_hook_store)."""
+    ct_hook_store.prune(_sessions_dir(wdir), now=now, max_age=max_age)
 
 
 # ---------------------------------------------------------------------------
@@ -311,57 +262,7 @@ def prune(wdir, now=None, max_age=STORE_MAX_AGE):
 # ---------------------------------------------------------------------------
 
 
-class PersistedBreaker:
-    """ct_wisdom_live.Breaker semantics over a JSON file (the Claude Code
-    leg's D8): after BREAKER_FAILS consecutive timeout/exit failures, CT
-    calls pause BREAKER_PAUSE s. Unreadable reads as closed."""
-
-    def __init__(self, path, fails=ct_wisdom_live.BREAKER_FAILS,
-                 pause=ct_wisdom_live.BREAKER_PAUSE, clock=time.time):
-        self._path = path
-        self._fails = fails
-        self._pause = pause
-        self._clock = clock
-
-    def _read(self):
-        try:
-            with open(self._path, encoding="utf-8") as handle:
-                data = json.load(handle)
-        except (OSError, ValueError):
-            return {"count": 0, "open_until": None}
-        count = data.get("count") if isinstance(data, dict) else None
-        until = data.get("open_until") if isinstance(data, dict) else None
-        return {
-            "count": count if isinstance(count, int) else 0,
-            "open_until": until if isinstance(until, (int, float)) else None,
-        }
-
-    def _write(self, state):
-        try:
-            _atomic_write(self._path, state)
-        except OSError:
-            logger.debug("wisdom-da: breaker write failed", exc_info=True)
-
-    def is_open(self):
-        state = self._read()
-        if state["open_until"] is None:
-            return False
-        if self._clock() >= state["open_until"]:
-            self._write({"count": 0, "open_until": None})
-            return False
-        return True
-
-    def record_failure(self):
-        state = self._read()
-        state["count"] += 1
-        if state["count"] >= self._fails:
-            state["open_until"] = self._clock() + self._pause
-        self._write(state)
-
-    def record_success(self):
-        state = self._read()
-        if state["count"] or state["open_until"] is not None:
-            self._write({"count": 0, "open_until": None})
+PersistedBreaker = ct_hook_store.PersistedBreaker
 
 
 def breaker_for(wdir):
@@ -380,8 +281,17 @@ def _file_sig(path):
     return [st.st_size, int(st.st_mtime)]
 
 
-def read_ct_cache(wdir, now=None):
-    """(path, capable) from a fresh cache whose binary is unchanged, else None."""
+def discovery_key(view):
+    """A digest of what `ct` discovery depends on (PATH, and HOME /
+    USERPROFILE / LOCALAPPDATA for the fallback candidates), so a cache
+    written under one view is never trusted under another."""
+    parts = [view.get(k) or "" for k in ("PATH", "HOME", "USERPROFILE", "LOCALAPPDATA")]
+    return hashlib.sha256("\0".join(parts).encode("utf-8", "replace")).hexdigest()
+
+
+def read_ct_cache(wdir, view, now=None):
+    """(path, capable) from a fresh cache written under this discovery view
+    whose binary is unchanged, else None."""
     now = time.time() if now is None else now
     try:
         with open(_ct_cache_path(wdir), encoding="utf-8") as handle:
@@ -393,15 +303,18 @@ def read_ct_cache(wdir, now=None):
     path, sig, capable, at = data.get("path"), data.get("sig"), data.get("capable"), data.get("at")
     if not isinstance(path, str) or not isinstance(capable, bool) or not isinstance(at, (int, float)):
         return None
+    if data.get("view") != discovery_key(view):
+        return None
     if now - at > CT_CACHE_MAX_AGE or sig != _file_sig(path):
         return None
     return path, capable
 
 
-def write_ct_cache(wdir, path, capable):
+def write_ct_cache(wdir, view, path, capable):
     try:
         _atomic_write(_ct_cache_path(wdir), {
-            "path": path, "sig": _file_sig(path), "capable": bool(capable), "at": time.time()})
+            "path": path, "sig": _file_sig(path), "capable": bool(capable), "at": time.time(),
+            "view": discovery_key(view)})
     except OSError:
         pass
 
@@ -415,7 +328,7 @@ def drop_ct_cache(wdir):
 
 def find_ct(wdir, view, need_match):
     """(path, failure_class). With need_match, `ct wisdom match` must exist."""
-    cached = read_ct_cache(wdir)
+    cached = read_ct_cache(wdir, view)
     if cached is not None:
         path, capable = cached
         if not need_match or capable:
@@ -426,7 +339,7 @@ def find_ct(wdir, view, need_match):
         return None, dclass or "discovery_miss"
     capable = ct_wisdom_live.has_match_capability(path)
     if capable is not None:
-        write_ct_cache(wdir, path, capable)
+        write_ct_cache(wdir, view, path, capable)
     if not need_match:
         return path, None
     if not capable:
@@ -518,25 +431,60 @@ def render_deferred_block(entries, corrections, ledger):
     return LIVE_HEADING + "\n\n" + "\n\n".join(parts), delivered
 
 
-def render_bootstrap(view, wdir, cwd, exclude):
-    """The v1 bootstrap block (Hermes render_block) or "" on any failure;
-    entries already in context (the scan) are dropped first."""
+BOOTSTRAP_TRIES = 3  # model calls a pending session retries a transient recall failure
+
+
+def recall_bootstrap(view, wdir, cwd):
+    """The bootstrap recall: (entries, transient). `entries` is a list of
+    [title, text, id] (possibly empty) when CT answered; None with
+    transient=True when the failure may clear (ct_wisdom's memo rule: a
+    discovery miss, a probe timeout, a recall timeout / exit / spawn and an
+    open breaker are NOT final). A parse error is final (entries []).
+    Timeouts and exits feed the shared breaker."""
     try:
+        breaker = breaker_for(wdir)
+        if breaker.is_open():
+            return None, True
         path, _dclass = find_ct(wdir, view, need_match=False)
         if path is None:
-            return ""
+            return None, True
         entries, rclass = ct_wisdom.recall_wiki(
             path, ct_wisdom.query_for({"cwd": cwd if isinstance(cwd, str) else ""}))
-        if rclass == "spawn":
-            drop_ct_cache(wdir)
-            ct_wisdom.reset_discovery_cache()
-        if rclass is not None or not entries:
-            return ""
-        entries = [e for e in entries if e[2] not in exclude]
-        return ct_wisdom.render_block(entries) if entries else ""
+        if rclass is not None:
+            _after_ct_failure(wdir, rclass, breaker)
+            return None, True
+        breaker.record_success()
+        return [[e[0], e[1], e[2]] for e in (entries or [])], False
     except Exception:
-        logger.debug("wisdom-da: bootstrap render failed", exc_info=True)
-        return ""
+        logger.debug("wisdom-da: bootstrap recall failed", exc_info=True)
+        return None, True
+
+
+def render_bootstrap(entries, exclude):
+    """The v1 bootstrap block (Hermes render_block) from recalled entries,
+    dropping the ones already in context; "" when nothing is left."""
+    kept = [tuple(e) for e in entries if e[2] not in exclude]
+    return ct_wisdom.render_block(kept) if kept else ""
+
+
+def ensure_boot_entries(view, wdir, sid, cwd):
+    """For a pending session: the cached bootstrap recall, recalling (and
+    caching) it when none is stored yet. Returns (entries | None, store)."""
+    store = load_store(wdir, sid)
+    if store is not None and store["boot_entries"] is not None:
+        return store["boot_entries"], store
+    entries, transient = recall_bootstrap(view, wdir, cwd)
+    with locked(session_path(wdir, sid)):
+        cur = load_store(wdir, sid) or new_store(sid)
+        if cur["state"] == "pending" and cur["boot_entries"] is None:
+            if transient:
+                cur["boot_attempts"] += 1
+                if cur["boot_attempts"] >= BOOTSTRAP_TRIES:
+                    cur["boot_entries"] = []  # give up: no block for this session
+            else:
+                cur["boot_entries"] = entries
+            save_store(wdir, sid, cur)
+    return cur["boot_entries"], cur
 
 
 def _line_count(text):
@@ -637,8 +585,13 @@ def before_llm_call(payload, view):
             return _skip(view, sid, "unreadable")
         seen = scan_messages(messages)
         prune(wdir)
-        block = render_bootstrap(view, wdir, payload.get("cwd"), set(seen))
         try:
+            entries, store = ensure_boot_entries(view, wdir, sid, payload.get("cwd"))
+            if entries is None:
+                # A transient recall failure: stay pending (no block, no
+                # deliveries) and retry on the next model call (spec D5).
+                return _skip(view, sid, "bootstrap_retry")
+            block = render_bootstrap(entries, set(seen))
             with locked(session_path(wdir, sid)):
                 cur = load_store(wdir, sid) or new_store(sid)
                 if cur["state"] == "off":
@@ -648,6 +601,7 @@ def before_llm_call(payload, view):
                     note_ids(cur, "seen_ids", seen)
                     cur["bootstrap_block"] = block
                     note_ids(cur, "bootstrap_ids", ct_ledger.scan_ids(block))
+                    cur["boot_entries"] = None
                 cur["step"] += 1
                 save_store(wdir, sid, cur)
         except LockTimeout:
@@ -657,13 +611,17 @@ def before_llm_call(payload, view):
             return _skip(view, sid, "store_failed")
         store = cur
     else:
-        with locked(session_path(wdir, sid)):
-            cur = load_store(wdir, sid)
-            if cur is None or cur["state"] != "on":
-                return _skip(view, sid, "store_changed")
-            cur["step"] += 1
-            save_store(wdir, sid, cur)
-        store = cur
+        # The stored block never changes once the session is on, so the
+        # unlocked read above is enough to insert it: a lock timeout only
+        # costs this call's step tick, never the block (cache-safe).
+        try:
+            with locked(session_path(wdir, sid)):
+                cur = load_store(wdir, sid)
+                if cur is not None and cur["state"] == "on":
+                    cur["step"] += 1
+                    save_store(wdir, sid, cur)
+        except LockTimeout:
+            _skip(view, sid, "lock_timeout")
     block = store["bootstrap_block"]
     if not block or not _messages_ok(messages):
         return None
@@ -679,13 +637,21 @@ def before_llm_call(payload, view):
 # ---------------------------------------------------------------------------
 
 
-def _expire_pending(view, sid, store, channel):
+def _expire_pending(view, sid, store):
     pending = store.get("pending_live")
     if isinstance(pending, dict):
         _skip(view, sid, "no_tool_call", channel="deferred", record=True,
               query=pending.get("query"), result=pending.get("result"),
               ledger=sorted(ledger_of(store)))
     store["pending_live"] = None
+
+
+def prompt_query(prompt):
+    """The user's own text: attached-file blocks (Docker Agent appends
+    `<attached_file path="…">…</attached_file>` for pasted or attached
+    content, pkg/app/app.go:974, pkg/chat/chat.go:335 at v1.150.0) are
+    removed, so file contents never reach CT; "" when nothing is left."""
+    return ct_wisdom_live.user_text(_ATTACHED_RE.sub("", prompt))
 
 
 def user_prompt_submit(payload, view):
@@ -702,20 +668,27 @@ def user_prompt_submit(payload, view):
             store = new_store(sid)
         if store["state"] == "off":
             return _skip(view, sid, "delivery_off", channel=channel, record=True)
-        _expire_pending(view, sid, store, channel)
-        store["turns"] += 1
+        _expire_pending(view, sid, store)
         save_store(wdir, sid, store)
     breaker = breaker_for(wdir)
     if breaker.is_open():
         return _skip(view, sid, "breaker_open", channel=channel, record=True)
-    query = ct_wisdom_live.user_text(prompt)
+    query = prompt_query(prompt)
     if not query:
         return _skip(view, sid, "empty_query", channel=channel, record=True)
+    exclude = exclude_of(store)
+    if store["state"] == "pending":
+        # The first message of a session runs before its first model call:
+        # recall the bootstrap now (cached for that call) so its facts are
+        # excluded and the message's 2 slots go to new facts.
+        entries, store = ensure_boot_entries(view, wdir, sid, payload.get("cwd"))
+        boot = [e[2] for e in entries or [] if e[2] not in exclude]
+        exclude = (boot + exclude)[: ct_wisdom_live.EXCLUDE_MAX]
     path, fclass = find_ct(wdir, view, need_match=True)
     if path is None:
         return _skip(view, sid, fclass, channel=channel, record=True)
     result, rclass = ct_wisdom_live.match_wisdom(
-        path, query, ct_wisdom_live.LIVE_MAX_PER_TURN, exclude_of(store))
+        path, query, ct_wisdom_live.LIVE_MAX_PER_TURN, exclude)
     if rclass is not None:
         _after_ct_failure(wdir, rclass, breaker)
         return _skip(view, sid, rclass, channel=channel, record=True, query=query)
@@ -725,7 +698,7 @@ def user_prompt_submit(payload, view):
         cur = load_store(wdir, sid)
         if cur is None or cur["state"] == "off":
             return _skip(view, sid, "store_changed", channel=channel, record=True)
-        ledger = ledger_of(cur)
+        ledger = ledger_of(cur) | {e[2] for e in cur["boot_entries"] or []}
         if transient and cur["state"] == "on":
             block, delivered = ct_wisdom_live.render_live_block(
                 result["entries"], result["corrections"], ledger)
@@ -741,7 +714,7 @@ def user_prompt_submit(payload, view):
         if not ct_wisdom_activity.render_candidates(result["entries"], result["corrections"], ledger):
             return _skip(view, sid, "zero_hits", channel="deferred", record=True,
                          query=query, result=result, ledger=sorted(ledger))
-        cur["pending_live"] = {"turn": cur["turns"], "query": query, "result": result}
+        cur["pending_live"] = {"query": query, "result": result}
         save_store(wdir, sid, cur)
     return None
 
@@ -784,7 +757,7 @@ def rewrite_recall(text, ledger):
     return json.dumps(inner, ensure_ascii=False), new_ids
 
 
-def _recall_dedup(payload, view, sid, wdir):
+def _recall_dedup(payload, sid, wdir):
     response = payload.get("tool_response")
     if not isinstance(response, str) or payload.get("tool_error"):
         return None
@@ -795,7 +768,7 @@ def _recall_dedup(payload, view, sid, wdir):
         updated, new_ids = rewrite_recall(response, ledger_of(store))
         if new_ids:
             save_store(wdir, sid, note_ids(store, "tool_ids", new_ids))
-    if updated is None or not updated:
+    if not updated:
         return None
     return {"hook_specific_output": {"hook_event_name": "tool_response_transform",
                                      "updated_tool_response": updated}}
@@ -809,7 +782,7 @@ def tool_response_transform(payload, view):
     name, category = payload.get("tool_name"), payload.get("tool_category")
     if da_activity.is_ct_tool(name, category):
         if da_activity.is_recall_tool(name, category):
-            return _recall_dedup(payload, view, sid, wdir)
+            return _recall_dedup(payload, sid, wdir)
         return _skip(view, sid, "ct_tool")
     response = payload.get("tool_response")
     if payload.get("tool_error"):
@@ -885,53 +858,57 @@ def tool_response_transform(payload, view):
         if cur is None or cur["state"] != "on":
             return _skip(view, sid, "store_changed")
         ledger = ledger_of(cur)
-        blocks, events = [], []
+        parts, events = [], []  # parts: (ids, block, delivery event); deferred first
         if live is not None:
             result = live.get("result") if isinstance(live.get("result"), dict) else {}
             block, delivered = render_deferred_block(
                 result.get("entries") or [], result.get("corrections") or [], ledger)
             if block:
-                blocks.append(block)
-                events.append(("delivery", {"channel": "deferred", "session_id": sid,
-                                            "query": live.get("query"), "result": result,
-                                            "ledger": sorted(ledger), "delivered": delivered,
-                                            "block": block, "tool_name": name}))
-                ledger = ledger | set(delivered)
-                note_ids(cur, "delivered_ids", delivered)
+                parts.append((delivered, block, {
+                    "channel": "deferred", "session_id": sid, "query": live.get("query"),
+                    "result": result, "ledger": sorted(ledger), "delivered": delivered,
+                    "block": block, "tool_name": name}))
             else:
                 events.append(("skip", {"channel": "deferred", "session_id": sid,
                                         "query": live.get("query"), "result": result,
                                         "ledger": sorted(ledger), "reason": "zero_hits"}))
         if act_result is not None:
+            taken = ledger | {i for p in parts for i in p[0]}
             chosen = None
             for item, superseded in ct_wisdom_activity.render_candidates(
-                    act_result["entries"], act_result["corrections"], ledger):
+                    act_result["entries"], act_result["corrections"], taken):
                 block = ct_wisdom_activity.render_activity_block(item, superseded, activity)
                 if block:
                     chosen = (item, block)
                     break
             if chosen is not None:
-                blocks.append(chosen[1])
-                events.append(("delivery", dict(act_base, channel="activity", session_id=sid,
-                                                result=act_result, ledger=sorted(ledger),
-                                                delivered=[chosen[0]["id"]], block=chosen[1],
-                                                tool_name=name)))
-                note_ids(cur, "delivered_ids", [chosen[0]["id"]])
+                parts.append(([chosen[0]["id"]], chosen[1], dict(
+                    act_base, channel="activity", session_id=sid, result=act_result,
+                    ledger=sorted(taken), delivered=[chosen[0]["id"]], block=chosen[1],
+                    tool_name=name)))
             else:
                 events.append(("skip", dict(act_base, channel="activity", session_id=sid,
-                                            result=act_result, ledger=sorted(ledger),
+                                            result=act_result, ledger=sorted(taken),
                                             reason="zero_hits")))
-        out = ct_wisdom_activity.splice(response, "\n\n".join(blocks)) if blocks else None
-        if out is not None and not _fits(out):
-            out = None
-            events = [("skip", dict(e[1], reason="near_limit")) if e[0] == "delivery" else e
-                      for e in events]
+        # All of it if it fits under the limiter; else the deferred block
+        # alone (it has priority); else nothing.
+        out, used = None, []
+        options = [parts] + ([parts[:1]] if live is not None and len(parts) > 1 else [])
+        for option in options if parts else []:
+            candidate = ct_wisdom_activity.splice(response, "\n\n".join(p[1] for p in option))
+            if candidate is not None and _fits(candidate):
+                out, used = candidate, option
+                break
+        for part in parts:
+            if part in used:
+                note_ids(cur, "delivered_ids", part[0])
+                events.append(("delivery", part[2]))
+            else:
+                events.append(("skip", dict(part[2], reason="near_limit")))
+        # Unused parts are not recorded as delivered, but the claimed pending
+        # result and step slot stay spent (at-most-once).
         if out is not None:
             save_store(wdir, sid, cur)
-        else:
-            # Nothing is emitted: the claimed ids are NOT recorded, but the
-            # claimed pending result and step slot stay spent (at-most-once).
-            pass
     for kind, event in events:
         _record(kind, view, event)
     if not out:

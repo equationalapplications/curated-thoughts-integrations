@@ -175,12 +175,21 @@ The store (D9) has `state` ∈ `pending` (created by `user_prompt_submit` before
    are never delivered again. `before_llm_call` carries exactly what the model is about to see, so
    the scan is complete for that context.
 3. Render the bootstrap: `ct recall` on the seed query plus the cwd basename (`ct_wisdom.query_for`),
-   entries whose id is already in the ledger dropped, `render_block`. Record `bootstrap_block`
-   (`""` on any failure, and then **never re-rendered**: a later first block would change the
-   system region) and `bootstrap_ids`. Write the store (D4 of the Claude Code leg: store before
-   emit), set `state = on`, then insert the block (D4).
+   entries whose id is already in the ledger dropped, `render_block`. The recall is cached in the
+   pending store (`boot_entries`), so a first message that ran before the first model call has
+   already paid for it (D6). **Transient failures are not final** (ct_wisdom's memo rule): a
+   discovery miss, a probe timeout, a recall timeout / exit / spawn or an open breaker leaves the
+   session `pending` (no block, no deliveries) and the next model call retries, at most
+   `BOOTSTRAP_TRIES = 3` calls; timeouts and exits feed the shared breaker. A CT answer (entries,
+   none, or a parse error) is final. Record `bootstrap_block` (`""` when nothing survived, and then
+   **never re-rendered**: a later first block would change the system region) and
+   `bootstrap_ids`. Write the store (D4 of the Claude Code leg: store before emit), set
+   `state = on`, then insert the block (D4).
 4. Any exception, or a store write that fails, removes the store and inserts nothing: every
    later trigger then rescans, which is the fail-closed path.
+
+For a session already `on`, the stored block is immutable, so it is inserted from an unlocked
+read: a store-lock timeout costs that call's step tick, never the block (PR #59 review).
 
 A session id that already has a store in `on` is never rescanned. Branching creates a new id
 (investigation §3), so a branch is always scanned.
@@ -189,12 +198,19 @@ A session id that already has a store in `on` is never rescanned. Branching crea
 
 `user_prompt_submit` (and `user_followup_submit`):
 
-- Skip unless `session_id` and a non-empty `prompt` exist, and the prompt does not start with a
-  harness envelope tag (the Claude Code D5 rule, kept as defense; Docker Agent fires this event
-  only for real user messages, P6).
+- Skip unless `session_id` and a non-empty `prompt` exist, and the prompt does not start with
+  `<system-update>`, the one host envelope Docker Agent puts at the start of a user message at the
+  pin (`pkg/session/session.go:1113`). A prompt that merely starts with a tag (`<div> is not
+  centered`) is the user's. Docker Agent fires this event only for real user messages (P6).
+- The query is the prompt with every `<attached_file path="…">…</attached_file>` block removed
+  (pasted and attached content, `pkg/app/app.go:974`, `pkg/chat/chat.go:335`), so file contents
+  never reach CT; nothing left → no query.
 - Load the store, or create it in `pending`. `off` → skip. Breaker open → skip.
-- `match_wisdom(path, user_text(prompt), 2, exclude = ledger newest-first ≤ 256)`.
-- Write `pending_live = {"turn": n, "result": <match result>}`, **replacing** any unclaimed
+- A `pending` session (its first message runs before its first model call) recalls the bootstrap
+  now and caches it (D5 step 3), so the match excludes the bootstrap's ids and the message's two
+  slots go to new facts.
+- `match_wisdom(path, query, 2, exclude = bootstrap recall ids + ledger newest-first ≤ 256)`.
+- Write `pending_live = {"query": q, "result": <match result>}`, **replacing** any unclaimed
   pending result (it expired with its turn; verbose records it as `no_tool_call`). Emit nothing.
 
 `tool_response_transform`, for any tool result that is **eligible**:
@@ -275,7 +291,9 @@ counts as seen once a query starts). The CT call (`match_wisdom(..., 1, exclude)
 the lock with the 3 s budget. After it, under the lock, the first candidate whose id is still not
 in the ledger is rendered with `render_activity_block` (heading
 `## Curated Thoughts — relevant to this step`, `_for: <label>`, marker first, ≤ 600 chars), the id
-is recorded, the store is written, and the spliced result is emitted. Splicing and the limiter
+is recorded, the store is written, and the spliced result is emitted. If the per-message block
+and the activity block together would not fit under the limiter margin, the per-message block is
+tried alone (it has priority); the activity fact is then not recorded. Splicing and the limiter
 margin follow D6. When a deferred per-message block rides the same result, it goes first and the
 activity block follows it.
 
@@ -319,8 +337,13 @@ is harmless (named limit 8).
 - `breaker.json`: the Claude Code persisted breaker (3 timeout/exit failures pause CT calls 300 s,
   shared by every event).
 - `ct.json`: the accepted `ct` path with its size and mtime, and whether `wisdom match` exists,
-  valid for 24 h. A hit skips the two probe subprocesses; a `spawn` failure deletes it.
-- Housekeeping: a session's first `before_llm_call` prunes session files older than 30 days.
+  valid for 24 h, and only under the discovery view it was written in (a digest of `PATH`,
+  `HOME`, `USERPROFILE`, `LOCALAPPDATA`). A hit skips the two probe subprocesses; a `spawn` failure deletes it.
+- Housekeeping: a session's first `before_llm_call` prunes session stores older than 30 days.
+  **Lock files are never deleted:** unlinking a lock file another process has open (or is about
+  to lock) lets two processes each hold an "exclusive" lock on different inodes. The store, lock,
+  prune and breaker primitives live in `hooks/ct_hook_store.py`, byte-identical with Claude
+  Code's copy (which had this prune bug; fixed in claude-code 0.3.3) and parity-gated.
 
 ### D10. Verbose mode
 
@@ -397,6 +420,7 @@ verbose on, a record where noted.
 | `sandbox` | every event | `SANDBOX_VM_ID` set (D2) |
 | `no_payload` | every event | stdin empty or not a JSON object, no `session_id` |
 | `unreadable` | before_llm_call | `messages` not a list of objects → `state = off` for life |
+| `bootstrap_retry` | before_llm_call | transient bootstrap recall failure: stays `pending`, retried (≤ 3 calls) |
 | `store_failed` | before_llm_call | store could not be written → store removed, no insertion |
 | `no_store` / `pending` | tool events | the session was never scanned |
 | `delivery_off` | every event | `state = off` |
