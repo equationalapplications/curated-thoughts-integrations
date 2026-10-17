@@ -10,7 +10,7 @@ common architecture.
 
 | Harness | Directory | Status | Version |
 |---------|-----------|--------|---------|
-| [Hermes Agent](https://github.com/NousResearch/hermes-agent) | [`integrations/hermes/`](integrations/hermes/) | implemented | [0.6.4](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=hermes) |
+| [Hermes Agent](https://github.com/NousResearch/hermes-agent) | [`integrations/hermes/`](integrations/hermes/) | implemented | [0.6.5](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=hermes) |
 | DeepSeek Harness | [`integrations/deepseek/`](integrations/deepseek/) | implemented | [0.5.1](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=deepseek) |
 | OpenCode | [`integrations/opencode/`](integrations/opencode/) | implemented | [0.3.0](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=opencode) |
 | OpenClaw | [`integrations/openclaw/`](integrations/openclaw/) | implemented | [0.2.1](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=openclaw) |
@@ -119,9 +119,19 @@ keyed to what the agent is doing:
   `src/billing/invoice.py`, `pnpm test` or a search pattern. For shell
   commands that is the program plus the unquoted word right after it,
   never a flag's value or the rest of the command line. The one exception
-  is `python -m <module>`, which sends the module name (`python3 pytest`). Credential-shaped search
-  patterns are not sent at all. File contents, tool output, diffs
-  and the agent's own words are never sent.
+  is `python -m <module>`, which sends the module name (`python3 pytest`).
+  File contents, tool output, diffs and the agent's own words are never sent.
+- **Privacy (since hermes 0.6.5):** a file path is sent only when it is
+  inside a project (the nearest folder above the session's working
+  directory holding `.git`, `.hg`, `pyproject.toml`, `package.json`,
+  `Cargo.toml`, `go.mod`, `pom.xml`, `build.gradle`, `Gemfile`,
+  `composer.json`, a `*.sln` or `.curated-thoughts-project`, but never your
+  home folder or above it), and only relative to that project. Files outside
+  a project get no autonomous-work wisdom. Nothing naming you (`USER`,
+  `LOGNAME`, `USERNAME`, your home folder's name) is ever sent. A search
+  pattern is sent only if it is plain words (letters, digits, `_ . -`, at
+  most 6 words and 80 chars) with no key-shaped or auth word. To opt a
+  folder in without a build file, add an empty `.curated-thoughts-project`.
 - **Delivered as:** at most 1 fact in at most 600 characters, added to that
   tool's result under `## Curated Thoughts — relevant to this step`, with
   the same `ct-fact` marker and at-most-once rule as every other delivery.

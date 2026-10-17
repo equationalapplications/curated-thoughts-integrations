@@ -8,10 +8,12 @@ Run: python3 -m unittest tests.test_ct_wisdom_activity -v
 
 from __future__ import annotations
 
+import atexit
 import json
 import os
 import random
 import shlex
+import shutil
 import sys
 import tempfile
 import threading
@@ -28,6 +30,30 @@ import ct_wisdom_live  # noqa: E402
 import ct_wisdom_verbose  # noqa: E402
 
 ORIGINAL_SEAM = act._record_activity_delivery
+
+
+def make_tree(base, entries):
+    """Create `entries` under `base`: "x/" a directory, "x" an empty file."""
+    for entry in entries:
+        path = os.path.join(base, *entry.rstrip("/").split("/"))
+        if entry.endswith("/"):
+            os.makedirs(path, exist_ok=True)
+        else:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            Path(path).touch()
+
+
+def temp_base():
+    base = os.path.realpath(tempfile.mkdtemp(prefix="ct-activity-test-"))
+    atexit.register(shutil.rmtree, base, True)
+    return base
+
+
+# Privacy amendment 4: a path is sent only inside a project root. Every test
+# that needs one uses this temp project (never the checkout, so the suite
+# also runs from outside it).
+PROJ = temp_base()
+make_tree(PROJ, [".git/"])
 
 
 # ---------------------------------------------------------------------------
@@ -77,49 +103,105 @@ class TestActivityLine(unittest.TestCase):
     def test_cases(self):
         for tool, args, line, query in CASES:
             with self.subTest(tool=tool, args=args):
-                a = act.activity_for(tool, args, cwd="/work/repo")
+                a = act.activity_for(tool, args, cwd=PROJ)
                 self.assertIsNotNone(a)
                 self.assertEqual(a.line, line)
                 self.assertEqual(act.query_for(a), query)
 
     def test_query_never_has_the_verb(self):
         for tool, args, line, _ in CASES:
-            a = act.activity_for(tool, args, cwd="/work/repo")
+            a = act.activity_for(tool, args, cwd=PROJ)
             verb = line.split(" ", 1)[0]
             self.assertFalse(act.query_for(a).startswith(verb + " "), line)
 
-    def test_paths(self):
-        cwd = "/work/repo"
-        env = {"USER": "alice", "HOME": "/Users/alice"}
-        self.assertEqual(act.normalize_path("/work/repo/src/x.py", cwd, env), "src/x.py")
-        # Privacy amendment R2: outside cwd, the basename only.
-        self.assertEqual(act.normalize_path("/Users/alice/other/proj/y.py", cwd, env), "y.py")
-        self.assertEqual(act.normalize_path("~/notes/z.md", cwd, env), "z.md")
-        # 0.6.3 R1: HOME itself is not a valid cwd; a project inside it is.
-        self.assertEqual(act.normalize_path("~/notes/z.md", "/Users/alice", env), "z.md")
-        self.assertEqual(act.normalize_path("~/proj/z.md", "/Users/alice/proj", env), "z.md")
-        self.assertEqual(act.normalize_path("../../etc/passwd", cwd, env), "etc/passwd")
-        self.assertEqual(act.normalize_path("a\\b\\c.py", cwd, env), "a/b/c.py")
-        self.assertEqual(act.normalize_path("./", cwd, env), None)
-        self.assertEqual(act.normalize_path("", cwd, env), None)
-        self.assertEqual(act.normalize_path(None, cwd, env), None)
-        self.assertLessEqual(len(act.normalize_path("d/" * 300 + "f.py", cwd, env)),
-                             act.TARGET_CHARS)
+    def world(self):
+        base = temp_base()
+        home = os.path.join(base, "Users", "alice")
+        proj = os.path.join(home, "code", "proj")
+        make_tree(proj, [".git/"])
+        return base, home, proj, {"USER": "alice", "HOME": home}
 
-    def test_cwd_validity(self):
-        env = {"USER": "alice", "HOME": "/Users/alice"}
-        for cwd in ("", "/", "/Users", "/home", "/work", "C:/", "C:\\", "C:\\Users", "c:",
-                    "relative/dir", None, "/Users/alice", "~", "/home/bob", "C:foo",
-                    "C:\\Users\\bob"):
-            with self.subTest(cwd=cwd):
-                self.assertIsNone(act.valid_cwd(cwd, env))
-        self.assertIsNone(act.valid_cwd("/var/lib", {"HOME": "/var/lib/alice"}))
-        self.assertIsNone(act.valid_cwd("/data/home", {"HOME": "/data/home/alice"}))
-        self.assertEqual(act.valid_cwd("/Users/alice/proj", env), "/Users/alice/proj")
-        self.assertEqual(act.valid_cwd("~/proj", env), "/Users/alice/proj")
-        self.assertEqual(act.valid_cwd("/root/app", {"HOME": "/root"}), "/root/app")
-        self.assertEqual(act.valid_cwd("/work/repo/", env), "/work/repo")
-        self.assertEqual(act.valid_cwd("C:\\Users\\carol\\proj", {}), "c:/Users/carol/proj")
+    def test_paths(self):
+        base, home, proj, env = self.world()
+        n = act.normalize_path
+        self.assertEqual(n(os.path.join(proj, "src", "x.py"), proj, env), "src/x.py")
+        self.assertEqual(n("x.py", os.path.join(proj, "src"), env), "src/x.py")
+        self.assertEqual(n("src/../a.py", proj, env), "a.py")
+        self.assertEqual(n("a\\b\\c.py", proj, env), "a/b/c.py")
+        self.assertEqual(n("~/code/proj/a.md", proj, env), "a.md")
+        # Privacy amendment 4: everything outside the root is no query.
+        for raw in (os.path.join(home, "notes.txt"), "~/notes/z.md", "~", "~bob/x.md",
+                    "../../etc/passwd", "../other/x.py", "./", "", None, "C:foo.md",
+                    "\\\\?\\C:\\", "/mnt/c:", "docs/a:b.md"):
+            with self.subTest(raw=raw):
+                self.assertIsNone(n(raw, proj, env))
+        self.assertIsNone(n("src/x.py", "", env))
+        self.assertIsNone(n("src/x.py", home, env))
+        self.assertIsNone(n("src/x.py", base, env))
+        self.assertLessEqual(len(n("d/" * 300 + "f.py", proj, env)), act.TARGET_CHARS)
+
+    def test_project_root(self):
+        base, home, proj, env = self.world()
+        self.assertEqual(act.project_root(proj, env), proj)
+        self.assertEqual(act.project_root(os.path.join(proj, "a", "b"), env), proj)
+        self.assertIsNone(act.project_root("", env))
+        self.assertIsNone(act.project_root("relative/dir", env))
+        # HOME and its ancestors are never a root, and the search stops there.
+        make_tree(home, [".git/", "notes/"])
+        make_tree(base, ["Users/package.json"])
+        act.reset_state()
+        self.assertIsNone(act.project_root(home, env))
+        self.assertIsNone(act.project_root(os.path.join(home, "notes"), env))
+        self.assertEqual(act.project_root(proj, env), proj)
+        # Every marker, and *.sln.
+        for i, marker in enumerate(act.ROOT_MARKERS + ("App.sln",)):
+            d = os.path.join(base, "srv", "p%d" % i)
+            make_tree(d, [marker + ("/" if marker in (".git", ".hg") else "")])
+            self.assertEqual(act.project_root(os.path.join(d, "src"), env), d, marker)
+
+    def test_project_root_never_top_level(self):
+        """A filesystem root and its direct children are never a root, so
+        HOME=/ cannot make /home or /srv one."""
+        orig = act._has_marker
+        act._has_marker = lambda directory: True
+        self.addCleanup(setattr, act, "_has_marker", orig)
+        act.reset_state()
+        self.addCleanup(act.reset_state)
+        top = os.path.realpath(os.sep)
+        self.assertIsNone(act.project_root(top, {"HOME": top}))
+        self.assertIsNone(act.project_root(os.path.join(top, "nonexistent-ct"), {"HOME": top}))
+        deep = os.path.join(top, "nonexistent-ct", "app")
+        self.assertEqual(act.project_root(deep, {"HOME": top}), os.path.realpath(deep))
+
+    def test_project_root_cached_and_no_subprocess(self):
+        base = temp_base()
+        d = os.path.join(base, "srv", "late")
+        make_tree(d, ["src/"])
+        act.reset_state()
+        self.addCleanup(act.reset_state)
+        import subprocess
+
+        def no_subprocess(*a, **k):
+            raise AssertionError("project_root must not run a subprocess")
+
+        orig_popen = subprocess.Popen
+        subprocess.Popen = no_subprocess
+        self.addCleanup(setattr, subprocess, "Popen", orig_popen)
+        self.assertIsNone(act.project_root(d, {}))
+        make_tree(d, [".git/"])
+        self.assertIsNone(act.project_root(d, {}))  # cached
+        now = [1000.0]
+        orig_clock = act._root_clock
+        act._root_clock = lambda: now[0]
+        self.addCleanup(setattr, act, "_root_clock", orig_clock)
+        act.reset_state()
+        self.assertEqual(act.project_root(d, {}), d)
+        make_tree(base, ["srv/late2/"])
+        d2 = os.path.join(base, "srv", "late2")
+        self.assertIsNone(act.project_root(d2, {}))
+        make_tree(d2, ["go.mod"])
+        now[0] += act._ROOT_CACHE_TTL + 1
+        self.assertEqual(act.project_root(d2, {}), d2)
 
     def test_no_line(self):
         for tool, args in [
@@ -137,7 +219,7 @@ class TestActivityLine(unittest.TestCase):
             ("read_file", "not-a-dict"),
         ]:
             with self.subTest(tool=tool, args=args):
-                self.assertIsNone(act.activity_for(tool, args, cwd="/w"))
+                self.assertIsNone(act.activity_for(tool, args, cwd=PROJ))
 
     def test_ct_tools(self):
         for name in ("mcp__curated-thoughts__curated_recall_context",
@@ -156,7 +238,7 @@ class TestActivityLine(unittest.TestCase):
             ("search_files", {"pattern": "p", "file_glob": secret, "context": secret}),
             ("terminal", {"command": "ls", "workdir": secret}),
         ]:
-            a = act.activity_for(tool, args, cwd="/w")
+            a = act.activity_for(tool, args, cwd=PROJ)
             self.assertNotIn(secret, a.line)
             self.assertNotIn(secret, act.query_for(a))
 
@@ -170,7 +252,7 @@ class TestActivityLine(unittest.TestCase):
         for _ in range(500):
             parts = [rng.choice(words + nasty) for _ in range(rng.randint(1, 7))]
             command = " ".join(parts)
-            a = act.activity_for("terminal", {"command": command}, cwd="/w")
+            a = act.activity_for("terminal", {"command": command}, cwd=PROJ)
             if a is None:
                 continue
             query = act.query_for(a)
@@ -231,74 +313,99 @@ class TestActivityLine(unittest.TestCase):
                 self.assertFalse(any(w.startswith("-") for w in query.split()), pattern)
 
     def test_randomized_paths_privacy(self):
-        """Privacy amendment R1/R2: every tool path, under any cwd, drops the
-        user name, and outside a valid cwd keeps the basename only."""
-        rng = random.Random(20261018)
-        envs = [{"USER": "zelda", "LOGNAME": "zelda", "HOME": "/Users/zelda"},
-                {"USER": "zelda", "HOME": "/"}, {"USERNAME": "zelda", "HOME": "/root"}]
-        heads = ["/Users/zelda", "/home/zelda", "~", "/", "/work/repo", "C:\\Users\\zelda",
-                 "/srv", "..", "", "Users/zelda", "zelda", "./", "C:", "C:..", "\\etc",
-                 "/Users/zelda/proj", "/home/runner", "\\\\?\\C:", "/C:", "/mnt/c:",
-                 "\\\\?\\C:\\Users\\zelda", "/home/bob"]
+        """Privacy amendment 4: on a real temp tree, every query is a path
+        strictly inside the cwd's project root, never naming the user."""
+        rng = random.Random(20261019)
+        base = temp_base()
+        home = os.path.join(base, "Users", "zelda")
+        proj = os.path.join(home, "code", "proj")
+        other = os.path.join(base, "srv", "other")
+        make_tree(base, ["Users/zelda/code/proj/.git/", "Users/zelda/code/proj/src/",
+                         "Users/zelda/private/", "srv/other/package.json", "home/bob/",
+                         "Users/package.json"])
+        try:
+            os.symlink(os.path.join(home, "private"), os.path.join(proj, "escape"),
+                       target_is_directory=True)
+        except (OSError, NotImplementedError):
+            pass
+        # `base` stands in for `/`: it and its direct children are top level.
+        orig_top = act._top_level
+        act._top_level = lambda d: (os.path.dirname(d) == base or d == base
+                                    or not d.startswith(base) or orig_top(d))
+        self.addCleanup(setattr, act, "_top_level", orig_top)
+        act.reset_state()
+        self.addCleanup(act.reset_state)
+        envs = [{"USER": "zelda", "HOME": home}, {"USERNAME": "zelda", "HOME": base},
+                {"LOGNAME": "zelda"}, {"USER": "zelda", "HOME": base + os.sep}]
+        heads = [proj, home, base, other, "~", "~/code/proj", "..", "../..", "", ".",
+                 "C:", "C:..", "\\\\?\\C:", "/mnt/c:", "\\etc",
+                 os.path.join(base, "home", "bob"), os.path.join(proj, "escape"),
+                 os.path.join(proj, "src")]
         mids = ["clients", "acme", "zelda", "Zelda", "src", "..", ".", "home", "Users",
                 "secret-plans", "d\u00e9j\u00e0", "zelda.txt", "my-zelda", "ZELDA@corp",
-                "root", "node"]
-        cwds = ["", "/", "/Users", "/home", "/work", "/work/repo", "/Users/zelda", "C:/",
-                "C:\\Users\\zelda", "/Users/zelda/proj", "~", "/home/bob", "/mnt/c:"]
-        for _ in range(1000):
+                "root", "node", "zz", "a:b"]
+        cwds = [proj, os.path.join(proj, "src"), home, base, other, "",
+                os.path.join(base, "home"), os.path.join(home, "code")]
+        sent = 0
+        for _ in range(1500):
             segs = [rng.choice(mids) for _ in range(rng.randint(0, 4))]
             head = rng.choice(heads)
-            sep = "\\" if head.startswith("C:") else "/"
+            sep = rng.choice(["/", "\\"])
             raw = sep.join(([head] if head else []) + segs + ["f%d.md" % rng.randint(0, 9)])
-            cwd = rng.choice(cwds)
-            env = rng.choice(envs)
-            tool = rng.choice(["read_file", "write_file", "patch"])
-            a = act.activity_for(tool, {"path": raw}, cwd=cwd, env=env)
+            cwd, env = rng.choice(cwds), rng.choice(envs)
+            a = act.activity_for(rng.choice(["read_file", "write_file", "patch"]),
+                                 {"path": raw}, cwd=cwd, env=env)
             if a is None:
                 continue
+            sent += 1
             query = act.query_for(a)
             comps = query.split("/")
-            self.assertNotIn("zelda", query.casefold(), (raw, cwd, query))
-            self.assertNotIn("bob", query, (raw, cwd, env, query))
-            self.assertNotIn("\\", query, (raw, cwd))
-            self.assertNotIn("~", query, (raw, cwd))
-            self.assertFalse(query.startswith("/"), (raw, cwd))
-            self.assertNotIn(":", query, (raw, cwd))
-            self.assertTrue(a.line.endswith(" " + query), (raw, cwd))
-            under = act.valid_cwd(cwd, env)
-            absolute = raw.startswith(("/", "~", "C:", "\\"))
-            if absolute and under is None:
-                self.assertEqual(len(comps), 1, (raw, cwd, query))
+            ctx = (raw, cwd, env, query)
+            self.assertNotIn("zelda", query.casefold(), ctx)
+            self.assertNotIn(base, query, ctx)
+            for bad in ("\\", ":", "~"):
+                self.assertNotIn(bad, query, ctx)
+            self.assertFalse(set(comps) & {"", ".", ".."}, ctx)
+            self.assertTrue(a.line.endswith(" " + query), ctx)
+            root = act.project_root(cwd, env)
+            self.assertIn(root, (proj, other), ctx)
+            # No output component exists outside the root.
+            real = os.path.realpath(os.path.join(root, *comps))
+            self.assertIsNotNone(act._below(real, root), ctx)
+        self.assertGreater(sent, 50)
 
     def test_credential_shaped_search_pattern_rejected(self):
         for pattern in ("sk-live-abcdef", "find ghp_abcdefghijklmnop1234 here",
                         "AKIAABCDEFGHIJKLMNOP", "token a1b2c3d4e5f6g7h8i9"):
-            self.assertIsNone(act.activity_for("search_files", {"pattern": pattern}, cwd="/w"),
+            self.assertIsNone(act.activity_for("search_files", {"pattern": pattern}, cwd=PROJ),
                               pattern)
-        self.assertIsNotNone(act.activity_for("search_files", {"pattern": "error 404"}, cwd="/w"))
+        self.assertIsNotNone(act.activity_for("search_files", {"pattern": "error 404"}, cwd=PROJ))
 
     def test_own_marker_or_heading_is_never_a_target(self):
         for pattern in ("ct-fact:evil", "## Curated Thoughts \u2014 relevant now", "a\nb"):
-            self.assertIsNone(act.activity_for("search_files", {"pattern": pattern}, cwd="/w"))
+            self.assertIsNone(act.activity_for("search_files", {"pattern": pattern}, cwd=PROJ))
 
     def test_query_caps(self):
-        a = act.activity_for("search_files", {"pattern": "x" * 80, "path": "y" * 600}, cwd="/w")
+        a = act.activity_for("search_files", {"pattern": "x" * 80, "path": "y" * 600}, cwd=PROJ)
+        self.assertLessEqual(len(a.line), len("search ") + 80 + len(" in ") + act.TARGET_CHARS)
         self.assertLessEqual(len(act.query_for(a)), act.ACTIVITY_QUERY_CHARS)
         self.assertLessEqual(len(a.query), act.TARGET_CHARS)
         # 0.6.3 allowlist: over 80 chars is refused, never truncated.
-        self.assertIsNone(act.activity_for("search_files", {"pattern": "x" * 81}, cwd="/w"))
+        self.assertIsNone(act.activity_for("search_files", {"pattern": "x" * 81}, cwd=PROJ))
 
     def test_keys_use_full_local_path(self):
-        env = {"USER": "alice", "HOME": "/Users/alice"}
-        a = act.activity_for("read_file", {"path": "/srv/a/README.md"}, cwd="/", env=env)
-        b = act.activity_for("read_file", {"path": "/srv/b/README.md"}, cwd="/", env=env)
+        base = temp_base()
+        make_tree(base, ["srv/a/.git/", "srv/b/.git/"])
+        pa, pb = os.path.join(base, "srv", "a"), os.path.join(base, "srv", "b")
+        a = act.activity_for("read_file", {"path": "README.md"}, cwd=pa, env={})
+        b = act.activity_for("read_file", {"path": "README.md"}, cwd=pb, env={})
         self.assertEqual((a.query, b.query), ("README.md", "README.md"))
         self.assertNotEqual(a.key, b.key)
         # The same file by two spellings is one key; read/write/edit fold.
-        c = act.activity_for("patch", {"path": "README.md"}, cwd="/srv/a", env=env)
+        c = act.activity_for("patch", {"path": os.path.join(pa, "README.md")}, cwd=pa, env={})
         self.assertEqual(a.key, c.key)
         # The key never holds the raw path.
-        self.assertNotIn("/srv/a", repr(a.key))
+        self.assertNotIn(base, repr(a.key))
 
     def test_user_names_once_per_call(self):
         calls = []
@@ -314,7 +421,7 @@ class TestActivityLine(unittest.TestCase):
         act.activity_for("terminal", {"command": "make all"}, cwd="/w/r", env={})
         self.assertEqual(len(calls), 2)
 
-    def test_service_accounts_and_short_names_not_private(self):
+    def test_user_names_and_name_hit(self):
         for user in ("root", "node", "app", "user", "admin", "test", "ubuntu", "runner",
                      "docker", "www-data", "nobody", "daemon", "ec2-user", "vscode",
                      "codespace"):
@@ -322,17 +429,30 @@ class TestActivityLine(unittest.TestCase):
                              frozenset(), user)
         self.assertEqual(act.user_names({"USER": "Alice", "HOME": "/home/bob"}),
                          frozenset({"alice", "bob"}))
-        # Privacy amendment 3: HOME's basename counts only directly under
-        # /Users, /home or C:\Users; short names count (exact match only).
-        for home in ("/github/home", "/opt/build", "/var/lib/jenkins", "/", "/root",
-                     "/data/home/alice", "D:\\Profiles\\erin"):
-            self.assertEqual(act.user_names({"HOME": home}), frozenset(), home)
-        self.assertEqual(act.user_names({"USERPROFILE": "C:\\USERS\\Erin"}), frozenset({"erin"}))
+        # Privacy amendment 4: HOME's and USERPROFILE's basenames always count.
+        self.assertEqual(act.user_names({"HOME": "/nfs/home/alice"}), frozenset({"alice"}))
+        self.assertEqual(act.user_names({"USERPROFILE": "D:\\Profiles\\erin"}),
+                         frozenset({"erin"}))
+        self.assertEqual(act.user_names({"HOME": "/"}), frozenset())
         self.assertEqual(act.user_names({"USER": "jo"}), frozenset({"jo"}))
-        names = act.user_names({"USER": "jo"})
-        self.assertTrue(act._has_name("JO", names))
-        self.assertFalse(act._has_name("join.py", names))
-        self.assertTrue(act._has_name("Sample.py", act.user_names({"USER": "sam"})))
+        hit = act.name_hit
+        self.assertTrue(hit("JO.md", {"jo"}))
+        self.assertTrue(hit("docs/jo-notes", {"jo"}))
+        self.assertFalse(hit("src/join.py", {"jo"}))
+        self.assertTrue(hit("src/Sample.py", {"sam"}))
+        self.assertTrue(hit("docs/john_smith.md", {"john smith"}))
+        self.assertTrue(hit("docs/John Smith notes.md", {"john smith"}))
+        self.assertFalse(hit("docs/plan.md", {"john smith"}))
+        self.assertTrue(hit("docs/jose\u0301.md", {"jos\u00e9"}))
+        self.assertFalse(hit("anything", frozenset()))
+
+    def test_word_check(self):
+        names = {"alice"}
+        for word, verdict in (("tests/billing", "ok"), ("mypkg.cli", "ok"), ("alice", "name"),
+                              ("x/alice_notes.txt", "name"), ("../x", "shape"),
+                              ("/etc/passwd", "shape"), ("~/x", "shape"), ("C:foo", "shape"),
+                              ("a\\b", "shape")):
+            self.assertEqual(act.word_check(word, names), verdict, word)
 
     def test_session_cwd_is_lazy(self):
         calls = []
@@ -340,17 +460,20 @@ class TestActivityLine(unittest.TestCase):
 
         def counting(task_id=None):
             calls.append(task_id)
-            return "/srv/proj"
+            return PROJ
 
         act.session_cwd = counting
         self.addCleanup(setattr, act, "session_cwd", orig)
         act.activity_for("terminal", {"command": "make all"}, env={}, task_id="t1")
         act.activity_for("web_search", {"query": "x"}, env={}, task_id="t1")
-        self.assertEqual(calls, [])
-        a = act.activity_for("read_file", {"path": "/srv/proj/src/a.py"}, env={}, task_id="t1")
-        self.assertEqual(a.query, "src/a.py")
         act.activity_for("search_files", {"pattern": "TODO"}, env={}, task_id="t2")
-        self.assertEqual(calls, ["t1", "t2"])
+        act.activity_for("read_file", {}, env={}, task_id="t2")
+        self.assertEqual(calls, [])
+        a = act.activity_for("read_file", {"path": "src/a.py"}, env={}, task_id="t1")
+        self.assertEqual(a.query, "src/a.py")
+        act.activity_for("search_files", {"pattern": "TODO", "path": "src"}, env={},
+                         task_id="t3")
+        self.assertEqual(calls, ["t1", "t3"])
 
     def test_session_cwd_prefers_hermes_session_record(self):
         fake = type(sys)("tools.terminal_tool")
@@ -388,7 +511,7 @@ class TestActivityLine(unittest.TestCase):
 
 class TestActivityState(unittest.TestCase):
     def key(self, tool, path):
-        return act.activity_for(tool, {"path": path}, cwd="/w").key
+        return act.activity_for(tool, {"path": path}, cwd=PROJ).key
 
     def test_one_start_per_step(self):
         st = act.ActivityState()
@@ -414,11 +537,11 @@ class TestActivityState(unittest.TestCase):
     def test_run_and_search_keys_distinct_from_files(self):
         st = act.ActivityState()
         self.assertIsNone(st.admit("s", "r1", act.activity_for(
-            "terminal", {"command": "make test"}, cwd="/w").key))
+            "terminal", {"command": "make test"}, cwd=PROJ).key))
         self.assertIsNone(st.admit("s", "r2", act.activity_for(
-            "search_files", {"pattern": "make test"}, cwd="/w").key))
+            "search_files", {"pattern": "make test"}, cwd=PROJ).key))
         self.assertEqual(st.admit("s", "r3", act.activity_for(
-            "terminal", {"command": "make test -j4"}, cwd="/w").key), "seen_key")
+            "terminal", {"command": "make test -j4"}, cwd=PROJ).key), "seen_key")
 
 
 # ---------------------------------------------------------------------------
@@ -443,6 +566,10 @@ class Harness(unittest.TestCase):
         orig_breaker = ct_wisdom_live._BREAKER
         ct_wisdom_live._BREAKER = ct_wisdom_live.Breaker()
         self.addCleanup(setattr, ct_wisdom_live, "_BREAKER", orig_breaker)
+        old_cwd = os.environ.get("TERMINAL_CWD")
+        os.environ["TERMINAL_CWD"] = PROJ
+        self.addCleanup(lambda: os.environ.__setitem__("TERMINAL_CWD", old_cwd)
+                        if old_cwd is not None else os.environ.pop("TERMINAL_CWD", None))
         self.calls = []
         self.match_result = ({"entries": [item("f1")], "corrections": []}, None)
         self.deliveries = []
@@ -776,7 +903,7 @@ class TestMarkerHygiene(Harness):
             ("terminal", {"command": block}),
             ("patch", {"path": "a.py", "old_string": block, "new_string": block}),
         ]:
-            a = act.activity_for(tool, args, cwd="/w")
+            a = act.activity_for(tool, args, cwd=PROJ)
             if a is None:
                 continue
             q = act.query_for(a)
@@ -787,7 +914,7 @@ class TestMarkerHygiene(Harness):
     def test_history_scan_finds_activity_markers(self):
         out, _ = self.delivered_block()
         text_out = "plain\n\n" + act.render_activity_block(item("f9"), [], act.activity_for(
-            "read_file", {"path": "a.py"}, cwd="/w"))
+            "read_file", {"path": "a.py"}, cwd=PROJ))
         history = [{"role": "tool", "content": out}, {"role": "tool", "content": text_out}]
         self.assertEqual(sorted(ct_ledger.history_ids(history)), ["f1", "f9"])
 
@@ -807,7 +934,7 @@ class TestMarkerHygiene(Harness):
         self.assertIn("f1", ct_ledger.LEDGER_CACHE.get("s9"))  # and it is ledgered
 
     def test_marker_precedes_fact_content(self):
-        a = act.activity_for("read_file", {"path": "a.py"}, cwd="/w")
+        a = act.activity_for("read_file", {"path": "a.py"}, cwd=PROJ)
         for it, sup in [(item("f1"), []), (item("c1", supersedes=["o"]), ["o"]),
                         (item("f2", text="x" * 5000), [])]:
             block = act.render_activity_block(it, sup, a)
@@ -951,20 +1078,24 @@ class TestVerboseWiring(Harness):
             self.addCleanup(lambda n=name, o=old: os.environ.__setitem__(n, o)
                             if o is not None else os.environ.pop(n, None))
         ct_ledger.LEDGER_CACHE.put("s1", set())
-        args = {"path": "/Users/alice/clients/acme/contract.md"}
+        args = {"path": os.path.join(PROJ, "clients", "acme", "contract.md")}
         self.pre(args=args)
         out = self.post(READ_RESULT, args=args)
         block = json.loads(out)[act.ACTIVITY_RESULT_KEY]
-        self.assertIn("_for: read contract.md_", block)
-        self.assertEqual(self.calls[-1]["text"], "contract.md")
+        self.assertIn("_for: read clients/acme/contract.md_", block)
+        self.assertEqual(self.calls[-1]["text"], "clients/acme/contract.md")
         ev = self.events()
-        self.assertEqual(ev[-1]["query"], "contract.md")
-        self.assertEqual(ev[-1]["activity"], "read contract.md")
+        self.assertEqual(ev[-1]["query"], "clients/acme/contract.md")
+        self.assertEqual(ev[-1]["activity"], "read clients/acme/contract.md")
         with open(self.log, encoding="utf-8") as handle:
             raw = handle.read()
-        for leak in ("alice", "clients", "acme/"):
+        for leak in (PROJ, json.dumps(PROJ)[1:-1], os.path.basename(PROJ)):
             self.assertNotIn(leak, raw)
             self.assertNotIn(leak, out)
+        # A file outside the project is never a query at all.
+        self.calls.clear()
+        self.pre(call="c9", req="r9", args={"path": os.path.join(os.path.dirname(PROJ), "x.md")})
+        self.assertEqual(self.calls, [])
 
     def test_breaker_open_recorded_once_for_a_would_be_trigger(self):
         os.environ["CT_WISDOM_VERBOSE"] = "1"

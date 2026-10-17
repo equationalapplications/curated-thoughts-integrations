@@ -191,7 +191,8 @@ relative to it; any other absolute path is reduced to its last two components
 (`parent/name`), so a home directory or user name never leaves the machine. Leading `..`
 components are dropped. Targets are capped at 200 chars.
 *(Superseded for paths and search patterns by the "Privacy amendment (2026-10-16,
-hermes 0.6.2)", "Privacy amendment 2" (0.6.3) and "Privacy amendment 3" (0.6.4) sections below: the
+hermes 0.6.2)", "Privacy amendment 2" (0.6.3) and "Privacy amendment 3" (0.6.4) sections below,
+all replaced for paths by "Privacy amendment 4: project-root allowlist" (0.6.5): the
 two-component rule leaked user names.)*
 
 **Self-trigger guard on targets.** A target containing a control character (newline,
@@ -540,6 +541,72 @@ amendments 1 and 2:
   `src/join.py` is sent.
 - **Lazy cwd.** `session_cwd` is resolved only for file and search tools.
 
+## Privacy amendment 4: project-root allowlist (2026-10-16, hermes 0.6.5)
+
+**Why the heuristic approach was replaced.** Amendments 1-3 tried to decide, from the
+shape of a path and of the cwd, which parts were safe to send: basename-only outside a
+"valid" cwd, depth and `/Users`/`/home` checks, home-ancestor checks, drive and colon
+rules, name stripping. Each review found new shapes that slipped through. A review of
+0.6.4 found these:
+
+- a WSL cwd of `/mnt/c/Users` or `/mnt/c`;
+- `HOME=/` with `/var/home`, `/nfs/home` or `/export/home` layouts;
+- relative climbs (`../../bob/secret.txt`);
+- multi-word names (`John Smith`);
+- short names inside tokens (`jo.md`, `jo-notes`);
+- a HOME basename under `/nfs/home` with no `USER`.
+
+A blocklist of shapes cannot be complete. This amendment replaces it with an
+allowlist that is safe by construction. It supersedes the path rules of
+amendments 1-3: `valid_cwd`, the depth and home-parent heuristics, basename
+reduction and name stripping are all deleted. The shared vectors were rewritten.
+They now carry an `fs` field, so any port must model the filesystem.
+
+- **P1 (paths): project root.** A path is sent only when it resolves inside a project
+  root, and it is sent relative to that root. Resolving means `realpath` (symlinks
+  resolved, `..` collapsed), with components compared NFC- and case-folded and the
+  original case kept.
+  - **What a root is:** the nearest directory at or above the session cwd
+    (`session_cwd`, as before) holding a marker: `.git` (dir or file), `.hg`,
+    `pyproject.toml`, `package.json`, `Cargo.toml`, `go.mod`, `pom.xml`,
+    `build.gradle`, `Gemfile`, `composer.json`, `*.sln` or `.curated-thoughts-project`.
+  - **Where the search stops:** at HOME, at the top, and at the depth guard. HOME
+    itself, any ancestor of HOME, a filesystem root and a direct child of one
+    (`/home`, `/srv`, `C:\src`) are never a root. The depth guard is what makes
+    `HOME=/` safe generically.
+  - **How it runs:** `os.path` checks only, cached per (cwd, HOME) for 30 s, and never
+    a subprocess.
+  - **Everything else gives no query, not a basename:** a path outside the root
+    (including through a symlink), a `~` path outside it, no cwd, no root, or any `:`
+    outside a Windows drive prefix.
+  - **Behaviour change:** files outside a project get no autonomous-work wisdom. A user
+    can opt a folder in with an empty `.curated-thoughts-project`.
+- **P2 (names), the second layer.**
+  - **Private names:** the values of `USER`, `LOGNAME` and `USERNAME`, plus the basenames
+    of `HOME` and `USERPROFILE`, whatever their parent. Service accounts stay exempt.
+  - **Matching:** the candidate query is tokenized on `[^0-9A-Za-zÀ-￿]+`, folded. A name
+    part of ≥ 3 chars hits any token containing it; a shorter part hits only an equal
+    token (`jo.md` hits for `jo`, `join.py` does not). A name with spaces or punctuation
+    also hits when the folded query contains the whole folded name, and its parts are
+    checked as above (`john_smith.md` hits for `John Smith`).
+  - **Any hit gives no query.**
+- **P3 (commands).** Program plus subcommand as before. Both words go through one helper,
+  `word_check`. A name hit there gives no activity. A rooted, `~`, `..`, `:` or `\`
+  subcommand is dropped.
+- **P4 (search).** The allowlist stays and P2 applies to the whole pattern. A `path`
+  argument goes through P1: outside the root the path part is dropped, and a name hit
+  gives no query.
+- **P5 (cleanup).** `_resolve` returns `(target, hit, local)` with no sentinel object. The
+  session cwd is resolved only when a path argument is actually used.
+- **Testing.**
+  - **Vector runner:** it maps virtual absolute paths into a temp directory that models
+    `/` (the `_top_level` seam). It creates the `fs` entries (files, directories,
+    symlinks) and checks that the vector file matches its generator,
+    `tests/fixtures/make_activity_targets.py`.
+  - **Randomized path test:** it builds a real tree with projects, a symlink escape and
+    markers above HOME, and asserts that every query resolves strictly inside the cwd's
+    project root.
+
 ## Alignment with INTENT.md
 
 - **Goal "During autonomous work":** this is that step for Hermes. Host events
@@ -565,10 +632,13 @@ amendments 1 and 2:
 - **User decisions 1–7:** decision 1 → "Rate rule"; 2 → "Activity line builder" and the
   secret-safety tests; 3 and 4 → "Subagents and scheduled runs"; 5 → constants; 6 → this
   spec; 7 → `ct_tool` class.
-- **Privacy amendments 1-3:** serve "Why this repo exists" (CT is private and local-first):
-  the query names the work, never the person or their directory layout. It only removes
-  what is sent; relevance stays CT's (rule 8), limits are unchanged (rule 6), and an
-  activity that cannot be sent safely fails quietly with no query (rule 4).
+- **Privacy amendments 1-4:** serve "Why this repo exists" (CT is private and local-first):
+  the query names the work, never the person or their directory layout. They only remove
+  what is sent. Relevance stays CT's (rule 8): skipping files outside a project is a
+  privacy rule, not a relevance judgment. Limits are unchanged (rule 6), and an activity
+  that cannot be sent safely fails quietly with no query (rule 4). The project-root lookup
+  only `stat`s and lists directories on the user's own machine; it writes nothing and runs
+  no subprocess, and the brain is still reached only through `ct` (rule 7).
 - **Departures:** none. INTENT says every host should reach every step; Hermes now does.
 
 ## Known limitations

@@ -6,6 +6,42 @@ format below is load-bearing: `## <version> — <date>`.
 
 ## Unreleased
 
+## 0.6.5 — 2026-10-16
+
+- **Privacy redesign: file paths are sent only inside a project.** 0.6.2 through
+  0.6.4 tried to clean up any path. Each review found a new layout that slipped
+  through. What 0.6.4 could still send to CT and its embedding provider (and
+  show in the `_for:` label and the verbose log):
+  - **Another user's folder names under WSL**, with the cwd at `/mnt/c/Users`
+    or `/mnt/c`: `/mnt/c/Users/Bob/secret.txt` was sent as `Bob/secret.txt`.
+  - **Other users' home folders when `HOME=/`** with `/var/home`, `/nfs/home`
+    or `/export/home` layouts (`bob/secret.txt`).
+  - **Paths that climb out of the project**: `../../bob/secret.txt` was sent as
+    `bob/secret.txt`.
+  - **Your name** when it has a space (`John Smith`, in `john_smith.md`), when it
+    is short and part of a file name (`jo.md`, `jo-notes`), or when it is only
+    your home folder's name under a layout like `/nfs/home/alice` with no `USER`
+    set.
+
+  Now:
+  - A file path is sent only if it resolves (following symlinks) inside the
+    **project root**, and it is sent relative to that root. The root is the
+    nearest folder at or above the session's working directory holding `.git`,
+    `.hg`, `pyproject.toml`, `package.json`, `Cargo.toml`, `go.mod`, `pom.xml`,
+    `build.gradle`, `Gemfile`, `composer.json`, a `*.sln` or
+    `.curated-thoughts-project`.
+  - Your home folder, anything above it, `/` and top-level folders (`/home`,
+    `/srv`, `C:\src`) are never a project root.
+  - Anything outside a project root is not sent at all, not even its file name.
+  - Nothing that names you is sent. That covers `USER`, `LOGNAME`, `USERNAME`
+    and the names of `HOME` and `USERPROFILE`, including names with spaces and
+    short names used as a whole word. Service accounts (`root`, `node`,
+    `runner`, …) are still exempt.
+  - **Behavior change:** files outside a project get no autonomous-work wisdom.
+    To opt a folder in, add an empty `.curated-thoughts-project` file to it.
+  - Search patterns keep the 0.6.3 allowlist. A search `path` outside the
+    project is left out of the label.
+
 ## 0.6.4 — 2026-10-16
 
 - **Privacy fix, part 3.** A further review of 0.6.3 found that the

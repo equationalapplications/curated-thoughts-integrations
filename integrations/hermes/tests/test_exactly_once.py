@@ -7,8 +7,11 @@ Run: python3 -m unittest tests.test_exactly_once -v
 from __future__ import annotations
 
 import json
+import os
 import random
+import shutil
 import sys
+import tempfile
 import threading
 import unittest
 import zlib
@@ -188,6 +191,15 @@ class TestExactlyOnceWithActivity(unittest.TestCase):
         self.addCleanup(ct_ledger.LEDGER_CACHE.clear)
         self.addCleanup(ct_wisdom_live.reset_session_state)
         self.addCleanup(ct_wisdom_activity.reset_state)
+        # Activity paths are sent only inside a project root (Privacy
+        # amendment 4): the session cwd is a temp project.
+        proj = os.path.realpath(tempfile.mkdtemp(prefix="ct-exactly-once-"))
+        os.mkdir(os.path.join(proj, ".git"))
+        self.addCleanup(shutil.rmtree, proj, True)
+        old_cwd = os.environ.get("TERMINAL_CWD")
+        os.environ["TERMINAL_CWD"] = proj
+        self.addCleanup(lambda: os.environ.__setitem__("TERMINAL_CWD", old_cwd)
+                        if old_cwd is not None else os.environ.pop("TERMINAL_CWD", None))
 
     def test_no_fact_twice_with_activity(self):
         rng = random.Random(20261016)
