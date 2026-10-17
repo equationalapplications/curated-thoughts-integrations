@@ -1213,7 +1213,7 @@ export function selectActivityDelivery(
 // ─────────────────────────────────────────────────────────────────────────
 
 export interface ActivityMatch {
-  /** null on success; else capability_missing | spawn | timeout_or_exit | parse_error | hook_failed. */
+  /** null on success; else capability_missing | spawn | timeout_or_exit | parse_error | hook_failed | budget | cancelled. */
   failure: string | null;
   result?: WisdomMatchResult;
 }
@@ -1225,9 +1225,9 @@ export interface ActivityMatch {
  */
 /**
  * The one budget-miss rule: an activity match that ran past the host's
- * budget counts as one failure of the shared breaker. `runActivityMatch`
- * applies it to an aborted match; a host that cannot abort its match calls
- * it on expiry instead (never both for one miss).
+ * budget counts as one failure of the shared breaker. `cancel('budget')`
+ * (from `startActivity`) applies it at cancel time; a host that cannot
+ * cancel its match calls it on expiry instead (never both for one miss).
  */
 export function recordActivityBudgetMiss(breaker: Breaker): void {
   try {
@@ -1237,28 +1237,42 @@ export function recordActivityBudgetMiss(breaker: Breaker): void {
   }
 }
 
+/** Why a started activity was cancelled (spec 2026-10-17-core-spawn-binding-and-cancel-design.md). */
+export type ActivityCancelReason = 'budget' | 'abandoned';
+
+/** The core's handle on one started match: the signal it passes down, and why it was aborted. */
+export interface ActivityCancelControl {
+  signal: AbortSignal;
+  reason(): ActivityCancelReason | null;
+}
+
 export async function runActivityMatch(
   host: HostAdapter,
   activity: Activity,
   exclude: string[],
   breaker: Breaker,
-  signal?: AbortSignal,
+  control?: ActivityCancelControl,
 ): Promise<ActivityMatch> {
   try {
     if (host.wisdomMatchAbsent()) return { failure: 'capability_missing' };
-    const attempt = signal
-      ? await host.wisdomMatch(activityQuery(activity), ACTIVITY_MAX_PER_STEP, exclude, signal)
+    const attempt = control
+      ? await host.wisdomMatch(activityQuery(activity), ACTIVITY_MAX_PER_STEP, exclude, control.signal)
       : await host.wisdomMatch(activityQuery(activity), ACTIVITY_MAX_PER_STEP, exclude);
-    // The caller's budget ran out and killed the child. Never a success; it
-    // counts as ONE breaker failure on every host (controller decision after
-    // the openclaw 0.3.0 review, matching Hermes, where a live timeout is a
-    // failure): a CT that keeps missing the budget pauses both paths.
-    if (signal?.aborted) {
-      recordActivityBudgetMiss(breaker);
-      return { failure: 'budget' };
+    // 1. A real answer wins, even after a cancel: ct did answer (the binding
+    //    keeps a result that arrived before the kill). recordSuccess resets
+    //    the consecutive-failure count, clearing a budget charge.
+    if (attempt.outcome === 'ok' && attempt.result) {
+      breaker.recordSuccess();
+      return { failure: null, result: attempt.result };
     }
-    // An abort from anywhere else (the host cancelled the call; outcome
-    // `aborted`) is not CT's failure and never counts against the breaker.
+    const reason = control?.reason() ?? null;
+    // 2. The budget ran out: already charged ONCE, at cancel time.
+    if (reason === 'budget') return { failure: 'budget' };
+    // 3. The host abandoned the query: never CT's failure, whatever the kill
+    //    surfaced as (aborted, or an exit code).
+    if (reason === 'abandoned') return { failure: 'cancelled' };
+    // 4. No core cancel: the existing mapping. An abort from the host's own
+    //    spawn is not CT's failure and never counts against the breaker.
     if (attempt.outcome === 'aborted') return { failure: 'budget' };
     if (attempt.outcome === 'spawn') {
       host.resetDiscoveryAndProbeCaches();
@@ -1269,9 +1283,7 @@ export async function runActivityMatch(
       // The adapter latches a missing subcommand as timeout_or_exit too.
       return { failure: host.wisdomMatchAbsent() ? 'capability_missing' : 'timeout_or_exit' };
     }
-    if (!attempt.result) return { failure: 'parse_error' };
-    breaker.recordSuccess();
-    return { failure: null, result: attempt.result };
+    return { failure: 'parse_error' };
   } catch {
     return { failure: 'hook_failed' };
   }
@@ -1328,7 +1340,7 @@ export function reportActivity(
 }
 
 export type ActivityStart =
-  | { failure: null; match: Promise<ActivityMatch> }
+  | { failure: null; match: Promise<ActivityMatch>; cancel(reason: ActivityCancelReason): void }
   | { failure: string };
 
 /**
@@ -1342,13 +1354,38 @@ export function startActivity(
   session: SessionRef,
   activity: Activity,
   breaker: Breaker,
-  signal?: AbortSignal,
 ): ActivityStart {
   try {
     const gate = activityGate(host, session, breaker);
     if (!gate.ok) return { failure: gate.reason };
     const exclude = gate.ledger.idsMostRecentFirst.slice(0, EXCLUDE_MAX);
-    return { failure: null, match: runActivityMatch(host, activity, exclude, breaker, signal) };
+    const controller = new AbortController();
+    let reason: ActivityCancelReason | null = null;
+    let settled = false;
+    const match = runActivityMatch(host, activity, exclude, breaker, {
+      signal: controller.signal,
+      reason: () => reason,
+    }).finally(() => {
+      settled = true;
+    });
+    /**
+     * `budget`: the host's budget ran out. Charges ONE breaker failure now
+     * (so the next step's gate sees it even if the child never settles),
+     * then kills the query. `abandoned`: the host will not use the answer;
+     * kills it, never charges. Idempotent (the first reason wins); a no-op
+     * once the match has settled.
+     */
+    const cancel = (why: ActivityCancelReason): void => {
+      if (settled || reason !== null) return;
+      reason = why;
+      if (why === 'budget') recordActivityBudgetMiss(breaker);
+      try {
+        controller.abort();
+      } catch {
+        /* fail quietly */
+      }
+    };
+    return { failure: null, match, cancel };
   } catch {
     return { failure: 'hook_failed' };
   }

@@ -79,39 +79,105 @@ describe('abort support', () => {
     expect(seen).toEqual([ac.signal]);
   });
 
-  it('an aborted activity match is `budget` and counts ONE breaker failure (never a success)', async () => {
-    // Controller decision (post-merge review of openclaw 0.3.0): a budget
-    // miss counts as one failure on every host, like a Hermes live timeout.
-    const breaker = new Breaker();
-    const ac = new AbortController();
+  // ── core-owned cancel (spec 2026-10-17-core-spawn-binding-and-cancel-design.md) ──
+
+  /** A host whose wisdomMatch waits for the abort, then reports `outcome`. */
+  function hangingHost(outcome: 'aborted' | 'timeout_or_exit' | 'spawn' | 'ok') {
+    let seen: AbortSignal | undefined;
     const h = host({
       wisdomMatch: async (_q, _m, _e, signal) => {
-        await new Promise<void>((r) => signal?.addEventListener('abort', () => r()));
-        // even a host that reports ok after the kill is not a success
-        return { outcome: 'ok', result: { entries: [], corrections: [] } };
+        seen = signal;
+        await new Promise<void>((r) => signal?.addEventListener('abort', () => r(), { once: true }));
+        return outcome === 'ok' ? { outcome: 'ok', result: { entries: [], corrections: [] } } : { outcome };
       },
     });
-    const pending = runActivityMatch(h, activity, [], breaker, ac.signal);
-    ac.abort();
-    expect(await pending).toEqual({ failure: 'budget' });
-    expect(breaker.isOpen()).toBe(false); // one miss of BREAKER_FAILS
-    for (let i = 1; i < BREAKER_FAILS; i++) {
-      const again = new AbortController();
-      const p = runActivityMatch(h, activity, [], breaker, again.signal);
-      again.abort();
-      await p;
+    return { h, signal: () => seen };
+  }
+
+  function started(h: HostAdapter, breaker: Breaker) {
+    const start = startActivity(h, { id: 's' }, activity, breaker);
+    if (start.failure !== null) throw new Error(`refused: ${start.failure}`);
+    return start;
+  }
+
+  it("cancel('budget') charges ONE failure at once, before the match settles, then aborts", async () => {
+    const breaker = new Breaker();
+    const { h, signal } = hangingHost('aborted');
+    const start = started(h, breaker);
+    await Promise.resolve();
+    start.cancel('budget');
+    expect(signal()?.aborted).toBe(true);
+    // Charged synchronously: three budget misses open the breaker even if no match ever settles.
+    for (let i = 1; i < BREAKER_FAILS; i++) started(hangingHost('aborted').h, breaker).cancel('budget');
+    expect(breaker.isOpen()).toBe(true);
+    expect(await start.match).toEqual({ failure: 'budget' });
+  });
+
+  it("cancel('budget') charges once whatever the kill surfaced as", async () => {
+    for (const outcome of ['aborted', 'timeout_or_exit', 'spawn'] as const) {
+      const breaker = new Breaker();
+      const start = started(hangingHost(outcome).h, breaker);
+      start.cancel('budget');
+      expect(await start.match, outcome).toEqual({ failure: 'budget' });
+      for (let i = 0; i < BREAKER_FAILS - 2; i++) recordActivityBudgetMiss(breaker);
+      expect(breaker.isOpen(), outcome).toBe(false);
+      recordActivityBudgetMiss(breaker);
+      expect(breaker.isOpen(), outcome).toBe(true);
+    }
+  });
+
+  it("cancel('abandoned') never charges, even when the kill surfaces as an exit code", async () => {
+    for (const outcome of ['aborted', 'timeout_or_exit', 'spawn'] as const) {
+      const breaker = new Breaker();
+      for (let i = 0; i < BREAKER_FAILS + 1; i++) {
+        const start = started(hangingHost(outcome).h, breaker);
+        start.cancel('abandoned');
+        expect(await start.match, outcome).toEqual({ failure: 'cancelled' });
+      }
+      expect(breaker.isOpen(), outcome).toBe(false);
+    }
+  });
+
+  it('a real answer after a cancel wins and clears the budget charge', async () => {
+    const breaker = new Breaker();
+    for (let i = 0; i < BREAKER_FAILS - 1; i++) recordActivityBudgetMiss(breaker);
+    const start = started(hangingHost('ok').h, breaker);
+    start.cancel('budget'); // the charge opens the breaker...
+    expect(breaker.isOpen()).toBe(true);
+    const out = await start.match;
+    expect(out.failure).toBeNull(); // ...and ct's real answer closes it again
+    expect(breaker.isOpen()).toBe(false);
+  });
+
+  it('cancel is idempotent (first reason wins) and a no-op after the match settled', async () => {
+    const breaker = new Breaker();
+    const start = started(hangingHost('aborted').h, breaker);
+    start.cancel('abandoned');
+    start.cancel('budget'); // ignored: no charge
+    expect(await start.match).toEqual({ failure: 'cancelled' });
+    for (let i = 0; i < BREAKER_FAILS - 1; i++) recordActivityBudgetMiss(breaker);
+    expect(breaker.isOpen()).toBe(false);
+
+    const b2 = new Breaker();
+    const q2 = started(host(), b2);
+    expect((await q2.match).failure).toBeNull();
+    q2.cancel('budget'); // after settle: no charge
+    for (let i = 0; i < BREAKER_FAILS - 1; i++) recordActivityBudgetMiss(b2);
+    expect(b2.isOpen()).toBe(false);
+  });
+
+  it('a host whose wisdomMatch never settles is still charged at budget expiry', async () => {
+    const breaker = new Breaker();
+    const never = host({ wisdomMatch: () => new Promise(() => {}) });
+    for (let i = 0; i < BREAKER_FAILS; i++) {
+      const start = started(never, breaker);
+      const match = await settleWithin(start.match, 10, () => start.cancel('budget'));
+      expect(match).toBeNull();
     }
     expect(breaker.isOpen()).toBe(true);
   });
 
-  it('recordActivityBudgetMiss is the one rule hosts without a signal call', () => {
-    const breaker = new Breaker();
-    for (let i = 0; i < BREAKER_FAILS; i++) recordActivityBudgetMiss(breaker);
-    expect(breaker.isOpen()).toBe(true);
-  });
-
-  it('startActivity forwards the signal to the host', async () => {
-    const ac = new AbortController();
+  it('startActivity hands wisdomMatch the core signal', async () => {
     let got: AbortSignal | undefined;
     const h = host({
       wisdomMatch: async (_q, _m, _e, signal) => {
@@ -119,10 +185,16 @@ describe('abort support', () => {
         return { outcome: 'ok', result: { entries: [], corrections: [] } };
       },
     });
-    const start = startActivity(h, { id: 's' }, activity, new Breaker(), ac.signal);
-    expect(start.failure).toBeNull();
-    if (start.failure === null) await start.match;
-    expect(got).toBe(ac.signal);
+    const start = started(h, new Breaker());
+    await start.match;
+    expect(got).toBeInstanceOf(AbortSignal);
+    expect(got?.aborted).toBe(false);
+  });
+
+  it('recordActivityBudgetMiss is the one rule hosts without a signal call', () => {
+    const breaker = new Breaker();
+    for (let i = 0; i < BREAKER_FAILS; i++) recordActivityBudgetMiss(breaker);
+    expect(breaker.isOpen()).toBe(true);
   });
 });
 
