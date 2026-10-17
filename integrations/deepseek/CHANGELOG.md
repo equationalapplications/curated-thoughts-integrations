@@ -16,19 +16,25 @@
   - At most one CT call per model step, and only when the activity key is
     new (a new file, command or search; reading then editing a file is one
     key). No per-message ceiling and no session cap.
-  - The query is the bare target only: a relative path, the search pattern,
-    or a command's program plus its next safe word (`pnpm test`,
-    `npm run`). Never file contents, tool output, diffs, the agent's text,
-    flag values, quoted words, URLs, env assignments or credential-shaped
-    tokens. The privacy rules are those of hermes 0.6.3, with the same
-    shared test vectors (`tests/fixtures/activity_targets.json`): a path
-    outside the session's working directory is reduced to its file name
-    (the working directory is the session's own, from DSH's session header;
-    it never counts when it is `/`, a drive root, `/Users`, `/home`, your
-    home directory or one of its parents), no path component containing
-    your user name is sent, and a search pattern is sent only when it is
-    plain words (letters, digits, `_`, `.`, `-`; at most 6 words and 80
-    characters) with no auth word such as `token` or `password`.
+  - The query is the bare target only, under the hermes 0.6.5 privacy
+    rules with the same shared test vectors
+    (`tests/fixtures/activity_targets.json`, all 206 run in the core suite):
+    - a path is sent only when it resolves inside a project root (the
+      nearest directory at or above the session's working directory, from
+      DSH's session header, holding `.git`, `package.json`,
+      `pyproject.toml`, `Cargo.toml`, `go.mod`, a `*.sln` or an empty
+      `.curated-thoughts-project`, among others), relative to that root.
+      Home directories and their parents, `/`, `/Users`, `/home` and other
+      homes locations are never a root. Files outside a project get no
+      autonomous-work wisdom;
+    - nothing that names you is sent (your user name, also inside a word);
+    - a command sends its program plus a plain subcommand (`pnpm test`,
+      `git rebase`) or a `python -m` module, never a path or file name;
+    - a search pattern is sent only when it is plain words (letters,
+      digits, `_`, `.`, `-`; at most 6 words and 80 characters) with no
+      auth word such as `token` or `password`.
+    Never file contents, tool output, diffs, the agent's text, flag values,
+    quoted words, URLs, env assignments or credential-shaped tokens.
   - The gates are the user-turn ones and live in the shared core
     (`startActivity` / `finishActivity`): a delivery switch that is off, a
     restored session with no known bootstrap, a missing `ct wisdom match`

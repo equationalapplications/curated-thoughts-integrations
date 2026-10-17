@@ -431,6 +431,18 @@ rule; opencode and openclaw get patch bumps for it.
   the query (guarantee 2 keeps the superseded one out), and it is delivered like any fact. Rendering
   differences that remain from before (TS lists every `supersedes` id in a correction's title and puts
   entries before corrections; Hermes lists only ids in context, corrections first) change no ids.
+- **Line builder synced to hermes 0.6.5** ("Privacy amendment 4: project-root allowlist", which
+  supersedes the path rules below): a path is sent only relative to a project root it resolves inside
+  of (marker walk on the logical cwd, real-root re-check of every stop rule, homes locations, `/mnt`
+  rules, HOME / USERPROFILE / `os.homedir()` / `os.userInfo().homedir` and their ancestors, the macOS
+  firmlink mapping, 2 s negative and 30 s positive root caches, a per-directory `*.sln` cache); name
+  tokens (alphanumeric runs; ≥ 3-char parts by substring, shorter ones exactly; multi-word names); the
+  command allowlist (program regex, plain subcommand, `-m` module, a name in a subcommand sends the
+  program alone) kept in one isolated function (`commandTarget`) for the coming 0.6.6 command rules; the
+  search allowlist; no truncation (nothing over 200 chars is sent); full-path keys. Node's
+  `os.userInfo()` stands for `pwd` (guarded). The core suite runs all 206 shared vectors in temp-dir
+  worlds (files, directories, symlinks, `system_user` / `system_home`), exactly like the Hermes runner.
+  Without a session cwd no path is sent. The earlier bullet is kept for history:
 - **Line builder synced to hermes 0.6.3** ("Privacy amendment 2": search-pattern allowlist and
   auth-word refusal, HOME and its ancestors never a cwd, drive-relative and rooted-backslash paths,
   embedded user-name drop, service-account exemptions, SHA-256 full-path activity keys); the core suite

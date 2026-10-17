@@ -6,9 +6,10 @@
  * block renderer and the match runner.
  */
 
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
-import { describe, expect, it } from 'vitest';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import nodePath from 'node:path';
+import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 
 import {
   ACTIVITY_HEADING,
@@ -24,8 +25,10 @@ import {
   buildActivity,
   isCtTool,
   marker,
-  normalizePath,
+  nameHit,
+  projectRoot,
   renderActivityBlock,
+  resetActivityCaches,
   runActivityMatch,
   scanIds,
   selectActivityDelivery,
@@ -33,7 +36,6 @@ import {
   startActivity,
   finishActivity,
   userNames,
-  validCwd,
 } from '../src/index.js';
 import type {
   Activity,
@@ -64,16 +66,40 @@ function hermes(tool: string, args: unknown): ActivitySpec | null {
   }
 }
 
-/** The environment R2 reads; fixed so the suite never depends on the CI user. */
+/** The environment the builder reads; fixed so the suite never depends on the CI user. */
 const ENV = { USER: 'alice', HOME: '/Users/alice' };
-/** The language-neutral contract shared with Hermes (tests/tools/test_activity_target_vectors.py). */
-const VECTORS = fileURLToPath(new URL('../../../tests/fixtures/activity_targets.json', import.meta.url));
 
-function act(tool: string, args: unknown, cwd = '/work/repo'): Activity | null {
+/** A real project on disk (P1 needs one): a temp dir holding a `.git` marker. */
+const PROJ = realpathSync(mkdtempSync(nodePath.join(tmpdir(), 'ct-act-proj-')));
+mkdirSync(nodePath.join(PROJ, '.git'));
+/** A directory with no marker anywhere up its walk. */
+const NO_ROOT = realpathSync(mkdtempSync(nodePath.join(tmpdir(), 'ct-act-none-')));
+afterAll(() => {
+  rmSync(PROJ, { recursive: true, force: true });
+  rmSync(NO_ROOT, { recursive: true, force: true });
+});
+beforeEach(() => resetActivityCaches());
+
+/** realpath of the longest existing prefix, the rest appended. */
+function realpathOr(p: string): string {
+  const segs = p.split('/');
+  for (let i = segs.length; i > 0; i--) {
+    const head = segs.slice(0, i).join('/') || '/';
+    try {
+      return [realpathSync(head), ...segs.slice(i)].join('/');
+    } catch {
+      /* shorter prefix */
+    }
+  }
+  return p;
+}
+
+function act(tool: string, args: unknown, cwd: string = PROJ): Activity | null {
   const spec = hermes(tool, args);
   return spec === null ? null : buildActivity(spec, cwd, ENV);
 }
 
+/** Commands and searches (P3 / P4); paths are covered by the shared vectors. */
 const CASES: Array<[string, Record<string, unknown>, string, string]> = [
   ['read_file', { path: 'src/billing/invoice.py' }, 'read src/billing/invoice.py', 'src/billing/invoice.py'],
   ['write_file', { path: './a/b.py', content: 'SECRET_CONTENT' }, 'write a/b.py', 'a/b.py'],
@@ -82,13 +108,12 @@ const CASES: Array<[string, Record<string, unknown>, string, string]> = [
   ['search_files', { pattern: 'TODO' }, 'search TODO', 'TODO'],
   ['terminal', { command: 'pnpm test' }, 'run pnpm test', 'pnpm test'],
   ['terminal', { command: 'npm run build' }, 'run npm run', 'npm run'],
-  ['terminal', { command: 'pytest tests/billing -q' }, 'run pytest tests/billing', 'pytest tests/billing'],
-  ['terminal', { command: 'API_KEY=sk-123 python deploy.py --token x' }, 'run python deploy.py', 'python deploy.py'],
+  ['terminal', { command: 'pytest tests/billing -q' }, 'run pytest', 'pytest'],
+  ['terminal', { command: 'API_KEY=sk-123 python deploy.py --token x' }, 'run python', 'python'],
   ['terminal', { command: "curl -H 'Authorization: Bearer x' https://h" }, 'run curl', 'curl'],
   ['terminal', { command: "git commit -m 'msg SECRET'" }, 'run git commit', 'git commit'],
   ['terminal', { command: '/usr/local/bin/python3 -m pytest' }, 'run python3 pytest', 'python3 pytest'],
-  ['terminal', { command: 'pytest tests/test_x.py' }, 'run pytest tests/test_x.py', 'pytest tests/test_x.py'],
-  ['terminal', { command: 'cat .env.local | grep KEY' }, 'run cat .env.local', 'cat .env.local'],
+  ['terminal', { command: 'cat .env.local | grep KEY' }, 'run cat', 'cat'],
   ['terminal', { command: 'echo sk-live-abcdef' }, 'run echo', 'echo'],
   ['terminal', { command: 'export TOKEN=abc && make' }, 'run export', 'export'],
   ['terminal', { command: 'mysql -uroot -pS3cr3t db' }, 'run mysql', 'mysql'],
@@ -99,11 +124,10 @@ const CASES: Array<[string, Record<string, unknown>, string, string]> = [
   ['terminal', { command: 'python3.11 -m pytest -q' }, 'run python3.11 pytest', 'python3.11 pytest'],
   ['terminal', { command: 'node -m x' }, 'run node', 'node'],
   ['terminal', { command: 'grep "SecretPassword" app.log' }, 'run grep', 'grep'],
-  ['terminal', { command: "grep 'SecretPassword'" }, 'run grep', 'grep'],
   ['terminal', { command: "python -m 'secretmod'" }, 'run python', 'python'],
   ['terminal', { command: 'git push https://user:pw@host/r.git' }, 'run git push', 'git push'],
   ['terminal', { command: 'deploy ghp_abcdefghijklmnop1234' }, 'run deploy', 'deploy'],
-  ['terminal', { command: 'tool a1b2c3d4e5f6g7h8i9' }, 'run tool', 'tool'],
+  ['terminal', { command: 'git Rebase' }, 'run git', 'git'],
 ];
 
 /** Deterministic PRNG (mulberry32). */
@@ -148,8 +172,8 @@ function posixSplit(command: string): string[] {
 
 const basename = (p: string): string => p.split('/').pop() ?? p;
 
-describe('activity line builder (Hermes parity)', () => {
-  it('builds every Hermes case', () => {
+describe('activity line builder (hermes 0.6.5 rules; the full contract is activity_vectors.test.ts)', () => {
+  it('builds the command and search cases (P3 allowlist)', () => {
     for (const [tool, args, line, query] of CASES) {
       const a = act(tool, args);
       expect(a, JSON.stringify(args)).not.toBeNull();
@@ -165,153 +189,90 @@ describe('activity line builder (Hermes parity)', () => {
     }
   });
 
-  it('normalizes paths', () => {
-    const cwd = '/work/repo';
-    expect(normalizePath('/work/repo/src/x.py', cwd, ENV)).toBe('src/x.py');
-    expect(normalizePath('/Users/alice/other/proj/y.py', cwd, ENV)).toBe('y.py');
-    expect(normalizePath('~/notes/z.md', cwd, ENV)).toBe('z.md');
-    expect(normalizePath('../../etc/passwd', cwd, ENV)).toBe('etc/passwd');
-    expect(normalizePath('a\\b\\c.py', cwd, ENV)).toBe('a/b/c.py');
-    expect(normalizePath('C:\\Users\\bob\\proj\\y.py', cwd, ENV)).toBe('y.py');
-    expect(normalizePath('./', cwd, ENV)).toBeNull();
-    expect(normalizePath('', cwd, ENV)).toBeNull();
-    expect(normalizePath(null, cwd, ENV)).toBeNull();
-    expect(normalizePath('d/'.repeat(300) + 'f.py', cwd, ENV)!.length).toBeLessThanOrEqual(ACTIVITY_TARGET_CHARS);
+  it('P1: a path is sent only relative to the project root it resolves inside', () => {
+    expect(act('read_file', { path: 'src/billing/invoice.py' })!.query).toBe('src/billing/invoice.py');
+    expect(act('read_file', { path: `${PROJ}/src/x.py` })!.query).toBe('src/x.py');
+    expect(act('read_file', { path: '/etc/passwd' })).toBeNull();
+    expect(act('read_file', { path: '../outside.txt' })).toBeNull();
+    expect(act('read_file', { path: 'src/x.py' }, '')).toBeNull(); // no cwd
+    expect(act('read_file', { path: 'src/x.py' }, NO_ROOT)).toBeNull(); // no marker anywhere up the walk
+    expect(act('read_file', { path: 'a:b.py' })).toBeNull(); // `:` outside a drive prefix
+    expect(act('read_file', { path: `src/${'d/'.repeat(120)}f.py` })).toBeNull(); // > 200 chars: never cut
   });
 
-  // Privacy rules R1–R4 (hermes 0.6.2 "Privacy amendment"; review of PR #56).
-  it('R1: the cwd counts only at depth >= 2, never the parent of HOME', () => {
-    for (const cwd of ['/', 'C:\\', 'C:/', '/Users', '/home', '/tmp', '', 'relative/dir']) {
-      expect(validCwd(cwd, ENV), cwd).toBeNull();
-      expect(normalizePath('/Users/carol/projects/app/src/x.ts', cwd, ENV), cwd).toBe('x.ts');
-    }
-    expect(validCwd('C:\\Users', ENV)).toBeNull();
-    expect(validCwd('/Users/alice', ENV)).toBeNull(); // 0.6.3: HOME itself never counts
-    expect(validCwd('/Users/alice/proj', ENV)).toBe('/Users/alice/proj'); // strictly inside HOME counts
-    expect(validCwd('/Users/bob', ENV)).toBeNull(); // another /Users/<x> home
-    expect(normalizePath('/srv/app/src/x.ts', '/srv/app', ENV)).toBe('src/x.ts');
-    expect(normalizePath('C:\\work\\repo\\src\\x.ts', 'C:\\work\\repo', ENV)).toBe('src/x.ts');
+  it('P2: a path, a search pattern or a program that names the user gives nothing', () => {
+    expect(act('read_file', { path: 'notes/alice.txt' })).toBeNull();
+    expect(act('read_file', { path: 'notes/Alice-notes.md' })).toBeNull();
+    expect(act('search_files', { pattern: 'alice todo' })).toBeNull();
+    expect(act('terminal', { command: 'alice --help' })).toBeNull();
+    // a name in a subcommand or -m module sends the program alone
+    expect(act('terminal', { command: 'git alice' })!.query).toBe('git');
+    expect(act('terminal', { command: 'python -m alice_tools' })!.query).toBe('python');
   });
 
-  it('R2: outside-cwd absolute and ~ paths reduce to the basename; user names never leave', () => {
-    const cwd = '/work/repo';
-    expect(normalizePath('/Users/alice/notes.txt', cwd, ENV)).toBe('notes.txt');
-    expect(normalizePath('/home/alice', cwd, ENV)).toBeNull();
-    expect(normalizePath('~/alice', cwd, ENV)).toBeNull();
-    expect(normalizePath('~', cwd, ENV)).toBeNull();
-    expect(normalizePath('home/alice/notes.txt', cwd, ENV)).toBe('notes.txt');
-    expect(normalizePath('Users/Alice/x.txt', cwd, ENV)).toBe('x.txt');
-    expect(normalizePath('/work/repo/alice/x.ts', cwd, ENV)).toBe('x.ts');
-    expect(normalizePath('src/home/x.ts', cwd, ENV)).toBe('src/home/x.ts'); // `home` alone stays
-    expect(normalizePath('/Users/alice/proj/src/a.ts', '/Users/alice/proj', ENV)).toBe('src/a.ts');
-    expect(normalizePath('~/proj/src/a.ts', '/Users/alice/proj', ENV)).toBe('src/a.ts'); // ~ expands from HOME
-  });
-
-  it('R2: the user names come from the environment (NFC, case-folded)', () => {
+  it('P2: the user names come from the environment and the process identity', () => {
     expect([...userNames({ USER: 'Alice', HOME: '/Users/alice', USERPROFILE: 'C:\\Users\\Bob' })].sort())
-      .toEqual(['alice', 'bob']);
-    expect([...userNames({ USER: 'Jose\u0301' })]).toEqual(['jos\u00e9']);
-    expect([...userNames({})]).toEqual([]);
+      .toEqual(expect.arrayContaining(['alice', 'bob']));
+    expect(userNames({ USER: 'node' }).has('node')).toBe(false); // service account
+    expect(userNames({ HOME: '/config' }).has('config')).toBe(false); // parent is not Users/home/Profiles
+    expect(nameHit('jo.md', new Set(['jo']))).toBe(true);
+    expect(nameHit('join.py', new Set(['jo']))).toBe(false);
+    expect(nameHit('john_smith.md', new Set(['john smith']))).toBe(true);
+    expect(nameHit('jo\u2013notes.md', new Set(['jo']))).toBe(true);
   });
 
-  it('R3: search patterns with =, quotes, credentials or a word R2 would change send nothing', () => {
-    for (const pattern of ['API_KEY="hunter2pass"', 'password=letmein', "it's", 'say "hi"', 'run `x`',
-      'curly \u201cquote\u201d', 'token a1b2c3d4e5f6g7h8i9', '/Users/alice/secret.txt', '~/notes', 'alice',
-      'C:\\secret', '../up', 'src/Alice/x']) {
-      expect(act('search_files', { pattern }, '/work/repo'), pattern).toBeNull();
-    }
-    // 0.6.3 allowlist: globs, paths, regexes, flags and auth words are not sent.
+  it('P4: search allowlist; a path argument goes through P1', () => {
     for (const pattern of ['**/*.ts', 'src/billing', '\\w+', '--password hunter2', 'Bearer abc', 'token x',
-      'password:letmein', 'x@corp.com', 'w1 w2 w3 w4 w5 w6 w7', 'y'.repeat(81)]) {
+      'password:letmein', 'x@corp.com', 'w1 w2 w3 w4 w5 w6 w7', 'y'.repeat(81), 'API_KEY="x"']) {
       expect(act('search_files', { pattern }), pattern).toBeNull();
     }
     expect(act('search_files', { pattern: 'MCP tool name' })!.query).toBe('MCP tool name');
     expect(act('search_files', { pattern: 'café menü' })!.query).toBe('café menü');
-    expect(act('search_files', { pattern: 'error 404', path: 'src' })!.line).toBe('search error 404 in src');
-    expect(act('search_files', { pattern: 'TODO', path: '/Users/alice' })!.line).toBe('search TODO');
+    expect(act('search_files', { pattern: 'TODO', path: 'src' })!.line).toBe('search TODO in src');
+    expect(act('search_files', { pattern: 'TODO', path: '/etc' })!.line).toBe('search TODO'); // outside: path part dropped
+    expect(act('search_files', { pattern: 'TODO', path: 'alice' })).toBeNull(); // a name hit: nothing
   });
 
-  it('R3: a command subcommand R2 would change is dropped; a program named like the user gives nothing', () => {
-    expect(act('terminal', { command: 'cat ../alice/notes.txt' })!.query).toBe('cat');
-    expect(act('terminal', { command: 'cat src/alice/x' })!.query).toBe('cat');
-    expect(act('terminal', { command: 'alice --help' })).toBeNull();
-    expect(act('terminal', { command: 'cat src/x.ts' })!.query).toBe('cat src/x.ts');
+  it('keys: the same query in two places is two keys; read then edit is one', () => {
+    const a = act('search_files', { pattern: 'TODO', path: '/srv/a' })!;
+    const b = act('search_files', { pattern: 'TODO', path: '/srv/b' })!;
+    expect(a.query).toBe(b.query);
+    expect(a.key).not.toBe(b.key);
+    expect(act('read_file', { path: 'src/x.ts' })!.key).toBe(act('patch', { path: `${PROJ}/src/x.ts` })!.key);
   });
 
-  it('R4: the label and the query carry only the sanitized target', () => {
-    const a = act('read_file', { path: '/Users/alice/other/proj/y.py' })!;
-    expect(a.line).toBe('read y.py');
-    expect(activityQuery(a)).toBe('y.py');
-    const block = renderActivityBlock({ id: 'f1', title: 'T', text: 'x' }, [], a);
-    expect(block).toContain('_for: read y.py_');
-    expect(block).not.toMatch(/alice|Users|other\/proj/);
-  });
-
-  it('randomized paths and search patterns never carry the user name, a home layout or a value', () => {
+  it('randomized paths: every query resolves strictly inside the project root (symlink escape included)', () => {
+    mkdirSync(nodePath.join(PROJ, 'src', 'deep'), { recursive: true });
+    const esc = nodePath.join(PROJ, 'esc');
+    try {
+      symlinkSync(NO_ROOT, esc, 'dir');
+    } catch {
+      /* already there */
+    }
     const r = rng(20261017);
     const choice = <T>(arr: T[]): T => arr[Math.floor(r() * arr.length)];
-    const comps = ['src', 'alice', 'Alice', 'home', 'Users', 'proj', '..', '.', 'notes.txt', 'x.ts', '~'];
-    const roots = ['', '/', '~/', 'C:\\', '/Users/', '/home/', '/work/repo/'];
-    const cwds = ['/', '', '/Users', '/home', '/work', '/work/repo', '/Users/alice', 'C:\\'];
-    const words = ['TODO', 'alice', 'API_KEY=x', '"q"', "'q'", '`q`', 'password=p', 'src/x', '/abs', '~/h',
-      '../up', 'sk-ABCDEF1234567890xyz', 'error', '404'];
-    for (let i = 0; i < 1000; i++) {
-      const p = choice(roots) + Array.from({ length: 1 + Math.floor(r() * 4) }, () => choice(comps)).join(choice(['/', '\\']));
-      const cwd = choice(cwds);
-      const a = act('read_file', { path: p }, cwd);
-      if (a !== null) {
-        const q = activityQuery(a);
-        expect(q.toLowerCase().split('/'), `${p} @ ${cwd}`).not.toContain('alice');
-        expect(q, `${p} @ ${cwd}`).not.toMatch(/^(\/|~|[A-Za-z]:)/);
-        if (validCwd(cwd, ENV) === null && /^(\/|~|[A-Za-z]:)/.test(p)) {
-          expect(q.includes('/'), `${p} @ ${cwd}: outside cwd keeps the basename only`).toBe(false);
-        }
-        expect(a.line).toBe(`read ${q}`);
-      }
-      const pattern = Array.from({ length: 1 + Math.floor(r() * 3) }, () => choice(words)).join(' ');
-      const s = act('search_files', { pattern }, cwd);
-      if (s !== null) {
-        const q = activityQuery(s);
-        expect(q, pattern).not.toMatch(/[='"`]|alice|sk-|^\/|~|\.\./i);
-      }
+    const parts = ['src', 'deep', '..', '.', 'esc', 'x.ts', 'alice', 'notes.md', '~'];
+    const roots = ['', `${PROJ}/`, `${NO_ROOT}/`, '/', '~/', '../'];
+    let sent = 0;
+    for (let i = 0; i < 600; i++) {
+      const p = choice(roots) + Array.from({ length: 1 + Math.floor(r() * 4) }, () => choice(parts)).join('/');
+      const a = act('read_file', { path: p });
+      if (a === null) continue;
+      sent++;
+      const q = activityQuery(a);
+      expect(q, p).not.toMatch(/alice|^\/|\.\./);
+      const realTarget = realpathOr(nodePath.join(PROJ, q));
+      expect(realTarget.startsWith(`${PROJ}/`), `${p} → ${q}`).toBe(true);
     }
+    expect(sent).toBeGreaterThan(50);
   });
 
-  it('runs every shared vector of tests/fixtures/activity_targets.json (Hermes parity)', () => {
-    const vectors = JSON.parse(readFileSync(VECTORS, 'utf8')) as Array<{
-      name: string; tool: string; args: Record<string, unknown>; cwd: string;
-      env: Record<string, string>; expected_query: string | null; expected_line: string | null;
-      key_distinct_from?: string;
-    }>;
-    expect(vectors.length).toBeGreaterThanOrEqual(111);
-    const build = (v: (typeof vectors)[number]) => {
-      const spec = hermes(v.tool, v.args);
-      return spec === null ? null : buildActivity(spec, v.cwd, v.env);
-    };
-    // `key_distinct_from`: equal sanitized queries, distinct local keys.
-    const byName = new Map(vectors.map((v) => [v.name, v]));
-    let keyChecks = 0;
-    for (const v of vectors) {
-      if (!v.key_distinct_from) continue;
-      const a = build(v);
-      const b = build(byName.get(v.key_distinct_from)!);
-      expect(activityQuery(a!), v.name).toBe(activityQuery(b!));
-      expect(a!.key, v.name).not.toBe(b!.key);
-      keyChecks++;
-    }
-    expect(keyChecks).toBeGreaterThan(0);
-    for (const v of vectors) {
-      const a = build(v);
-      if (v.expected_query === null) {
-        expect(a === null || activityQuery(a) === '', `${v.name}: got ${a?.line}`).toBe(true);
-        continue;
-      }
-      expect(a, v.name).not.toBeNull();
-      expect(activityQuery(a!), v.name).toBe(v.expected_query);
-      expect(a!.line, v.name).toBe(v.expected_line);
-      const block = renderActivityBlock({ id: 'f1', title: 'T', text: 'x', provenance: 'p' }, [], a!);
-      expect(block, v.name).toContain(`_for: ${v.expected_line}_`);
-    }
+  it('project roots are cached (30 s found, 2 s none) and reset for tests', () => {
+    expect(projectRoot(PROJ, ENV)).toBe(PROJ);
+    expect(projectRoot(NO_ROOT, ENV)).toBeNull();
+    writeFileSync(`${NO_ROOT}/.curated-thoughts-project`, '');
+    resetActivityCaches();
+    expect(projectRoot(NO_ROOT, ENV)).toBe(NO_ROOT);
   });
 
   it('gives no line for unsafe or unknown calls', () => {
@@ -330,7 +291,7 @@ describe('activity line builder (Hermes parity)', () => {
       ['read_file', 'not-a-dict'],
     ];
     for (const [tool, args] of cases) {
-      expect(act(tool, args, '/w'), `${tool} ${JSON.stringify(args)}`).toBeNull();
+      expect(act(tool, args), `${tool} ${JSON.stringify(args)}`).toBeNull();
     }
   });
 
@@ -358,7 +319,7 @@ describe('activity line builder (Hermes parity)', () => {
       ['search_files', { pattern: 'p', file_glob: secret, context: secret }],
       ['terminal', { command: 'ls', workdir: secret }],
     ] as Array<[string, Record<string, unknown>]>) {
-      const a = act(tool, args, '/w')!;
+      const a = act(tool, args)!;
       expect(a.line).not.toContain(secret);
       expect(activityQuery(a)).not.toContain(secret);
     }
@@ -377,7 +338,7 @@ describe('activity line builder (Hermes parity)', () => {
       const n = 1 + Math.floor(r() * 7);
       const parts = Array.from({ length: n }, () => choice([...words, ...nasty]));
       const command = parts.join(' ');
-      const a = act('terminal', { command }, '/w');
+      const a = act('terminal', { command });
       if (a === null) continue;
       checked++;
       const query = activityQuery(a);
@@ -408,20 +369,20 @@ describe('activity line builder (Hermes parity)', () => {
   it('rejects credential-shaped search patterns', () => {
     for (const pattern of ['sk-live-abcdef', 'find ghp_abcdefghijklmnop1234 here',
       'AKIAABCDEFGHIJKLMNOP', 'token a1b2c3d4e5f6g7h8i9']) {
-      expect(act('search_files', { pattern }, '/w'), pattern).toBeNull();
+      expect(act('search_files', { pattern }), pattern).toBeNull();
     }
-    expect(act('search_files', { pattern: 'error 404' }, '/w')).not.toBeNull();
+    expect(act('search_files', { pattern: 'error 404' })).not.toBeNull();
   });
 
   it('never uses our own marker or heading as a target', () => {
     for (const pattern of ['ct-fact:evil', '## Curated Thoughts \u2014 relevant now', 'a\nb']) {
-      expect(act('search_files', { pattern }, '/w')).toBeNull();
+      expect(act('search_files', { pattern })).toBeNull();
     }
   });
 
   it('caps the query and the target', () => {
-    expect(act('search_files', { pattern: 'x'.repeat(81) }, '/w')).toBeNull(); // refused, not cut
-    const a = act('search_files', { pattern: 'x'.repeat(80), path: 'y'.repeat(600) }, '/w')!;
+    expect(act('search_files', { pattern: 'x'.repeat(81) })).toBeNull(); // refused, not cut
+    const a = act('search_files', { pattern: 'x'.repeat(80), path: 'y'.repeat(600) })!;
     expect(activityQuery(a).length).toBeLessThanOrEqual(ACTIVITY_QUERY_CHARS);
     expect(a.query.length).toBeLessThanOrEqual(ACTIVITY_TARGET_CHARS);
   });
@@ -435,7 +396,7 @@ describe('activity line builder (Hermes parity)', () => {
 });
 
 describe('ActivityTracker (rate rule)', () => {
-  const key = (tool: string, path: string) => act(tool, { path }, '/w')!.key;
+  const key = (tool: string, path: string) => act(tool, { path })!.key;
 
   it('starts one query per step', () => {
     const st = new ActivityTracker();
@@ -495,7 +456,7 @@ function ledgerOf(ids: string[]): Ledger {
   return { idsMostRecentFirst: [...ids], has: (id) => set.has(id), knownBootstrap: false };
 }
 
-const READ = buildActivity({ verb: 'read', path: 'src/x.ts' }, '/w')!;
+const READ = buildActivity({ verb: 'read', path: 'src/x.ts' }, PROJ, ENV)!;
 
 describe('activity block', () => {
   it('is marker first, within 600 chars, with provenance and one marker', () => {

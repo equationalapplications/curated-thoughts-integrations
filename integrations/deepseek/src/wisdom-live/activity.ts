@@ -161,7 +161,7 @@ interface AgentLike {
  * the session header's validated absolute `cwd` (dsh-session SessionHeader;
  * dsh-tool-fs `session-cwd` and dsh-tool-bash `resolveWorkdir` read
  * `exec.agent.session.header.cwd`, 0.2.0-rc.2). Missing → null, which the
- * builder treats as "no cwd" (absolute paths reduce to their basename).
+ * builder treats as "no cwd": no project root, so no path is sent.
  * Never process.cwd(): the harness process may run anywhere.
  */
 export function sessionCwd(agent: AgentLike | null | undefined): string | null {
@@ -287,7 +287,7 @@ export class DshActivity {
     try {
       cwd = this.cwd(agent);
     } catch {
-      cwd = null; // fail closed: no cwd, absolute paths reduce to their basename
+      cwd = null; // fail closed: no cwd, so no path is sent
     }
     for (const call of step.calls) {
       if (isCtTool(call.name)) {

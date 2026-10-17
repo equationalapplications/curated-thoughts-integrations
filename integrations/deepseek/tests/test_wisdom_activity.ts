@@ -6,10 +6,10 @@
  * marker hygiene and verbose mode. All spawns are injected.
  */
 
-import { mkdtempSync, readFileSync, existsSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { afterAll, describe, expect, it } from 'vitest';
 
 import {
   ACTIVITY_HEADING,
@@ -33,8 +33,24 @@ import {
 
 type Msg = Record<string, unknown>;
 
-/** A fixed environment for the builder (R2 user names), never the real one. */
+/** A fixed environment for the builder (user names), never the real one. */
 const TEST_ENV = { USER: 'alice', HOME: '/Users/alice' };
+
+/**
+ * Real project roots on disk (hermes 0.6.5 P1: a path is sent only relative
+ * to a project root it resolves inside of): temp dirs holding a `.git`.
+ */
+function projectDir(prefix: string): string {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), prefix)));
+  mkdirSync(join(dir, '.git'));
+  return dir;
+}
+const PROJ = projectDir('ct-dsh-act-proj-');
+const CHILD = projectDir('ct-dsh-act-child-');
+afterAll(() => {
+  rmSync(PROJ, { recursive: true, force: true });
+  rmSync(CHILD, { recursive: true, force: true });
+});
 
 const text = (t: string) => ({ type: 'text', text: t });
 let seq = 0;
@@ -109,7 +125,7 @@ function setup(
   // The cwd comes from the session header, as DSH's own tools resolve it.
   const activity = new DshActivity({ adapter, breaker, env: TEST_ENV, ...(over.now ? { now: over.now } : {}) });
   const log: Msg[] = [{ id: 'u0', role: 'user', source: { kind: 'user' }, content: [text('do the task')] }];
-  const agent = { id: 'agent-1', session: { deriveMessages: () => [...log], header: { cwd: '/work/repo' } as { cwd?: string } } };
+  const agent = { id: 'agent-1', session: { deriveMessages: () => [...log], header: { cwd: PROJ } as { cwd?: string } } };
   /** One model step: the assistant's calls, pre-execute per call, then results. */
   const step = (calls: Array<[string, unknown]>, results?: string[]): Msg => {
     const msg = assistant(calls);
@@ -217,7 +233,7 @@ describe('per-step plan and delivery', () => {
     expect(await s.pre()).toBeNull();
     s.step([['write', { file_path: '.env.local', content: 'FOO=bar' }]]);
     await s.pre();
-    s.step([['read', { file_path: '/work/repo/.env.local' }]]);
+    s.step([['read', { file_path: `${PROJ}/.env.local` }]]);
     expect(await s.pre()).toBeNull();
     expect(s.ct.calls.map((c) => c.query)).toEqual(['pnpm test', '.env.local']);
   });
@@ -364,24 +380,28 @@ describe('session cwd (DSH SessionHeader.cwd, never process.cwd())', () => {
 
   it('a path under the session cwd is sent relative to it', async () => {
     const s = setup();
-    s.step([['read', { file_path: '/work/repo/src/billing/invoice.ts' }]]);
+    s.step([['read', { file_path: `${PROJ}/src/billing/invoice.ts` }]]);
     await s.pre();
     expect(s.ct.calls.map((c) => c.query)).toEqual(['src/billing/invoice.ts']);
   });
 
-  it('without a header cwd, an absolute path reduces to its basename (not process.cwd()-relative)', async () => {
+  it('without a header cwd no path is sent, even one inside a project (never process.cwd())', async () => {
     const s = setup();
     delete s.agent.session.header.cwd;
-    const here = process.cwd();
-    s.step([['read', { file_path: `${here}/src/deep/x.ts` }]]);
+    s.step([['read', { file_path: `${PROJ}/src/deep/x.ts` }], ['read', { file_path: `${process.cwd()}/package.json` }]]);
     await s.pre();
-    expect(s.ct.calls.map((c) => c.query)).toEqual(['x.ts']);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(s.ct.calls).toEqual([]);
+    // commands do not need a cwd
+    s.step([['bash', { command: 'pnpm test' }]]);
+    await s.pre();
+    expect(s.ct.calls.map((c) => c.query)).toEqual(['pnpm test']);
   });
 
   it('a subagent uses its own session cwd', async () => {
     const s = setup();
-    const childLog: Msg[] = [assistant([['read', { file_path: '/srv/child/lib/a.ts' }]])];
-    const child = { id: 'child-cwd', session: { deriveMessages: () => [...childLog], header: { cwd: '/srv/child' } } };
+    const childLog: Msg[] = [assistant([['read', { file_path: `${CHILD}/lib/a.ts` }]])];
+    const child = { id: 'child-cwd', session: { deriveMessages: () => [...childLog], header: { cwd: CHILD } } };
     await s.activity.deliver(child, [], []);
     expect(s.ct.calls.map((c) => c.query)).toEqual(['lib/a.ts']);
   });

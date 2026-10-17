@@ -20,7 +20,10 @@
  *     (ct_tool_dedup parity) — no test-side marker patching.
  */
 
-import { describe, expect, it } from 'vitest';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterAll, describe, expect, it } from 'vitest';
 
 import { onToolResult, onUserTurn, Breaker, marker } from '@equational-applications/ct-wisdom-core';
 import type {
@@ -250,6 +253,11 @@ function pickStatic<T>(arr: T[]): T {
   return arr[Math.floor(staticRand() * arr.length)];
 }
 
+/** A real project root (hermes 0.6.5 P1), so file activities are sent too. */
+const SIM_PROJ = realpathSync(mkdtempSync(join(tmpdir(), 'ct-dsh-sim-proj-')));
+mkdirSync(join(SIM_PROJ, '.git'));
+afterAll(() => rmSync(SIM_PROJ, { recursive: true, force: true }));
+
 class ActivitySim {
   log: AnyMsg[] = [];
   adapter!: DshWisdomAdapter;
@@ -268,7 +276,7 @@ class ActivitySim {
   boot(): void {
     this.adapter = new DshWisdomAdapter({ env: {}, discover: () => ({ path: '/bin/ct', failure: null }), spawnFn: this.fake });
     this.breaker = new Breaker();
-    this.activity = new DshActivity({ adapter: this.adapter, breaker: this.breaker, cwd: () => '/w' });
+    this.activity = new DshActivity({ adapter: this.adapter, breaker: this.breaker, cwd: () => SIM_PROJ, env: { USER: 'alice', HOME: '/Users/alice' } });
     if (this.bootIds.length > 0) {
       // The section re-renders the same bootstrap block into the memo.
       this.adapter.bootstrapMemo[this.id] = { block: 'boot', ids: [...this.bootIds] };

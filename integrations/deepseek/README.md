@@ -97,19 +97,24 @@ relevant fact per model step, keyed to what it is doing
   only when the activity changes; reading then editing a file is one
   activity. No ceiling per message or per session. Curated Thoughts' own
   tools never trigger it.
-- **What is sent.** Only the bare target: a path relative to the workspace
-  (`src/billing/invoice.ts`), the search pattern, or a command's program
-  plus the unquoted word right after it (`pnpm test`, `npm run`, `git push`).
-  Never a flag's value, a quoted word, a URL, an `ENV=value` assignment or a
-  credential-shaped token, and never file contents, tool output, diffs or
-  the agent's own words. A path outside the session's working directory
-  (DSH's session header `cwd`) is reduced to its file name, and that
-  directory never counts when it is `/`, a drive root, `/Users`, `/home`,
-  your home directory or one of its parents. No path component containing
-  your user name is sent. A search pattern is sent only when it is plain
-  words (letters, digits, `_`, `.`, `-`; at most 6 words and 80
-  characters) with no auth word such as `token` or `password` (the Hermes
-  0.6.3 rules, with the same test vectors).
+- **What is sent.** Only the bare target (the Hermes 0.6.5 rules, with the
+  same test vectors):
+  - a **path relative to the project root**, and only when it resolves
+    inside one: the nearest directory at or above the session's working
+    directory (DSH's session header `cwd`) holding a marker such as
+    `.git`, `package.json`, `pyproject.toml`, `Cargo.toml`, `go.mod` or a
+    `*.sln`. Your home directory and its parents, `/`, `/Users`, `/home`
+    and other homes locations are never a root. Files outside a project get
+    nothing; to opt a folder in, add an empty `.curated-thoughts-project`;
+  - a command's program plus a plain subcommand (`pnpm test`,
+    `git rebase`) or a `python -m` module; never a path or file name;
+  - a search pattern made of plain words (letters, digits, `_`, `.`, `-`;
+    at most 6 words and 80 characters) with no auth word such as `token`
+    or `password`.
+  Nothing that names you (your user name, also inside a word) is sent, and
+  never a flag's value, a quoted word, a URL, an `ENV=value` assignment, a
+  credential-shaped token, file contents, tool output, diffs or the agent's
+  own words.
 - **Delivered as.** At most 1 fact in at most 600 characters, marker first,
   under `## Curated Thoughts — relevant to this step`, as its own user
   message (source kind `curated-thoughts-wisdom-activity`) before the next
