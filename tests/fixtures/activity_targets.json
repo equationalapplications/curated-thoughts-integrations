@@ -127,7 +127,7 @@
     "expected_line": "read conf.yml"
   },
   {
-    "name": "R1: cwd equal to HOME counts",
+    "name": "R1: cwd equal to HOME does not count",
     "tool": "read_file",
     "args": {
       "path": "/Users/alice/notes/z.md"
@@ -137,11 +137,11 @@
       "USER": "alice",
       "HOME": "/Users/alice"
     },
-    "expected_query": "notes/z.md",
-    "expected_line": "read notes/z.md"
+    "expected_query": "z.md",
+    "expected_line": "read z.md"
   },
   {
-    "name": "R1+R2: ~ under cwd equal to HOME",
+    "name": "R1+R2: ~ under cwd equal to HOME is basename only",
     "tool": "read_file",
     "args": {
       "path": "~/notes/z.md"
@@ -151,8 +151,8 @@
       "USER": "alice",
       "HOME": "/Users/alice"
     },
-    "expected_query": "notes/z.md",
-    "expected_line": "read notes/z.md"
+    "expected_query": "z.md",
+    "expected_line": "read z.md"
   },
   {
     "name": "bug2: file directly in home",
@@ -774,7 +774,7 @@
     "expected_line": "search error 404"
   },
   {
-    "name": "keep: search relative path token",
+    "name": "allowlist: slash is not allowed",
     "tool": "search_files",
     "args": {
       "pattern": "src/billing"
@@ -784,11 +784,11 @@
       "USER": "alice",
       "HOME": "/Users/alice"
     },
-    "expected_query": "src/billing",
-    "expected_line": "search src/billing"
+    "expected_query": null,
+    "expected_line": null
   },
   {
-    "name": "keep: regex escapes",
+    "name": "allowlist: backslash regex is not allowed",
     "tool": "search_files",
     "args": {
       "pattern": "def \\w+_target"
@@ -798,8 +798,8 @@
       "USER": "alice",
       "HOME": "/Users/alice"
     },
-    "expected_query": "def \\w+_target",
-    "expected_line": "search def \\w+_target"
+    "expected_query": null,
+    "expected_line": null
   },
   {
     "name": "keep: unicode pattern",
@@ -984,5 +984,582 @@
     },
     "expected_query": null,
     "expected_line": null
+  },
+  {
+    "name": "0.6.3 search: colon value",
+    "tool": "search_files",
+    "args": {
+      "pattern": "password:letmein"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USER": "alice",
+      "HOME": "/Users/alice"
+    },
+    "expected_query": null,
+    "expected_line": null
+  },
+  {
+    "name": "0.6.3 search: colon-space value",
+    "tool": "search_files",
+    "args": {
+      "pattern": "token: hunter2"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USER": "alice",
+      "HOME": "/Users/alice"
+    },
+    "expected_query": null,
+    "expected_line": null
+  },
+  {
+    "name": "0.6.3 search: flag value",
+    "tool": "search_files",
+    "args": {
+      "pattern": "--password hunter2"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USER": "alice",
+      "HOME": "/Users/alice"
+    },
+    "expected_query": null,
+    "expected_line": null
+  },
+  {
+    "name": "0.6.3 search: bearer value",
+    "tool": "search_files",
+    "args": {
+      "pattern": "Bearer abc123xyz"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USER": "alice",
+      "HOME": "/Users/alice"
+    },
+    "expected_query": null,
+    "expected_line": null
+  },
+  {
+    "name": "0.6.3 search: auth keyword anywhere",
+    "tool": "search_files",
+    "args": {
+      "pattern": "find the secret word"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USER": "alice",
+      "HOME": "/Users/alice"
+    },
+    "expected_query": null,
+    "expected_line": null
+  },
+  {
+    "name": "0.6.3 search: api_key keyword",
+    "tool": "search_files",
+    "args": {
+      "pattern": "load APIKEY here"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USER": "alice",
+      "HOME": "/Users/alice"
+    },
+    "expected_query": null,
+    "expected_line": null
+  },
+  {
+    "name": "0.6.3 search: word starting with -",
+    "tool": "search_files",
+    "args": {
+      "pattern": "-v hunter2"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USER": "alice",
+      "HOME": "/Users/alice"
+    },
+    "expected_query": null,
+    "expected_line": null
+  },
+  {
+    "name": "0.6.3 search: email",
+    "tool": "search_files",
+    "args": {
+      "pattern": "alice@example.com"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USER": "bob",
+      "HOME": "/home/bob"
+    },
+    "expected_query": null,
+    "expected_line": null
+  },
+  {
+    "name": "0.6.3 search: rooted backslash path",
+    "tool": "search_files",
+    "args": {
+      "pattern": "\\ProgramData\\corp\\secrets.txt"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USER": "alice",
+      "HOME": "/Users/alice"
+    },
+    "expected_query": null,
+    "expected_line": null
+  },
+  {
+    "name": "0.6.3 search: more than 6 words",
+    "tool": "search_files",
+    "args": {
+      "pattern": "one two three four five six seven"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USER": "alice",
+      "HOME": "/Users/alice"
+    },
+    "expected_query": null,
+    "expected_line": null
+  },
+  {
+    "name": "0.6.3 search: 6 words is fine",
+    "tool": "search_files",
+    "args": {
+      "pattern": "one two three four five six"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USER": "alice",
+      "HOME": "/Users/alice"
+    },
+    "expected_query": "one two three four five six",
+    "expected_line": "search one two three four five six"
+  },
+  {
+    "name": "0.6.3 search: over 80 chars",
+    "tool": "search_files",
+    "args": {
+      "pattern": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USER": "alice",
+      "HOME": "/Users/alice"
+    },
+    "expected_query": null,
+    "expected_line": null
+  },
+  {
+    "name": "0.6.3 search: 80 chars is fine",
+    "tool": "search_files",
+    "args": {
+      "pattern": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USER": "alice",
+      "HOME": "/Users/alice"
+    },
+    "expected_query": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    "expected_line": "search xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+  },
+  {
+    "name": "0.6.3 search: user name inside a word",
+    "tool": "search_files",
+    "args": {
+      "pattern": "alice_notes TODO"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USER": "alice",
+      "HOME": "/Users/alice"
+    },
+    "expected_query": null,
+    "expected_line": null
+  },
+  {
+    "name": "0.6.3 search: dotted and dashed words allowed",
+    "tool": "search_files",
+    "args": {
+      "pattern": "ct_wisdom.py fail-closed"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USER": "alice",
+      "HOME": "/Users/alice"
+    },
+    "expected_query": "ct_wisdom.py fail-closed",
+    "expected_line": "search ct_wisdom.py fail-closed"
+  },
+  {
+    "name": "0.6.3 search: other punctuation refused",
+    "tool": "search_files",
+    "args": {
+      "pattern": "foo(bar)"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USER": "alice",
+      "HOME": "/Users/alice"
+    },
+    "expected_query": null,
+    "expected_line": null
+  },
+  {
+    "name": "0.6.3 R1: cwd inside HOME counts",
+    "tool": "read_file",
+    "args": {
+      "path": "/Users/alice/proj/src/x.py"
+    },
+    "cwd": "/Users/alice/proj",
+    "env": {
+      "USER": "alice",
+      "HOME": "/Users/alice"
+    },
+    "expected_query": "src/x.py",
+    "expected_line": "read src/x.py"
+  },
+  {
+    "name": "0.6.3 R1: cwd equal to HOME, file in a client dir",
+    "tool": "read_file",
+    "args": {
+      "path": "/Users/alice/clients/acme/contract.md"
+    },
+    "cwd": "/Users/alice",
+    "env": {
+      "USER": "alice",
+      "HOME": "/Users/alice"
+    },
+    "expected_query": "contract.md",
+    "expected_line": "read contract.md"
+  },
+  {
+    "name": "0.6.3 R1: ancestor of a deep HOME",
+    "tool": "read_file",
+    "args": {
+      "path": "/data/home/alice/acme/plan.md"
+    },
+    "cwd": "/data/home",
+    "env": {
+      "USER": "alice",
+      "HOME": "/data/home/alice"
+    },
+    "expected_query": "plan.md",
+    "expected_line": "read plan.md"
+  },
+  {
+    "name": "0.6.3 R1: another user's home dir without HOME",
+    "tool": "read_file",
+    "args": {
+      "path": "/home/bob/acme/plan.md"
+    },
+    "cwd": "/home/bob",
+    "env": {
+      "USER": "svc"
+    },
+    "expected_query": "plan.md",
+    "expected_line": "read plan.md"
+  },
+  {
+    "name": "0.6.3 R1: Windows cwd equal to USERPROFILE",
+    "tool": "read_file",
+    "args": {
+      "path": "C:\\Users\\carol\\clients\\acme.docx"
+    },
+    "cwd": "C:\\Users\\carol",
+    "env": {
+      "USERNAME": "carol",
+      "USERPROFILE": "C:\\Users\\carol"
+    },
+    "expected_query": "acme.docx",
+    "expected_line": "read acme.docx"
+  },
+  {
+    "name": "0.6.3 R2: drive-relative file",
+    "tool": "read_file",
+    "args": {
+      "path": "C:foo.md"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USERNAME": "carol",
+      "USERPROFILE": "C:\\Users\\carol"
+    },
+    "expected_query": "foo.md",
+    "expected_line": "read foo.md"
+  },
+  {
+    "name": "0.6.3 R2: drive-relative with ..",
+    "tool": "read_file",
+    "args": {
+      "path": "C:..\\Users\\alice\\x.md"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USER": "alice",
+      "HOME": "/Users/alice"
+    },
+    "expected_query": "x.md",
+    "expected_line": "read x.md"
+  },
+  {
+    "name": "0.6.3 R2: rooted backslash path",
+    "tool": "read_file",
+    "args": {
+      "path": "\\etc\\passwd"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USER": "alice",
+      "HOME": "/Users/alice"
+    },
+    "expected_query": "passwd",
+    "expected_line": "read passwd"
+  },
+  {
+    "name": "0.6.3 R2: rooted backslash search path",
+    "tool": "search_files",
+    "args": {
+      "pattern": "TODO",
+      "path": "\\ProgramData\\corp\\secrets"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USER": "alice",
+      "HOME": "/Users/alice"
+    },
+    "expected_query": "TODO",
+    "expected_line": "search TODO in secrets"
+  },
+  {
+    "name": "0.6.3 R2: name inside a file name",
+    "tool": "read_file",
+    "args": {
+      "path": "notes/alice.txt"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USER": "alice",
+      "HOME": "/Users/alice"
+    },
+    "expected_query": "notes",
+    "expected_line": "read notes"
+  },
+  {
+    "name": "0.6.3 R2: name-dash file",
+    "tool": "read_file",
+    "args": {
+      "path": "alice-notes.md"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USER": "alice",
+      "HOME": "/Users/alice"
+    },
+    "expected_query": null,
+    "expected_line": null
+  },
+  {
+    "name": "0.6.3 R2: name inside an email-like basename",
+    "tool": "read_file",
+    "args": {
+      "path": "/srv/mail/alice@corp.com.eml"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USER": "alice",
+      "HOME": "/Users/alice"
+    },
+    "expected_query": null,
+    "expected_line": null
+  },
+  {
+    "name": "0.6.3 R2: name inside, case and NFC",
+    "tool": "read_file",
+    "args": {
+      "path": "docs/José_plan.md"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USER": "josé",
+      "HOME": "/Users/josé"
+    },
+    "expected_query": "docs",
+    "expected_line": "read docs"
+  },
+  {
+    "name": "0.6.3 R2: name inside a dir before Users",
+    "tool": "read_file",
+    "args": {
+      "path": "Users/alice.old/x.md"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USER": "alice",
+      "HOME": "/Users/alice"
+    },
+    "expected_query": "x.md",
+    "expected_line": "read x.md"
+  },
+  {
+    "name": "0.6.3 R2: name inside a subcommand",
+    "tool": "terminal",
+    "args": {
+      "command": "cat alice_notes.txt"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USER": "alice",
+      "HOME": "/Users/alice"
+    },
+    "expected_query": "cat",
+    "expected_line": "run cat"
+  },
+  {
+    "name": "0.6.3 R2: short names are not private",
+    "tool": "read_file",
+    "args": {
+      "path": "al/x.md"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USER": "al",
+      "HOME": "/home/al"
+    },
+    "expected_query": "al/x.md",
+    "expected_line": "read al/x.md"
+  },
+  {
+    "name": "0.6.3 service: USER=node",
+    "tool": "terminal",
+    "args": {
+      "command": "node server.js"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USER": "node",
+      "HOME": "/home/node"
+    },
+    "expected_query": "node server.js",
+    "expected_line": "run node server.js"
+  },
+  {
+    "name": "0.6.3 service: USER=test",
+    "tool": "terminal",
+    "args": {
+      "command": "npm test"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USER": "test",
+      "HOME": "/home/test"
+    },
+    "expected_query": "npm test",
+    "expected_line": "run npm test"
+  },
+  {
+    "name": "0.6.3 service: HOME=/root",
+    "tool": "read_file",
+    "args": {
+      "path": "src/root/x.py"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USER": "root",
+      "HOME": "/root"
+    },
+    "expected_query": "src/root/x.py",
+    "expected_line": "read src/root/x.py"
+  },
+  {
+    "name": "0.6.3 service: runner home",
+    "tool": "read_file",
+    "args": {
+      "path": "/home/runner/work/app/src/a.py"
+    },
+    "cwd": "/home/runner/work/app",
+    "env": {
+      "USER": "runner",
+      "HOME": "/home/runner"
+    },
+    "expected_query": "src/a.py",
+    "expected_line": "read src/a.py"
+  },
+  {
+    "name": "0.6.3 service: www-data",
+    "tool": "read_file",
+    "args": {
+      "path": "www-data/x.md"
+    },
+    "cwd": "/work/repo",
+    "env": {
+      "USER": "www-data"
+    },
+    "expected_query": "www-data/x.md",
+    "expected_line": "read www-data/x.md"
+  },
+  {
+    "name": "0.6.3 key: /srv/a/README.md",
+    "tool": "read_file",
+    "args": {
+      "path": "/srv/a/README.md"
+    },
+    "cwd": "/",
+    "env": {
+      "USER": "alice",
+      "HOME": "/Users/alice"
+    },
+    "expected_query": "README.md",
+    "expected_line": "read README.md"
+  },
+  {
+    "name": "0.6.3 key: /srv/b/README.md",
+    "tool": "read_file",
+    "args": {
+      "path": "/srv/b/README.md"
+    },
+    "cwd": "/",
+    "env": {
+      "USER": "alice",
+      "HOME": "/Users/alice"
+    },
+    "expected_query": "README.md",
+    "expected_line": "read README.md",
+    "key_distinct_from": "0.6.3 key: /srv/a/README.md"
+  },
+  {
+    "name": "0.6.3 key: search in a vs b",
+    "tool": "search_files",
+    "args": {
+      "pattern": "TODO",
+      "path": "/srv/b/docs"
+    },
+    "cwd": "/",
+    "env": {
+      "USER": "alice",
+      "HOME": "/Users/alice"
+    },
+    "expected_query": "TODO",
+    "expected_line": "search TODO in docs"
+  },
+  {
+    "name": "0.6.3 key: search in other docs",
+    "tool": "search_files",
+    "args": {
+      "pattern": "TODO",
+      "path": "/srv/a/docs"
+    },
+    "cwd": "/",
+    "env": {
+      "USER": "alice",
+      "HOME": "/Users/alice"
+    },
+    "expected_query": "TODO",
+    "expected_line": "search TODO in docs",
+    "key_distinct_from": "0.6.3 key: search in a vs b"
   }
 ]
