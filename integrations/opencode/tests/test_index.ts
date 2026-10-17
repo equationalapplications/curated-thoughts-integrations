@@ -66,13 +66,15 @@ describe('CuratedThoughts hooks object', () => {
     // No `event` hook: OpenCode 1.18.x emits no MCP status event
     // (tests/host/compatibility.json → findings.mcpStatusEvents = false).
     // Wisdom (leg spec LD1): chat.message = N1+N2, tool.execute.after = N3,
-    // experimental.session.compacting = decision-3 carry-forward snapshot.
+    // experimental.session.compacting = decision-3 carry-forward snapshot;
+    // tool.execute.before = autonomous-work plan (spec 2026-10-17).
     expect(Object.keys(hooks).sort()).toEqual([
       'chat.message',
       'dispose',
       'experimental.chat.system.transform',
       'experimental.session.compacting',
       'tool.execute.after',
+      'tool.execute.before',
     ]);
     await hooks.dispose!();
   });

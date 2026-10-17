@@ -25,6 +25,12 @@
  *                  failure ⇒ no N1/N2; N3 dedups against child ∪ parent
  *                  history, best-effort.
  *   Restore      — none separate: resume rebuilds from the same history (LD10).
+ *   Activity     — autonomous-work delivery (spec 2026-10-17-opencode-
+ *                  autonomous-work-wisdom-design.md, activity.ts) reads the
+ *                  session's OWN history (`activityView`): the step id of a
+ *                  call and the ledger the agent sees. Ids this process put in
+ *                  a tool result that may not be persisted yet (`unpersisted`)
+ *                  join every ledger until an own-history scan finds them.
  */
 
 import {
@@ -43,6 +49,7 @@ import {
   type WisdomMatchResult,
 } from '@equational-applications/ct-wisdom-core';
 import { spawn } from 'node:child_process';
+import nodePath from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { discoverCt, invalidateAcceptedPath } from '../wisdom.js';
 
@@ -350,7 +357,7 @@ export interface AdapterDeps {
   /** Persisted history rows of a session, oldest first; null/throw ⇒ empty. */
   fetchHistory?: (sessionId: string) => Promise<HistoryRow[] | null>;
   /** Session info (`parentID`), null/throw ⇒ unknown ⇒ treated as child. */
-  fetchSession?: (sessionId: string) => Promise<{ parentID?: unknown } | null>;
+  fetchSession?: (sessionId: string) => Promise<{ parentID?: unknown; directory?: unknown } | null>;
   /** n3 discovery reset (tests); defaults to dropping the accepted ct path. */
   invalidateDiscovery?: () => void;
   /** Verbose-mode recorder; set only when CT_WISDOM_VERBOSE is on. */
@@ -384,16 +391,23 @@ export class OpenCodeWisdomAdapter implements HostAdapter {
   private readonly spawnFn: SpawnFn;
   private readonly discover: () => { path: string | null; failure: string | null };
   private readonly fetchHistory: (sessionId: string) => Promise<HistoryRow[] | null>;
-  private readonly fetchSession: (sessionId: string) => Promise<{ parentID?: unknown } | null>;
+  private readonly fetchSession: (sessionId: string) => Promise<{ parentID?: unknown; directory?: unknown } | null>;
   private readonly invalidateDiscovery: () => void;
   /** m1 turn cache: the N1 rebuild, read by N3 within the turn. */
   private readonly turns = new Map<string, Ledger>();
   /** Definitive session kinds (lookup failures are not cached). */
-  private readonly kinds = new Map<string, { kind: SessionKind; parentID: string | null }>();
+  private readonly kinds = new Map<string, { kind: SessionKind; parentID: string | null; directory: string | null }>();
   /** Decision 3 carry-forward: pre-compaction ids, never cleared. */
   private readonly carry = new Map<string, Set<string>>();
   /** Ids this process delivered live (persistence-gap cover, LD5). */
   private readonly delivered = new Map<string, string[]>();
+  /**
+   * Ids this process placed in a tool result (an activity block, a CT
+   * recall's entries) that the host may not have persisted yet: parallel
+   * calls of one step finish before their parts are written. Pruned once an
+   * own-history scan finds the id (history is the record, LD5).
+   */
+  private readonly unpersisted = new Map<string, Set<string>>();
   /** Whether the last rebuild saw any persisted user row (LD4 first-turn rule). */
   private readonly userHistory = new Map<string, boolean>();
   private capabilityAbsent = false;
@@ -420,6 +434,7 @@ export class OpenCodeWisdomAdapter implements HostAdapter {
     this.kinds.clear();
     this.carry.clear();
     this.delivered.clear();
+    this.unpersisted.clear();
     this.userHistory.clear();
     this.bootstrapMemo = {};
     this.capabilityAbsent = false;
@@ -431,7 +446,7 @@ export class OpenCodeWisdomAdapter implements HostAdapter {
   async sessionKind(sessionId: string): Promise<SessionKind> {
     const known = this.kinds.get(sessionId);
     if (known) return known.kind;
-    let info: { parentID?: unknown } | null = null;
+    let info: { parentID?: unknown; directory?: unknown } | null = null;
     try {
       info = await this.fetchSession(sessionId);
     } catch {
@@ -440,8 +455,24 @@ export class OpenCodeWisdomAdapter implements HostAdapter {
     if (!isObj(info)) return 'child';
     const parentID = typeof info.parentID === 'string' && info.parentID !== '' ? info.parentID : null;
     const kind: SessionKind = parentID === null ? 'parent' : 'child';
-    lruSet(this.kinds, sessionId, { kind, parentID });
+    // The session's working directory (SDK Session.directory; tools resolve
+    // relative paths against it). Only an absolute path counts.
+    const directory =
+      typeof info.directory === 'string' && info.directory.trim() !== '' && nodePath.isAbsolute(info.directory)
+        ? info.directory
+        : null;
+    lruSet(this.kinds, sessionId, { kind, parentID, directory });
     return kind;
+  }
+
+  /** Activity delivery runs in any session whose kind is KNOWN (parent or child). */
+  sessionKnown(sessionId: string): boolean {
+    return this.kinds.has(sessionId);
+  }
+
+  /** The session's absolute working directory, or null (then no path is sent). */
+  sessionDirectory(sessionId: string): string | null {
+    return this.kinds.get(sessionId)?.directory ?? null;
   }
 
   /** Parent-only delivery: only a session positively known as a parent. */
@@ -483,6 +514,7 @@ export class OpenCodeWisdomAdapter implements HostAdapter {
    */
   async rebuildLedgerAsync(session: SessionRef): Promise<Ledger> {
     const own = await this.rows(session.id);
+    this.prune(session.id, own);
     const parentID = this.kinds.get(session.id)?.parentID ?? null;
     const parentRows = parentID !== null ? await this.rows(parentID) : [];
     const ledger = this.buildLedger(session.id, [...parentRows, ...own]);
@@ -502,6 +534,7 @@ export class OpenCodeWisdomAdapter implements HostAdapter {
     };
     const delivered = this.delivered.get(sessionId) ?? [];
     for (let i = delivered.length - 1; i >= 0; i--) push(delivered[i]!);
+    for (const id of this.unpersisted.get(sessionId) ?? []) push(id);
     let bootSeen = false;
     for (let i = rows.length - 1; i >= 0; i--) {
       const row = rows[i] as HistoryRow;
@@ -519,6 +552,54 @@ export class OpenCodeWisdomAdapter implements HostAdapter {
     for (const id of memo?.ids ?? []) push(id);
     for (const id of this.carry.get(sessionId) ?? []) push(id);
     return makeLedger(ordered, bootSeen || memo !== undefined);
+  }
+
+  // ── activity view (spec 2026-10-17) ──────────────────────────────────
+
+  /** Remember ids just placed in a tool result of this session (see `unpersisted`). */
+  noteUnpersisted(sessionId: string, ids: Iterable<string>): void {
+    const valid = [...ids].filter((id) => validId(id));
+    if (valid.length === 0) return;
+    lruSet(this.unpersisted, sessionId, unionInto(this.unpersisted.get(sessionId), valid));
+  }
+
+  /** Drop unpersisted ids that the session's own persisted history now shows. */
+  private prune(sessionId: string, own: HistoryRow[]): void {
+    const pending = this.unpersisted.get(sessionId);
+    if (pending === undefined || pending.size === 0) return;
+    const seen = new Set<string>();
+    for (const row of own) {
+      if (!isObj(row)) continue;
+      for (const t of [...rowTexts(row), ...toolOutputTexts(row)]) for (const id of scanIds(t)) seen.add(id);
+    }
+    for (const id of seen) pending.delete(id);
+  }
+
+  /**
+   * The activity path's view of a session: its OWN persisted history (never
+   * the parent's: a subagent cannot see its parent's context), plus carry,
+   * memo, user-turn deliveries and unpersisted ids. `stepOf(callID)` is the
+   * assistant message id of the tool part with that call id (the processor
+   * persists the part when the call streams in), or null.
+   */
+  async activityView(sessionId: string): Promise<{ ledger: Ledger; stepOf: (callID: string) => string | null }> {
+    const own = await this.rows(sessionId);
+    this.prune(sessionId, own);
+    const ledger = this.buildLedger(sessionId, own);
+    const stepOf = (callID: string): string | null => {
+      for (let i = own.length - 1; i >= 0; i--) {
+        const row = own[i];
+        if (!isObj(row) || !Array.isArray(row.parts)) continue;
+        for (const part of row.parts) {
+          if (!isObj(part) || part.type !== 'tool' || part.callID !== callID) continue;
+          if (typeof part.messageID === 'string' && part.messageID !== '') return part.messageID;
+          const id = isObj(row.info) ? row.info.id : undefined;
+          return typeof id === 'string' && id !== '' ? id : null;
+        }
+      }
+      return null;
+    };
+    return { ledger, stepOf };
   }
 
   /**
