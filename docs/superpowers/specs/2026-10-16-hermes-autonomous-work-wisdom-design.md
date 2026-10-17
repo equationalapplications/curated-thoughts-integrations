@@ -1005,6 +1005,10 @@ this"; sending its target anyway is the worse failure.
   `"status": "blocked"` with the deny-rule `BLOCKED: …` error. CT again received only
   `TASK.md`, `pnpm test` and `.env.local`. Two facts were delivered (terminal and
   write_file), each once, and no key value was found in `out/`.
+  **Rerun after Amendment 8 update 3 (2026-10-17): RESULT PASS, all checks**, with check
+  6 now matching the refused target precisely (a query starting `git push`). CT again
+  received only `TASK.md`, `pnpm test` and `.env.local`; secrets.env and `git push`
+  sent nothing; no key value in `out/`.
 
 ### Amendment 8 update (PR #72 review, 2026-10-17)
 
