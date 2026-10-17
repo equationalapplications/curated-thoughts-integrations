@@ -56,7 +56,7 @@ class InstallerTests(unittest.TestCase):
     def test_drop_in_content(self):
         self.run_install()
         text = self.dropin.read_text(encoding="utf-8")
-        self.assertTrue(text.startswith(MARKER + "\n# version: 0.1.2\n"))
+        self.assertTrue(text.startswith(MARKER + "\n# version: 0.1.3\n"))
         for event in ("before_llm_call", "user_prompt_submit", "user_followup_submit",
                       "tool_response_transform"):
             self.assertRegex(text, r"(?m)^%s:$" % event)

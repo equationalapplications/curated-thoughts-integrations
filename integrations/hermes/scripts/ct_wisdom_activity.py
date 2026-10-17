@@ -330,7 +330,7 @@ def _git_bash(path, windows=None):
 def _pwd_identity():
     """(pw_name, pw_dir) of the process user, looked up once (an NSS lookup
     can be slow); (None, None) where pwd is unavailable (Windows). Cleared by
-    reset_state."""
+    reset_caches."""
     try:
         import pwd
         entry = pwd.getpwuid(os.getuid())

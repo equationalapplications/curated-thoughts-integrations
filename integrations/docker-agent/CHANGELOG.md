@@ -5,6 +5,11 @@ All notable changes to this integration. Versions follow SemVer; tags are
 
 ## Unreleased
 
+## 0.1.3 — 2026-10-17
+
+- Internal: the shared `ct_wisdom_activity.py` no longer carries the Hermes-only
+  delivery code (about 540 fewer shipped lines). No behavior change.
+
 ## 0.1.2 — 2026-10-17
 
 - Shared `ct_wisdom_activity.py` re-synced with Hermes 0.7.1 (its Hermes-only

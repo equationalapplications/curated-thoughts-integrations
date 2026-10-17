@@ -1,6 +1,6 @@
 {
   "name": "curated-thoughts",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Curated Thoughts for Docker Agent: a hooks.d drop-in that brings Intuitive Wisdom (relevant curated facts, delivered once, when they matter) to every agent of `docker agent run`, plus the MCP sidecar snippet, health checks and verbose mode.",
   "license": "MIT",
   "homepage": "https://github.com/equationalapplications/curated-thoughts-integrations"
