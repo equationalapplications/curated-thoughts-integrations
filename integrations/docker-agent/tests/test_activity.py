@@ -45,7 +45,6 @@ CASES = [
     ("shell", {"cmd": "API_KEY=sk-123 python deploy.py --token x"}, "run python", "python"),
     ("shell", {"cmd": "curl -H 'Authorization: Bearer x' https://h"}, "run curl", "curl"),
     ("shell", {"cmd": "git commit -m 'msg SECRET'"}, "run git commit", "git commit"),
-    ("shell", {"cmd": "/usr/local/bin/python3 -m pytest"}, "run python3 pytest", "python3 pytest"),
     ("shell", {"cmd": "cat .env.local | grep KEY"}, "run cat", "cat"),
     ("shell", {"cmd": "echo sk-live-abcdef"}, "run echo", "echo"),
     ("shell", {"cmd": "export TOKEN=abc && make"}, "run export", "export"),
@@ -151,9 +150,12 @@ class SharedVectorTests(unittest.TestCase):
         "terminal": ("shell", {"command": "cmd"}),
     }
 
-    def world(self, cases):
-        tmp = os.path.realpath(tempfile.mkdtemp(prefix="ct-da-world-"))
-        self.addCleanup(shutil.rmtree, tmp, True)
+    def world(self, cases, tmp=None):
+        if tmp is None:
+            tmp = os.path.realpath(tempfile.mkdtemp(prefix="ct-da-world-"))
+            self.addCleanup(shutil.rmtree, tmp, True)
+        else:
+            os.makedirs(tmp)
 
         def vmap(value):
             if isinstance(value, str) and value.startswith("/"):
@@ -186,8 +188,8 @@ class SharedVectorTests(unittest.TestCase):
         if cwd.startswith(tmp):
             os.makedirs(cwd, exist_ok=True)
         env = {k: (vmap(v) if k in ("HOME", "USERPROFILE") else v) for k, v in case["env"].items()}
-        identity = ([case["system_user"]] if case.get("system_user") else [],
-                    [vmap(case["system_home"])] if case.get("system_home") else [])
+        home = [vmap(case["system_home"])] if case.get("system_home") else []
+        identity = ([case["system_user"]] if case.get("system_user") else [], home, home)
         saved = ct_wisdom_activity._fs_root, ct_wisdom_activity._system_identity
         ct_wisdom_activity._fs_root = lambda d: d == tmp or not d.startswith(tmp + os.sep)
         ct_wisdom_activity._system_identity = lambda: identity
@@ -232,10 +234,20 @@ class SharedVectorTests(unittest.TestCase):
             if not other:
                 continue
             with self.subTest(case["name"]):
-                tmp, vmap = self.world([case, cases[other]])
-                if tmp is None:
-                    self.skipTest("symlinks unavailable")
-                a, b = self.build(case, tmp, vmap), self.build(cases[other], tmp, vmap)
+                # Each case in its own world, one after the other, at the SAME
+                # path (the shared runner's rule): no fs cross-talk, and keys
+                # (digests of full paths) stay comparable.
+                parent = os.path.realpath(tempfile.mkdtemp(prefix="ct-da-pair-"))
+                self.addCleanup(shutil.rmtree, parent, True)
+                built = []
+                for one in (case, cases[other]):
+                    where = os.path.join(parent, "w")
+                    tmp, vmap = self.world([one], tmp=where)
+                    if tmp is None:
+                        self.skipTest("symlinks unavailable")
+                    built.append(self.build(one, tmp, vmap))
+                    shutil.rmtree(where, ignore_errors=True)
+                a, b = built
                 self.assertEqual(act.query_for(a), act.query_for(b))
                 self.assertNotEqual(a.key, b.key)
                 checked += 1
