@@ -1088,6 +1088,16 @@ export class ActivityTracker {
     s.steps.delete(stepId);
   }
 
+  /**
+   * Free only the KEY (review of PR #66): the step stays used, so a failed
+   * query can be retried in a LATER step but never a second time in this
+   * one. Per-tool hosts (OpenCode) need it: the other calls of the same step
+   * would otherwise start another query.
+   */
+  releaseKey(sessionId: string, key: string): void {
+    this.sessions.get(sessionId)?.keys.delete(key);
+  }
+
   /** Sessions tracked (tests). */
   sessionCount(): number {
     return this.sessions.size;
@@ -1218,10 +1228,16 @@ export async function runActivityMatch(
   activity: Activity,
   exclude: string[],
   breaker: Breaker,
+  signal?: AbortSignal,
 ): Promise<ActivityMatch> {
   try {
     if (host.wisdomMatchAbsent()) return { failure: 'capability_missing' };
-    const attempt = await host.wisdomMatch(activityQuery(activity), ACTIVITY_MAX_PER_STEP, exclude);
+    const attempt = signal
+      ? await host.wisdomMatch(activityQuery(activity), ACTIVITY_MAX_PER_STEP, exclude, signal)
+      : await host.wisdomMatch(activityQuery(activity), ACTIVITY_MAX_PER_STEP, exclude);
+    // The caller's budget ran out and killed the child: not CT's failure, so
+    // the breaker does not count it (the same rule as `budget` elsewhere).
+    if (signal?.aborted) return { failure: 'budget' };
     if (attempt.outcome === 'spawn') {
       host.resetDiscoveryAndProbeCaches();
       return { failure: 'spawn' };
@@ -1304,12 +1320,13 @@ export function startActivity(
   session: SessionRef,
   activity: Activity,
   breaker: Breaker,
+  signal?: AbortSignal,
 ): ActivityStart {
   try {
     const gate = activityGate(host, session, breaker);
     if (!gate.ok) return { failure: gate.reason };
     const exclude = gate.ledger.idsMostRecentFirst.slice(0, EXCLUDE_MAX);
-    return { failure: null, match: runActivityMatch(host, activity, exclude, breaker) };
+    return { failure: null, match: runActivityMatch(host, activity, exclude, breaker, signal) };
   } catch {
     return { failure: 'hook_failed' };
   }

@@ -17,6 +17,11 @@ export interface SpawnLike {
   command: string;
   args: string[];
   timeoutMs: number;
+  /**
+   * Optional: abort kills the child (process tree). Bindings that ignore it
+   * still end at `timeoutMs`.
+   */
+  signal?: AbortSignal;
 }
 
 export interface SpawnOutcome {
@@ -95,11 +100,13 @@ export async function wisdomMatch(
   max: number,
   exclude: string[],
   spawnFn: SpawnFn,
+  signal?: AbortSignal,
 ): Promise<{ outcome: MatchOutcome; result?: WisdomMatchResult }> {
   const raw = await spawnFn({
     command: ctPath,
     args: matchArgs(query, max, exclude),
     timeoutMs: TIMEOUT_MS,
+    ...(signal ? { signal } : {}),
   });
   const outcome = classify(raw);
   if (outcome !== 'ok') return { outcome };

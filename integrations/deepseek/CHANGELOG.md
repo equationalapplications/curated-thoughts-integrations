@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 0.6.1 — 2026-10-17
+
+- Changed (no behavior change): the autonomous-work budget wait uses the
+  shared `settleWithin` from `ct-wisdom-core` instead of a private copy
+  (review of the OpenCode leg, PR #66: one helper for every host). The
+  shared core also gained optional abort support for `ct wisdom match`
+  (used by OpenCode to kill a timed-out query) and
+  `ActivityTracker.releaseKey`; DeepSeek Harness does not pass a signal and
+  keeps its per-step `release`.
+
 ## 0.6.0 — 2026-10-16
 
 - Added: Intuitive Wisdom during autonomous work. While the agent works on

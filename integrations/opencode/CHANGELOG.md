@@ -2,6 +2,34 @@
 
 ## Unreleased
 
+## 0.4.0 — 2026-10-17
+
+- Added: Intuitive Wisdom during autonomous work. While the agent works on
+  its own, each approved `read`/`write`/`edit`/`grep`/`glob`/`bash` call can
+  bring one fact (≤ 600 chars), appended marker-first to that tool's result
+  (`## Curated Thoughts — relevant to this step`), persisted with the
+  session and never repeated (the ledger scans the session's own tool
+  outputs, plus a process-local set for parallel results that are not
+  persisted yet). At most one CT call per model step, only on a new file,
+  command or search key; the query is the bare target from the shared
+  `ct-wisdom-core` builder (all 290 shared privacy vectors pass through this
+  binding). The query starts in `tool.execute.after`, because OpenCode asks
+  permission after `tool.execute.before` and exposes no approval result to
+  plugins: a call the host refuses sends nothing. Subagent sessions are
+  included (own ledger); per-message delivery stays parent-only. CT tools
+  and experimental code-mode child calls never trigger. Verbose mode reports
+  these on channel `activity`. One 3 s deadline covers the whole hook
+  (session lookups included); on expiry the `ct` child is killed and the
+  key, not the step, is freed for a later step. Not-yet-persisted ids
+  expire (60 s) and are dropped when the step is aborted or undone.
+  Spec: `docs/superpowers/specs/2026-10-17-opencode-autonomous-work-wisdom-design.md`.
+- Tests: binding vectors and golden blocks, rate/coalescing, subagents,
+  fail-closed, verbose byte-identity, a randomized exactly-once test with
+  parallel activity steps, refused calls, recalls, compaction and restarts;
+  a real-binary host-contract test; an opt-in real-gate live e2e
+  (`CT_E2E_REAL_GATE=1`). The e2e image now carries the `ct` 3.5.1 CLI and
+  pnpm (test-only provisioning).
+
 ## 0.3.1 — 2026-10-16
 
 - Fixed (shared `ct-wisdom-core`): a live delivery could show a fact twice
