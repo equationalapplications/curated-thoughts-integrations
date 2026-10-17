@@ -23,7 +23,7 @@ describe('plugin entry shape', () => {
 
   it('registers agent_turn_prepare, before_prompt_build (20 s budget), model_call_started and openclaw-runtime middleware', () => {
     const api = boot(new FakeCt());
-    expect(api.hooks.map((h) => h.name)).toEqual(['agent_turn_prepare', 'before_prompt_build', 'model_call_started']);
+    expect(api.hooks.map((h) => h.name)).toEqual(['agent_turn_prepare', 'before_prompt_build', 'before_compaction', 'after_compaction', 'model_call_started']);
     // no before_tool_call: it runs before approvals, and a throwing one blocks the tool
     expect(api.hooks.map((h) => h.name)).not.toContain('before_tool_call');
     expect(api.hooks[2].opts).toBeUndefined();
@@ -39,7 +39,7 @@ describe('plugin entry shape', () => {
     (api as { registerAgentToolResultMiddleware?: unknown }).registerAgentToolResultMiddleware = undefined;
     (api as { session?: unknown }).session = undefined;
     createPlugin({ spawnFn: ct.spawnFn, env: {}, candidates: () => ['/fake/ct'], usable: () => true }).register(api as never);
-    expect(api.hooks.map((h) => h.name)).toEqual(['agent_turn_prepare', 'before_prompt_build', 'model_call_started']);
+    expect(api.hooks.map((h) => h.name)).toEqual(['agent_turn_prepare', 'before_prompt_build', 'before_compaction', 'after_compaction', 'model_call_started']);
     const ctx = userCtx({ hookInvocation: { assertActive: () => { throw new Error('inactive'); } } });
     const r = await build(api as never, { prompt: 'p', currentUserMessage: 'x', currentUserMessageId: 'm', messages: [] }, ctx);
     expect(r).toBeUndefined();

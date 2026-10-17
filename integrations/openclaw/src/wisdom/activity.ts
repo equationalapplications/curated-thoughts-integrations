@@ -35,13 +35,15 @@ import {
   lruSet,
   reportActivity,
   scanIds,
+  settleWithin,
   startActivity,
+  validId,
   type ActivityEnv,
   type ActivitySpec,
   type Breaker,
 } from '@equational-applications/ct-wisdom-core';
 
-import type { OpenClawWisdomAdapter } from './adapter.js';
+import { STRUCTURED_PREFIX, isRecallToolName, partTexts, type OpenClawWisdomAdapter } from './adapter.js';
 
 /** The host's per-result block limit (tool-result-middleware MAX_MIDDLEWARE_CONTENT_BLOCKS). */
 export const MIDDLEWARE_MAX_BLOCKS = 200;
@@ -113,9 +115,8 @@ export interface OpenClawActivityDeps {
   breaker: Breaker;
   /** Environment the builder reads (user names, HOME for `~`). */
   env: ActivityEnv;
-  /** Wall budget for one query (default TIMEOUT_MS; a test seam). */
+  /** Wall budget for one match (default TIMEOUT_MS; a test seam). Locate and probe are outside it. */
   budgetMs?: number;
-  now?: () => number;
   /** One debug line per skip (index.ts: api.logger.debug). */
   log?: (line: string) => void;
 }
@@ -127,7 +128,6 @@ export class OpenClawActivity {
   private readonly breaker: Breaker;
   private readonly env: ActivityEnv;
   private readonly budgetMs: number;
-  private readonly now: () => number;
   private readonly log?: (line: string) => void;
 
   constructor(deps: OpenClawActivityDeps) {
@@ -135,7 +135,6 @@ export class OpenClawActivity {
     this.breaker = deps.breaker;
     this.env = deps.env;
     this.budgetMs = deps.budgetMs ?? TIMEOUT_MS;
-    this.now = deps.now ?? (() => Date.now());
     if (deps.log) this.log = deps.log;
   }
 
@@ -183,6 +182,14 @@ export class OpenClawActivity {
       this.adapter.noteRunIds(sessionKey, runId, resultIds(result));
 
       const toolName = e.toolName;
+      if (toolName === META_TOOL) {
+        // A CT recall through the `tool_call` meta tool: N3 cannot stub it,
+        // but its facts are in context now. Unreadable → fail closed.
+        const ids = metaRecallIds(e.args, result);
+        if (ids === 'unreadable') this.adapter.markBlind(sessionKey, 'meta_unreadable', runId);
+        else if (ids !== null) this.adapter.noteRunIds(sessionKey, runId, ids);
+        return result; // never a trigger (decision 5; not in the map either)
+      }
       if (isCtTool(toolName)) return result; // decision 5
       const spec = openclawActivitySpec(toolName, e.args);
       if (spec === null) return result;
@@ -211,12 +218,28 @@ export class OpenClawActivity {
       const content = obj(result)?.content;
       if (!Array.isArray(content) || content.length >= MIDDLEWARE_MAX_BLOCKS) return skipOncePerStep('no_channel');
       if (!this.adapter.hasRun(sessionKey, runId)) return skipOncePerStep('no_ledger');
+      const blind = this.adapter.blindReason(sessionKey, runId);
+      if (blind !== null) return skipOncePerStep(blind);
 
-      const start = startActivity(this.adapter, session, activity, this.breaker);
-      if (start.failure !== null) return skipOncePerStep(start.failure);
+      // Claim the step synchronously (parallel results of one step race here
+      // and nowhere else), then pay any first-use locate + probe cost (cached,
+      // warmed at prompt time) OUTSIDE the match budget. A refused start
+      // releases the claim, so it records nothing.
       this.tracker.admit(sessionKey, stepId, activity.key);
-      const deadline = this.now() + this.budgetMs;
-      const match = await settleWithin(start.match, Math.max(0, deadline - this.now()));
+      await this.adapter.ready();
+      const abort = new AbortController();
+      const start = startActivity(this.adapter, session, activity, this.breaker, abort.signal);
+      if (start.failure !== null) {
+        this.tracker.release(sessionKey, stepId, activity.key);
+        return skipOncePerStep(start.failure);
+      }
+      // On expiry: kill the abandoned ct child (the core then reports
+      // `budget`, never a success) and count the miss toward the shared
+      // breaker, so a CT that keeps missing the budget pauses both paths.
+      const match = await settleWithin(start.match, this.budgetMs, () => {
+        abort.abort();
+        this.breaker.recordFailure();
+      });
       // The core re-gates on a FRESH ledger (results that arrived while we
       // waited included), selects one fact, updates the N3 cache and reports.
       const outcome = finishActivityOutcome(this.adapter, session, activity, match);
@@ -239,32 +262,56 @@ export class OpenClawActivity {
   }
 }
 
-/** Marker ids in every text block of a tool result. */
+/** Marker ids in every text part of a tool result. */
 function resultIds(result: unknown): string[] {
-  const content = obj(result)?.content;
-  if (!Array.isArray(content)) return [];
-  const ids: string[] = [];
-  for (const block of content) {
-    const text = obj(block)?.text;
-    if (typeof text === 'string') for (const id of scanIds(text)) if (!ids.includes(id)) ids.push(id);
-  }
-  return ids;
+  const ids = new Set<string>();
+  for (const text of partTexts(obj(result)?.content)) for (const id of scanIds(text)) ids.add(id);
+  return [...ids];
 }
 
-/** The promise's value if it settles within `ms` (or already has), else null. */
-function settleWithin<T>(promise: Promise<T>, ms: number): Promise<T | null> {
-  return new Promise((resolve) => {
-    const timer = setTimeout(() => resolve(null), ms);
-    timer.unref?.();
-    promise.then(
-      (v) => {
-        clearTimeout(timer);
-        resolve(v);
-      },
-      () => {
-        clearTimeout(timer);
-        resolve(null);
-      },
-    );
-  });
+/** OpenClaw's deferred-tool meta tool (`args.id = "mcp:<server>:<tool>"`, live-verified). */
+export const META_TOOL = 'tool_call';
+const WRAP_START = '\n---\n';
+const WRAP_END = '<<<END_EXTERNAL_UNTRUSTED_CONTENT';
+
+/**
+ * Fact ids of a CT recall made through the `tool_call` meta tool: null when
+ * the call is not a CT recall; 'unreadable' when it is but the result shape
+ * is not the verified one (an external-content wrapper around
+ * `{tool, result: {content: [{text: <recall envelope>}]}}`).
+ */
+export function metaRecallIds(args: unknown, result: unknown): string[] | 'unreadable' | null {
+  const target = obj(args)?.id;
+  if (typeof target !== 'string') return null;
+  const name = target.slice(target.lastIndexOf(':') + 1);
+  if (!isRecallToolName(name)) return null;
+  try {
+    for (const text of partTexts(obj(result)?.content)) {
+      let body = text;
+      const at = body.indexOf(WRAP_START);
+      if (at >= 0) body = body.slice(at + WRAP_START.length);
+      const end = body.lastIndexOf(WRAP_END);
+      if (end >= 0) body = body.slice(0, end);
+      const outer = obj(JSON.parse(body.trim()));
+      const inner = obj(outer?.result)?.content;
+      if (!Array.isArray(inner)) continue;
+      const ids: string[] = [];
+      let found = false;
+      for (const t of partTexts(inner)) {
+        const env = obj(JSON.parse(t.startsWith(STRUCTURED_PREFIX) ? t.slice(STRUCTURED_PREFIX.length) : t));
+        const entries = env?.wiki_entries;
+        if (!Array.isArray(entries)) continue;
+        found = true;
+        for (const entry of entries) {
+          const id = obj(entry)?.id;
+          if (validId(id) && !ids.includes(id)) ids.push(id);
+        }
+        for (const id of scanIds(t)) if (!ids.includes(id)) ids.push(id);
+      }
+      if (found) return ids;
+    }
+  } catch {
+    /* fall through: unreadable */
+  }
+  return 'unreadable';
 }

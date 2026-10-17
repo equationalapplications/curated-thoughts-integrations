@@ -87,7 +87,7 @@ function deliveries(transcript: Msg[], bootIds: string[]): Map<string, number> {
   return counts;
 }
 
-interface Stats { live: number; salvaged: number; drained: number; stubs: number; compactions: number; restarts: number; activity: number; midRunRestarts: number; corrections: number }
+interface Stats { live: number; salvaged: number; drained: number; stubs: number; compactions: number; restarts: number; activity: number; midRunRestarts: number; corrections: number; midRunCompactions: number }
 
 async function runSession(seed: number, turns: number, stats: Stats): Promise<{ violations: string[]; maxLive: number }> {
   const rnd = mulberry32(seed);
@@ -185,6 +185,14 @@ async function runSession(seed: number, turns: number, stats: Stats): Promise<{ 
         stats.midRunRestarts++;
         restartedMidRun = true;
       }
+      // compaction DURING the run: the host fires before_compaction; the
+      // oldest messages leave the window (the run goes blind for activity)
+      if (rnd() < 0.08 && transcript.length > 6) {
+        api.hook('before_compaction')({ messageCount: transcript.length }, { sessionKey: ctx.sessionKey });
+        transcript = transcript.slice(Math.floor(transcript.length / 2));
+        stats.midRunCompactions++;
+        restartedMidRun = true; // N3 stubs nothing after it: no recall in the oracle (see below)
+      }
       api.hook('model_call_started')({ runId, callId: `${runId}:model:${s}` }, { runId, sessionKey: ctx.sessionKey });
       transcript.push({ role: 'assistant', content: [{ type: 'toolCall', name: 'batch' }] });
       const batch = Array.from({ length: 1 + Math.floor(rnd() * 3) }, () => pick(TOOLS));
@@ -199,10 +207,10 @@ async function runSession(seed: number, turns: number, stats: Stats): Promise<{ 
         if (content.some((b) => b.text.includes('supersedes ct-fact:'))) stats.corrections++;
         return { role: 'toolResult', toolName, content };
       });
-      // A recall in a process that never saw this run's snapshot has no
-      // ledger to stub against (the pre-existing N3 limit, out of this
-      // spec's scope); activity delivery fails closed there (no_ledger),
-      // which the batch above still exercises.
+      // A recall in a process that never saw this run's snapshot, or after a
+      // compaction in the run, has no trustworthy ledger to stub against (the
+      // N3 limit, out of this spec's scope); activity delivery fails closed
+      // there (no_ledger / compacted), which the batch above still exercises.
       if (!restartedMidRun && rnd() < 0.3) {
         const ids = Array.from({ length: 1 + Math.floor(rnd() * 3) }, () => pick(POOL).id);
         const raw = { content: [{ type: 'text', text: JSON.stringify({ wiki_entries: [...new Set(ids)].map((id) => ({ id, title: id, text: `t-${id}` })) }) }], details: {} };
@@ -252,7 +260,7 @@ describe('exactly-once across prependContext, salvage injections, the N3 middlew
   it('holds over 150 randomized sessions with retries, compaction and restarts', async () => {
     const all: string[] = [];
     let maxLive = 0;
-    const stats: Stats = { live: 0, salvaged: 0, drained: 0, stubs: 0, compactions: 0, restarts: 0, activity: 0, midRunRestarts: 0, corrections: 0 };
+    const stats: Stats = { live: 0, salvaged: 0, drained: 0, stubs: 0, compactions: 0, restarts: 0, activity: 0, midRunRestarts: 0, corrections: 0, midRunCompactions: 0 };
     for (let seed = 1; seed <= 150; seed++) {
       const r = await runSession(seed, 14, stats);
       all.push(...r.violations);
@@ -272,6 +280,7 @@ describe('exactly-once across prependContext, salvage injections, the N3 middlew
     expect(stats.activity).toBeGreaterThan(100);
     expect(stats.midRunRestarts).toBeGreaterThan(5);
     expect(stats.corrections).toBeGreaterThan(5);
+    expect(stats.midRunCompactions).toBeGreaterThan(5);
     if (process.env.CT_EO_STATS) console.log(JSON.stringify({ ...stats, maxLive }));
   }, 120_000);
 });

@@ -480,6 +480,51 @@ reading had missed:
   dev Mac; two doctor tests time out at the 5 s default under load), all `tsc` clean; `ct_ci.py`
   validate, generate, policy and readme gates pass.
 
+## Review amendments (PR #67 @ cee0ec4, high-effort review)
+
+1. **Snapshot before the admission cache.** `before_prompt_build` now always stores the run's
+   snapshot (`setTurn`, run-ledger reset) *before* looking up the admission memo; only the CT call
+   (the live outcome) is memoized. A host re-run of a cached admission under a new `runId` keeps
+   activity delivery, and the cached live block, a salvaged block and the ids drained into the
+   admitted request join the new run's ledger.
+2. **Config per registration.** The process-wide state no longer freezes the first registration's
+   `pluginConfig.brainDir`: each registration recomputes the environment, and the spawn binding reads
+   it at spawn time (`nodeSpawnFn(() => state.env)`).
+3. **Budget = the match only.** `ct` discovery and the `wisdom match --help` probe are cached and
+   warmed at prompt time (`adapter.ready()`, one shared attempt); the activity path awaits them
+   *before* the 3 s budget starts. On expiry the abandoned child is killed (an `AbortSignal` through
+   `SpawnLike.signal`; `nodeSpawnFn` kills the process tree), the core reports `budget` and never
+   `recordSuccess`, and the OpenClaw host **counts the miss toward the shared breaker** (as the
+   review asked). The core helpers (`settleWithin` with an expiry callback, the `signal` plumbing,
+   `ActivityTracker.releaseKey`) are taken byte-identically from the OpenCode leg's branch (#66) so
+   the second PR to merge reconciles trivially. Note the one divergence: the OpenCode host does not
+   count a budget miss toward the breaker; OpenClaw does, from its own expiry callback, not in the
+   core. The step is claimed synchronously before the `ready()` await (parallel results of one step
+   still make one call) and released if the start is refused.
+4. **No run id (`''`, legacy hosts) is no run.** It is normalized to absent: nothing is run-scoped,
+   `noteRunIds` is a no-op, every snapshot starts clean, and activity delivery is off (`no_ledger`).
+5. **Recalls through `tool_call`.** The middleware recognises a `tool_call` whose `args.id` names a
+   `curated_recall_context` tool and reads the envelope ids out of the external-content wrapper
+   (`{tool, result: {content: [{text: <envelope>}]}}`, the live-verified shape) into the run ledger,
+   so activity never repeats them. If the result is not that shape, the run goes blind
+   (`meta_unreadable`): no activity delivery until the next snapshot. N3 still cannot stub such
+   recalls (limitation 9).
+6. **N3 for every run, made safe under compaction.** N3 now runs with the run's ledger in every
+   session (it had none outside user turns before, and none at all live). The risk is a ledger that
+   holds ids compaction removed from view, which would make N3 stub a fact the agent can no longer
+   see. The embedded runner fires `before_compaction` / `after_compaction` for in-run compaction
+   (`builtin-openclaw-C66TYl5I.mjs` `runBestEffortCompactionHook`, ctx `{sessionKey}`) [V code]; the
+   plugin registers both and marks the run **blind** (`compacted`): the ledger then reports nothing
+   in context (N3 stubs nothing), the N3 cache is dropped, activity refuses the run, and the next
+   snapshot (taken after compaction) clears it. Tested; the randomized test gained mid-run
+   compactions (223 across 150 sessions, 0 violations).
+7. **Bounded run ledger.** A `Set` plus an order list, capped at `EXCLUDE_MAX`. Forgetting an id that
+   is in context could repeat it, so on overflow the oldest ids are dropped *and* the run goes blind
+   (`ledger_overflow`).
+8. `settleWithin` comes from the core (item 3).
+9. `resultIds` reuses the adapter's exported `partTexts`.
+10. The dead `deadline` / `now` seam in the activity path is gone.
+
 ## Versioning and docs
 
 - openclaw `0.2.2 → 0.3.0` (`package.json`, `openclaw.plugin.json`, `integration.yaml`), CHANGELOG,

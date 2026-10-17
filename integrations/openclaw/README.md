@@ -159,14 +159,16 @@ Since 0.3.0, on the embedded runtime (spec:
 - **Exactly once:** the ledger is the run's prompt-hook snapshot plus every
   fact that entered context during the run (the live block, earlier tool
   results, recalls). A process that never saw the run's snapshot (a gateway
-  restart mid-run) delivers nothing until the next run.
+  restart mid-run), or a run that was compacted, delivers nothing until the
+  next snapshot.
 - **Cost:** the CT call starts after the tool ran, so a triggering result can
   wait up to 3 s. The breaker is shared with live delivery.
 - **Where:** main sessions, subagents, cron and heartbeat runs. Not on the
   Codex app-server or Copilot runtimes.
 - **Known limit:** a `curated_recall_context` call the model makes through
-  OpenClaw's `tool_call` meta tool is not seen by the recall dedup (a recall
-  can then show a fact the agent already has).
+  OpenClaw's `tool_call` meta tool is not stubbed by the recall dedup (a
+  recall can then show a fact the agent already has). Its facts still join
+  the run's record, so autonomous-work delivery never repeats them.
 
 ## Cache safety
 

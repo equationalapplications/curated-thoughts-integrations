@@ -34,8 +34,19 @@
   instances (found live). All wisdom state now lives in one process-wide
   holder. Before this, the recall dedup ran with an empty ledger in the
   middleware instance and never stubbed a repeated fact.
+- Review fixes (PR #67): the run snapshot is stored before the admission
+  memo (a re-run under a new runId keeps activity delivery); the brain
+  directory follows the current registration's config; discovery and the
+  capability probe are warmed outside the 3 s match budget, an abandoned
+  match is killed and counts toward the breaker; an empty runId is no run;
+  compaction during a run (`before_compaction` / `after_compaction`) blinds
+  the run (no activity delivery, no recall stubs) until the next snapshot;
+  the run ledger is bounded (overflow blinds the run). Shared core budget
+  helpers come from the OpenCode leg (#66), unchanged.
 - Known limit: a recall the model makes through OpenClaw's `tool_call` meta
-  tool is not seen by the recall dedup.
+  tool is not stubbed by the recall dedup; its facts do join the run ledger
+  (activity never repeats them), and an unreadable one turns activity off
+  for the rest of the run.
 - e2e: `tests/e2e/run_activity.sh` (isolated `HOME`, state and brain; stub CT
   and stub MCP sidecar; `activity_verdict.py`).
 

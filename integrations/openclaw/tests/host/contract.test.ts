@@ -112,6 +112,14 @@ describe.skipIf(!built)('OpenClaw shape contract (pin %s)'.replace('%s', compat.
     expect(names).not.toContain('before_tool_call');
     expect(compat.beforeToolCallPrecedesApproval).toBeTruthy();
     expect(compat.middlewareRewritePersisted).toBeTruthy();
+    // compaction during a run blinds the run ledger (review of PR #67)
+    expect(names).toEqual(expect.arrayContaining(['before_compaction', 'after_compaction']));
+    expect(compat.compactionHooks).toBeTruthy();
+  });
+
+  it('the meta-tool name the activity path recognises is the recorded one', async () => {
+    const { META_TOOL } = await import(pathToFileURL(join(ROOT, 'lib', 'src', 'wisdom', 'activity.js')).href);
+    expect(compat.metaToolName.startsWith(`${META_TOOL}:`)).toBe(true);
   });
 
   it('the activity channel stays within the recorded middleware result limits', async () => {

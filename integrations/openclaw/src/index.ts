@@ -110,8 +110,23 @@ interface PluginState {
   sightings: Map<string, boolean>;
   /** `${sessionKey}#${runId}` → ids drained into that run from our injections. */
   drained: Map<string, string[]>;
-  /** `${sessionKey}#${admission}` → the one result for that admitted request. */
-  admissions: Map<string, Promise<PromptBuildResult | undefined>>;
+  /** `${sessionKey}#${admission}` → the one live outcome for that admitted request. */
+  admissions: Map<string, Promise<LiveOutcome | undefined>>;
+  /**
+   * The CURRENT registration's environment (its pluginConfig.brainDir →
+   * CURATED_BRAIN_DIR), read at spawn time: the state is process-wide, the
+   * config is not fixed to the first registration (review of PR #67).
+   */
+  env: NodeJS.ProcessEnv;
+}
+
+/** What one admitted request's CT call produced (cached; the snapshot never is). */
+interface LiveOutcome {
+  prependContext?: string;
+  /** Ids salvaged to the next turn: they must not be delivered again in this run. */
+  salvaged: string[];
+  /** Ids drained into the admitted request's prompt (a re-run under a new runId replays them). */
+  drained: string[];
 }
 
 /** Where a plugin object keeps its state; the default export uses a process-wide one. */
@@ -129,8 +144,7 @@ export function processStateHolder(): StateHolder {
 }
 
 function makeState(api: OpenClawApiLike, deps: PluginDeps): PluginState {
-  const env = brainEnv(deps.env ?? process.env, api.pluginConfig?.brainDir);
-  const spawnFn = deps.spawnFn ?? nodeSpawnFn(env);
+  const spawnFn = deps.spawnFn ?? nodeSpawnFn(() => state.env);
   const locator = new CtLocator({
     env: deps.env ?? process.env, // discovery reads the host PATH as-is
     spawnFn,
@@ -157,6 +171,7 @@ function makeState(api: OpenClawApiLike, deps: PluginDeps): PluginState {
       ...(deps.activityBudgetMs !== undefined ? { budgetMs: deps.activityBudgetMs } : {}),
       log: (line) => state.current.logger?.debug?.(`curated-thoughts: ${line}`),
     }),
+    env: brainEnv(deps.env ?? process.env, api.pluginConfig?.brainDir),
     bootstrap: new BootstrapMemo({
       locate: () => locator.locate(),
       spawnFn,
@@ -188,6 +203,7 @@ export function createPlugin(deps: PluginDeps = {}, holder: StateHolder = {}) {
       // state would leave the middleware without the prompt hook's ledger.
       const state = (holder.state ??= makeState(api, deps));
       state.current = api; // the logger the shared parts report through
+      state.env = brainEnv(deps.env ?? process.env, api.pluginConfig?.brainDir);
       const { adapter, breaker, activity, bootstrap, sightings, drained, admissions } = state;
       const warn = (what: string, error: unknown): void => {
         try {
@@ -238,48 +254,45 @@ export function createPlugin(deps: PluginDeps = {}, holder: StateHolder = {}) {
         });
       };
 
-      const compute = async (event: PromptBuildEvent, ctx: AgentCtx, sessionKey: string, admissionKey: string | null): Promise<PromptBuildResult | undefined> => {
-        const bootKey = `${sessionKey}|${str(ctx.sessionId)}`;
-        const boot = await bootstrap.ensure(bootKey);
-        const result: PromptBuildResult = {};
-        if (boot?.block) result.prependSystemContext = boot.block;
-
+      /** The run's snapshot: stored for EVERY prompt build, cached admission or not. */
+      const snapshot = (event: PromptBuildEvent, ctx: AgentCtx, sessionKey: string, bootIds: string[] | null): void => {
         const messages = event?.messages;
-        if (Array.isArray(messages)) {
-          let restored = sightings.get(sessionKey);
-          if (restored === undefined) {
-            // The session predates this process when its snapshot already
-            // holds assistant turns (gateway restart / resumed session).
-            restored = messages.some((m) => (m as { role?: unknown } | null)?.role === 'assistant');
-            lruSet(sightings, sessionKey, restored);
-          }
-          // Every run's snapshot is stored (any trigger, subagents too): it is
-          // the ledger source for this run's activity deliveries.
-          adapter.setTurn(sessionKey, {
-            runId: str(ctx.runId),
-            messages,
-            drained: drained.get(`${sessionKey}#${str(ctx.runId)}`) ?? [],
-            bootstrapIds: boot ? boot.ids : null,
-            restored,
-          });
+        if (!Array.isArray(messages)) return;
+        let restored = sightings.get(sessionKey);
+        if (restored === undefined) {
+          // The session predates this process when its snapshot already
+          // holds assistant turns (gateway restart / resumed session).
+          restored = messages.some((m) => (m as { role?: unknown } | null)?.role === 'assistant');
+          lruSet(sightings, sessionKey, restored);
         }
-        if (admissionKey !== null && Array.isArray(messages) && isLiveEligible(ctx, sessionKey)) {
-          const query = typeof event.currentUserMessage === 'string'
-            ? event.currentUserMessage
-            : str(event.prompt); // legacy hosts: prompt may carry history (degraded)
-          const block = await onUserTurn(adapter, { id: sessionKey }, query, breaker);
-          if (block !== null) {
-            let accepted = true;
-            try {
-              ctx.hookInvocation?.assertActive();
-            } catch {
-              accepted = false;
-            }
-            if (accepted) result.prependContext = block;
-            else await salvage(ctx, sessionKey, block);
-          }
+        // Every run's snapshot is stored (any trigger, subagents too): it is
+        // the ledger source for this run's activity deliveries.
+        adapter.setTurn(sessionKey, {
+          runId: str(ctx.runId),
+          messages,
+          drained: drained.get(`${sessionKey}#${str(ctx.runId)}`) ?? [],
+          bootstrapIds: bootIds,
+          restored,
+        });
+      };
+
+      /** The one CT call of an admitted user turn (memoized per admission). */
+      const live = async (event: PromptBuildEvent, ctx: AgentCtx, sessionKey: string): Promise<LiveOutcome | undefined> => {
+        const query = typeof event.currentUserMessage === 'string'
+          ? event.currentUserMessage
+          : str(event.prompt); // legacy hosts: prompt may carry history (degraded)
+        const drainedIds = drained.get(`${sessionKey}#${str(ctx.runId)}`) ?? [];
+        const block = await onUserTurn(adapter, { id: sessionKey }, query, breaker);
+        if (block === null) return { salvaged: [], drained: drainedIds };
+        let accepted = true;
+        try {
+          ctx.hookInvocation?.assertActive();
+        } catch {
+          accepted = false;
         }
-        return Object.keys(result).length ? result : undefined;
+        if (accepted) return { prependContext: block, salvaged: [], drained: drainedIds };
+        await salvage(ctx, sessionKey, block);
+        return { salvaged: scanIds(block), drained: drainedIds };
       };
 
       // ── before_prompt_build: bootstrap (N5) + live delivery (N1/N2) ──────
@@ -287,27 +300,61 @@ export function createPlugin(deps: PluginDeps = {}, holder: StateHolder = {}) {
         try {
           const sessionKey = str(ctx?.sessionKey);
           if (sessionKey === '') return undefined; // invariant 3
+          void adapter.ready(); // warm locate + probe, outside any match budget
+          const boot = await bootstrap.ensure(`${sessionKey}|${str(ctx.sessionId)}`);
+          // BEFORE the admission lookup: a host re-run of a cached admission
+          // under a new runId still gets its own snapshot and run ledger.
+          snapshot(event, ctx, sessionKey, boot ? boot.ids : null);
+          const result: PromptBuildResult = {};
+          if (boot?.block) result.prependSystemContext = boot.block;
           const admission = str(event?.currentUserMessageId) || str(ctx.runId);
           const admissionKey = admission ? `${sessionKey}#${admission}` : null;
-          if (admissionKey !== null) {
-            const prior = admissions.get(admissionKey);
-            if (prior) return await prior; // rebuild/retry: same bytes, no new CT call
+          if (admissionKey !== null && Array.isArray(event?.messages) && isLiveEligible(ctx, sessionKey)) {
+            let pending = admissions.get(admissionKey); // rebuild/retry: same bytes, no new CT call
+            if (pending === undefined) {
+              // Only a SUCCESSFUL outcome is memoized: a failure (e.g. a
+              // rejected salvage enqueue) drops the entry so a host retry gets
+              // a fresh attempt instead of a cached nothing.
+              pending = live(event, ctx, sessionKey).catch((error) => {
+                warn('before_prompt_build failed', error);
+                admissions.delete(admissionKey);
+                return undefined;
+              });
+              lruSet(admissions, admissionKey, pending);
+            }
+            const outcome = await pending;
+            if (outcome?.prependContext) result.prependContext = outcome.prependContext;
+            // This run's prompt carries the live block (and the salvaged one
+            // waits in the queue): both are in this run's ledger, cached or not.
+            adapter.noteRunIds(sessionKey, str(ctx.runId), [
+              ...scanIds(outcome?.prependContext ?? ''),
+              ...(outcome?.salvaged ?? []),
+              ...(outcome?.drained ?? []),
+            ]);
           }
-          // Only a SUCCESSFUL result is memoized for the admission: a failure
-          // (e.g. a rejected salvage enqueue) drops the entry so a host retry
-          // of the same request gets a fresh attempt instead of a cached nothing.
-          const run = compute(event, ctx, sessionKey, admissionKey).catch((error) => {
-            warn('before_prompt_build failed', error);
-            if (admissionKey !== null) admissions.delete(admissionKey);
-            return undefined;
-          });
-          if (admissionKey !== null) lruSet(admissions, admissionKey, run);
-          return await run;
+          return Object.keys(result).length ? result : undefined;
         } catch (error) {
           warn('before_prompt_build failed', error);
           return undefined;
         }
       }) as never, { timeoutMs: PROMPT_HOOK_TIMEOUT_MS });
+
+      // ── compaction during a run: what the model sees is no longer known ──
+      // (embedded runner: runBestEffortCompactionHook, ctx { sessionKey }).
+      // The run goes blind until the next snapshot: no activity delivery, and
+      // the N3 dedup stubs nothing (it could otherwise hide a fact that was
+      // compacted away).
+      for (const name of ['before_compaction', 'after_compaction']) {
+        api.on(name, ((_event: unknown, ctx: { sessionKey?: unknown } | null) => {
+          try {
+            const sessionKey = str(ctx?.sessionKey);
+            if (sessionKey !== '') adapter.markBlind(sessionKey, 'compacted');
+          } catch (error) {
+            warn(`${name} failed`, error);
+          }
+          return undefined;
+        }) as never);
+      }
 
       // ── model_call_started: the step id of the activity rate rule ───────
       api.on('model_call_started', ((event: ModelCallEvent, ctx: ModelCallCtx) => {
