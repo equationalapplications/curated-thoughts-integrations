@@ -32,6 +32,8 @@ export interface SpawnOutcome {
   /** True when the binary could not be launched at all (ENOENT, EACCES). */
   spawnError: boolean;
   timedOut: boolean;
+  /** True when the caller aborted the call (`SpawnLike.signal`) and the child was killed. */
+  aborted?: boolean;
 }
 
 export type SpawnFn = (spec: SpawnLike) => Promise<SpawnOutcome>;
@@ -58,6 +60,7 @@ export function matchArgs(
 
 /** Classify a spawn outcome per Annex A (`res.failed` / breaker / n3). */
 export function classify(outcome: SpawnOutcome): MatchOutcome {
+  if (outcome.aborted === true) return 'aborted';
   if (outcome.spawnError) return 'spawn';
   if (outcome.timedOut || outcome.code !== 0) return 'timeout_or_exit';
   return 'ok';

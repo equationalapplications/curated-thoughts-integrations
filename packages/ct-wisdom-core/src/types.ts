@@ -35,7 +35,11 @@ export interface WisdomMatchResult {
 }
 
 /** Outcome class of a subprocess attempt — drives breaker vs cache reset. */
-export type MatchOutcome = 'ok' | 'timeout_or_exit' | 'spawn';
+/**
+ * `aborted`: the caller's budget ran out and it killed the child (the spawn
+ * reported `aborted: true`). Never a breaker failure: it says nothing about CT.
+ */
+export type MatchOutcome = 'ok' | 'timeout_or_exit' | 'spawn' | 'aborted';
 
 /** The ledger: ids present in the session's context, newest first. */
 export interface Ledger {

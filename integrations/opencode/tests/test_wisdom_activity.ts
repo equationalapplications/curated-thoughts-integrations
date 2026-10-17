@@ -64,7 +64,7 @@ interface SimOptions {
    * CT answer for an activity query (`--max 1`). 'hang' runs until the call
    * is aborted (then exits after `killDelayMs`): the budget path.
    */
-  answer?: (query: string) => Entry[] | 'hang' | 'timeout';
+  answer?: (query: string) => Entry[] | 'hang' | 'timeout' | 'aborted';
   killDelayMs?: number;
   /** The activity budget (default 3 s). */
   budgetMs?: number;
@@ -72,6 +72,13 @@ interface SimOptions {
   hangHistory?: boolean;
   /** Run the afters of a step one after the other. */
   sequential?: boolean;
+  /** Delay of every session.messages answer (mutable: tests change it mid-run). */
+  history?: { delayMs: number };
+  /** session.get never answers / always throws. */
+  sessionHangs?: boolean;
+  sessionThrows?: boolean;
+  /** Exit code of `ct wisdom match --help` (non-zero latches the capability off). */
+  helpExit?: number;
   /** CT answer for user-turn queries (`--max 2`). */
   userAnswer?: (query: string) => Entry[];
   sessions?: Record<string, { parentID?: string; directory?: string } | null>;
@@ -88,9 +95,10 @@ function makeSim(opts: SimOptions = {}) {
   const argvs: string[][] = [];
   const killed: string[] = [];
   let historyFetches = 0;
+  let sessionFetches = 0;
   let seq = 0;
   const spawnFn: SpawnFn = async (spec) => {
-    if (spec.args.includes('--help')) return done('');
+    if (spec.args.includes('--help')) return { ...done(''), code: opts.helpExit ?? 0 };
     argvs.push(spec.args);
     const query = spec.args[spec.args.length - 1] ?? '';
     const max = Number(spec.args[spec.args.indexOf('--max') + 1]);
@@ -109,6 +117,7 @@ function makeSim(opts: SimOptions = {}) {
         });
       }
       if (a === 'timeout') return { code: null, stdout: '', stderr: '', spawnError: false, timedOut: true };
+      if (a === 'aborted') return { code: null, stdout: '', stderr: '', spawnError: false, timedOut: false, aborted: true };
       return done(JSON.stringify({ entries: a, corrections: [] }));
     }
     return done(JSON.stringify({ entries: opts.userAnswer?.(query) ?? [], corrections: [] }));
@@ -121,10 +130,13 @@ function makeSim(opts: SimOptions = {}) {
       if (opts.fetchFails) throw new Error('boom');
       historyFetches++;
       if (opts.hangHistory) return new Promise(() => {});
+      if (opts.history?.delayMs) await new Promise((r) => setTimeout(r, opts.history!.delayMs));
       return structuredClone(rows[id] ?? []);
     },
     fetchSession: async (id) => {
-      if (opts.fetchFails) throw new Error('boom');
+      sessionFetches++;
+      if (opts.fetchFails || opts.sessionThrows) throw new Error('boom');
+      if (opts.sessionHangs) return new Promise(() => {});
       return id in sessions ? sessions[id] ?? null : null;
     },
     renderBootstrap: () => '',
@@ -192,6 +204,7 @@ function makeSim(opts: SimOptions = {}) {
   return {
     hooks, rows, argvs, activityCalls, queries, userTurn, step, undo, lastMessageID, killed,
     historyFetches: () => historyFetches,
+    sessionFetches: () => sessionFetches,
     adapter: built.adapter,
   };
 }
@@ -242,23 +255,13 @@ describe('delivery channel (marker first, appended)', () => {
     expect(out!.indexOf('<!-- ct-fact:f-env -->')).toBeLessThan(out!.indexOf('Title f-env'));
   });
 
-  it('MCP: the block rides the LAST text item, so it is the tail of the joined output', async () => {
+  it('an MCP-shaped result never carries a block (only builtin tools are planned; 0.4.1)', async () => {
     const sim = makeSim({ answer: () => [fact('f-m')] });
-    // A non-CT MCP tool never has an activity; drive the MCP shape with a builtin name.
-    const out = { content: [{ type: 'text', text: 'one' }, { type: 'image', data: 'x', mimeType: 'image/png' }, { type: 'text', text: 'two' }] };
-    sim.rows['P'] = [{ info: { role: 'assistant', id: 'msg_a' }, parts: [{ type: 'tool', callID: 'c1', messageID: 'msg_a', state: { status: 'running' } }] }];
-    await sim.hooks['tool.execute.before']({ tool: 'bash', sessionID: 'P', callID: 'c1' }, { args: { command: 'pnpm test' } });
-    await sim.hooks['tool.execute.after']({ tool: 'bash', sessionID: 'P', callID: 'c1', args: {} }, out as never);
-    expect(out.content[0]!.text).toBe('one');
-    expect(out.content[2]!.text!.startsWith(`two\n\n${ACTIVITY_HEADING}`)).toBe(true);
-  });
-
-  it('MCP fit guard: an output near the host truncation limit sends nothing and is untouched', async () => {
-    const sim = makeSim({ answer: () => [fact('f-big')] });
-    const big = 'x\n'.repeat(1995);
-    const [out] = await sim.step('P', [{ tool: 'bash', args: { command: 'pnpm test' }, mcp: true, text: big }]);
-    expect(out).toBe(big);
+    const [out] = await sim.step('P', [{ tool: 'bash', args: { command: 'pnpm test' }, mcp: true, text: 'one' }]);
+    expect(out).toBe('one');
     expect(sim.activityCalls()).toEqual([]);
+    expect(canCarry({ content: [{ type: 'text', text: 'x' }] })).toBe(false);
+    expect(canCarry({ title: '', output: '', metadata: {} })).toBe(true);
   });
 
   it('an unsupported output shape sends nothing', async () => {
@@ -338,7 +341,7 @@ describe('rate rule: one CT call per model step on a key change', () => {
   it('release on a post-start failure (budget, timeout): a later step retries the key', async () => {
     let n = 0;
     const answers: Array<'hang' | 'timeout' | Entry[]> = ['hang', 'timeout', [fact('f-ok')]];
-    const sim = makeSim({ answer: () => answers[n++]!, budgetMs: 100 });
+    const sim = makeSim({ answer: () => answers[n++]!, budgetMs: 300 });
     const o1 = await sim.step('P', [{ tool: 'bash', args: { command: 'pnpm test' } }]);
     await tick(); // the killed child exits; the in-flight marker is released then
     const o2 = await sim.step('P', [{ tool: 'bash', args: { command: 'pnpm test' } }]);
@@ -544,7 +547,7 @@ describe('review of PR #66', () => {
 
   it('3 budget expiry kills the ct child; the step stays used, the key retries in a later step', async () => {
     let n = 0;
-    const sim = makeSim({ answer: () => (n++ === 0 ? 'hang' : [fact('ok')]), budgetMs: 100, sequential: true });
+    const sim = makeSim({ answer: () => (n++ === 0 ? 'hang' : [fact('ok')]), budgetMs: 300, sequential: true });
     const outs = await sim.step('P', [
       { tool: 'bash', args: { command: 'pnpm test' } },
       { tool: 'read', args: { filePath: 'src/a.ts' } }, // same step, after the failure: no second query
@@ -560,7 +563,7 @@ describe('review of PR #66', () => {
 
   it('3 the in-flight marker stays until the killed child exits', async () => {
     let n = 0;
-    const sim = makeSim({ answer: () => (n++ === 0 ? 'hang' : []), budgetMs: 50, killDelayMs: 300 });
+    const sim = makeSim({ answer: () => (n++ === 0 ? 'hang' : []), budgetMs: 260, killDelayMs: 300 });
     await sim.step('P', [{ tool: 'bash', args: { command: 'pnpm test' } }]);
     await sim.step('P', [{ tool: 'read', args: { filePath: 'src/a.ts' } }]); // child still exiting
     expect(sim.queries()).toEqual(['pnpm test']);
@@ -575,26 +578,83 @@ describe('review of PR #66', () => {
     expect(sim.historyFetches()).toBe(1);
   });
 
-  it('5 canCarry uses a small worst case for the block, not 600 lines', () => {
-    const lines = (n: number) => ({ content: [{ type: 'text', text: Array.from({ length: n }, () => 'x').join('\n') }] });
-    expect(canCarry(lines(1980))).toBe(true);
-    expect(canCarry(lines(1995))).toBe(false);
-    expect(canCarry({ content: [{ type: 'text', text: 'y'.repeat(51200 - 2402) }] })).toBe(true);
-    expect(canCarry({ content: [{ type: 'text', text: 'y'.repeat(51200 - 2401) }] })).toBe(false);
-  });
-
-  it('8 the activity host is the adapter (Object.create): a capability latch set through it is the adapter\'s', async () => {
+  it('8 the activity host delegates to the adapter: a capability latch set through it is the adapter\'s', async () => {
     const adapter = new OpenCodeWisdomAdapter({
       env: {},
       discover: () => ({ path: '/bin/ct', failure: null }),
       spawnFn: async () => ({ code: 2, stdout: '', stderr: '', spawnError: false, timedOut: false }),
     });
     const host = activityHost(adapter);
-    expect(Object.getPrototypeOf(host)).toBe(adapter);
+    // 0.4.1: an explicit delegating object, no inheritance from the adapter.
+    expect(Object.getPrototypeOf(host)).toBe(Object.prototype);
     await host.wisdomMatch('q', 1, []);
     expect(adapter.wisdomMatchAbsent()).toBe(true);
     expect(host.wisdomMatchAbsent()).toBe(true);
     expect(host.restored({ id: 's' })).toBe(false);
     expect(host.deliveryEnabled({ id: 'unknown' })).toBe(false);
+  });
+});
+
+
+describe('0.4.1 polish (post-merge review of 0.4.0)', () => {
+  it('1 too little budget left before the start: no spawn, and the key and step are not admitted', async () => {
+    const history = { delayMs: 260 };
+    const sim = makeSim({ answer: () => [fact('X')], budgetMs: 400, history });
+    const [out] = await sim.step('P', [{ tool: 'bash', args: { command: 'pnpm test' } }]);
+    expect(sim.activityCalls()).toEqual([]);
+    expect(blocksIn(out!)).toBe(0);
+    history.delayMs = 0;
+    const [again] = await sim.step('P', [{ tool: 'bash', args: { command: 'pnpm test' } }]);
+    expect(sim.queries()).toEqual(['pnpm test']);
+    expect(again).toContain('<!-- ct-fact:X -->');
+  });
+
+  it('2 an open breaker skips the history fetch', async () => {
+    const sim = makeSim({ answer: () => 'timeout' });
+    for (const command of ['a1', 'a2', 'a3']) await sim.step('P', [{ tool: 'bash', args: { command } }]);
+    expect(sim.activityCalls().length).toBe(3);
+    const before = sim.historyFetches();
+    await sim.step('P', [{ tool: 'bash', args: { command: 'a4' } }]);
+    expect(sim.historyFetches()).toBe(before);
+    expect(sim.activityCalls().length).toBe(3);
+  });
+
+  it('2 a latched-off capability skips the history fetch', async () => {
+    const sim = makeSim({ answer: () => [fact('X')], helpExit: 2 });
+    await sim.step('P', [{ tool: 'bash', args: { command: 'pnpm test' } }]); // probe latches off
+    const before = sim.historyFetches();
+    await sim.step('P', [{ tool: 'read', args: { filePath: 'src/a.ts' } }]);
+    expect(sim.historyFetches()).toBe(before);
+  });
+
+  it('2 an unknown session kind skips the history fetch', async () => {
+    const sim = makeSim({ sessions: {}, answer: () => [fact('X')] });
+    await sim.step('X', [{ tool: 'bash', args: { command: 'pnpm test' } }]);
+    expect(sim.historyFetches()).toBe(0);
+  });
+
+  it('3 a failing session.get is cached briefly: one lookup for many tool calls', async () => {
+    const sim = makeSim({ sessionThrows: true, answer: () => [fact('X')] });
+    for (const command of ['a', 'b', 'c', 'd']) await sim.step('P', [{ tool: 'bash', args: { command } }]);
+    expect(sim.sessionFetches()).toBe(1);
+  });
+
+  it('3 the plan-time lookup waits ~300 ms at most', async () => {
+    const sim = makeSim({ sessionHangs: true, answer: () => [fact('X')] });
+    const t0 = Date.now();
+    await sim.hooks['tool.execute.before']({ tool: 'bash', sessionID: 'P', callID: 'c1' }, { args: { command: 'pnpm test' } });
+    expect(Date.now() - t0).toBeLessThan(1000);
+  });
+
+  it('9 an abort from elsewhere (not our budget) never counts against the breaker', async () => {
+    const sim = makeSim({ answer: () => 'aborted' });
+    for (const command of ['a1', 'a2', 'a3', 'a4']) await sim.step('P', [{ tool: 'bash', args: { command } }]);
+    expect(sim.activityCalls().length).toBe(4);
+  });
+
+  it('3 deliver reuses the plan-time lookup (one session.get per session)', async () => {
+    const sim = makeSim({ answer: () => [] });
+    for (const command of ['a', 'b', 'c']) await sim.step('P', [{ tool: 'bash', args: { command } }]);
+    expect(sim.sessionFetches()).toBe(1);
   });
 });

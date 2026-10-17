@@ -1237,7 +1237,7 @@ export async function runActivityMatch(
       : await host.wisdomMatch(activityQuery(activity), ACTIVITY_MAX_PER_STEP, exclude);
     // The caller's budget ran out and killed the child: not CT's failure, so
     // the breaker does not count it (the same rule as `budget` elsewhere).
-    if (signal?.aborted) return { failure: 'budget' };
+    if (signal?.aborted || attempt.outcome === 'aborted') return { failure: 'budget' };
     if (attempt.outcome === 'spawn') {
       host.resetDiscoveryAndProbeCaches();
       return { failure: 'spawn' };

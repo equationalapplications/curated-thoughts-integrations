@@ -11,6 +11,8 @@ import {
   ActivityTracker,
   Breaker,
   EMPTY_LEDGER,
+  classify,
+  onUserTurn,
   runActivityMatch,
   settleWithin,
   startActivity,
@@ -109,6 +111,28 @@ describe('abort support', () => {
     expect(start.failure).toBeNull();
     if (start.failure === null) await start.match;
     expect(got).toBe(ac.signal);
+  });
+});
+
+describe('the aborted outcome (opencode 0.4.1 review)', () => {
+  it('classify reports an aborted spawn as `aborted`, before any timeout or exit code', () => {
+    expect(classify({ code: null, stdout: '', stderr: '', spawnError: false, timedOut: false, aborted: true })).toBe('aborted');
+    expect(classify({ code: null, stdout: '', stderr: '', spawnError: false, timedOut: true, aborted: true })).toBe('aborted');
+    expect(classify({ code: null, stdout: '', stderr: '', spawnError: false, timedOut: true })).toBe('timeout_or_exit');
+  });
+
+  it('an `aborted` match is `budget` and never a breaker failure, even without a signal', async () => {
+    const breaker = new Breaker();
+    const h = host({ wisdomMatch: async () => ({ outcome: 'aborted' }) });
+    for (let i = 0; i < 5; i++) expect(await runActivityMatch(h, activity, [], breaker)).toEqual({ failure: 'budget' });
+    expect(breaker.isOpen()).toBe(false);
+  });
+
+  it('onUserTurn never counts an aborted match against the breaker', async () => {
+    const breaker = new Breaker();
+    const h = host({ wisdomMatch: async () => ({ outcome: 'aborted' }) });
+    for (let i = 0; i < 5; i++) expect(await onUserTurn(h, { id: 's' }, 'question', breaker)).toBeNull();
+    expect(breaker.isOpen()).toBe(false);
   });
 });
 
