@@ -302,9 +302,10 @@ check("6 the agent tried `git push` and Hermes refused it (approvals.deny)",
 check("6 CT never received the blocked target (secrets.env)",
       not any("secrets" in a for argv in argvs for a in argv), "queries=%s" % queries)
 check("6 CT never received the refused target (git push)",
-      not any(q.startswith("git") for q in queries), "queries=%s" % queries)
+      not any(q.startswith("git push") for q in queries), "queries=%s" % queries)
 check("6 no verbose record names a refused or blocked call",
-      not any(("secrets" in (v.get("query") or "") or "git" in (v.get("query") or ""))
+      not any(("secrets" in (v.get("query") or "")
+               or (v.get("query") or "").startswith("git push"))
               for v in verbose))
 check("6 neither result carries an activity block",
       all(HEADING not in c for c in blocked_reads + pushes))

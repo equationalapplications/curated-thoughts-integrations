@@ -32,7 +32,7 @@ can trigger one relevant CT fact:
 
 Fail-closed classes (no CT call or no delivery, one debug line):
   empty_id, ct_tool, no_activity, no_ledger, breaker_open, ct_unavailable,
-  seen_key, step_used, refused, discovery_miss, probe_timeout,
+  probing, seen_key, step_used, refused, discovery_miss, probe_timeout,
   capability_missing, timeout, spawn, spawn_failed, exit, parse_error,
   budget, zero_hits, unsupported_result, hook_failed.
 
@@ -909,8 +909,10 @@ def command_target(command, env=None, names=None, root=None):
     rest = words[1:]
     if is_python:
         module = _python_module(rest)
-        # The name check runs on the full module (the program passed it
-        # already): `python -m tests.alice_notes` sends `python` alone.
+        # Name checks: first the full module (the program passed already;
+        # `python -m tests.alice_notes` sends `python` alone), and
+        # then on the exact joined string that is sent, which also catches a
+        # multi-word name spanning the program and the module.
         if (module and _MODULE_RE.match(module) and not _credential_shaped(module)
                 and not name_hit(module, names)):
             sent = module if module in _PYTHON_MODULES else _project_package(
@@ -1099,16 +1101,41 @@ def _ct_unusable():
     with _unusable_lock:
         if not _unusable:
             return None
-        if _clock() >= _unusable["until"] or _unusable["path"] != os.environ.get("PATH"):
-            _unusable.clear()
-            return None
-        return _unusable["reason"]
+        moved = _unusable["path"] != os.environ.get("PATH")
+        if not moved and _clock() < _unusable["until"]:
+            return _unusable["reason"]
+        _unusable.clear()
+    if moved:
+        # discover_ct keeps one accepted path per process and the probe
+        # caches per path: without a reset the retry would not re-discover.
+        ct_wisdom.reset_discovery_cache()
+        ct_wisdom_live.reset_capability_cache()
+    return None
 
 
 def _mark_unusable(reason):
     with _unusable_lock:
         _unusable.update(until=_clock() + CT_UNUSABLE_PAUSE,
                          path=os.environ.get("PATH"), reason=reason)
+
+
+# At most one cold query (discovery plus capability probe) in flight per
+# process: a hung ct must not collect parallel probes, one per new activity.
+_probe_busy = []
+_probe_lock = threading.Lock()
+
+
+def _take_probe():
+    with _probe_lock:
+        if _probe_busy:
+            return False
+        _probe_busy.append(True)
+        return True
+
+
+def _release_probe():
+    with _probe_lock:
+        _probe_busy.clear()
 
 
 def _ct_warm():
@@ -1154,6 +1181,7 @@ def reset_state():
     _pwd_identity.cache_clear()
     with _unusable_lock:
         _unusable.clear()
+    _release_probe()
 
 
 def _record_breaker(outcome):
@@ -1174,6 +1202,8 @@ def _finish(p, result, failure, outcome):
         p.settled = True
         abandoned = p.abandoned
     _record_breaker(record)
+    if not p.warm:
+        _release_probe()
     if failure in _UNUSABLE_CLASSES:
         _mark_unusable(failure)
     if abandoned:
@@ -1186,7 +1216,7 @@ def _run_prefetch(p):
     """Discovery, probe and match for one query (worker thread). Outcome for
     the breaker: a probe timeout (`ct --help` or `ct wisdom match --help`)
     or a match timeout/exit is a failure, an answer a success, anything else
-    nothing."""
+    nothing (a spawn error resets the discovery and capability caches)."""
     result, failure, outcome = None, None, None
     try:
         path, dclass = ct_wisdom.discover_ct()
@@ -1194,7 +1224,15 @@ def _run_prefetch(p):
             failure = dclass or "discovery_miss"
             outcome = "failure" if failure == "probe_timeout" else None
             return
+        started = _clock()
         capable = ct_wisdom_live.has_match_capability(path)
+        if capable is None and _clock() - started < ct_wisdom.PROBE_TIMEOUT:
+            # None before the timeout can fire is an OSError at spawn (ct
+            # moved or uninstalled): spawn-class, as on the match path.
+            ct_wisdom.reset_discovery_cache()
+            ct_wisdom_live.reset_capability_cache()
+            failure = "spawn"
+            return
         if not capable:
             failure = "probe_timeout" if capable is None else "capability_missing"
             outcome = "failure" if capable is None else None
@@ -1260,8 +1298,11 @@ def _nonempty(value):
 
 
 def _blocked_report(session_id, api_request_id, activity, blocked):
-    """A would-be trigger that cannot run (no ledger, open breaker): verbose
-    mode hears of it once per step. Nothing is recorded in the key tracker."""
+    """A would-be trigger that cannot run (no_ledger, breaker_open,
+    ct_unavailable, probing): verbose mode hears of it once per step, so
+    while ct is remembered as unusable it logs one ct_unavailable record per
+    new-activity step (the user sees nothing). Nothing is recorded in the
+    key tracker."""
     report = (_STATE.peek(session_id, api_request_id, activity.key) is None
               and _STATE.first_report(session_id, api_request_id))
     return _skip(session_id, blocked, record=report, query=query_for(activity),
@@ -1442,11 +1483,14 @@ _REFUSED_STATUSES = frozenset({
     "blocked", "pending_approval", "approval_required", "denied", "rejected",
     "refused", "cancelled", "canceled", "not_approved"})
 _REFUSED_PREFIXES = ("blocked", "refusing", "denied", "command denied", "access denied",
-                     "not approved", "rejected", "cancelled", "canceled")
+                     "not approved", "rejected", "cancelled", "canceled", "declined",
+                     "not allowed", "approval timed out")
 _REFUSED_PHRASES = ("not approved", "did not approve", "denied by", "user denied",
                     "was not run", "not executed", "rejected", "cancelled by",
                     "canceled by", "user cancelled", "user canceled",
-                    "operation cancelled", "operation canceled")
+                    "operation cancelled", "operation canceled", "declined",
+                    "approval timed out", "timed out waiting for approval",
+                    "not allowed")
 _REFUSED_ERROR_TYPE_WORDS = ("block", "denied", "deny", "reject", "refus", "approval",
                              "cancel")
 _ENVELOPE_TEXT_KEYS = ("error", "message", "reason", "detail", "error_message")
@@ -1534,21 +1578,34 @@ def _transform(result, session_id, tool_call_id, tool_name=None, args=None, task
     blocked, ledger = _gate_blocked(session_id)
     if blocked is None and _ct_unusable() is not None:
         blocked = "ct_unavailable"
+    warm = _ct_warm() if blocked is None else True
+    if blocked is None and not warm and not _take_probe():
+        blocked = "probing"  # another cold query is discovering / probing
     if blocked is not None:
         return _blocked_report(session_id, api_request_id, activity, blocked)
     refused = _STATE.start(session_id, api_request_id, activity.key)
     if refused is not None:
+        if not warm:
+            _release_probe()
         return _skip(session_id, refused)
-    p = _Prefetch(session_id, api_request_id, tool_name, activity,
-                  sorted(ledger)[:ct_wisdom_live.EXCLUDE_MAX], _ct_warm())
     try:
+        p = _Prefetch(session_id, api_request_id, tool_name, activity,
+                      sorted(ledger)[:ct_wisdom_live.EXCLUDE_MAX], warm)
         _spawn(lambda: _run_prefetch(p))
     except Exception:
-        # No thread, no query: nothing was sent, so free the step and the key.
+        # No thread, no query: nothing was sent, so free the step, the key
+        # and the probe slot.
         logger.debug("wisdom-activity: could not start the query", exc_info=True)
         _STATE.release(session_id, api_request_id, activity.key)
+        if not warm:
+            _release_probe()
         return _skip(session_id, "spawn_failed")
-    return _deliver(p, result, mode)
+    try:
+        return _deliver(p, result, mode)
+    except Exception:
+        # The query ran (the step stays used) but nothing was delivered.
+        _STATE.release_key(session_id, activity.key)
+        raise
 
 
 def _deliver(p, result, mode=None):

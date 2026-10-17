@@ -324,8 +324,16 @@ jobs:
           assert len(ctx.sections) == 2, ctx.sections
           assert ctx.sections[1][2] == {"max_chars": 2500}, ctx.sections
           ctx.hooks[0][1](session_id="ci", cwd=".")
-          assert dict(ctx.hooks)["transform_tool_result"](
-              tool_name="read_file", args={"path": "a"}, result="{}") is None
+          # Full ids, so the call reaches past the id checks (no ct on PATH:
+          # it may skip, never raise or return anything but None or a str).
+          import os
+          os.environ["PATH"] = "/nonexistent"
+          out = dict(ctx.hooks)["transform_tool_result"](
+              tool_name="read_file", args={"path": "a.py"}, result='{"content": "x"}',
+              session_id="ci", tool_call_id="ci-call-1", api_request_id="ci-req-1",
+              task_id="", turn_id="t", duration_ms=1, status="ok",
+              error_type=None, error_message=None)
+          assert out is None or isinstance(out, str), out
           assert ctx.sections[0][1](), "system prompt section rendered empty"
 
           class Minimal(Ctx):

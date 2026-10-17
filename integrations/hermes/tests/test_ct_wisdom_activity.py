@@ -1602,13 +1602,15 @@ class TestBudgetBreaker(Harness):
         act._ct_warm = lambda: False
         for i in range(ct_wisdom_live.BREAKER_FAILS):
             args = {"path": "f%d.py" % i}
+            before = (self.breaker.failures, self.breaker.successes)
             self.assertIsNone(self.post(READ_RESULT, call="c%d" % i, req="r%d" % i, args=args))
-        self.assertEqual((self.breaker.failures, self.breaker.successes), (0, 0))
+            self.assertEqual((self.breaker.failures, self.breaker.successes), before,
+                             "the cold miss itself records nothing")
+            self.match_result = (None, "timeout") if i == 1 else (
+                {"entries": [item("f1")], "corrections": []}, None)
+            self.started[i]()  # the late worker: a genuine success, or CT's own timeout
+        self.assertEqual((self.breaker.failures, self.breaker.successes), (1, 2))
         self.assertFalse(ct_wisdom_live._BREAKER.is_open())
-        self.started[0]()  # CT answers late: a genuine success
-        self.match_result = (None, "timeout")
-        self.started[1]()  # CT itself timed out: one genuine failure
-        self.assertEqual((self.breaker.failures, self.breaker.successes), (1, 1))
         # The cold miss freed its key: a later step retries it.
         act._spawn = lambda target: target()
         act._wait = lambda p: p.done.wait(0)
@@ -1907,8 +1909,21 @@ class TestUnusableCt(Harness):
         self.probed = []
         self.discover_answer = ("/fake/ct", None)
         self.probe_answer = True
+        self.probe_hangs = True  # None after PROBE_TIMEOUT; False: an instant OSError
         ct_wisdom.discover_ct = lambda env=None: self.discovered.append(1) or self.discover_answer
-        ct_wisdom_live.has_match_capability = lambda p: self.probed.append(p) or self.probe_answer
+        ct_wisdom_live.has_match_capability = self.fake_probe
+        self.resets = []
+        for mod, name in [(ct_wisdom, "reset_discovery_cache"),
+                          (ct_wisdom_live, "reset_capability_cache")]:
+            orig = getattr(mod, name)
+            setattr(mod, name, lambda n=name: self.resets.append(n))
+            self.addCleanup(setattr, mod, name, orig)
+
+    def fake_probe(self, path):
+        self.probed.append(path)
+        if self.probe_answer is None and self.probe_hangs:
+            self.now[0] += ct_wisdom.PROBE_TIMEOUT
+        return self.probe_answer
 
     def step(self, n, path=None):
         args = {"path": path or "f%d.py" % n}
@@ -1970,6 +1985,83 @@ class TestUnusableCt(Harness):
         start = source.index("def discover_ct(")
         body = source[start:source.index('"""', source.index('"""', start) + 3)]
         self.assertNotIn("(memoized)", body)
+
+
+class TestReview3(TestUnusableCt):
+    """PR #72 third review."""
+
+    def test_probe_spawn_error_is_spawn_class(self):
+        """1: has_match_capability's None from an OSError (instant) is not a
+        timeout: caches reset, no breaker charge, not remembered."""
+        self.probe_answer, self.probe_hangs = None, False
+        self.assertIsNone(self.step(1))
+        self.assertEqual(self.breaker.failures, 0)
+        self.assertEqual(sorted(self.resets), ["reset_capability_cache", "reset_discovery_cache"])
+        self.assertIsNone(act._ct_unusable())
+        self.probe_answer = True
+        self.assertIsNotNone(self.step(2), "the next step tries again")
+
+    def test_path_change_resets_the_caches(self):
+        """2: the memo clearing on a PATH change also resets discovery and
+        the capability cache, so the retry really re-discovers."""
+        self.probe_answer = False
+        self.assertIsNone(self.step(1))
+        self.resets.clear()
+        with mock.patch.dict(os.environ, {"PATH": "/opt/new/bin"}):
+            self.probe_answer = True
+            self.assertIsNotNone(self.step(2))
+        self.assertEqual(sorted(self.resets), ["reset_capability_cache", "reset_discovery_cache"])
+
+    def test_one_cold_probe_in_flight(self):
+        """5: while a cold probe runs, another cold step does not spawn one."""
+        act._ct_warm = lambda: False
+        held = []
+        act._spawn = lambda target: held.append(target)
+        act._wait = lambda p: False
+        self.assertIsNone(self.step(1))
+        self.assertIsNone(self.step(2))
+        self.assertEqual(len(held), 1, "a second cold probe started")
+        held.pop()()
+        self.assertIsNone(self.step(3))
+        self.assertEqual(len(held), 1, "the probe slot was not freed")
+
+    def test_exception_after_start_frees_the_key(self):
+        """4: anything raising after the claim (constructor, warm check,
+        render, ledger claim) leaves neither step nor key held."""
+        for name in ("_Prefetch", "_ct_warm", "render_activity_block"):
+            with self.subTest(name=name):
+                act.reset_state()
+                ct_ledger.LEDGER_CACHE.put("s1", set())
+                orig = getattr(act, name)
+
+                def boom(*a, **k):
+                    raise RuntimeError("boom")
+
+                setattr(act, name, boom)
+                self.assertIsNone(self.step(1, path="same.py"))
+                setattr(act, name, orig)
+                self.assertIsNotNone(self.step(2, path="same.py"), name)
+        act.reset_state()
+        ct_ledger.LEDGER_CACHE.put("s1", set())
+        with mock.patch.object(ct_ledger.LEDGER_CACHE, "claim", side_effect=RuntimeError):
+            self.assertIsNone(self.step(1, path="same.py"))
+        self.assertIsNotNone(self.step(2, path="same.py"), "ledger claim")
+
+    def test_more_refusal_wording(self):
+        """3: declined, approval timed out, not allowed (envelope only)."""
+        for err in ("User declined to run this command", "Approval timed out after 60s",
+                    "Not allowed: path is outside the sandbox",
+                    "Timed out waiting for approval"):
+            self.assertTrue(act.is_refusal(json.dumps({"error": err})), err)
+            self.assertTrue(act.is_refusal(json.dumps({"message": err})), err)
+            self.assertFalse(act.is_refusal(json.dumps({"output": err, "exit_code": 0,
+                                                        "error": ""})), err)
+
+    def test_comment_and_docstring(self):
+        """8, 9."""
+        source = Path(act.__file__).read_text(encoding="utf-8")
+        self.assertNotIn("The name check runs on the full module (the program passed it", source)
+        self.assertIn("ct_unavailable", act._blocked_report.__doc__)
 
 
 class TestKeyInFlight(Harness):
