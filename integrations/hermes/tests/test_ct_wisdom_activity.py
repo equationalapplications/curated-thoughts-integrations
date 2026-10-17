@@ -71,16 +71,16 @@ CASES = [
     ("terminal", {"command": "pnpm test"}, "run pnpm test", "pnpm test"),
     ("terminal", {"command": "npm run build"}, "run npm run", "npm run"),
     ("terminal", {"command": "pytest tests/billing -q"},
-     "run pytest tests/billing", "pytest tests/billing"),
+     "run pytest", "pytest"),
     ("terminal", {"command": "API_KEY=sk-123 python deploy.py --token x"},
-     "run python deploy.py", "python deploy.py"),
+     "run python", "python"),
     ("terminal", {"command": "curl -H 'Authorization: Bearer x' https://h"}, "run curl", "curl"),
     ("terminal", {"command": "git commit -m 'msg SECRET'"}, "run git commit", "git commit"),
     ("terminal", {"command": "/usr/local/bin/python3 -m pytest"},
      "run python3 pytest", "python3 pytest"),
     ("terminal", {"command": "pytest tests/test_x.py"},
-     "run pytest tests/test_x.py", "pytest tests/test_x.py"),
-    ("terminal", {"command": "cat .env.local | grep KEY"}, "run cat .env.local", "cat .env.local"),
+     "run pytest", "pytest"),
+    ("terminal", {"command": "cat .env.local | grep KEY"}, "run cat", "cat"),
     ("terminal", {"command": "echo sk-live-abcdef"}, "run echo", "echo"),
     ("terminal", {"command": "export TOKEN=abc && make"}, "run export", "export"),
     ("terminal", {"command": "mysql -uroot -pS3cr3t db"}, "run mysql", "mysql"),
@@ -146,7 +146,9 @@ class TestActivityLine(unittest.TestCase):
         self.assertIsNone(n("src/x.py", "", env))
         self.assertIsNone(n("src/x.py", home, env))
         self.assertIsNone(n("src/x.py", base, env))
-        self.assertLessEqual(len(n("d/" * 300 + "f.py", proj, env)), act.TARGET_CHARS)
+        # Over TARGET_CHARS is no query, never a cut.
+        self.assertIsNone(n("d/" * 300 + "f.py", proj, env))
+        self.assertEqual(n("a" * 196 + ".py", proj, env), "a" * 196 + ".py")
 
     def test_project_root(self):
         base, home, proj, env = self.world()
@@ -167,9 +169,9 @@ class TestActivityLine(unittest.TestCase):
             make_tree(d, [marker + ("/" if marker in (".git", ".hg") else "")])
             self.assertEqual(act.project_root(os.path.join(d, "src"), env), d, marker)
 
-    def test_project_root_never_top_level(self):
-        """A filesystem root and its direct children are never a root, so
-        HOME=/ cannot make /home or /srv one."""
+    def test_project_root_top_level(self):
+        """The filesystem root is never a root; other direct children of it
+        (`/app`, `/workspace`) can be, except homes locations and `/mnt`."""
         orig = act._has_marker
         act._has_marker = lambda directory: True
         self.addCleanup(setattr, act, "_has_marker", orig)
@@ -177,7 +179,10 @@ class TestActivityLine(unittest.TestCase):
         self.addCleanup(act.reset_state)
         top = os.path.realpath(os.sep)
         self.assertIsNone(act.project_root(top, {"HOME": top}))
-        self.assertIsNone(act.project_root(os.path.join(top, "nonexistent-ct"), {"HOME": top}))
+        for name in ("home", "Users", "mnt"):
+            self.assertIsNone(act.project_root(os.path.join(top, name), {"HOME": top}), name)
+        app = os.path.join(top, "nonexistent-ct-app")
+        self.assertEqual(act.project_root(app, {"HOME": top}), os.path.realpath(app))
         deep = os.path.join(top, "nonexistent-ct", "app")
         self.assertEqual(act.project_root(deep, {"HOME": top}), os.path.realpath(deep))
 
@@ -192,12 +197,18 @@ class TestActivityLine(unittest.TestCase):
         def no_subprocess(*a, **k):
             raise AssertionError("project_root must not run a subprocess")
 
-        orig_popen = subprocess.Popen
-        subprocess.Popen = no_subprocess
-        self.addCleanup(setattr, subprocess, "Popen", orig_popen)
+        for mod, names in ((subprocess, ("Popen", "run", "call", "check_call", "check_output")),
+                           (os, ("system", "popen", "posix_spawn", "posix_spawnp", "spawnv",
+                                 "spawnve", "spawnvp", "spawnvpe", "spawnl", "spawnle",
+                                 "spawnlp", "spawnlpe", "execv", "execve", "fork"))):
+            for name in names:
+                if hasattr(mod, name):
+                    self.addCleanup(setattr, mod, name, getattr(mod, name))
+                    setattr(mod, name, no_subprocess)
         self.assertIsNone(act.project_root(d, {}))
+        self.assertEqual(act.activity_for("read_file", {"path": "src/a.py"}, cwd=d, env={}), None)
         make_tree(d, [".git/"])
-        self.assertIsNone(act.project_root(d, {}))  # cached
+        self.assertIsNone(act.project_root(d, {}))  # "no root" cached briefly
         now = [1000.0]
         orig_clock = act._root_clock
         act._root_clock = lambda: now[0]
@@ -436,7 +447,7 @@ class TestActivityLine(unittest.TestCase):
                              frozenset(), user)
         self.assertEqual(act.user_names({"USER": "Alice", "HOME": "/home/bob"}),
                          frozenset({"alice", "bob"}))
-        # Privacy amendment 4: HOME's and USERPROFILE's basenames always count.
+        # A HOME / USERPROFILE basename counts under Users, home or Profiles.
         self.assertEqual(act.user_names({"HOME": "/nfs/home/alice"}), frozenset({"alice"}))
         self.assertEqual(act.user_names({"USERPROFILE": "D:\\Profiles\\erin"}),
                          frozenset({"erin"}))
@@ -508,13 +519,48 @@ class TestActivityLine(unittest.TestCase):
         act._fs_root = lambda d: d == base or not d.startswith(base + os.sep)
         self.addCleanup(setattr, act, "_fs_root", orig_root)
         j = lambda *parts: os.path.join(base, *parts)  # noqa: E731
-        for d in (base, j("home"), j("srv"), j("Users", "Alice"), j("x", "home", "bob"),
-                  j("d", "Profiles", "erin"), j("mnt", "c"), j("mnt", "C", "Users"),
-                  j("x", "USERS", "bob")):
+        for d in (base, j("home"), j("Users"), j("USERS"), j("Profiles"), j("mnt"),
+                  j("Users", "Alice"), j("home", "bob"), j("Profiles", "erin"),
+                  j("var", "home"), j("var", "home", "bob"), j("nfs", "home", "bob"),
+                  j("export", "home", "bob"), j("data", "home", "bob"), j("mnt", "c"),
+                  j("mnt", "C", "Users"), j("mnt", "c", "Users", "Bob")):
             self.assertTrue(act._stop_dir(d), d)
-        for d in (j("srv", "app"), j("Users", "Alice", "code"), j("mnt", "c", "dev"),
-                  j("mnt", "cd"), j("x", "mnt", "c"), j("srv", "home")):
+        for d in (j("srv"), j("app"), j("workspace"), j("srv", "app"), j("Users", "Alice", "code"),
+                  j("mnt", "c", "dev"), j("mnt", "cd"), j("x", "mnt", "c"), j("srv", "home"),
+                  j("x", "home", "bob"), j("d", "Profiles", "erin"), j("x", "USERS", "bob"),
+                  j("srv", "web", "src", "pages", "home", "components"), j("opt", "home", "x")):
             self.assertFalse(act._stop_dir(d), d)
+
+    def test_negative_root_cached_briefly(self):
+        base = temp_base()
+        d = os.path.join(base, "srv", "fresh")
+        make_tree(d, ["src/"])
+        now = [5000.0]
+        orig_clock = act._root_clock
+        act._root_clock = lambda: now[0]
+        self.addCleanup(setattr, act, "_root_clock", orig_clock)
+        self.assertIsNone(act.project_root(d, {}))
+        make_tree(d, [".curated-thoughts-project"])
+        now[0] += act._ROOT_NEGATIVE_TTL + 0.1
+        self.assertEqual(act.project_root(d, {}), d)
+        os.remove(os.path.join(d, ".curated-thoughts-project"))
+        now[0] += act._ROOT_NEGATIVE_TTL + 0.1
+        self.assertEqual(act.project_root(d, {}), d)  # a found root is kept 30 s
+        self.assertGreater(act._ROOT_CACHE_TTL, act._ROOT_NEGATIVE_TTL)
+
+    def test_git_bash_cwd_and_path_args(self):
+        """The Git Bash `/c/...` mapping applies to the cwd and path args too
+        (wiring checked on any platform by mapping into a temp project)."""
+        base = temp_base()
+        proj = os.path.join(base, "dev", "proj")
+        make_tree(proj, [".git/"])
+        orig = act._git_bash
+        act._git_bash = lambda p, windows=None: (
+            os.path.join(base, *p.split("/")[2:]) if p.startswith("/c/") else p)
+        self.addCleanup(setattr, act, "_git_bash", orig)
+        a = act.activity_for("read_file", {"path": "/c/dev/proj/src/a.py"}, cwd="/c/dev/proj",
+                             env={})
+        self.assertEqual(a.query, "src/a.py")
 
     def test_root_cache_is_lru_and_keyed_on_raw_strings(self):
         base = temp_base()
@@ -567,10 +613,13 @@ class TestActivityLine(unittest.TestCase):
 
     def test_word_check(self):
         names = {"alice"}
-        for word, verdict in (("tests/billing", "ok"), ("mypkg.cli", "ok"), ("alice", "name"),
-                              ("x/alice_notes.txt", "name"), ("../x", "shape"),
-                              ("/etc/passwd", "shape"), ("~/x", "shape"), ("C:foo", "shape"),
-                              ("a\\b", "shape")):
+        for word, verdict in (("test", "ok"), ("run-script", "ok"), ("rebase", "ok"),
+                              ("build2", "ok"), ("alice", "name"),
+                              ("x/alice_notes.txt", "name"), ("tests/billing", "shape"),
+                              ("mypkg.cli", "shape"), ("deploy.py", "shape"), ("Build", "shape"),
+                              ("../x", "shape"), ("/etc/passwd", "shape"), ("~/x", "shape"),
+                              ("C:foo", "shape"), ("a\\b", "shape"), ("-v", "shape"),
+                              ("a" * 32, "shape"), ("abc1def2ghi3jkl4m", "shape")):
             self.assertEqual(act.word_check(word, names), verdict, word)
 
     def test_session_cwd_is_lazy(self):

@@ -117,9 +117,12 @@ keyed to what the agent is doing:
   Curated Thoughts' own tools never trigger it.
 - **What is sent to Curated Thoughts:** only the bare target, for example
   `src/billing/invoice.py`, `pnpm test` or a search pattern. For shell
-  commands that is the program plus the unquoted word right after it,
-  never a flag's value or the rest of the command line. The one exception
-  is `python -m <module>`, which sends the module name (`python3 pytest`).
+  commands that is the program plus the word right after it, and only when
+  that word is a plain lowercase verb such as `test`, `rebase` or
+  `run-script`. It is never a path, a file name, a flag's value or the rest
+  of the command line, so `pytest tests/billing` sends `pytest`. The one
+  exception is `python -m <module>`, which sends the module name
+  (`python3 pytest`).
   File contents, tool output, diffs and the agent's own words are never sent.
 - **Privacy (since hermes 0.6.5):** a file path is sent only when it is
   inside a project (the nearest folder above the session's working
@@ -127,8 +130,9 @@ keyed to what the agent is doing:
   `Cargo.toml`, `go.mod`, `pom.xml`, `build.gradle`, `Gemfile`,
   `composer.json`, a `*.sln` or `.curated-thoughts-project`). It is never your
   home folder or above it, anyone's home folder itself (`/home/<x>`,
-  `C:\Users\<x>`), a top-level folder or a WSL drive root. The path is sent
-  only relative to that project. Files outside
+  `C:\Users\<x>`), `/`, `/home`-style folders or a WSL drive root.
+  Container folders such as `/app` and `/workspace` work. The path is sent
+  only relative to that project, and only up to 200 characters. Files outside
   a project get no autonomous-work wisdom. Nothing naming you (`USER`,
   `LOGNAME`, `USERNAME`, your system account, your home folder's name) is
   ever sent. A search

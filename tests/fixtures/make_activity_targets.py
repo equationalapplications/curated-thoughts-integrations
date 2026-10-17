@@ -87,7 +87,7 @@ for d in ("/home", "/var/home", "/nfs/home", "/export/home"):
     v("HOME=/: cwd " + d, "read_file", rd(d + "/bob/secret.txt"), None, cwd=d, env={"USER": "nobody", "HOME": "/"}, fs=[])
     v("HOME=/: cwd %s/bob" % d, "read_file", rd(d + "/bob/acme/secret.txt"), None, cwd=d + "/bob", env={"USER": "nobody", "HOME": "/"}, fs=[])
 v("HOME=/: a marker at /home is not a root", "read_file", rd("/home/bob/secret.txt"), None, cwd="/home/bob", env={"USER": "nobody", "HOME": "/"}, fs=["/home/package.json"])
-v("HOME=/: a marker at /srv is not a root", "read_file", rd("/srv/app/x.py"), None, cwd="/srv/app", env={"USER": "nobody", "HOME": "/"}, fs=["/srv/.git/"])
+v("HOME=/: a marker at /srv is a root", "read_file", rd("/srv/app/x.py"), "app/x.py", cwd="/srv/app", env={"USER": "nobody", "HOME": "/"}, fs=["/srv/.git/"])
 v("no HOME: a marker at /Users is not a root", "read_file", rd("/Users/bob/x.md"), None, cwd="/Users/bob", env={"USER": "carl"}, fs=["/Users/package.json"])
 v("HOME=/: a real project still works", "read_file", rd("/srv/app/src/x.py"), "src/x.py", cwd="/srv/app", env={"USER": "nobody", "HOME": "/"}, fs=["/srv/app/pyproject.toml"])
 v("HOME=/root: project under it", "read_file", rd("src/root/x.py"), "src/root/x.py", cwd="/root/app", env={"USER": "root", "HOME": "/root"}, fs=["/root/app/.git/"])
@@ -126,7 +126,7 @@ v("P2: LOGNAME", "read_file", rd("dave/x.md"), None, cwd="/srv/p", env={"LOGNAME
 v("P2: USERNAME", "read_file", rd("carol-notes.md"), None, cwd="/srv/p", env=WE, fs=["/srv/p/.git/"])
 v("P2: HOME basename under a home dir", "read_file", rd("alice-notes.md"), None, cwd="/nfs/home/alice/proj", env={"HOME": "/nfs/home/alice"}, fs=["/nfs/home/alice/proj/.git/"])
 v("P2: HOME basename under /nfs/home with no USER", "read_file", rd("src/alice.py"), None, cwd="/nfs/home/alice/proj", env={"HOME": "/nfs/home/alice"}, fs=["/nfs/home/alice/proj/.git/"])
-v("P2: USERPROFILE basename, any parent", "read_file", rd("erin/x.md"), None, cwd="/srv/p", env={"USERPROFILE": "D:\\Profiles\\erin"}, fs=["/srv/p/.git/"])
+v("P2: USERPROFILE basename under Profiles", "read_file", rd("erin/x.md"), None, cwd="/srv/p", env={"USERPROFILE": "D:\\Profiles\\erin"}, fs=["/srv/p/.git/"])
 v("P2: multi-word name, exact", "read_file", rd("docs/John Smith notes.md"), None, cwd="/srv/p", env={"USERNAME": "John Smith"}, fs=["/srv/p/.git/"])
 v("P2: multi-word name, joined", "read_file", rd("docs/john_smith.md"), None, cwd="/srv/p", env={"USERNAME": "John Smith"}, fs=["/srv/p/.git/"])
 v("P2: multi-word name, unrelated file", "read_file", rd("docs/plan.md"), "docs/plan.md", cwd="/srv/p", env={"USERNAME": "John Smith"}, fs=["/srv/p/.git/"])
@@ -168,27 +168,43 @@ v("search: 80 chars", "search_files", srch("x" * 80), "x" * 80)
 v("search: dots and dashes", "search_files", srch("ct_wisdom.py fail-closed"), "ct_wisdom.py fail-closed")
 v("search: unicode letters", "search_files", srch("a\u00f1o fiscal"), "a\u00f1o fiscal")
 v("search: error 404", "search_files", srch("error 404"), "error 404")
-# ---- P3: commands ----
+# ---- P3: commands (allowlist: program + a plain verb-like subcommand) ----
 for name, cmd, q in (("program + subcommand", "pnpm test", "pnpm test"), ("npm run", "npm run build", "npm run"),
-                     ("relative path subcommand", "pytest tests/billing -q", "pytest tests/billing"),
-                     ("env assignment skipped", "API_KEY=sk-123 python deploy.py --token x", "python deploy.py"),
+                     ("hyphenated verb", "npm run-script lint", "npm run-script"), ("git rebase", "git rebase -i main", "git rebase"),
+                     ("path subcommand is never sent", "pytest tests/billing -q", "pytest"),
+                     ("file subcommand is never sent", "API_KEY=sk-123 python deploy.py --token x", "python"),
+                     ("dotfile subcommand is never sent", "cat .env.local | grep KEY", "cat"),
+                     ("capitalized subcommand is never sent", "make Build", "make"),
                      ("quoted value", "git commit -m 'msg SECRET'", "git commit"), ("curl", "curl -H 'A: b' https://h", "curl"),
                      ("python -m", "python -m mypkg.cli --key v", "python mypkg.cli"),
                      ("absolute python", "/usr/local/bin/python3 -m pytest", "python3 pytest"),
-                     ("pipe", "cat .env.local | grep KEY", "cat .env.local"), ("echo", "echo sk-live-abcdef", "echo"),
+                     ("python -m quoted module", "python -m 'secretmod'", "python"),
+                     ("python -m capitalized module", "python -m MyPkg", "python"),
+                     ("echo", "echo sk-live-abcdef", "echo"),
                      ("flag value", "psql -W secretpw", "psql"), ("absolute program", "/Users/alice/bin/deploy --token x", "deploy"),
-                     (".. subcommand dropped", "pytest ../x/t.py", "pytest"), ("colon subcommand dropped", "cat C:foo", "cat"),
-                     ("rooted subcommand dropped", "cat /etc/passwd", "cat"), ("~ subcommand dropped", "cat ~/notes.md", "cat")):
+                     ("script program", "./scripts/deploy.sh prod", "deploy.sh prod"),
+                     (".. subcommand", "pytest ../x/t.py", "pytest"), ("colon subcommand", "cat C:foo", "cat"),
+                     ("rooted subcommand", "cat /etc/passwd", "cat"), ("~ subcommand", "cat ~/notes.md", "cat"),
+                     ("credential-shaped subcommand", "deploy ghp_abcdefghijklmnop1234", "deploy"),
+                     ("digits-heavy subcommand", "tool a1b2c3d4e5f6g7h8i9", "tool")):
     v("cmd: " + name, "terminal", run(cmd), q)
-for name, cmd, env in (("user name in a subcommand path", "cat alice/notes.txt", A), ("user name subcommand", "finger alice", A),
-                       ("user name inside a subcommand", "cat alice_notes.txt", A), ("user name in a .. subcommand", "pytest ../Users/alice/t.py", A),
-                       ("user name program", "alice --help", A), ("user name inside the program", "alice-deploy now", A),
-                       ("short name subcommand", "finger jo", {"USER": "jo"}), ("short name token", "cat jo.md", {"USER": "jo"})):
+v("cmd: a file under another user's home is never sent", "terminal", run("cat Bob/secret.txt"), "cat",
+  cwd="/mnt/c/Users", env={"USER": "alice", "HOME": "/home/alice"}, fs=[])
+for name, cmd, env, q in (("user name in a subcommand path", "cat alice/notes.txt", A, "cat"),
+                          ("user name subcommand", "finger alice", A, "finger"),
+                          ("user name inside a subcommand", "cat alice_notes.txt", A, "cat"),
+                          ("user name in a .. subcommand", "pytest ../Users/alice/t.py", A, "pytest"),
+                          ("user name python module", "python -m alice_tools", A, "python"),
+                          ("short name subcommand", "finger jo", {"USER": "jo"}, "finger"),
+                          ("short name token", "cat jo.md", {"USER": "jo"}, "cat")):
+    v("cmd: %s drops the subcommand" % name, "terminal", run(cmd), q, env=env)
+for name, cmd, env in (("user name program", "alice --help", A), ("user name inside the program", "alice-deploy now", A),
+                       ("program with odd chars", "f(x) now", A), ("program starting with a dot", ".hidden run", A)):
     v("cmd: %s gives nothing" % name, "terminal", run(cmd), None, env=env)
-for name, cmd, env, q in (("service USER=node", "node server.js", {"USER": "node", "HOME": "/home/node"}, "node server.js"),
+for name, cmd, env, q in (("service USER=node", "node server.js", {"USER": "node", "HOME": "/home/node"}, "node"),
                           ("service USER=test", "npm test", {"USER": "test", "HOME": "/home/test"}, "npm test"),
                           ("service USER=docker", "docker build", {"USER": "docker"}, "docker build"),
-                          ("short name inside a word", "cat join.py", {"USER": "jo"}, "cat join.py")):
+                          ("short name inside a word", "git join", {"USER": "jo"}, "git join")):
     v("cmd: " + name, "terminal", run(cmd), q, env=env)
 
 # ---- review of PR #61 ----
@@ -205,8 +221,8 @@ v("homes: another user's home with a package.json", "read_file", rd("/Users/Alic
   cwd="/Users/Alice/docs", env=SVC, fs=["/Users/Alice/package.json"])
 v("homes: /data/home/<x> with a marker", "read_file", rd("/data/home/bob/a.md"), None,
   cwd="/data/home/bob", env=SVC, fs=["/data/home/bob/.git/"])
-v("homes: Profiles/<x> with a marker", "read_file", rd("/d/Profiles/erin/a.md"), None,
-  cwd="/d/Profiles/erin", env=SVC, fs=["/d/Profiles/erin/package.json"])
+v("homes: /Profiles/<x> with a marker", "read_file", rd("/Profiles/erin/a.md"), None,
+  cwd="/Profiles/erin", env=SVC, fs=["/Profiles/erin/package.json"])
 v("homes: a project below a user's home works", "read_file", rd("src/a.py"), "src/a.py",
   cwd="/Users/Alice/code/proj", env=SVC, fs=["/Users/Alice/package.json", "/Users/Alice/code/proj/.git/"])
 v("WSL: /mnt/c with a marker", "read_file", rd("/mnt/c/dev/a.md"), None,
@@ -234,6 +250,25 @@ v("key: search path b outside the root", "search_files", srch("TODO", "/Users/al
 for name, raw in (("en dash", "docs/jo\u2013notes.md"), ("curly quote", "docs/jo\u2019s.md"),
                   ("times sign", "docs/jo\u00d72.md"), ("division sign", "docs/jo\u00f7x.md")):
     v("P2: short name split by " + name, "read_file", rd(raw), None, cwd="/srv/p", env={"USER": "jo"}, fs=["/srv/p/.git/"])
+
+# ---- second review of PR #61 ----
+# 2: a target over TARGET_CHARS (200) is not sent (never cut mid-token)
+v("long: a path over 200 chars gives nothing", "read_file", rd("d/" * 100 + "f.py"), None)
+v("long: a path of 199 chars is sent", "read_file", rd("a" * 196 + ".py"), "a" * 196 + ".py")
+# 4: only known homes locations make a homes-dir child
+for name, d in (("/var/home", "/var/home/bob"), ("/nfs/home", "/nfs/home/bob"), ("/export/home", "/export/home/bob"),
+                ("/mnt/c/Users", "/mnt/c/Users/Bob")):
+    v("homes: %s/<x> with a marker" % name, "read_file", rd(d + "/a.md"), None, cwd=d, env=SVC, fs=[d + "/package.json"])
+v("homes: a project's own home/ folder is fine", "read_file", rd("Nav.tsx"), "src/pages/home/components/Nav.tsx",
+  cwd="/srv/web/src/pages/home/components", env=SVC, fs=["/srv/web/package.json"])
+v("homes: x/home/<y> is not a homes dir", "read_file", rd("/srv/x/home/bob/a.md"), "a.md",
+  cwd="/srv/x/home/bob", env=SVC, fs=["/srv/x/home/bob/.git/"])
+# 5: direct children of / can be roots, except homes locations and /mnt
+v("root-level: /app container", "read_file", rd("/app/src/x.py"), "src/x.py", cwd="/app", env=SVC, fs=["/app/.git/"])
+v("root-level: /workspace container", "read_file", rd("lib/y.ts"), "lib/y.ts", cwd="/workspace", env={"USER": "node", "HOME": "/home/node"}, fs=["/workspace/package.json"])
+v("root-level: /home is never a root", "read_file", rd("/home/x.md"), None, cwd="/home", env=SVC, fs=["/home/.git/"])
+v("root-level: /mnt is never a root", "read_file", rd("/mnt/x/a.md"), None, cwd="/mnt/x", env=SVC, fs=["/mnt/.git/"])
+v("root-level: / is never a root", "read_file", rd("/x/a.md"), None, cwd="/x", env=SVC, fs=["/.git/"])
 
 names = [c["name"] for c in V]
 assert len(names) == len(set(names)), [n for n in names if names.count(n) > 1]

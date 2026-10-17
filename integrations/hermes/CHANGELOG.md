@@ -34,13 +34,25 @@ format below is load-bearing: `## <version> — <date>`.
     - your home folder (from `HOME`, `USERPROFILE`, `~` or the system account,
       so a dotfiles repo there counts even with `HOME` unset) and anything
       above it;
-    - `/` and top-level folders (`/home`, `/srv`, `C:\src`);
-    - anyone's home inside a `Users`, `home` or `Profiles` folder (so
+    - `/` itself;
+    - the folders that hold users' homes (`/home`, `/Users`, `C:\Users`,
+      `D:\Profiles`, `/var/home`, `/nfs/home`, `/export/home`, `/data/home`,
+      `/mnt/<letter>/Users`) and anyone's home inside them (so
       `C:\Users\Alice` with a `package.json` is not a project, but
       `C:\Users\Alice\code\proj` is);
-    - WSL's `/mnt/<letter>` and `/mnt/<letter>/Users`.
-  - Anything outside a project root is not sent at all, not even its file name.
-    Paths are compared case-insensitively only on macOS and Windows.
+    - WSL's `/mnt` and `/mnt/<letter>`.
+
+    Other top-level folders can be projects, so wisdom works in `/app` or
+    `/workspace` containers.
+  - Anything outside a project root is not sent at all, not even its file name,
+    and neither is a path longer than 200 characters (it is never cut). Paths
+    are compared case-insensitively only on macOS and Windows.
+  - **Commands send only the program plus a plain subcommand word** (`npm test`,
+    `git rebase`, `npm run-script`), never a path, a dot or a file name.
+    `pytest tests/billing` sends `pytest`, `python deploy.py` sends `python`,
+    and `cat Bob/secret.txt` sends `cat`. In 0.6.0–0.6.4 the word after the
+    program could be a relative path, so it could name a folder outside the
+    project.
   - Nothing that names you is sent. That covers `USER`, `LOGNAME`, `USERNAME`
     and the system account name, plus your home folder's name when it sits
     in a `Users`, `home` or `Profiles` folder (so `HOME=/config` does not

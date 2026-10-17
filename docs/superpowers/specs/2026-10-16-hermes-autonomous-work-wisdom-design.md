@@ -507,7 +507,8 @@ first amendment:
 - **Keys.** The activity key (local de-duplication only, never sent or logged) uses a
   digest of the full local path, resolved against the cwd. So `/srv/a/README.md` and
   `/srv/b/README.md` are different keys even though both queries are `README.md`.
-- **Hot path.** `user_names` and `valid_cwd` are computed once per `activity_for` call.
+- **Hot path.** `user_names` is computed once per `activity_for` call. (`valid_cwd`, also
+  computed once here, was removed by amendment 4.)
 
 ## Privacy amendment 3 (2026-10-16, hermes 0.6.4)
 
@@ -571,25 +572,37 @@ They now carry an `fs` field, so any port must model the filesystem.
     (`session_cwd`, as before) holding a marker: `.git` (dir or file), `.hg`,
     `pyproject.toml`, `package.json`, `Cargo.toml`, `go.mod`, `pom.xml`,
     `build.gradle`, `Gemfile`, `composer.json`, `*.sln` or `.curated-thoughts-project`.
+  - **The walk.** It runs on the logical cwd (normalized, symlinks not resolved), so the
+    stop rules see `/home/bob` even where it resolves elsewhere (`/home` on macOS is
+    `/System/Volumes/Data/home`). The root it finds is then resolved with `realpath`.
   - **Where the walk stops (and never a root):**
-    - **Home directories and their ancestors.** The home directories are the real paths
-      of `HOME`, `USERPROFILE`, `os.path.expanduser("~")` and `pwd`'s `pw_dir` (where
-      available). Git Bash's `/c/Users/x` maps to `C:\Users\x` on Windows. So with
-      `HOME` unset, a dotfiles `.git` at the real home still sends nothing.
-    - **Filesystem roots and their direct children** (`/home`, `/srv`, `C:\src`). This
-      depth guard makes `HOME=/` safe generically.
-    - **Someone's home in a homes dir:** any directory whose parent is named `Users`,
-      `home` or `Profiles` (any case). So `C:\Users\Alice` with a `package.json` is not
-      a root, while `C:\Users\Alice\code\proj` is. A side effect is that a cwd under a
-      project's own `home/<x>` folder finds no root.
-    - **WSL drives:** `/mnt/<letter>` and `/mnt/<letter>/Users`.
+    - **Home directories and their ancestors.** The home directories are `HOME`,
+      `USERPROFILE`, `os.path.expanduser("~")` and `pwd`'s `pw_dir` (where available),
+      each compared in both its normalized and its real form. Git Bash's `/c/Users/x`
+      maps to `C:\Users\x` on Windows, here and for the cwd and path arguments. So
+      with `HOME` unset, a dotfiles `.git` at the real home still sends nothing.
+    - **The filesystem root** (`/`, `C:\`).
+    - **Known homes locations and anyone's home in one.** The homes locations are
+      `/home`, `/Users` and `/Profiles` (`C:\Users`, `D:\Profiles`); `/var/home`,
+      `/nfs/home`, `/export/home` and `/data/home`; and `/mnt/<letter>/Users`. So
+      `C:\Users\Alice` with a `package.json` is not a root, while
+      `C:\Users\Alice\code\proj` is. A project's own `src/pages/home/components`
+      folder is not a homes location, so it works.
+    - **WSL drives:** `/mnt` and `/mnt/<letter>`.
+    - **Other direct children of the root can be roots** (`/app`, `/workspace`,
+      `D:\repo`). This makes containers work. `HOME=/` stays safe through the homes
+      rules.
   - **How it runs:** `os.path` checks only, and never a subprocess. The result is cached
-    (LRU, 30 s) on the raw cwd, `HOME` and `USERPROFILE` strings, so a hit does no
-    filesystem work. The fixed markers are checked first; the directory is scanned for a
-    `*.sln` only after them, and the scan returns early.
+    (LRU) on the raw cwd, `HOME` and `USERPROFILE` strings, so a hit does no filesystem
+    work. A root found is kept 30 s; "no root" is kept only 2 s, so
+    `touch .curated-thoughts-project` takes effect almost at once. The fixed markers are
+    checked first; the directory is scanned for a `*.sln` only after them, and the scan
+    returns early. For a path argument, the cached root is looked up before any
+    `realpath`, and `user_names` runs only after the tool-name filter.
   - **Everything else gives no query, not a basename:** a path outside the root
-    (including through a symlink), a `~` path outside it, no cwd, no root, or any `:`
-    outside a Windows drive prefix.
+    (including through a symlink), a `~` path outside it, no cwd, no root, any `:`
+    outside a Windows drive prefix, or a target longer than 200 chars (never cut
+    mid-token).
   - **Behaviour change:** files outside a project get no autonomous-work wisdom. A user
     can opt a folder in with an empty `.curated-thoughts-project`.
 - **P2 (names), the second layer.**
@@ -605,9 +618,18 @@ They now carry an `fs` field, so any port must model the filesystem.
     also hits when the folded query contains the whole folded name, and its parts are
     checked as above (`john_smith.md` hits for `John Smith`).
   - **Any hit gives no query.**
-- **P3 (commands).** Program plus subcommand as before. Both words go through one helper,
-  `word_check`. A name hit there gives no activity. A rooted, `~`, `..`, `:` or `\`
-  subcommand is dropped.
+- **P3 (commands), an allowlist.** No dots, slashes or file names are ever sent from a
+  command. This closes `cat Bob/secret.txt` from cwd `/mnt/c/Users`, which bypassed P1.
+  - **The program** (the basename of the first word) must match
+    `^[A-Za-z0-9][A-Za-z0-9._+-]{0,40}$`, must not be credential-shaped and must not name
+    the user. Otherwise there is no query.
+  - **The subcommand** is sent only when it is a plain verb-like word
+    (`^[a-z][a-z0-9-]{0,30}$`: `test`, `rebase`, `run-script`) that passes `word_check`
+    (no name hit, not credential-shaped).
+  - **`python -m <module>`** sends the module only when it matches
+    `^[a-z_][a-z0-9_.]{0,60}$` and does not name the user.
+  - **Otherwise the program alone** is sent: `pytest tests/billing` → `pytest`,
+    `python deploy.py` → `python`, `cat .env.local` → `cat`.
 - **P4 (search).** The allowlist stays and P2 applies to the whole pattern. A `path`
   argument goes through P1: outside the root the path part is dropped, and a name hit
   gives no query. The search key still uses the full-path digest of the `path`, even

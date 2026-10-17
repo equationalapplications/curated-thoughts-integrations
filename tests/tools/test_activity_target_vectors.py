@@ -177,7 +177,10 @@ class TestActivityTargetVectors(unittest.TestCase):
                 # R4: the visible label is built from the same sanitized line.
                 block = act.render_activity_block(
                     {"id": "f1", "title": "T", "text": "x", "provenance": "p"}, [], a)
-                self.assertIn("_for: %s_" % case["expected_line"], block)
+                label = case["expected_line"]
+                if len(label) > act.LABEL_CHARS:  # display cap, never the query
+                    label = label[:act.LABEL_CHARS - 1] + "…"
+                self.assertIn("_for: %s_" % label, block)
 
     def test_keys_distinct(self):
         cases = {c["name"]: c for c in load()}
