@@ -9,7 +9,8 @@
  * POSIX the child's process group is killed; on Windows only the direct
  * child. Every end path settles: once the child has exited (for any
  * reason), 'close' gets at most a short grace, then the pipes are destroyed
- * and the real exit code is reported.
+ * and the real exit code is reported; after a kill of a running child, the
+ * call settles within the same grace even if the kill failed.
  */
 
 import { spawn } from 'node:child_process';
@@ -107,6 +108,13 @@ export function nodeSpawnFn(
       let exitCode: number | null = null;
       let exited = false;
       let grace: ReturnType<typeof setTimeout> | undefined;
+      let deadline: ReturnType<typeof setTimeout> | undefined;
+      /** Pipes may be held by a descendant: destroy them and settle with what is known. */
+      function settleNow(): void {
+        child.stdout?.destroy();
+        child.stderr?.destroy();
+        finish(exited ? exitCode : null, false);
+      }
       /**
        * The one kill path (timeout, abort, overflow). POSIX: the process
        * group (negative pid), falling back to the direct child when the
@@ -122,6 +130,12 @@ export function nodeSpawnFn(
         // (PR #71); a straggler it started can therefore outlive the call.
         // The exit-time grace alone bounds the wait.
         if (exited) return;
+        // Hard settle deadline, armed once at the first kill: a kill can
+        // fail (Node then emits 'error', ignored above) while the child
+        // keeps running, so no 'exit' or 'close' may ever come. The binding
+        // must always settle; whichever of this, the exit grace or 'close'
+        // comes first wins (finish is idempotent).
+        if (deadline === undefined) deadline = setTimeout(settleNow, killGraceMs);
         if (process.platform !== 'win32') {
           try {
             process.kill(-pid, 'SIGKILL');
@@ -130,7 +144,11 @@ export function nodeSpawnFn(
             /* group gone — fall through to the direct kill */
           }
         }
-        child.kill('SIGKILL');
+        try {
+          child.kill('SIGKILL');
+        } catch {
+          /* a kill that throws is bounded by the deadline above */
+        }
       }
       // Cleared at exit, so `timedOut` means the timer fired BEFORE exit.
       const timer = setTimeout(() => {
@@ -142,7 +160,8 @@ export function nodeSpawnFn(
         settled = true;
         clearTimeout(timer);
         if (grace !== undefined) clearTimeout(grace);
-        // Every end path ('close', 'error', the exit grace) drops the abort listener.
+        if (deadline !== undefined) clearTimeout(deadline);
+        // Every end path ('close', 'error', the exit grace, the kill deadline) drops the abort listener.
         spec.signal?.removeEventListener('abort', onAbort);
         resolve(spawnOutcomeOf({
           code,
@@ -170,11 +189,7 @@ export function nodeSpawnFn(
         clearTimeout(timer);
         spec.signal?.removeEventListener('abort', onAbort);
         if (settled || grace !== undefined) return;
-        grace = setTimeout(() => {
-          child.stdout?.destroy();
-          child.stderr?.destroy();
-          finish(exitCode, false);
-        }, killGraceMs);
+        grace = setTimeout(settleNow, killGraceMs);
       });
       // The caller's budget ran out (activity delivery, `spec.signal`): kill
       // the tree now and report `aborted`, which the core classifies as its

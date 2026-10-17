@@ -90,6 +90,10 @@ export function spawnOutcomeOf(raw: {
   a descendant holds stdout is never reported as timed out.
 - `'error'` is a failed start only when the child never got a pid; on a started child (e.g. a failed kill) it is
   ignored and exit, `close` or the grace settle.
+- The binding always settles. The first kill of a child that has not exited (timeout, abort or overflow) arms a hard
+  deadline of `killGraceMs`. If neither `close` nor the exit grace has settled the call by then (a kill that failed
+  while the child keeps running), the pipes are destroyed and the call settles with code null (or the exit code if it
+  has exited), with `timedOut`, `aborted` and overflow as set. Whichever end path comes first wins.
 - Past the byte cap, nothing more is collected on either stream and the tree is killed once.
 - An abort after exit keeps the real result. An overflow is `spawnError`, never `aborted` (`spawnOutcomeOf`).
 - **New, from OpenClaw:** raw Buffers are accumulated and decoded once at settle, and the cap counts real bytes.

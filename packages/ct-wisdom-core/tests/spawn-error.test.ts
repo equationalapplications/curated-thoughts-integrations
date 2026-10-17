@@ -7,7 +7,7 @@
 
 import { EventEmitter } from 'node:events';
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 class FakeStream extends EventEmitter {
   destroy(): void { /* nothing to close */ }
@@ -59,5 +59,73 @@ describe("nodeSpawnFn 'error' handling (mocked child)", () => {
     const out = await pending;
     expect(out.spawnError).toBe(true);
     expect(out.code).toBeNull();
+  });
+
+  describe('a kill that fails while the child keeps running still settles (PR #76 fix round 1)', () => {
+    // A pid no real process has (above every OS pid range), and process.kill
+    // stubbed to fail, so no real process or group is ever signalled.
+    const FAKE_PID = 2 ** 30 + 7;
+    let killSpy: ReturnType<typeof vi.spyOn>;
+    beforeEach(() => {
+      killSpy = vi.spyOn(process, 'kill').mockImplementation(() => {
+        throw Object.assign(new Error('kill EPERM'), { code: 'EPERM' });
+      });
+    });
+    afterEach(() => {
+      killSpy.mockRestore();
+    });
+
+    /** The direct kill fails too: it emits 'error' (as Node does) and the child never exits or closes. */
+    function stuckChild(): FakeChild {
+      const child = new FakeChild(FAKE_PID);
+      child.kill = vi.fn(() => {
+        queueMicrotask(() => child.emit('error', new Error('kill EPERM')));
+        return false;
+      });
+      return child;
+    }
+
+    it('timeout: settles within the kill deadline as timedOut, not a spawn error', { timeout: 3000 }, async () => {
+      const child = stuckChild();
+      state.next = child;
+      const started = Date.now();
+      const pending = nodeSpawnFn({}, { killGraceMs: 100 })({ command: 'ct', args: [], timeoutMs: 100 });
+      child.stdout.emit('data', Buffer.from('partial'));
+      const out = await pending;
+      expect(Date.now() - started).toBeLessThan(200 + 800);
+      expect(out.timedOut).toBe(true);
+      expect(out.spawnError).toBe(false);
+      expect(out.code).toBeNull();
+      expect(out.stdout).toBe('partial');
+      expect(child.kill).toHaveBeenCalled();
+    });
+
+    it('abort: settles within the kill deadline as aborted', { timeout: 3000 }, async () => {
+      const child = stuckChild();
+      state.next = child;
+      const abort = new AbortController();
+      const started = Date.now();
+      const pending = nodeSpawnFn({}, { killGraceMs: 100 })({ command: 'ct', args: [], timeoutMs: 60_000, signal: abort.signal });
+      abort.abort();
+      const out = await pending;
+      expect(Date.now() - started).toBeLessThan(100 + 800);
+      expect(out.aborted).toBe(true);
+      expect(out.timedOut).toBe(false);
+      expect(out.spawnError).toBe(false);
+      expect(out.code).toBeNull();
+    });
+
+    it('overflow: settles within the kill deadline as a spawn error, never aborted', { timeout: 3000 }, async () => {
+      const child = stuckChild();
+      state.next = child;
+      const started = Date.now();
+      const pending = nodeSpawnFn({}, { killGraceMs: 100, capBytes: 4 })({ command: 'ct', args: [], timeoutMs: 60_000 });
+      child.stdout.emit('data', Buffer.from('too long'));
+      const out = await pending;
+      expect(Date.now() - started).toBeLessThan(100 + 800);
+      expect(out.spawnError).toBe(true);
+      expect(out.aborted).toBeUndefined();
+      expect(out.timedOut).toBe(false);
+    });
   });
 });
