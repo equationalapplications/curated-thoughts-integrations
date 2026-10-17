@@ -77,7 +77,8 @@ class Base(unittest.TestCase):
                     "USER": "tester", "PATH": os.environ.get("PATH", "")}
         self.boot = []
         self.match = {}            # query -> [fact]
-        self.fail = None           # failure class returned by match
+        self.ct_fail = None           # failure class returned by match
+        self.corrections = {}      # query -> [correction]
         self.honor_exclude = True
         self.calls = []            # ("discover"|"probe"|"match", query, max_n, exclude)
         self.discovered = ("/fake/ct", None)
@@ -104,12 +105,13 @@ class Base(unittest.TestCase):
 
     def _match(self, path, text, max_n, exclude):
         self.calls.append(("match", text, max_n, list(exclude)))
-        if self.fail:
-            return None, self.fail
+        if self.ct_fail:
+            return None, self.ct_fail
         facts = self.match(text) if callable(self.match) else self.match.get(text, [])
         if self.honor_exclude:
             facts = [f for f in facts if f["id"] not in exclude]
-        return {"entries": [dict(f) for f in facts][:max_n], "corrections": [],
+        corrections = [dict(c) for c in self.corrections.get(text, [])]
+        return {"entries": [dict(f) for f in facts][:max_n], "corrections": corrections,
                 "gate": "semantic-v1:test"}, None
 
     def queries(self):
@@ -434,9 +436,9 @@ class FailureTests(Base):
                 sid = "rel-" + failure
                 self.start(sid=sid)
                 self.match = {"src/a.py": [fact("a1")]}
-                self.fail = failure
+                self.ct_fail = failure
                 self.assertIsNone(self.batch([call()], sid=sid))
-                self.fail = None
+                self.ct_fail = None
                 cc.PersistedBreaker(cc.breaker_path(self.data)).record_success()
                 self.assertIn("ct-fact:a1", self.block(self.batch([call()], sid=sid)))
 
@@ -445,6 +447,7 @@ class FailureTests(Base):
         self.start()
         self.discovered = (None, "discovery_miss")
         self.assertIsNone(self.batch([call()]))
+        cc.drop_ct_cache(os.path.join(self.data, "wisdom"))  # the 5-min miss TTL ends
         self.discovered = ("/fake/ct", None)
         self.capable = None
         self.assertIsNone(self.batch([call()]))
@@ -460,11 +463,11 @@ class FailureTests(Base):
 
     def test_timeouts_feed_the_shared_breaker(self):
         self.start()
-        self.fail = "timeout"
+        self.ct_fail = "timeout"
         for name in ("src/a.py", "src/b.py", "README.md"):
             self.batch([call(args={"file_path": name})])
         self.assertTrue(cc.PersistedBreaker(cc.breaker_path(self.data)).is_open())
-        self.fail = None
+        self.ct_fail = None
         before = len(self.queries())
         self.assertIsNone(self.batch([call(args={"file_path": "package.json"})]))
         self.assertEqual(len(self.queries()), before)
@@ -558,7 +561,7 @@ class CtCacheTests(Base):
         self.start()
         self.batch([call()])
         self.assertTrue(os.path.exists(os.path.join(self.data, "wisdom", "ct.json")))
-        self.fail = "spawn"
+        self.ct_fail = "spawn"
         self.batch([call(args={"file_path": "src/b.py"})])
         self.assertFalse(os.path.exists(os.path.join(self.data, "wisdom", "ct.json")))
 
@@ -624,6 +627,163 @@ class VerboseTests(Base):
         self.start()
         self.batch([call()])
         self.assertEqual(self.log(), [])
+
+
+class ReviewFixTests(Base):
+    """Regressions for the PR #68 high-effort review (items 1-9)."""
+
+    def recall(self, ids, agent=None, response=None):
+        payload = {"session_id": SID, "hook_event_name": "PostToolUse", "tool_name": RECALL,
+                   "tool_input": {"query": "q"}, "tool_use_id": "t1",
+                   "tool_response": response if response is not None else recall_response(ids)}
+        if agent:
+            payload.update(agent_id=agent, agent_type="Explore")
+        out = cc.respond(payload, env=self.env)
+        if not out:
+            return {}
+        shown = out["hookSpecificOutput"]["updatedToolOutput"]
+        text = shown[0]["text"] if isinstance(shown, list) else shown
+        return {e["id"]: bool(e.get("in_context")) for e in json.loads(text)["wiki_entries"]}
+
+    def evict(self, agent):
+        for i in range(cc.AGENTS_MAX + 1):
+            self.batch([call(args={"file_path": "src/b.py"})], agent_id="ev%03d" % i)
+        self.assertIn(agent, self.store()["evicted_agents"])
+        self.assertNotIn(agent, self.store()["agents"])
+
+    # 1 ------------------------------------------------------------------
+    def test_evicted_subagent_keeps_stubbing_after_its_next_event(self):
+        self.boot = ["boot1"]
+        self.start()
+        self.recall(["r1"], agent="old")
+        self.evict("old")
+        # r1 is stubbed (whole ledger); r2 is new, shown once and recorded.
+        self.assertEqual(self.recall(["r1", "r2"], agent="old"), {"r1": True, "r2": False})
+        # The second recall must not have re-created an empty entry that
+        # would let r1 through on the third.
+        self.assertNotIn("old", self.store()["agents"])
+        self.assertEqual(self.recall(["r1", "r2", "boot1"], agent="old"),
+                         {"r1": True, "r2": True, "boot1": True})
+
+    def test_evicted_subagent_gets_no_activity_and_no_entry(self):
+        self.match = {"src/a.py": [fact("a1")]}
+        self.start()
+        self.recall(["r1"], agent="old")
+        self.evict("old")
+        self.assertIsNone(self.batch([call()], agent_id="old"))
+        self.assertNotIn("old", self.store()["agents"])
+
+    # 2 ------------------------------------------------------------------
+    def test_upgrade_from_0_3_x_seeds_the_main_threads_own_ids(self):
+        self.start()
+        path = cc.session_path(self.data, SID)
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+        for field in ("activity_ids", "executed", "agents", "evicted_agents"):
+            data.pop(field)
+        data["tool_ids"], data["live_ids"] = ["old_t"], ["old_l"]
+        data["order"] = ["old_t", "old_l"]
+        Path(path).write_text(json.dumps(data), encoding="utf-8")
+        # A subagent now records the same ids; the main thread had them first.
+        self.recall(["old_t", "old_l"], agent="af01")
+        self.assertEqual(self.recall(["old_t", "old_l"]), {"old_t": True, "old_l": True})
+
+    # 3 ------------------------------------------------------------------
+    def test_one_parser_for_every_recall_shape(self):
+        inner = json.loads(recall_response(["x1", "x2"])[0]["text"])
+        shapes = [recall_response(["x1", "x2"]), json.dumps(inner),
+                  json.dumps(recall_response(["x1", "x2"])),
+                  {"content": recall_response(["x1", "x2"])}]
+        for shape in shapes:
+            with self.subTest(shape=type(shape).__name__):
+                self.assertEqual(cc.recall_response_ids(shape), ["x1", "x2"])
+                updated, new = cc.rewrite_response(shape, {"x1"})
+                self.assertEqual(new, ["x2"])
+                self.assertIsNotNone(updated)
+                self.assertEqual(type(updated), type(shape))
+        self.assertEqual(cc.recall_response_ids("not json"), [])
+        self.assertEqual(cc.rewrite_response("not json", {"x1"}), (None, []))
+
+    def test_string_shaped_recall_in_the_batch_joins_the_ledger(self):
+        self.start()
+        self.batch([call(RECALL, {"query": "q"}, response=json.dumps(recall_response(["s1"])))])
+        self.assertIn("s1", cc.ledger_of(self.store()))
+
+    # 4 ------------------------------------------------------------------
+    def test_correction_only_where_the_old_fact_is_in_context(self):
+        self.match = {"src/a.py": [fact("a1")], "src/b.py": []}
+        self.start()
+        self.batch([call()], agent_id="af01")           # a1 in the subagent only
+        self.corrections = {"src/b.py": [fact("a1v2", supersedes=["a1"])]}
+        # The main thread never saw a1: no correction there, none recorded...
+        self.assertIsNone(self.batch([call(args={"file_path": "src/b.py"})]))
+        self.assertNotIn("a1v2", cc.ledger_of(self.store()))
+        # ...so it still reaches the subagent, which holds a1.
+        block = self.block(self.batch([call(args={"file_path": "src/b.py"})], agent_id="af01"))
+        self.assertIn("ct-fact:a1v2", block)
+        self.assertIn("supersedes ct-fact:a1", block)
+
+    # 5 ------------------------------------------------------------------
+    def test_lock_timeout_in_phase_c_releases_the_key_and_is_recorded(self):
+        self.match = {"src/a.py": [fact("a1")]}
+        self.start()
+        env = dict(self.env, CT_WISDOM_VERBOSE="1")
+        real = cc.locked
+        state = {"n": 0}
+
+        def flaky(path, wait=None):
+            state["n"] += 1
+            if state["n"] == 2:  # Phase A is the first lock of the batch hook
+                raise cc.LockTimeout(path)
+            return real(path, wait)
+
+        c = call()
+        self.executed(c)
+        self._patch(cc, "locked", flaky)
+        out = self.batch([c], run=False, env=env)
+        self.assertEqual(set(out or {}), {"systemMessage"})
+        self.assertIn("lock_timeout", out["systemMessage"])
+        self._patch(cc, "locked", real)
+        self.assertIn("ct-fact:a1", self.block(self.batch([call()])))  # key was released
+
+    # 6 ------------------------------------------------------------------
+    def test_discovery_miss_is_cached_and_reported_once(self):
+        self.start()
+        self.calls.clear()  # the bootstrap's own discovery
+        self.discovered = (None, "discovery_miss")
+        env = dict(self.env, CT_WISDOM_VERBOSE="1")
+        first = self.batch([call()], env=env)
+        self.assertIn("discovery_miss", first["systemMessage"])
+        second = self.batch([call(args={"file_path": "src/b.py"})], env=env)
+        self.assertIsNone(second)
+        self.assertEqual([c[0] for c in self.calls].count("discover"), 1)
+        # After the TTL, discovery runs again.
+        wdir = os.path.join(self.data, "wisdom")
+        data = json.loads(Path(wdir, "ct.json").read_text(encoding="utf-8"))
+        data["at"] -= cc.CT_MISS_TTL + 1
+        Path(wdir, "ct.json").write_text(json.dumps(data), encoding="utf-8")
+        self.batch([call(args={"file_path": "README.md"})], env=env)
+        self.assertEqual([c[0] for c in self.calls].count("discover"), 2)
+
+    # 7 ------------------------------------------------------------------
+    def test_seen_key_moves_to_the_lru_end(self):
+        self.start()
+        self.batch([call()])                                     # key A
+        for i in range(ct_wisdom_activity.RECENT_KEYS_MAX - 1):  # fill the rest
+            self.batch([call("Grep", {"pattern": "word%d" % i})])
+        self.batch([call()])                                     # A seen: refreshed
+        self.batch([call("Grep", {"pattern": "fresh"})])         # evicts the oldest, not A
+        before = len(self.queries())
+        self.batch([call()])
+        self.assertEqual(len(self.queries()), before)            # A still seen
+
+    # 8, 9 ---------------------------------------------------------------
+    def test_one_is_recall_tool_and_the_subagent_rule(self):
+        self.assertIs(cc.is_recall_tool, cc.cc_activity.is_recall_tool)
+        self.match = {"src/a.py": [fact("a1")]}
+        self.start()
+        self.batch([call()], agent_id="   ")  # blank agent_id = main thread
+        self.assertIn("", self.store()["agents"])
+        self.assertNotIn("   ", self.store()["agents"])
 
 
 if __name__ == "__main__":

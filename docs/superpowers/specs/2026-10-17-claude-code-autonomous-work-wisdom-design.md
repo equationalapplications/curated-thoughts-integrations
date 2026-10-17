@@ -185,7 +185,8 @@ _for: read src/billing/invoice.py_
 ```
 
 1 fact (`ACTIVITY_MAX_PER_STEP`), ≤ 600 chars (`ACTIVITY_MAX_BLOCK_CHARS`), marker first.
-Corrections ride only when they supersede an id in the ledger. The block is the whole
+Corrections ride only when they supersede an id in the **receiving agent's own context**
+(see "Review amendments", R4). The block is the whole
 `additionalContext`; Claude Code adds its own `PostToolBatch hook additional context:` prefix (H6).
 
 ### D7. Ledger and write-before-emit
@@ -236,8 +237,9 @@ its subagents:
   never delivered again (the loss INTENT allows; same as OpenCode, Docker Agent and this host's
   live path).
 - `/clear`: a new session id, a fresh store (leg F12).
-- Old 0.3.x stores (same `v`, without the three new fields) load with empty defaults: their ledger
-  is still exact, so a session that spans the plugin upgrade keeps working.
+- Old 0.3.x stores (same `v`, without the new fields) load with defaults: their ledger is still
+  exact, and the main thread's own-context list is seeded from their `tool_ids` and `live_ids`
+  (R2), so a session that spans the plugin upgrade keeps working.
 
 ### D10. Latency: ct cache and one wall budget
 
@@ -288,7 +290,9 @@ Every row means: no `additionalContext`, one debug line, verbose record where no
 | `timeout`, `exit`, `spawn`, `parse_error` | batch | as Hermes; timeout/exit feed the breaker (recorded; key released) |
 | `store_changed` | batch | the store went missing or OFF while CT ran |
 | `zero_hits` → `deduped` / `no_match` | batch | nothing new survived the ledger (recorded; key kept) |
-| `lock_timeout` | any | the store lock was not taken within 2 s |
+| `lock_timeout` | any | the store lock was not taken within 2 s (Phase C: recorded; key released) |
+| `agent_evicted` | batch | a subagent whose tracking was evicted (R1) |
+| `discovery_miss_cached` | batch | a miss within the 5-min TTL (not recorded; key released, R6) |
 | `hook_failed` | any | unexpected exception, caught; exit 0 |
 
 ## Exactly-once argument (rule 1)
@@ -304,6 +308,37 @@ Every row means: no `additionalContext`, one debug line, verbose record where no
 - Resumed and forked sessions, whose visible ids are unknowable, are OFF (D9). Compaction keeps
   the ledger (a loss, never a repeat). A new `/clear` id is a new, empty context.
 - The block is persisted and replayed byte-identically (H7); the system prompt is never edited.
+
+## Review amendments (PR #68, high-effort review)
+
+- **R1, evicted subagents.** `context_ids` checks `evicted_agents` first: once evicted, a
+  subagent's recalls are always stubbed against the whole session ledger, and `agent_entry` never
+  re-creates its entry (a re-created empty entry would have let its own facts through on a later
+  recall). An evicted subagent also gets no activity delivery (`agent_evicted`): its rate state is
+  gone with its entry, and failing closed keeps the at-most-once rule simple.
+- **R2, 0.3.x upgrade.** A store without `agents` is a 0.3.x store, whose `tool_ids` and
+  `live_ids` are all the main thread's. They seed `agents[""].ids`, so the main thread keeps
+  stubbing them after a subagent records the same id.
+- **R3, one recall parser.** `rewrite_response` is the only parser of a CT recall result and
+  handles a content-block list, a `{content: [...]}` dict, a raw JSON envelope string and a string
+  holding a serialized block list (the batch's `tool_response`). `recall_response_ids` is
+  `rewrite_response(response, set())`'s id list.
+- **R4, corrections per context.** A correction is delivered only to an agent whose **own**
+  context (`context_ids`) holds a fact it supersedes, listing only those ids. Elsewhere it is
+  neither delivered nor recorded, so it can still reach the context that holds the old fact.
+- **R5, Phase C lock timeout.** Caught locally: the key is released and a verbose `lock_timeout`
+  skip is recorded (nothing was recorded or shown).
+- **R6, discovery miss.** A miss is cached in `ct.json` for `CT_MISS_TTL = 300 s` under the same
+  discovery-view digest: no probe subprocess and no second verbose notice within the TTL
+  (`discovery_miss_cached`, not recorded; the key is still released).
+- **R7, LRU keys.** A seen key moves to the end of the agent's recent keys, as Hermes
+  `ActivityState.admit` does.
+- **R8, R9.** One `is_recall_tool` (`ct_wisdom_cc_activity`), imported by the adapter; the batch
+  hook decides the agent with `_in_subagent(payload)` (a blank `agent_id` is the main thread).
+
+Each has a regression test in `tests/test_activity_delivery_cc.py` (`ReviewFixTests`). None of them
+changes the tested live e2e scenario: no subagent was evicted, the store was created at 0.4.0, no
+correction was returned and CT was found, so the live e2e was not re-run.
 
 ## Alignment with INTENT.md
 

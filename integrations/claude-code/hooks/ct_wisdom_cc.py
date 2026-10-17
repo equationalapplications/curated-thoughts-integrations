@@ -78,6 +78,8 @@ AGENTS_MAX = 128          # agents (main thread "" + subagents) tracked per sess
 EVICTED_MAX = 1024        # subagent ids whose tracking was evicted (stub-everything rule)
 RECENT_KEYS_MAX = ct_wisdom_activity.RECENT_KEYS_MAX
 CT_CACHE_MAX_AGE = 86400
+CT_MISS_TTL = 300         # a discovery miss is remembered (and reported) once per 5 min
+MISS_CACHED = "discovery_miss_cached"
 _USE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 _clock = time.monotonic
 
@@ -158,10 +160,17 @@ def ledger_of(store):
             | set(store["activity_ids"]))
 
 
+def is_evicted(store, agent):
+    return agent != "" and agent in store["evicted_agents"]
+
+
 def agent_entry(store, agent):
     """The tracking entry of `agent` ("" = main thread), created on first use
-    and moved to the LRU end. An evicted subagent's id is remembered, so its
-    later recall results are stubbed against the whole ledger (D8)."""
+    and moved to the LRU end; None for an evicted subagent. Its entry is
+    NEVER re-created: what is in its context is no longer known, so it is
+    stubbed against the whole ledger and gets no activity (D8)."""
+    if is_evicted(store, agent):
+        return None
     entry = store["agents"].pop(agent, None) or {"keys": [], "ids": []}
     store["agents"][agent] = entry
     while len(store["agents"]) > AGENTS_MAX:
@@ -173,6 +182,8 @@ def agent_entry(store, agent):
 
 def note_agent_ids(store, agent, ids):
     entry = agent_entry(store, agent)
+    if entry is None:  # evicted: the shared ledger still records the ids
+        return
     for fid in ids:
         if ct_ledger.valid_id(fid) and fid not in entry["ids"]:
             entry["ids"].append(fid)
@@ -186,6 +197,8 @@ def context_ids(store, agent):
     would hide a fact. Main thread: the ledger minus ids only subagents got.
     A subagent: its own ids; an evicted one: the whole ledger (safe side)."""
     ledger = ledger_of(store)
+    if is_evicted(store, agent):  # first: once evicted, always the whole ledger
+        return ledger
     if agent == "":
         main = store["agents"].get("")
         own = set(main["ids"]) if main else set()
@@ -197,8 +210,6 @@ def context_ids(store, agent):
         return ledger - (sub_only - own)
     if agent in store["agents"]:
         return set(store["agents"][agent]["ids"])
-    if agent in store["evicted_agents"]:
-        return ledger
     return set()
 
 
@@ -240,9 +251,19 @@ def load_store(ddir, session_id):
     except (OSError, ValueError):
         return None
     if isinstance(data, dict):
+        legacy = "agents" not in data
         for field, kind in _NEW_FIELDS.items():
             if field not in data:
                 data[field] = kind()
+        if legacy and isinstance(data.get("tool_ids"), list) and isinstance(data.get("live_ids"), list):
+            # A 0.3.x store: every recall and live id it holds is the main
+            # thread's (0.3.x never recorded subagent recalls), so the main
+            # thread keeps stubbing them once a subagent records the same id.
+            seeded = []
+            for fid in data["tool_ids"] + data["live_ids"]:
+                if ct_ledger.valid_id(fid) and fid not in seeded:
+                    seeded.append(fid)
+            data["agents"][""] = {"keys": [], "ids": seeded}
     return data if _valid_store(data, session_id) else None
 
 
@@ -547,8 +568,11 @@ def _rewrite_blocks(blocks, ledger, new_ids):
 
 
 def rewrite_response(response, ledger):
-    """(updated_response | None, new_ids). The response keeps its shape: the
-    MCP content-block list (observed, F8) or a dict with a `content` list."""
+    """(updated_response | None, new_ids): the ONE parser of a CT recall
+    result. The response keeps its shape: the MCP content-block list
+    (PostToolUse, F8), a dict with a `content` list, a raw JSON envelope
+    string, or a string holding a serialized block list (the PostToolBatch
+    `tool_response`, H2). new_ids are the valid ids not in `ledger`."""
     new_ids = []
     if isinstance(response, list):
         blocks, stubbed = _rewrite_blocks(response, ledger, new_ids)
@@ -556,12 +580,20 @@ def rewrite_response(response, ledger):
     if isinstance(response, dict) and isinstance(response.get("content"), list):
         blocks, stubbed = _rewrite_blocks(response["content"], ledger, new_ids)
         return (dict(response, content=blocks) if stubbed else None), new_ids
+    if isinstance(response, str):
+        try:
+            parsed = json.loads(response)
+        except ValueError:
+            return None, new_ids
+        if isinstance(parsed, list):
+            blocks, stubbed = _rewrite_blocks(parsed, ledger, new_ids)
+            return (json.dumps(blocks, ensure_ascii=False) if stubbed else None), new_ids
+        text, _stubbed = _rewrite_text(response, ledger, new_ids)
+        return text, new_ids
     return None, new_ids
 
 
-def is_recall_tool(tool_name):
-    return (isinstance(tool_name, str) and tool_name.startswith("mcp__")
-            and tool_name.endswith(RECALL_TOOL_SUFFIX))
+is_recall_tool = cc_activity.is_recall_tool
 
 
 def post_tool_use(payload, env=None):
@@ -692,6 +724,31 @@ def write_ct_cache(wdir, view, path, capable):
         pass
 
 
+def read_ct_miss(wdir, view, now=None):
+    """The failure class of a discovery miss recorded under this view less
+    than CT_MISS_TTL ago, else None."""
+    now = time.time() if now is None else now
+    try:
+        with open(_ct_cache_path(wdir), encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict) or not isinstance(data.get("miss"), str):
+        return None
+    at = data.get("at")
+    if data.get("view") != discovery_key(view) or not isinstance(at, (int, float)):
+        return None
+    return data["miss"] if 0 <= now - at <= CT_MISS_TTL else None
+
+
+def write_ct_miss(wdir, view, dclass):
+    try:
+        _atomic_write(_ct_cache_path(wdir), {"miss": dclass, "at": time.time(),
+                                             "view": discovery_key(view)})
+    except OSError:
+        pass
+
+
 def drop_ct_cache(wdir):
     try:
         os.remove(_ct_cache_path(wdir))
@@ -706,10 +763,14 @@ def find_ct(wdir, view, deadline):
     cached = read_ct_cache(wdir, view)
     if cached is not None:
         return (cached[0], None) if cached[1] else (None, "capability_missing")
+    if read_ct_miss(wdir, view) is not None:
+        # A recent miss: no probe and no second notice until the TTL ends.
+        return None, MISS_CACHED
     if deadline - _clock() < ct_wisdom.PROBE_TIMEOUT:
         return None, "budget"
     path, dclass = ct_wisdom.discover_ct(env=view)
     if path is None:
+        write_ct_miss(wdir, view, dclass or "discovery_miss")
         return None, dclass or "discovery_miss"
     if deadline - _clock() < ct_wisdom.PROBE_TIMEOUT:
         return None, "budget"
@@ -750,25 +811,23 @@ def _act_skip(view, session_id, failure_class, record=False, **detail):
 
 
 def recall_response_ids(response):
-    """Valid wiki-entry ids of a CT recall result as the batch carries it
-    (the serialized content: a string or MCP content blocks)."""
-    texts = []
-    if isinstance(response, str):
-        texts.append(response)
-    elif isinstance(response, list):
-        texts += [b["text"] for b in response
-                  if isinstance(b, dict) and isinstance(b.get("text"), str)]
+    """Valid wiki-entry ids of a CT recall result in any shape (the one
+    parser, rewrite_response, with nothing to stub)."""
+    return rewrite_response(response, set())[1]
+
+
+def corrections_for(corrections, store, agent):
+    """The corrections the RECEIVING agent may get: only those superseding a
+    fact in its own context (context_ids), each limited to those ids. A
+    correction for a fact only another context holds is left for that
+    context (not delivered here, so not recorded)."""
+    own = context_ids(store, agent)
     out = []
-    for text in texts:
-        try:
-            inner = json.loads(text)
-        except ValueError:
-            continue
-        entries = inner.get("wiki_entries") if isinstance(inner, dict) else None
-        for e in entries if isinstance(entries, list) else []:
-            fid = e.get("id") if isinstance(e, dict) else None
-            if ct_ledger.valid_id(fid) and fid not in out:
-                out.append(fid)
+    for c in corrections if isinstance(corrections, list) else []:
+        supersedes = c.get("supersedes") if isinstance(c, dict) else None
+        kept = [s for s in supersedes if s in own] if isinstance(supersedes, list) else []
+        if kept:
+            out.append(dict(c, supersedes=kept))
     return out
 
 
@@ -817,7 +876,7 @@ def _post_tool_batch(payload, env):
         return _act_skip(view, sid, "no_store")
     if store["state"] != "on":  # the latch (resume, fork, clear_same_id), before anything
         return _act_skip(view, sid, "delivery_off")
-    agent = payload.get("agent_id") if _nonempty_str(payload.get("agent_id")) else ""
+    agent = payload.get("agent_id") if _in_subagent(payload) else ""
     cwd = payload.get("cwd")
 
     recall_ids, candidates = [], []
@@ -852,14 +911,21 @@ def _post_tool_batch(payload, env):
             note_ids(cur, "tool_ids", recall_ids)
             note_agent_ids(cur, agent, recall_ids)
             executed = set(cur["executed"])
-            keys = agent_entry(cur, agent)["keys"]
+            entry = agent_entry(cur, agent)
+            if entry is None:
+                # An evicted subagent: what its context holds is unknown, so
+                # it gets no activity delivery (fail closed, spec D8).
+                candidates, why = [], "agent_evicted"
+            keys = entry["keys"] if entry is not None else []
             for use_id, name, activity in candidates:
                 if use_id not in executed:
                     why = "not_executed" if why == "no_activity" else why
                     continue  # denied or never ran (D3)
                 key = json.dumps(list(activity.key))
                 if key in keys:
-                    why = "seen_key"
+                    keys.remove(key)  # LRU: a seen key moves to the end (Hermes admit)
+                    keys.append(key)
+                    changed, why = True, "seen_key"
                     continue
                 chosen = (name, activity, key)
                 break
@@ -891,7 +957,7 @@ def _post_tool_batch(payload, env):
         path, fclass = find_ct(wdir, view, deadline)
         if path is None:
             _release_key(ddir, sid, agent, key)
-            return _act_skip(view, sid, fclass, record=True, **base)
+            return _act_skip(view, sid, fclass, record=fclass != MISS_CACHED, **base)
         if deadline - _clock() < ct_wisdom_live.LIVE_TIMEOUT:
             breaker.record_failure()
             _release_key(ddir, sid, agent, key)
@@ -910,25 +976,31 @@ def _post_tool_batch(payload, env):
 
     # Phase C (locked): render against the ledger as it is NOW, record the
     # id, write, and only then emit (at-most-once, leg D4).
-    with locked(session_path(ddir, sid)):
-        cur = load_store(ddir, sid)
-        if cur is None or cur["state"] != "on":
-            return _act_skip(view, sid, "store_changed")
-        ledger = ledger_of(cur)
-        picked = None
-        for item, superseded in cc_activity.render_candidates(
-                result["entries"], result["corrections"], ledger):
-            block = cc_activity.render_activity_block(item, superseded, activity)
-            if block:
-                picked = (item["id"], block)
-                break
-        if picked is None:
-            # CT answered; nothing new survived: the key stays spent.
-            return _act_skip(view, sid, "zero_hits", record=True, result=result,
-                             ledger=sorted(ledger), **base)
-        note_ids(cur, "activity_ids", [picked[0]])
-        note_agent_ids(cur, agent, [picked[0]])
-        save_store(ddir, sid, cur)
+    try:
+        with locked(session_path(ddir, sid)):
+            cur = load_store(ddir, sid)
+            if cur is None or cur["state"] != "on":
+                return _act_skip(view, sid, "store_changed")
+            ledger = ledger_of(cur)
+            picked = None
+            for item, superseded in cc_activity.render_candidates(
+                    result["entries"], corrections_for(result["corrections"], cur, agent),
+                    ledger):
+                block = cc_activity.render_activity_block(item, superseded, activity)
+                if block:
+                    picked = (item["id"], block)
+                    break
+            if picked is None:
+                # CT answered; nothing new survived: the key stays spent.
+                return _act_skip(view, sid, "zero_hits", record=True, result=result,
+                                 ledger=sorted(ledger), **base)
+            note_ids(cur, "activity_ids", [picked[0]])
+            note_agent_ids(cur, agent, [picked[0]])
+            save_store(ddir, sid, cur)
+    except LockTimeout:
+        # Nothing was recorded or shown: free the key for a later step.
+        _release_key(ddir, sid, agent, key)
+        return _act_skip(view, sid, "lock_timeout", record=True, **base)
     logger.debug("wisdom-cc: activity deliver session=%s id=%s", sid, picked[0])
     _record("delivery", view, dict(base, session_id=sid, result=result, ledger=sorted(ledger),
                                    delivered=[picked[0]], block=picked[1]))
