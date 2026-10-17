@@ -1,6 +1,6 @@
 # ct-wisdom-core: one shared spawn binding, and a core-owned `cancel` — design
 
-**Date:** 2026-10-17 · **Status:** Draft for user review · **Branch:** `feat/core-spawn-binding-and-cancel`
+**Date:** 2026-10-17 · **Status:** Approved (user, 2026-10-17) · **Branch:** `feat/core-spawn-binding-and-cancel`
 · **Base:** `main` @ `fb66034`
 **Delivery:** one spec and one plan, landed as **two PRs**: B (the spawn binding) first, then A (cancel).
 **Releases:** each PR bumps the three TypeScript hosts. PR B: deepseek 0.6.2 → 0.6.3, opencode 0.4.2 → 0.4.3,
