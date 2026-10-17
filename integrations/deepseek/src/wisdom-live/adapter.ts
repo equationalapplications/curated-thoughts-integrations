@@ -316,12 +316,11 @@ export class DshWisdomAdapter implements HostAdapter {
     query: string,
     max: number,
     exclude: string[],
-    budget?: AbortSignal,
+    signal?: AbortSignal,
   ): Promise<{ outcome: MatchOutcome; result?: WisdomMatchResult }> {
     if (this.capabilityAbsent) return { outcome: 'timeout_or_exit' };
     const { path } = this.discover();
     if (path === null) return { outcome: 'spawn' };
-    const signal = this.spawnSignal(budget);
     if (this.probedPath !== path) {
       // Capability gate per the live-delivery spec: `ct wisdom match --help`
       // exits 0 (Hermes ct_wisdom_live.has_match_capability parity), once
@@ -352,44 +351,16 @@ export class DshWisdomAdapter implements HostAdapter {
       }
     }
     const res = await coreWisdomMatch(path, query, max, exclude, this.spawnFn, signal);
-    // Cancelled (the host charged the budget miss itself at expiry): a kill
-    // that surfaces as a timeout or exit is that same miss, not a second
-    // CT failure.
-    if (signal?.aborted && res.outcome === 'timeout_or_exit') return { outcome: 'aborted' };
     // A failed match re-probes on the next call: a ct that lost `wisdom
     // match` in place (a downgrade at the same path) then latches quietly
     // instead of charging the breaker on every query. This failure itself
     // still counts once: an exit code cannot tell "unknown command" from
     // any other usage error reliably.
-    if (res.outcome === 'timeout_or_exit') this.probedPath = null;
+    // Not after a core cancel: a child that exited non-zero inside the close
+    // grace as the cancel fired says nothing about the capability, and the
+    // re-probe would spend the next query's budget.
+    if (res.outcome === 'timeout_or_exit' && !signal?.aborted) this.probedPath = null;
     return res;
-  }
-
-  /**
-   * Host-side cancels (activity.ts: a plan whose slot was replaced or
-   * evicted, a turn the host would not extend, the budget expiry), keyed by
-   * the signal the core passes to `wisdomMatch`. A cancel kills the child,
-   * but the core sees its own signal still un-aborted, so the outcome is
-   * `aborted` and never a breaker failure on its own.
-   *
-   * This side channel depends on ct-wisdom-core handing `wisdomMatch` the
-   * SAME AbortSignal object the host gave `startActivity` (runActivityMatch
-   * passes it through untouched). If the core ever wraps or replaces that
-   * signal, the lookup misses and a cancel stops killing the child; the
-   * host test "a host cancel linked to the budget signal kills the child"
-   * catches that. The clean fix is a `cancel` parameter in the core.
-   */
-  private readonly cancels = new WeakMap<AbortSignal, AbortSignal>();
-
-  /** Link a host cancel signal to the signal handed to the core. */
-  linkCancel(budget: AbortSignal, cancel: AbortSignal): void {
-    this.cancels.set(budget, cancel);
-  }
-
-  private spawnSignal(budget?: AbortSignal): AbortSignal | undefined {
-    if (budget === undefined) return undefined;
-    const cancel = this.cancels.get(budget);
-    return cancel === undefined ? budget : AbortSignal.any([budget, cancel]);
   }
 
   /** m4: N3 fires on the CT recall surface only, never get_wiki_entry. */

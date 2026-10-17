@@ -34,11 +34,11 @@ import {
   finishActivityOutcome,
   isCtTool,
   lruSet,
-  recordActivityBudgetMiss,
   reportActivity,
   settleWithin,
   startActivity,
   type Activity,
+  type ActivityCancelReason,
   type ActivityMatch,
   type ActivitySpec,
   type Breaker,
@@ -186,13 +186,12 @@ interface Plan {
   deadline: number;
   promise: Promise<ActivityMatch>;
   /**
-   * Kills the `ct` child (adapter `linkCancel`): on budget expiry, and when
-   * the plan is abandoned (slot replaced or evicted, a turn the host would
-   * not extend). The core never sees it aborted, so a cancel is no breaker
-   * failure by itself; an expiry that really killed the query counts once
-   * (deliver, recordActivityBudgetMiss).
+   * The core's `cancel`: kills the `ct` child. `'budget'` on expiry (the
+   * core charges ONE breaker failure at once), `'abandoned'` when the plan is
+   * dropped (slot replaced or evicted, a turn the host would not extend),
+   * which is never a breaker failure.
    */
-  cancel: AbortController;
+  cancel: (reason: ActivityCancelReason) => void;
   consumed: boolean;
 }
 
@@ -280,7 +279,7 @@ export class DshActivity {
     const plan = slot?.plan;
     if (plan == null || plan.consumed) return;
     plan.consumed = true;
-    plan.cancel.abort();
+    plan.cancel('abandoned');
     this.release(agentId, plan);
     reportActivity(this.adapter, { id: agentId }, plan.activity, { kind: 'skip', reason: 'abandoned' });
   }
@@ -347,20 +346,14 @@ export class DshActivity {
     if (activity === null) return null;
     const session = { id: agentId };
     this.publish(agentId, messages);
-    // The core gets a signal it never sees aborted: it is only the key the
-    // adapter finds `cancel` by (linkCancel), so the host decides what a
-    // kill costs the breaker.
-    const coreSignal = new AbortController().signal;
-    const cancel = new AbortController();
-    this.adapter.linkCancel(coreSignal, cancel.signal);
-    const start = startActivity(this.adapter, session, activity, this.breaker, coreSignal);
+    const start = startActivity(this.adapter, session, activity, this.breaker);
     if (start.failure !== null) {
       this.debug(agentId, start.failure);
       reportActivity(this.adapter, session, activity, { kind: 'skip', reason: start.failure });
       return null;
     }
     this.tracker.admit(agentId, step.messageId, activity.key);
-    slot.plan = { activity, deadline: this.now() + TIMEOUT_MS, promise: start.match, cancel, consumed: false };
+    slot.plan = { activity, deadline: this.now() + TIMEOUT_MS, promise: start.match, cancel: start.cancel, consumed: false };
     return slot.plan;
   }
 
@@ -431,21 +424,19 @@ export class DshActivity {
       plan.consumed = true;
       if ((claimed?.length ?? 0) > 0 && (decisionMessages?.length ?? 0) === 0) {
         reportActivity(this.adapter, session, plan.activity, { kind: 'skip', reason: 'would_extend_turn' });
-        // Nothing will use the answer: kill the query (a cancel, not a
+        // Nothing will use the answer: kill the query (abandoned, not a
         // budget miss, so no breaker failure) and free the key.
-        plan.cancel.abort();
+        plan.cancel('abandoned');
         this.release(agentId, plan);
         return null;
       }
-      // On expiry: charge the miss as ONE breaker failure now, before the
-      // next step's gate runs (recordActivityBudgetMiss, the shared rule),
-      // then kill the `ct` child. A child that had already answered keeps
-      // its result (the binding reports it, not `aborted`) and the core's
-      // recordSuccess then clears the charge.
-      const match = await settleWithin(plan.promise, Math.max(0, plan.deadline - this.now()), () => {
-        recordActivityBudgetMiss(this.breaker);
-        plan.cancel.abort();
-      });
+      // On expiry `cancel('budget')` kills the `ct` child and the core
+      // charges the miss as ONE breaker failure at once, before the next
+      // step's gate runs. A child that had already answered keeps its result
+      // and the core's recordSuccess then clears the charge.
+      const match = await settleWithin(plan.promise, Math.max(0, plan.deadline - this.now()), () =>
+        plan.cancel('budget'),
+      );
       // The core re-checks every gate against the log the model sees now
       // (tool results of the step included), selects and reports.
       this.publish(agentId, messages);

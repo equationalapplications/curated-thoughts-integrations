@@ -224,6 +224,27 @@ describe('release on post-start failures, keep on CT answers (decision 10)', () 
   });
 });
 
+describe('a ct that hangs past the budget (never settles, ignores the kill)', () => {
+  it('each budget miss counts once, so three open the breaker; a fourth step makes no query', async () => {
+    let started = 0;
+    const h = new Harness({ activityBudgetMs: 40 }, (fn) => (spec) => {
+      const isActivity = spec.args[0] === 'wisdom' && spec.args[1] === 'match' && !spec.args.includes('--help') && spec.args.includes('--max') && spec.args[spec.args.indexOf('--max') + 1] === '1';
+      if (!isActivity) return fn(spec);
+      started++;
+      return new Promise(() => {}); // a child that never closes, even when killed
+    });
+    await h.prompt('r1');
+    for (let n = 1; n <= BREAKER_FAILS; n++) {
+      h.step('r1', n);
+      await h.tool('r1', 'read', { path: `hang${n}.ts` });
+    }
+    expect(started).toBe(BREAKER_FAILS);
+    h.step('r1', BREAKER_FAILS + 1);
+    await h.tool('r1', 'read', { path: 'after.ts' });
+    expect(started).toBe(BREAKER_FAILS); // breaker open: no fourth query
+  });
+});
+
 describe('fail closed', () => {
   it('no snapshot for this run (no before_prompt_build in this process) → no CT call', async () => {
     const h = new Harness();

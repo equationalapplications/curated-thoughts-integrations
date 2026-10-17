@@ -152,11 +152,14 @@ export function startActivity(host: HostAdapter, session: SessionRef, activity: 
 1. A real answer wins: outcome `ok` with a parsed result calls `breaker.recordSuccess()` and returns the result, even
    after a cancel. This keeps DSH's current rule that a late real answer clears the charge. [V] `recordSuccess` resets
    the whole consecutive-failure count and closes the breaker (`breaker.ts:32-35`): `ct` did answer.
+   A `spawn` outcome (checked next) always resets the discovery and probe caches, whatever the cancel reason: the
+   binding reports `spawnError` only when `ct` truly could not start, so the reason only decides the class and the
+   charge. This is a controller ruling made during implementation (the first draft skipped the reset after a cancel).
 2. Cancel reason `'budget'` returns `{ failure: 'budget' }`. It was already charged at cancel time, so nothing more is
    charged.
 3. Cancel reason `'abandoned'` returns `{ failure: 'cancelled' }`, with no charge, whatever the outcome
    (`aborted` or `timeout_or_exit` from a kill). This absorbs DSH's relabel at `adapter.ts:524`.
-4. Otherwise the existing mapping is unchanged: `spawn` resets the caches, `timeout_or_exit` is one failure,
+4. Otherwise the existing mapping is unchanged: `spawn` returns `'spawn'` (its reset already happened), `timeout_or_exit` is one failure,
    `aborted` from the host's own spawn with no core cancel is `budget` with no charge (as today), and a missing result
    is `parse_error`.
 
