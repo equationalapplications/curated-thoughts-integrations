@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 0.6.2 — 2026-10-17
+
+- Fixed: an autonomous-work query that runs past its 3 s budget is now
+  stopped. The pre-step aborts it on expiry and the `ct` child (its whole
+  process tree, the capability probe included) is killed, so it no longer
+  keeps running in the background. The miss counts as exactly one failure
+  toward the five-minute failure pause (the shared core rule
+  `recordActivityBudgetMiss`, the same on every host). The activity can
+  still trigger again at a later step; the step that missed keeps its one
+  query (the key is freed, the step is not).
+
 ## 0.6.1 — 2026-10-17
 
 - Changed (no behavior change): the autonomous-work budget wait uses the

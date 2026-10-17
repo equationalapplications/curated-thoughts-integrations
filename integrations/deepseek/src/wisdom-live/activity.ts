@@ -182,10 +182,10 @@ export function sessionCwd(agent: AgentLike | null | undefined): string | null {
 
 interface Plan {
   activity: Activity;
-  /** The step id the key was admitted under (released on a retryable failure). */
-  stepId: string;
   deadline: number;
   promise: Promise<ActivityMatch>;
+  /** Aborted on budget expiry: kills the `ct` child (the core counts the miss once). */
+  abort: AbortController;
   consumed: boolean;
 }
 
@@ -318,20 +318,24 @@ export class DshActivity {
     if (activity === null) return null;
     const session = { id: agentId };
     this.publish(agentId, messages);
-    const start = startActivity(this.adapter, session, activity, this.breaker);
+    const abort = new AbortController();
+    const start = startActivity(this.adapter, session, activity, this.breaker, abort.signal);
     if (start.failure !== null) {
       this.debug(agentId, start.failure);
       reportActivity(this.adapter, session, activity, { kind: 'skip', reason: start.failure });
       return null;
     }
     this.tracker.admit(agentId, step.messageId, activity.key);
-    slot.plan = { activity, stepId: step.messageId, deadline: this.now() + TIMEOUT_MS, promise: start.match, consumed: false };
+    slot.plan = { activity, deadline: this.now() + TIMEOUT_MS, promise: start.match, abort, consumed: false };
     return slot.plan;
   }
 
-  /** Free a key whose started query never got a genuine answer, so a later step can retry. */
+  /**
+   * Free a key whose started query never got a genuine answer, so a LATER
+   * step can retry it. The step stays used: it already had its one query.
+   */
   private release(agentId: string, plan: Plan): void {
-    this.tracker.release(agentId, plan.stepId, plan.activity.key);
+    this.tracker.releaseKey(agentId, plan.activity.key);
   }
 
   /**
@@ -393,10 +397,15 @@ export class DshActivity {
       plan.consumed = true;
       if ((claimed?.length ?? 0) > 0 && (decisionMessages?.length ?? 0) === 0) {
         reportActivity(this.adapter, session, plan.activity, { kind: 'skip', reason: 'would_extend_turn' });
+        // No budget miss: the query may still answer in the background and
+        // its result (success or a CT failure) feeds the breaker as usual.
         this.release(agentId, plan);
         return null;
       }
-      const match = await settleWithin(plan.promise, Math.max(0, plan.deadline - this.now()));
+      // On expiry: kill the abandoned `ct` child. The core then reports
+      // `budget` and counts the miss as ONE breaker failure
+      // (recordActivityBudgetMiss), the same on every host.
+      const match = await settleWithin(plan.promise, Math.max(0, plan.deadline - this.now()), () => plan.abort.abort());
       // The core re-checks every gate against the log the model sees now
       // (tool results of the step included), selects and reports.
       this.publish(agentId, messages);

@@ -514,6 +514,16 @@ rule; opencode and openclaw get patch bumps for it.
   reduce to their basename); `process.cwd()` is never used.
 - **e2e check 5** now reads tab-separated argv and asserts the query is the single element right after
   `--` with nothing after it.
+- **0.6.2: abort on budget expiry** (follow-up to the shared core's abort support and
+  `recordActivityBudgetMiss`, PR #70). Each started activity owns an `AbortController`; its signal goes
+  to `startActivity` → `runActivityMatch` → the adapter's `wisdomMatch` (capability probe and match) →
+  `SpawnLike.signal`. The pre-step's `settleWithin(match, remaining, onExpire)` aborts it on expiry, and
+  `nodeSpawnFn` kills the child's process group and reports `aborted: true`. The core then counts the
+  miss as ONE breaker failure; this supersedes "Running out is class `budget` (not a breaker failure)"
+  above. A non-budget abort counts zero. On a retryable outcome DSH now frees only the key
+  (`ActivityTracker.releaseKey`): the step stays used, so it never gets a second query, and a later
+  step can retry the activity (OpenCode / OpenClaw parity). A plan whose pre-step never runs is not
+  aborted; it ends at the spawns' own timeouts as before.
 
 ## Versioning and docs
 

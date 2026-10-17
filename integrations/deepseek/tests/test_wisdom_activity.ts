@@ -92,8 +92,17 @@ interface CtCall {
   exclude: string[];
 }
 
-function fakeCt(answer: (q: string, exclude: string[]) => WisdomMatchResult | 'timeout' | 'spawn' | 'hang') {
+/**
+ * `hang` never answers on its own; like the real binding, an abort of
+ * `spec.signal` kills it (`aborted: true`), or, with `abortAs: 'timeout'`,
+ * it ends as a plain timeout (a binding whose kill races its own timer).
+ */
+function fakeCt(
+  answer: (q: string, exclude: string[]) => WisdomMatchResult | 'timeout' | 'spawn' | 'hang',
+  abortAs: 'aborted' | 'timeout' = 'aborted',
+) {
   const calls: CtCall[] = [];
+  const signals: AbortSignal[] = [];
   const spawnFn: SpawnFn = (spec) => {
     if (spec.args[2] === '--help') {
       return Promise.resolve({ code: 0, stdout: '', stderr: '', spawnError: false, timedOut: false });
@@ -102,19 +111,28 @@ function fakeCt(answer: (q: string, exclude: string[]) => WisdomMatchResult | 't
     const exclude = spec.args.filter((a) => a.startsWith('--exclude=')).map((a) => a.slice(10));
     calls.push({ query, max: Number(spec.args[spec.args.indexOf('--max') + 1]), exclude });
     const r = answer(query, exclude);
-    if (r === 'hang') return new Promise(() => {});
+    if (r === 'hang') {
+      if (spec.signal) signals.push(spec.signal);
+      return new Promise((resolve) => {
+        const end = () => resolve(abortAs === 'aborted'
+          ? { code: null, stdout: '', stderr: '', spawnError: false, timedOut: false, aborted: true }
+          : { code: null, stdout: '', stderr: '', spawnError: false, timedOut: true });
+        if (spec.signal?.aborted) end();
+        else spec.signal?.addEventListener('abort', end, { once: true });
+      });
+    }
     if (r === 'timeout') return Promise.resolve({ code: null, stdout: '', stderr: '', spawnError: false, timedOut: true });
     if (r === 'spawn') return Promise.resolve({ code: null, stdout: '', stderr: '', spawnError: true, timedOut: false });
     return Promise.resolve({ code: 0, stdout: JSON.stringify(r), stderr: '', spawnError: false, timedOut: false });
   };
-  return { calls, spawnFn };
+  return { calls, signals, spawnFn };
 }
 
 function setup(
   answer: Parameters<typeof fakeCt>[0] = () => ({ entries: [fact('f1')], corrections: [] }),
-  over: { now?: () => number; recordVerbose?: (t: VerboseTurn) => void; breaker?: Breaker } = {},
+  over: { now?: () => number; recordVerbose?: (t: VerboseTurn) => void; breaker?: Breaker; abortAs?: 'aborted' | 'timeout' } = {},
 ) {
-  const ct = fakeCt(answer);
+  const ct = fakeCt(answer, over.abortAs);
   const adapter = new DshWisdomAdapter({
     env: {},
     discover: () => ({ path: '/bin/ct', failure: null }),
@@ -538,6 +556,100 @@ describe('keys burned by a post-start failure are released (review of PR #56)', 
     s.step([['bash', { command: 'pnpm test' }]]);
     await s.pre();
     expect(s.ct.calls).toHaveLength(1);
+  });
+});
+
+/** A breaker that counts its failures (the shared-breaker accounting). */
+class CountingBreaker extends Breaker {
+  failuresRecorded = 0;
+  override recordFailure(): void {
+    this.failuresRecorded++;
+    super.recordFailure();
+  }
+}
+
+const flush = async () => {
+  for (let i = 0; i < 5; i++) await new Promise((r) => setTimeout(r, 0));
+};
+
+describe('budget expiry aborts the query (core recordActivityBudgetMiss)', () => {
+  it('one expiry: the child is aborted, exactly ONE breaker failure, budget reported', async () => {
+    let now = 1000;
+    const breaker = new CountingBreaker();
+    const turns: VerboseTurn[] = [];
+    const s = setup(() => 'hang', { now: () => now, breaker, recordVerbose: (t) => turns.push(t) });
+    s.step([['bash', { command: 'pnpm test' }]]);
+    await flush(); // the probe resolves; the match spawn is now hanging
+    expect(s.ct.signals).toHaveLength(1);
+    expect(s.ct.signals[0]!.aborted).toBe(false);
+    now += 3001;
+    expect(await s.pre()).toBeNull();
+    expect(s.ct.signals[0]!.aborted).toBe(true);
+    await flush(); // the aborted match settles in the background
+    expect(breaker.failuresRecorded).toBe(1);
+    expect(turns.map((t) => [t.kind, t.reason])).toEqual([['skip', 'budget']]);
+  });
+
+  it('no double count: an abort that ends as a timeout is still one failure', async () => {
+    let now = 1000;
+    const breaker = new CountingBreaker();
+    const s = setup(() => 'hang', { now: () => now, breaker, abortAs: 'timeout' });
+    s.step([['bash', { command: 'pnpm test' }]]);
+    await flush();
+    now += 3001;
+    expect(await s.pre()).toBeNull();
+    await flush();
+    expect(breaker.failuresRecorded).toBe(1);
+  });
+
+  it('an expiry during the capability probe counts once and latches nothing', async () => {
+    let now = 1000;
+    const breaker = new CountingBreaker();
+    const s = setup(() => ({ entries: [fact('f1')], corrections: [] }), { now: () => now, breaker });
+    // The probe hangs until aborted.
+    const signals: AbortSignal[] = [];
+    const inner = (s.adapter as unknown as { spawnFn: SpawnFn }).spawnFn;
+    (s.adapter as unknown as { spawnFn: SpawnFn }).spawnFn = (spec) => {
+      if (spec.args[2] !== '--help') return inner(spec);
+      if (spec.signal) signals.push(spec.signal);
+      return new Promise((resolve) => spec.signal?.addEventListener('abort', () =>
+        resolve({ code: null, stdout: '', stderr: '', spawnError: false, timedOut: false, aborted: true }), { once: true }));
+    };
+    s.step([['bash', { command: 'pnpm test' }]]);
+    now += 3001;
+    expect(await s.pre()).toBeNull();
+    await flush();
+    expect(signals).toHaveLength(1);
+    expect(signals[0]!.aborted).toBe(true);
+    expect(breaker.failuresRecorded).toBe(1);
+    expect(s.adapter.wisdomMatchAbsent()).toBe(false);
+    expect(s.ct.calls).toHaveLength(0); // the match itself never started
+  });
+
+  it('a budget miss frees the key, keeps the step used, and retries at a later step', async () => {
+    let now = 1000;
+    let hang = true;
+    const breaker = new CountingBreaker();
+    const s = setup(() => (hang ? 'hang' : { entries: [fact('f1')], corrections: [] }), { now: () => now, breaker });
+    const msg = s.step([['bash', { command: 'pnpm test' }]]);
+    await flush();
+    now += 3001;
+    expect(await s.pre()).toBeNull();
+    const tracker = (s.activity as unknown as { tracker: { peek: (a: string, st: string, k: string) => string | null } }).tracker;
+    expect(tracker.peek('agent-1', msg.id as string, 'some-other-key')).toBe('step_used');
+    hang = false;
+    s.step([['bash', { command: 'pnpm test' }]]);
+    expect(await s.pre()).not.toBeNull();
+    expect(s.ct.calls.map((c) => c.query)).toEqual(['pnpm test', 'pnpm test']);
+    expect(breaker.failuresRecorded).toBe(1);
+  });
+
+  it('a match that settles within the budget is never aborted', async () => {
+    const breaker = new CountingBreaker();
+    const s = setup(undefined, { breaker });
+    s.step([['read', { file_path: 'a.ts' }]]);
+    expect(await s.pre()).not.toBeNull();
+    expect(breaker.failuresRecorded).toBe(0);
   });
 });
 

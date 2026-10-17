@@ -120,6 +120,111 @@ describe('nodeSpawnFn (real binding, fake binary)', () => {
   });
 });
 
+describe('nodeSpawnFn abort (real process tree)', () => {
+  const alive = (pid: number): boolean => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  const waitFor = async (cond: () => boolean, ms: number): Promise<boolean> => {
+    const end = Date.now() + ms;
+    while (Date.now() < end) {
+      if (cond()) return true;
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    return cond();
+  };
+
+  /** A fake ct whose `--help` exits 0 and whose match forks a grandchild and hangs. */
+  async function hangingCt() {
+    const { mkdtempSync, writeFileSync, chmodSync, rmSync, readFileSync, existsSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const dir = mkdtempSync(join(tmpdir(), 'ct-spawn-abort-'));
+    const pidFile = join(dir, 'grandchild.pid');
+    const script = join(dir, 'ct');
+    writeFileSync(
+      script,
+      '#!/bin/sh\n'
+        + 'case "$*" in *--help*) exit 0;; esac\n'
+        + `sleep 30 &\necho $! > '${pidFile}'\nwait\n`,
+    );
+    chmodSync(script, 0o755);
+    const grandchild = async (): Promise<number> => {
+      await waitFor(() => existsSync(pidFile) && readFileSync(pidFile, 'utf8').trim() !== '', 5000);
+      return Number(readFileSync(pidFile, 'utf8').trim());
+    };
+    return { script, grandchild, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
+  }
+
+  it('an abort kills the child AND its grandchild and reports aborted', async () => {
+    if (process.platform === 'win32') return;
+    const ct = await hangingCt();
+    try {
+      const abort = new AbortController();
+      const started = Date.now();
+      const pending = nodeSpawnFn()({ command: ct.script, args: ['wisdom', 'match'], timeoutMs: 30_000, signal: abort.signal });
+      const gpid = await ct.grandchild();
+      expect(alive(gpid)).toBe(true);
+      abort.abort();
+      const out = await pending;
+      expect(out.aborted).toBe(true);
+      expect(out.timedOut).toBe(false);
+      expect(Date.now() - started).toBeLessThan(10_000);
+      expect(await waitFor(() => !alive(gpid), 3000)).toBe(true);
+    } finally {
+      ct.cleanup();
+    }
+  });
+
+  it('an already-aborted signal kills at once', async () => {
+    if (process.platform === 'win32') return;
+    const ct = await hangingCt();
+    try {
+      const abort = new AbortController();
+      abort.abort();
+      const out = await nodeSpawnFn()({ command: ct.script, args: ['wisdom', 'match'], timeoutMs: 30_000, signal: abort.signal });
+      expect(out.aborted).toBe(true);
+    } finally {
+      ct.cleanup();
+    }
+  });
+
+  it('a run that ends normally is not aborted, and a later abort is a no-op', async () => {
+    if (process.platform === 'win32') return;
+    const ct = await hangingCt();
+    try {
+      const abort = new AbortController();
+      const out = await nodeSpawnFn()({ command: ct.script, args: ['--help'], timeoutMs: 3000, signal: abort.signal });
+      expect(out.code).toBe(0);
+      expect(out.aborted).toBeUndefined();
+      abort.abort();
+    } finally {
+      ct.cleanup();
+    }
+  });
+
+  it('DshWisdomAdapter.wisdomMatch passes the signal: abort → outcome aborted, capability not latched', async () => {
+    if (process.platform === 'win32') return;
+    const ct = await hangingCt();
+    try {
+      const a = new DshWisdomAdapter({ env: { ...process.env }, discover: () => ({ path: ct.script, failure: null }) });
+      const abort = new AbortController();
+      const pending = a.wisdomMatch('pnpm test', 1, [], abort.signal);
+      const gpid = await ct.grandchild();
+      abort.abort();
+      expect((await pending).outcome).toBe('aborted');
+      expect(a.wisdomMatchAbsent()).toBe(false);
+      expect(await waitFor(() => !alive(gpid), 3000)).toBe(true);
+    } finally {
+      ct.cleanup();
+    }
+  });
+});
+
 describe('ledger rebuild (m5: session-log source of truth)', () => {
   it('scans user + tool roles from the derived log, newest first', () => {
     const { a } = adapter();

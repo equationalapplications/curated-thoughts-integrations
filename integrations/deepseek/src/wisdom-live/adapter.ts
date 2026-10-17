@@ -70,7 +70,8 @@ export function userMessageText(message: unknown): string {
 // ─────────────────────────────────────────────────────────────────────────
 // SpawnFn: async child_process binding with the same hygiene as the v1
 // spawnSync path (argument LIST — never a shell string — killSignal SIGKILL,
-// maxBuffer, cwd home, no shell, windowsHide).
+// maxBuffer, cwd home, no shell, windowsHide). `spec.signal` aborts: the
+// whole process tree is killed and the outcome reports `aborted: true`.
 // ─────────────────────────────────────────────────────────────────────────
 
 export function nodeSpawnFn(env: NodeJS.ProcessEnv = process.env): SpawnFn {
@@ -104,6 +105,7 @@ export function nodeSpawnFn(env: NodeJS.ProcessEnv = process.env): SpawnFn {
       let overflow = false;
       const CAP = 4 * 1024 * 1024;
       let timedOut = false;
+      let aborted = false;
       let settled = false;
       const timer = setTimeout(() => {
         timedOut = true;
@@ -123,10 +125,12 @@ export function nodeSpawnFn(env: NodeJS.ProcessEnv = process.env): SpawnFn {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
-        resolve({ code, stdout, stderr, spawnError: spawnError || overflow, timedOut });
+        // Both end paths ('close' and 'error') drop the abort listener.
+        spec.signal?.removeEventListener('abort', onAbort);
+        resolve({ code, stdout, stderr, spawnError: spawnError || overflow, timedOut, ...(aborted ? { aborted: true } : {}) });
       };
       child.on('error', () => finish(null, true));
-      const killTree = (): void => {
+      function killTree(): void {
         if (child.pid !== undefined && process.platform !== 'win32') {
           try {
             process.kill(-child.pid, 'SIGKILL');
@@ -136,7 +140,18 @@ export function nodeSpawnFn(env: NodeJS.ProcessEnv = process.env): SpawnFn {
           }
         }
         child.kill('SIGKILL');
-      };
+      }
+      // The caller's budget ran out (activity delivery, `spec.signal`): kill
+      // the tree now and report `aborted`, which the core classifies as its
+      // own outcome (OpenCode / OpenClaw parity).
+      function onAbort(): void {
+        aborted = true;
+        killTree();
+      }
+      if (spec.signal) {
+        if (spec.signal.aborted) onAbort();
+        else spec.signal.addEventListener('abort', onAbort, { once: true });
+      }
       child.stdout?.on('data', (chunk: Buffer) => {
         if (stdout.length + chunk.length > CAP) {
           overflow = true;
@@ -399,6 +414,7 @@ export class DshWisdomAdapter implements HostAdapter {
     query: string,
     max: number,
     exclude: string[],
+    signal?: AbortSignal,
   ): Promise<{ outcome: MatchOutcome; result?: WisdomMatchResult }> {
     if (this.capabilityAbsent) return { outcome: 'timeout_or_exit' };
     const { path } = this.discover();
@@ -409,7 +425,11 @@ export class DshWisdomAdapter implements HostAdapter {
       // exits 0 (Hermes ct_wisdom_live.has_match_capability parity).
       args: ['wisdom', 'match', '--help'],
       timeoutMs: 3000,
+      ...(signal ? { signal } : {}),
     });
+    // Aborted mid-probe (the activity budget ran out): decide nothing about
+    // the capability; the core counts a budget abort once.
+    if (probe.aborted === true || signal?.aborted) return { outcome: 'aborted' };
     if (probe.spawnError || probe.timedOut) {
       return { outcome: 'spawn' };
     }
@@ -419,7 +439,7 @@ export class DshWisdomAdapter implements HostAdapter {
       this.capabilityAbsent = true;
       return { outcome: 'timeout_or_exit' };
     }
-    return coreWisdomMatch(path, query, max, exclude, this.spawnFn);
+    return coreWisdomMatch(path, query, max, exclude, this.spawnFn, signal);
   }
 
   /** m4: N3 fires on the CT recall surface only, never get_wiki_entry. */

@@ -78,7 +78,9 @@ Needs the standalone `ct` CLI from Curated Thoughts ≥ 3.3.0
 - **Failure handling.** Silent and bounded: each `ct` call has a 3 s budget,
   and three consecutive timeouts, non-zero exits or unparseable results
   pause matching for five minutes (one half-open probe then retries). A `ct`
-  that cannot be started does not count.
+  that cannot be started does not count. An autonomous-work query that
+  misses its 3 s budget is stopped (the `ct` child is killed) and counts as
+  one failure.
 - **Since 0.4.1** the delivery message is an identified user message (`id`,
   `role: "user"`), so a session that received a block can be continued; in
   0.4.0 DSH rejected such a session on replay.
