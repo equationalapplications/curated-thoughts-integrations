@@ -10,12 +10,12 @@ common architecture.
 
 | Harness | Directory | Status | Version |
 |---------|-----------|--------|---------|
-| [Hermes Agent](https://github.com/NousResearch/hermes-agent) | [`integrations/hermes/`](integrations/hermes/) | implemented | [0.7.0](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=hermes) |
+| [Hermes Agent](https://github.com/NousResearch/hermes-agent) | [`integrations/hermes/`](integrations/hermes/) | implemented | [0.7.1](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=hermes) |
 | DeepSeek Harness | [`integrations/deepseek/`](integrations/deepseek/) | implemented | [0.6.2](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=deepseek) |
 | OpenCode | [`integrations/opencode/`](integrations/opencode/) | implemented | [0.4.2](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=opencode) |
 | OpenClaw | [`integrations/openclaw/`](integrations/openclaw/) | implemented | [0.3.1](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=openclaw) |
-| Claude Code | [`integrations/claude-code/`](integrations/claude-code/) | implemented | [0.4.1](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=claude-code) |
-| [Docker Agent](https://github.com/docker/docker-agent) | [`integrations/docker-agent/`](integrations/docker-agent/) | implemented | [0.1.1](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=docker-agent) |
+| Claude Code | [`integrations/claude-code/`](integrations/claude-code/) | implemented | [0.4.2](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=claude-code) |
+| [Docker Agent](https://github.com/docker/docker-agent) | [`integrations/docker-agent/`](integrations/docker-agent/) | implemented | [0.1.2](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=docker-agent) |
 
 Each version links to that integration's releases.
 
@@ -136,9 +136,10 @@ On Hermes:
   `ct wisdom match` per model step, only when the activity changes (a new
   file, command or search). There is no ceiling per message or per session.
   Curated Thoughts' own tools never trigger it.
-- **Only calls that ran (since hermes 0.7.0):** nothing is sent until
-  Hermes has let the call run, so a call you refuse, or another plugin
-  blocks, sends nothing. The query starts after the tool finishes, so a
+- **Only calls that ran (since hermes 0.7.0; proof required since
+  0.7.1):** nothing is sent until Hermes has let the call run and the
+  tool's result shows it really ran, so a call you refuse, or another
+  plugin blocks, sends nothing, however the refusal is worded. The query starts after the tool finishes, so a
   step whose activity is new waits up to 3 s for it, once per step.
 - **What is sent to Curated Thoughts:** only the bare target, for example
   `src/billing/invoice.py`, `pnpm test` or a search pattern. For shell

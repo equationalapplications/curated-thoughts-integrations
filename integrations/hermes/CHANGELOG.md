@@ -6,6 +6,21 @@ format below is load-bearing: `## <version> — <date>`.
 
 ## Unreleased
 
+## 0.7.1 — 2026-10-17
+
+- **Privacy: a target is sent only when the tool's result proves it ran.**
+  0.7.0 decided "was this call refused?" from a list of refusal words and
+  statuses, so a refusal worded some new way still sent its target (for
+  example `secrets.env` or `git push`) to Curated Thoughts. Now each
+  activity tool must show its own success shape: a terminal `exit_code`
+  (or a command handed to the background), read_file `content`,
+  write_file `bytes_written`, patch `success`, search_files
+  `total_count`, with no `error`. Anything else, including plain text and
+  unknown shapes, sends nothing. A command that ran and exited non-zero
+  still counts as run. The word list is gone. Tests pin each shape to the
+  Hermes commit the plugin is tested against and fail when that commit
+  changes, so a Hermes upgrade re-checks them.
+
 ## 0.7.0 — 2026-10-17
 
 - **Privacy: nothing is sent for a call you refuse.** Until now the

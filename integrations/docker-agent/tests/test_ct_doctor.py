@@ -95,7 +95,7 @@ class RegistrationCheckTests(unittest.TestCase):
             self.assertIn(key, r.detail)
 
     def test_plugin_version_comes_from_plugin_json(self):
-        self.assertEqual(ct_doctor._plugin_version(), "0.1.1")
+        self.assertEqual(ct_doctor._plugin_version(), "0.1.2")
 
     def test_config_dir_resolution(self):
         saved = {k: os.environ.get(k) for k in ("DOCKER_AGENT_CONFIG_DIR", "CAGENT_CONFIG_DIR")}

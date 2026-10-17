@@ -10,8 +10,9 @@ can trigger one relevant CT fact:
   * No `pre_tool_call` hook (amendment 8): Hermes resolves approvals and
     other plugins' blocks only after every pre_tool_call callback has
     returned, and a call it blocks there never reaches the transform.
-  * `transform_tool_result` (Hermes let the call run): unless the result is
-    Hermes's refusal (`is_refusal`), build the activity from the tool's ARGS
+  * `transform_tool_result` (Hermes let the call run): only when the result
+    proves the tool ran (`proves_ran`, per tool; anything else sends
+    nothing), build the activity from the tool's ARGS
     that ran (never contents, output, diffs, reasoning or full command
     lines), claim the model step (`api_request_id`) and the activity key in
     one atomic step, start `ct wisdom match --max 1` and wait for it within
@@ -35,6 +36,7 @@ Fail-closed classes (no CT call or no delivery, one debug line):
   probing, seen_key, step_used, refused, discovery_miss, probe_timeout,
   capability_missing, timeout, spawn, spawn_failed, exit, parse_error,
   budget, zero_hits, unsupported_result, hook_failed.
+  (`refused` means the result did not prove the tool ran.)
 
 Verbose mode (CT_WISDOM_VERBOSE=1, ct_wisdom_verbose) records each delivery
 and each query that delivered nothing with channel "activity"; per-call rate
@@ -1454,107 +1456,61 @@ def on_transform_tool_result(**kwargs):
         return _transform(kwargs.get("result"), kwargs.get("session_id"),
                           kwargs.get("tool_call_id"), kwargs.get("tool_name"),
                           kwargs.get("args"), kwargs.get("task_id"),
-                          kwargs.get("api_request_id"), kwargs.get("status"),
-                          kwargs.get("error_type"), kwargs.get("error_message"))
+                          kwargs.get("api_request_id"))
     except Exception:
         logger.debug("wisdom-activity: transform failed", exc_info=True)
         return None
 
 
-# Hermes's own refusal envelopes (pin ee8dd6c8), matched case-insensitively:
-#   - terminal_tool.py `_error_json(..., status="blocked" | "pending_approval")`
-#     for a denied or unanswered approval, an `approvals.deny` rule or a
-#     hardline floor (message "BLOCKED: ..." or the fallback "Command denied:
-#     ..."); approval.py's action gate `"status": "approval_required"`,
-#     `"approved": false`, and its "denied by user" / "was not approved"
-#     reasons;
-#   - the file tools' `tool_error("BLOCKED: ...")` / `tool_error("Refusing to
-#     write ...")` (write guards, protected and SSH-config writes);
-#   - other tools' "Blocked: ..." and "did not approve ... was NOT run", and
-#     the generic statuses / wording denied, rejected, refused, cancelled;
-#   - the `status` / `error_type` / `error_message` kwargs Hermes passes to
-#     transform_tool_result (derived from the result's `error` at the pin).
-# Only envelope fields are read: `status`, `approved`, `approval_pending`,
-# and `error` / `message` / `reason` / `detail` / `error_message`, also when
-# nested or holding a JSON-object string. Tool OUTPUT fields are never read
-# (a command that ran may print "Permission denied"); a plain-text result is
-# matched on its prefix only.
-_REFUSED_STATUSES = frozenset({
-    "blocked", "pending_approval", "approval_required", "denied", "rejected",
-    "refused", "cancelled", "canceled", "not_approved"})
-_REFUSED_PREFIXES = ("blocked", "refusing", "denied", "command denied", "access denied",
-                     "not approved", "rejected", "cancelled", "canceled", "declined",
-                     "not allowed", "approval timed out")
-_REFUSED_PHRASES = ("not approved", "did not approve", "denied by", "user denied",
-                    "was not run", "not executed", "rejected", "cancelled by",
-                    "canceled by", "user cancelled", "user canceled",
-                    "operation cancelled", "operation canceled", "declined",
-                    "approval timed out", "timed out waiting for approval",
-                    "not allowed")
-_REFUSED_ERROR_TYPE_WORDS = ("block", "denied", "deny", "reject", "refus", "approval",
-                             "cancel")
-_ENVELOPE_TEXT_KEYS = ("error", "message", "reason", "detail", "error_message")
-_REFUSAL_DEPTH = 3
+# Proof that a tool ran (INTENT rule 9, spec 2026-10-17-hermes-fail-closed-
+# ran-check-design.md): the success shape of each activity tool's result at
+# the Hermes pin (tests/e2e/Dockerfile HERMES_COMMIT). Every result needs to
+# be a JSON object whose `error` is absent or null; then, per tool:
+#   - terminal: `exit_code` an int >= 0 and no `status` (foreground run,
+#     non-zero exit included, or background spawn); or `status`
+#     "yielded_to_background" with a `session_id` (terminal_tool.py,
+#     terminal_tool_result.py, terminal_tool_background.py);
+#   - read_file: `content` a str, no `status` (the dedup stub has one), and
+#     `is_binary` not true (ReadResult.to_dict);
+#   - write_file: `bytes_written` an int >= 0 (WriteResult.to_dict);
+#   - patch: `success` is True (PatchResult.to_dict);
+#   - search_files: `total_count` an int >= 0 (SearchResult.to_dict).
+# Anything else (plain text, unknown fields, another tool) proves nothing,
+# so nothing is sent. Fields are checked for presence and type only; no tool
+# output is read. Hermes's status kwarg is not used: it says "error" for any
+# non-zero exit, a command that ran (agent/display.py).
 
 
-def _refusal_text(text):
-    if not isinstance(text, str):
+def _is_count(value):
+    """An int >= 0 that is not a bool."""
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def proves_ran(tool_name, data):
+    """True only when `data` (the parsed tool result) proves the tool ran.
+    Fails closed: any shape not listed above is False."""
+    if not isinstance(data, dict) or data.get("error") is not None:
         return False
-    low = text.lstrip().lower()
-    return low.startswith(_REFUSED_PREFIXES) or any(p in low for p in _REFUSED_PHRASES)
-
-
-def _refused_status(status):
-    return isinstance(status, str) and status.strip().lower() in _REFUSED_STATUSES
-
-
-def _refusal_value(value, depth=0):
-    """An envelope value (dict, or error text that may hold a JSON object)."""
-    if depth > _REFUSAL_DEPTH:
-        return False
-    if isinstance(value, str):
-        if _refusal_text(value):
-            return True
-        text = value.strip()
-        if not text.startswith("{"):
-            return False
-        try:
-            value = json.loads(text)
-        except ValueError:
-            return False
-    if not isinstance(value, dict):
-        return False
-    if _refused_status(value.get("status")):
-        return True
-    if value.get("approved") is False or value.get("approval_pending") is True:
-        return True
-    return any(_refusal_value(value.get(k), depth + 1) for k in _ENVELOPE_TEXT_KEYS
-               if k in value)
-
-
-def _refused(result, data, status=None, error_type=None, error_message=None):
-    if _refused_status(status) or _refusal_text(error_message):
-        return True
-    if isinstance(error_type, str) and any(
-            w in error_type.lower() for w in _REFUSED_ERROR_TYPE_WORDS):
-        return True
-    if not isinstance(result, str):
-        return False
-    if data is _NOT_JSON:  # plain text: its own leading wording only
-        return result.lstrip().lower().startswith(_REFUSED_PREFIXES)
-    return isinstance(data, dict) and _refusal_value(data)
-
-
-def is_refusal(result, status=None, error_type=None, error_message=None):
-    """True when the tool result (or Hermes's status / error kwargs for it)
-    is Hermes refusing the call (the call did not run, or ran nothing the
-    user approved): nothing may be sent. Leans closed: a false positive only
-    skips one delivery."""
-    return _refused(result, _parse(result), status, error_type, error_message)
+    if tool_name == "terminal":
+        if "status" not in data:
+            return _is_count(data.get("exit_code"))
+        session = data.get("session_id")
+        return (data.get("status") == "yielded_to_background"
+                and isinstance(session, str) and bool(session))
+    if tool_name == "read_file":
+        return (isinstance(data.get("content"), str) and "status" not in data
+                and data.get("is_binary") is not True)
+    if tool_name == "write_file":
+        return _is_count(data.get("bytes_written"))
+    if tool_name == "patch":
+        return data.get("success") is True
+    if tool_name == "search_files":
+        return _is_count(data.get("total_count"))
+    return False
 
 
 def _transform(result, session_id, tool_call_id, tool_name=None, args=None, task_id=None,
-               api_request_id=None, status=None, error_type=None, error_message=None):
+               api_request_id=None):
     if not (_nonempty(session_id) and _nonempty(tool_call_id) and _nonempty(api_request_id)):
         return _skip(session_id, "empty_id")
     if is_ct_tool(tool_name):
@@ -1563,10 +1519,11 @@ def _transform(result, session_id, tool_call_id, tool_name=None, args=None, task
     if _STATE.peek(session_id, api_request_id, None) == "step_used":
         return _skip(session_id, "step_used")
     data = _parse(result)
-    # Hermes decided by now (approvals, other plugins' blocks, guardrails):
-    # a refusal sends nothing (amendment 8). Nothing is recorded, so the step
-    # stays free for a later call of the same step.
-    if _refused(result, data, status, error_type, error_message):
+    # Hermes decided by now (approvals, other plugins' blocks, guardrails),
+    # but a refusal can be worded any way. Send only when the result proves
+    # the tool ran (INTENT rule 9): anything else sends nothing. Nothing is
+    # recorded, so the step stays free for a later call of the same step.
+    if not proves_ran(tool_name, data):
         return _skip(session_id, "refused")
     mode = _splice_mode(result, data)
     if mode is None:

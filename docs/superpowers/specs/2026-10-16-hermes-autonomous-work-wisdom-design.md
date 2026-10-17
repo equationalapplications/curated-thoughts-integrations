@@ -1138,6 +1138,10 @@ result, so this needs a plugin that runs first and returns a non-refusal string,
 then our block is dropped anyway: first string wins). A fail-closed design (send only
 when the result shows the tool ran, per tool) is proposed in the PR, not built.
 
+**Replaced in hermes 0.7.1 (Amendment 9):** the word list above is gone. The transform now sends only when the
+result proves the tool ran, checked per tool. See
+[`2026-10-17-hermes-fail-closed-ran-check-design.md`](2026-10-17-hermes-fail-closed-ran-check-design.md).
+
 ### Versioning
 
 hermes `0.6.9 → 0.7.0`. claude-code `0.4.0 → 0.4.1` and docker-agent `0.1.0 → 0.1.1`
