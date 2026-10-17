@@ -22,6 +22,7 @@
  */
 
 import {
+  lruSet,
   marker,
   onToolResult as coreOnToolResult,
   onUserTurn as coreOnUserTurn,
@@ -360,13 +361,7 @@ export class DshWisdomAdapter implements HostAdapter {
    * snapshot: LRU-refreshed, bounded to SNAPSHOTS_MAX agents.
    */
   snapshotMessages(agentId: string, messages: unknown[]): void {
-    this.sessionMessages.delete(agentId);
-    this.sessionMessages.set(agentId, messages);
-    while (this.sessionMessages.size > DshWisdomAdapter.SNAPSHOTS_MAX) {
-      const oldest = this.sessionMessages.keys().next();
-      if (oldest.done) break;
-      this.sessionMessages.delete(oldest.value);
-    }
+    lruSet(this.sessionMessages, agentId, messages, DshWisdomAdapter.SNAPSHOTS_MAX);
   }
 
   /** Agents whose derived-log snapshot is kept. */
@@ -374,12 +369,7 @@ export class DshWisdomAdapter implements HostAdapter {
 
   /** m1: cache the N1 rebuild before any early return. */
   cacheLedger(session: SessionRef, ledger: Ledger): void {
-    this.turns.set(session.id, { ledger });
-    while (this.turns.size > 256) {
-      const oldest = this.turns.keys().next();
-      if (oldest.done) break;
-      this.turns.delete(oldest.value);
-    }
+    lruSet(this.turns, session.id, { ledger }, 256);
   }
 
   /** m2: the N1 rebuild, when this turn produced one. */

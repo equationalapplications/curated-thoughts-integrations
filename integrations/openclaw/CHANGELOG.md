@@ -8,7 +8,11 @@
   when CT returned a correction whose own id was already in context, or the
   same id both as an entry and as a correction. A correction now rides only
   when it supersedes an id in context and is itself new, and each id is
-  delivered at most once per block (the Hermes reference rule). The core
+  delivered at most once per block. This deliberately aligns the TypeScript
+  core with the Hermes reference (`ct_wisdom_live.render_live_block`) and
+  the live-delivery spec's step 7. Also fixed: the block and query caps
+  now count and cut by code point, so a cut never splits an emoji or other
+  non-BMP character (the Python hosts already did). The core
   also gained the autonomous-work activity API for a later OpenClaw leg;
   OpenClaw does not call it yet, so there is no other behavior change.
   Why dropping a correction loses nothing: CT emits a correction only for

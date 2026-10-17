@@ -55,13 +55,17 @@ function renderCorrection(correction: Correction): RenderedEntry | null {
   return { body: `${titleLine}\n${cleanText}`, id };
 }
 
-/** Head+tail truncation that keeps the block under the char budget. */
+/**
+ * Head+tail truncation that keeps the block under the char budget. Counts
+ * and cuts by code point (Python parity), so a surrogate pair is never split.
+ */
 export function truncateBlock(block: string, max = MAX_BLOCK_CHARS): string {
-  if (block.length <= max) return block;
+  const cps = Array.from(block);
+  if (cps.length <= max) return block;
   const head = Math.floor(max * 0.7);
   const tail = max - head - 2; // "\n" + ellipsis
-  return `${block.slice(0, head)}\n${ELLIPSIS}${
-    tail > 0 ? block.slice(block.length - tail) : ''
+  return `${cps.slice(0, head).join('')}\n${ELLIPSIS}${
+    tail > 0 ? cps.slice(cps.length - tail).join('') : ''
   }`;
 }
 

@@ -39,6 +39,8 @@ import {
   EXCLUDE_MAX,
 } from './constants.js';
 import { marker, stripForged, validId } from './ledger.js';
+import { lruGet, lruSet } from './lru.js';
+import { cpLen, cpSlice } from './text.js';
 import type {
   Correction,
   FactEntry,
@@ -216,11 +218,6 @@ function fold(text: string): string {
 function foldPath(text: string): string {
   const nfc = text.normalize('NFC');
   return CASE_INSENSITIVE ? casefold(nfc) : nfc;
-}
-
-/** Code-point length (Python `len`). */
-function cpLen(text: string): number {
-  return [...text].length;
 }
 
 function envStr(env: ActivityEnv, name: string): string | null {
@@ -474,12 +471,8 @@ function fixedMarker(directory: string): boolean {
 /** `directory` holds a `*.sln` (one scan, early return), cached per directory. */
 function slnMarker(directory: string): boolean {
   const now = performance.now();
-  const hit = sln.get(directory);
-  if (hit !== undefined && now - hit.at < SLN_CACHE_TTL_MS) {
-    sln.delete(directory);
-    sln.set(directory, hit);
-    return hit.found;
-  }
+  const hit = lruGet(sln, directory);
+  if (hit !== undefined && now - hit.at < SLN_CACHE_TTL_MS) return hit.found;
   let found = false;
   try {
     const dir = opendirSync(directory);
@@ -496,13 +489,7 @@ function slnMarker(directory: string): boolean {
   } catch {
     /* unreadable: no marker */
   }
-  sln.delete(directory);
-  sln.set(directory, { at: now, found });
-  while (sln.size > SLN_CACHE_MAX) {
-    const oldest = sln.keys().next();
-    if (oldest.done) break;
-    sln.delete(oldest.value);
-  }
+  lruSet(sln, directory, { at: now, found }, SLN_CACHE_MAX);
   return found;
 }
 
@@ -575,12 +562,8 @@ function canon(path: string): string | null {
 export function projectRoot(cwd: unknown, env: ActivityEnv = process.env): string | null {
   const key = JSON.stringify([cwd ?? null, envStr(env, 'HOME'), envStr(env, 'USERPROFILE')]);
   const now = performance.now();
-  const hit = roots.get(key);
-  if (hit !== undefined && now - hit.at < (hit.root ? ROOT_CACHE_TTL_MS : ROOT_NEGATIVE_TTL_MS)) {
-    roots.delete(key);
-    roots.set(key, hit);
-    return hit.root;
-  }
+  const hit = lruGet(roots, key);
+  if (hit !== undefined && now - hit.at < (hit.root ? ROOT_CACHE_TTL_MS : ROOT_NEGATIVE_TTL_MS)) return hit.root;
   let root: string | null = null;
   const start = absCwd(cwd, env);
   if (start !== null) {
@@ -590,13 +573,7 @@ export function projectRoot(cwd: unknown, env: ActivityEnv = process.env): strin
     root = found ? canon(found) : null;
     if (root !== null && blocked(root, realHomes)) root = null;
   }
-  roots.delete(key);
-  roots.set(key, { at: now, root });
-  while (roots.size > ROOT_CACHE_MAX) {
-    const oldest = roots.keys().next();
-    if (oldest.done) break;
-    roots.delete(oldest.value);
-  }
+  lruSet(roots, key, { at: now, root }, ROOT_CACHE_MAX);
   return root;
 }
 
@@ -795,7 +772,7 @@ export function buildActivity(
 
 /** The text sent to CT: the bare target (A6), never the verb. */
 export function activityQuery(activity: Activity): string {
-  return stripForged(activity.query).trim().slice(0, ACTIVITY_QUERY_CHARS);
+  return cpSlice(stripForged(activity.query).trim(), 0, ACTIVITY_QUERY_CHARS);
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -811,13 +788,7 @@ interface TrackerSession {
 }
 
 function bump(map: Map<string, true>, key: string, max: number): void {
-  map.delete(key);
-  map.set(key, true);
-  while (map.size > max) {
-    const oldest = map.keys().next();
-    if (oldest.done) break;
-    map.delete(oldest.value);
-  }
+  lruSet(map, key, true, max);
 }
 
 /**
@@ -828,18 +799,8 @@ export class ActivityTracker {
   private readonly sessions = new Map<string, TrackerSession>();
 
   private state(sessionId: string): TrackerSession {
-    let s = this.sessions.get(sessionId);
-    if (s === undefined) {
-      s = { keys: new Map(), steps: new Map(), reported: new Map() };
-    } else {
-      this.sessions.delete(sessionId);
-    }
-    this.sessions.set(sessionId, s);
-    while (this.sessions.size > ACTIVITY_SESSIONS_MAX) {
-      const oldest = this.sessions.keys().next();
-      if (oldest.done) break;
-      this.sessions.delete(oldest.value);
-    }
+    const s = this.sessions.get(sessionId) ?? { keys: new Map(), steps: new Map(), reported: new Map() };
+    lruSet(this.sessions, sessionId, s, ACTIVITY_SESSIONS_MAX);
     return s;
   }
 
@@ -933,8 +894,10 @@ export function renderActivityBlock(
   activity: Activity,
 ): string {
   if (item === null || typeof item !== 'object' || !validId(item.id)) return '';
+  // Every length and cut is by code point (Python `len` / slicing): a cut
+  // never splits a surrogate pair, and the caps match the Python hosts.
   let label = oneLine(activity?.line);
-  if (label.length > ACTIVITY_LABEL_CHARS) label = label.slice(0, ACTIVITY_LABEL_CHARS - 1) + ELLIPSIS;
+  if (cpLen(label) > ACTIVITY_LABEL_CHARS) label = cpSlice(label, 0, ACTIVITY_LABEL_CHARS - 1) + ELLIPSIS;
   const head = `${ACTIVITY_HEADING}\n_for: ${label}_\n\n`;
   const title = oneLine(item.title);
   const text = stripForged(typeof item.text === 'string' ? item.text : '');
@@ -943,11 +906,12 @@ export function renderActivityBlock(
   let titleLine = `${marker(item.id)} **${title}** (provenance: ${provenance})`;
   const sup = superseded.filter(validId);
   if (sup.length > 0) titleLine += ` — supersedes ${sup.map((s) => `ct-fact:${s}`).join(', ')}`;
-  const remaining = ACTIVITY_MAX_BLOCK_CHARS - head.length;
-  if (remaining <= titleLine.length + 1) return '';
+  const remaining = ACTIVITY_MAX_BLOCK_CHARS - cpLen(head);
+  const titleLen = cpLen(titleLine);
+  if (remaining <= titleLen + 1) return '';
   let body = `${titleLine}\n${text}`;
-  if (body.length > remaining) {
-    body = `${titleLine}\n${text.slice(0, remaining - titleLine.length - 1 - ELLIPSIS.length)}${ELLIPSIS}`;
+  if (cpLen(body) > remaining) {
+    body = `${titleLine}\n${cpSlice(text, 0, remaining - titleLen - 1 - cpLen(ELLIPSIS))}${ELLIPSIS}`;
   }
   return head + body;
 }
@@ -1085,8 +1049,9 @@ export function startActivity(
 /**
  * Finish an activity: `match` is the settled query, or null when it ran
  * past the host's budget. Re-checks the gates against a FRESH ledger,
- * selects one fact, records it (`noteDelivered` and the N3 turn cache, so a
- * CT recall later in the turn stubs it) and reports every outcome to
+ * selects one fact, records it in the turn-scoped N3 cache only (so a CT
+ * recall later in the turn stubs it; never `noteDelivered`, the ledger stays
+ * what the agent sees) and reports every outcome to
  * verbose mode. Resolves to the block for the host to place on its channel,
  * or null. Never throws.
  */
@@ -1109,7 +1074,11 @@ export function finishActivity(
     const ledgerIds = [...ledger.idsMostRecentFirst];
     const sel = selectActivityDelivery(match.result, ledger, activity);
     if (sel === null) return skip('zero_hits', { result: match.result, ledgerIds });
-    host.noteDelivered(session, [sel.id]);
+    // No `noteDelivered`: that is the user-turn bootstrap record, and an
+    // activity id stored there would outlive the message (a rejected
+    // decision, a compaction) and block the fact forever. The ledger stays
+    // what the agent sees; only the turn-scoped N3 cache learns the id, so a
+    // CT recall later in this turn stubs it.
     const cached = host.cachedLedger ? host.cachedLedger(session) : null;
     const merged = [sel.id];
     for (const id of [...ledgerIds, ...(cached?.idsMostRecentFirst ?? [])]) {

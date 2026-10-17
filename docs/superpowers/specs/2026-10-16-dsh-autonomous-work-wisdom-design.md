@@ -315,8 +315,11 @@ From `@equational-applications/ct-wisdom-core`:
   (no session, `deliveryEnabled` latch such as Claude Code's resume-OFF, restored without a known
   bootstrap, capability latch, breaker), `startActivity(host, session, activity, breaker)` (gate +
   `--exclude` bound + match) and `finishActivity(host, session, activity, match | null)` (re-gate on a
-  fresh ledger, select, `noteDelivered`, N3 cache update, verbose report), plus `reportActivity`;
-- `localUserNames(env)` (R2);
+  fresh ledger, select, turn-scoped N3 cache update, verbose report), plus `reportActivity`;
+- `userNames(env)`, `nameHit`, `projectRoot`, `activitySeams` and `resetActivityCaches` (the 0.6.5
+  rules and their test seams);
+- `cpLen` / `cpSlice` (every cap counts and cuts by code point, like Python) and `lruSet` / `lruGet`
+  (the one LRU helper of the core and the DSH host);
 - `VerboseTurn.channel?` and `VerboseTurn.activity?`.
 
 `ActivityTracker.firstReport` stays in the core for the per-tool hosts (Hermes, OpenCode, OpenClaw),
@@ -412,8 +415,21 @@ rule; opencode and openclaw get patch bumps for it.
 - **Privacy R1–R4** (above): implemented in the core builder, identical to the Hermes hotfix rules;
   the shared vector file `tests/fixtures/activity_targets.json` runs in the core suite once it lands.
 - **Gates in the core** (`activityGate` / `startActivity` / `finishActivity`): DSH no longer
-  re-implements the ledger, cache and verbose steps; `deliveryEnabled`, the restored-session rule and
-  `noteDelivered` now apply to every activity delivery.
+  re-implements the ledger, cache and verbose steps; `deliveryEnabled` and the restored-session rule
+  now apply to every activity delivery. A second review (PR #56 @ 39319da) removed `noteDelivered`
+  from `finishActivity`: it is the user-turn bootstrap record, so an activity id stored there outlived
+  its message (a rejected decision, a compaction) and blocked the fact for good, and only when a
+  bootstrap record existed. The ledger is what the agent sees (the session-log scan), plus the
+  turn-scoped N3 cache. `plan()` gates once (`startActivity`) and admits the key only when the start
+  succeeded. Every cap (activity block, label, both query caps, the user-turn block truncation) counts
+  and cuts by code point and never splits a surrogate pair. The named logger is resolved once.
+- **Hot path (kept as is, on purpose).** Per step the DSH path derives the log twice (the first
+  `tools/pre-execute` of the step, then the next `agent/pre-step`) and rebuilds the ledger twice;
+  other calls of a planned step return before touching the log. The pre-step re-derive cannot be
+  cached away: the step's tool results, CT recall markers included, land between the plan and the
+  delivery, and a stale ledger could show a recalled fact again (test "a recall in the previous step
+  is in the fresh ledger"). `deriveMessages()` itself is incremental at the pin ("pure tail growth
+  costs O(new nodes)", dsh-session `Session.deriveMessages`).
 - **One plan slot per agent** (only the newest step matters), LRU-bounded at 256 agents like the key
   tracker, instead of one 64-entry LRU across agents; prefetch remembers a planned step's call ids and
   skips the log read for its other calls; one adapter method (`snapshotMessages`) publishes log

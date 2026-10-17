@@ -11,7 +11,7 @@ import { describe, expect, it } from 'vitest';
 
 import { Breaker, VERBOSE_LOG_NAME, type SpawnFn, type VerboseTurn } from '@equational-applications/ct-wisdom-core';
 import { DshWisdomAdapter, runUserTurn } from '../src/wisdom-live/adapter.js';
-import { dshVerboseRecorder } from '../src/verbose.js';
+import { dshVerboseRecorder, namedLogger } from '../src/verbose.js';
 
 const SECRET = 'sk-dsh-SECRET-never-logged-7777';
 
@@ -86,5 +86,31 @@ describe('DSH verbose mode', () => {
     const rec = dshVerboseRecorder(ctx, { CT_WISDOM_VERBOSE: '1', CT_WISDOM_VERBOSE_LOG: log });
     expect(await turn(MATCHES[0], rec)).toEqual(await turn(MATCHES[0]));
     expect(existsSync(log)).toBe(false);
+  });
+});
+
+describe('namedLogger (resolved once)', () => {
+  it('looks the named logger up once, lazily, for info and debug', () => {
+    let lookups = 0;
+    const lines: string[] = [];
+    const ctx = {
+      logger: (name: string) => {
+        lookups++;
+        return { info: (m: string) => lines.push(`info ${name} ${m}`), debug: (m: string) => lines.push(`debug ${name} ${m}`) };
+      },
+    };
+    const log = namedLogger(ctx);
+    expect(lookups).toBe(0);
+    log.info('a');
+    log.debug('b');
+    log.debug('c');
+    expect(lookups).toBe(1);
+    expect(lines).toEqual(['info curated-thoughts a', 'debug curated-thoughts b', 'debug curated-thoughts c']);
+  });
+
+  it('a missing or throwing factory is a quiet no-op', () => {
+    expect(() => namedLogger({}).info('x')).not.toThrow();
+    expect(() => namedLogger({ logger: () => { throw new Error('down'); } }).debug('x')).not.toThrow();
+    expect(() => namedLogger(null).debug('x')).not.toThrow();
   });
 });

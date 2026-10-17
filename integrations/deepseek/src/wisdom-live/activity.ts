@@ -29,11 +29,11 @@ import {
   ACTIVITY_SESSIONS_MAX,
   ActivityTracker,
   TIMEOUT_MS,
-  activityGate,
   activityQuery,
   buildActivity,
   finishActivity,
   isCtTool,
+  lruSet,
   reportActivity,
   startActivity,
   type Activity,
@@ -258,8 +258,7 @@ export class DshActivity {
   private slotFor(agentId: string, messageId: string): AgentSlot | null {
     const slot = this.slots.get(agentId);
     if (slot === undefined || slot.messageId !== messageId) return null;
-    this.slots.delete(agentId);
-    this.slots.set(agentId, slot);
+    lruSet(this.slots, agentId, slot, ACTIVITY_SESSIONS_MAX);
     return slot;
   }
 
@@ -275,13 +274,7 @@ export class DshActivity {
     const existing = this.slotFor(agentId, step.messageId);
     if (existing !== null) return existing.plan;
     const slot: AgentSlot = { messageId: step.messageId, plan: null, callIds: new Set(step.calls.map((c) => c.id)) };
-    this.slots.delete(agentId);
-    this.slots.set(agentId, slot);
-    while (this.slots.size > ACTIVITY_SESSIONS_MAX) {
-      const oldest = this.slots.keys().next();
-      if (oldest.done) break;
-      this.slots.delete(oldest.value);
-    }
+    lruSet(this.slots, agentId, slot, ACTIVITY_SESSIONS_MAX);
     const session = { id: agentId };
     let cwd: string | null = null;
     try {
@@ -305,20 +298,17 @@ export class DshActivity {
         continue;
       }
       if (seen === 'step_used') break;
+      // One gate: startActivity checks every core precondition and starts
+      // the match. The key is admitted only when the start succeeded, so a
+      // refusal records nothing and the same activity can trigger later.
       this.publish(agentId, messages);
-      const gate = activityGate(this.adapter, session, this.breaker);
-      if (!gate.ok) {
-        this.debug(agentId, gate.reason);
-        reportActivity(this.adapter, session, activity, { kind: 'skip', reason: gate.reason });
-        break;
-      }
-      this.tracker.admit(agentId, step.messageId, activity.key);
       const start = startActivity(this.adapter, session, activity, this.breaker);
       if (start.failure !== null) {
         this.debug(agentId, start.failure);
         reportActivity(this.adapter, session, activity, { kind: 'skip', reason: start.failure });
         break;
       }
+      this.tracker.admit(agentId, step.messageId, activity.key);
       slot.plan = { activity, deadline: this.now() + TIMEOUT_MS, promise: start.match, consumed: false };
       break;
     }

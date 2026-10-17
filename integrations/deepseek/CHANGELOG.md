@@ -38,7 +38,9 @@
   - The gates are the user-turn ones and live in the shared core
     (`startActivity` / `finishActivity`): a delivery switch that is off, a
     restored session with no known bootstrap, a missing `ct wisdom match`
-    or an open breaker stop the query, and every delivered id is recorded.
+    or an open breaker stop the query. A delivered id is recorded only for
+    the turn's recall dedup, never in the bootstrap record, so a fact whose
+    message was rejected or compacted away can arrive again.
   - One fact of at most 600 characters, marker first, under the heading
     `## Curated Thoughts — relevant to this step`, delivered as an
     identified user-role message with source kind

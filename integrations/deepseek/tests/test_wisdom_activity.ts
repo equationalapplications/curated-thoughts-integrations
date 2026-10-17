@@ -345,6 +345,26 @@ describe('core gates apply to activity delivery (review of PR #56)', () => {
     expect(s.ct.calls).toEqual([]);
   });
 
+  it('a refused start records no key: the same activity triggers once the gate opens', async () => {
+    const s = setup();
+    let enabled = false;
+    (s.adapter as unknown as { deliveryEnabled: () => boolean }).deliveryEnabled = () => enabled;
+    let rebuilds = 0;
+    const rebuild = s.adapter.rebuildLedger.bind(s.adapter);
+    s.adapter.rebuildLedger = (session) => {
+      rebuilds++;
+      return rebuild(session);
+    };
+    s.step([['bash', { command: 'pnpm test' }]]);
+    expect(await s.pre()).toBeNull();
+    enabled = true;
+    rebuilds = 0;
+    s.step([['bash', { command: 'pnpm test' }]]);
+    expect(await s.pre()).not.toBeNull();
+    // one gate (one rebuild) at plan time, one fresh rebuild at delivery
+    expect(rebuilds).toBe(2);
+  });
+
   it('a restored session with no known bootstrap fails closed', async () => {
     const s = setup();
     (s.adapter as unknown as { restored: () => boolean }).restored = () => true;
@@ -358,12 +378,36 @@ describe('core gates apply to activity delivery (review of PR #56)', () => {
     expect(await s2.pre()).not.toBeNull();
   });
 
-  it('noteDelivered records the activity id next to the bootstrap memo', async () => {
+  it('an activity id is never written into the bootstrap memo', async () => {
     const s = setup();
     s.adapter.bootstrapMemo['agent-1'] = { block: 'b', ids: ['boot1'] };
     s.step([['read', { file_path: 'a.ts' }]]);
-    await s.pre();
-    expect(s.adapter.bootstrapMemo['agent-1'].ids).toEqual(['boot1', 'f1']);
+    expect(await s.pre()).not.toBeNull();
+    expect(s.adapter.bootstrapMemo['agent-1'].ids).toEqual(['boot1']);
+  });
+
+  it('a rejected decision (message never persisted) leaves the fact deliverable', async () => {
+    const s = setup();
+    s.adapter.bootstrapMemo['agent-1'] = { block: 'b', ids: ['boot1'] }; // a bootstrap record exists
+    s.step([['read', { file_path: 'a.ts' }]]);
+    expect(await s.activity.deliver(s.agent, [], [])).not.toBeNull(); // an outer listener rejects: not appended
+    s.step([['read', { file_path: 'b.ts' }]]);
+    const again = await s.pre();
+    expect(scanIds(again)).toEqual(['f1']);
+  });
+
+  it('after compaction drops the activity message, the fact is deliverable again', async () => {
+    const s = setup();
+    s.adapter.bootstrapMemo['agent-1'] = { block: 'b', ids: ['boot1'] }; // a bootstrap record exists
+    s.step([['read', { file_path: 'a.ts' }]]);
+    expect(await s.pre()).not.toBeNull();
+    s.step([['read', { file_path: 'b.ts' }]]);
+    expect(await s.pre()).toBeNull(); // still visible: deduped
+    // compaction: the activity message leaves the model's view
+    const i = s.log.findIndex((m) => (m.source as { kind?: string } | undefined)?.kind === ACTIVITY_SOURCE_KIND);
+    s.log.splice(i, 1);
+    s.step([['read', { file_path: 'c.ts' }]]);
+    expect(scanIds(await s.pre())).toEqual(['f1']);
   });
 });
 

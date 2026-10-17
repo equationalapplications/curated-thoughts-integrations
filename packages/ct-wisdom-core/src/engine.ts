@@ -13,6 +13,7 @@ import {
 } from './constants.js';
 import { scanIds, stripForged, validId } from './ledger.js';
 import { renderBlock } from './render.js';
+import { cpSlice } from './text.js';
 import { EMPTY_LEDGER } from './types.js';
 import type {
   HostAdapter,
@@ -25,7 +26,8 @@ import type { VerboseTurn } from './verbose.js';
 /** Query derived from the user message: sanitized + char-capped. */
 export function buildQuery(userMessage: unknown): string {
   const raw = typeof userMessage === 'string' ? userMessage : '';
-  return stripForged(raw).trim().slice(0, QUERY_CHARS).trim();
+  // Capped by code point (Python parity): never splits a surrogate pair.
+  return cpSlice(stripForged(raw).trim(), 0, QUERY_CHARS).trim();
 }
 
 /**

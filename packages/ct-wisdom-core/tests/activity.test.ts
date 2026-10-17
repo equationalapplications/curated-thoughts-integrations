@@ -597,7 +597,7 @@ describe('core activity gates (startActivity / finishActivity)', () => {
     expect(startActivity(gateHost({ restored: true, known: true }).host, S, READ, new Breaker()).failure).toBeNull();
   });
 
-  it('excludes the ledger newest first, then delivers one fact and records it everywhere', async () => {
+  it('excludes the ledger newest first, then delivers one fact, cached for the turn only', async () => {
     const { host, state } = gateHost({ ids: ['b', 'a'] });
     const start = startActivity(host, S, READ, new Breaker());
     expect(start.failure).toBeNull();
@@ -605,7 +605,10 @@ describe('core activity gates (startActivity / finishActivity)', () => {
     expect(state.queries).toEqual([{ query: 'src/x.ts', max: 1, exclude: ['b', 'a'] }]);
     const block = finishActivity(host, S, READ, match as never)!;
     expect(scanIds(block)).toEqual(['f1']);
-    expect(state.noted).toEqual([['f1']]);
+    // Never recorded beyond the turn (review of PR #56): the ledger is what
+    // the agent sees, rebuilt from the host's persisted context, so a fact
+    // whose message was rejected or compacted away can arrive again.
+    expect(state.noted).toEqual([]);
     expect(state.cached!.has('f1') && state.cached!.has('a')).toBe(true);
     expect(state.turns).toHaveLength(1);
     expect(state.turns[0]).toMatchObject({ kind: 'delivery', channel: 'activity', query: 'src/x.ts',

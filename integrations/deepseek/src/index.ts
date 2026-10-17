@@ -14,8 +14,8 @@ import {
   runToolResult,
 } from './wisdom-live/adapter.js';
 import { DshActivity, LIVE_SOURCE_KIND, activityMessage, wisdomMessage } from './wisdom-live/activity.js';
-import { Breaker } from '@equational-applications/ct-wisdom-core';
-import { dshVerboseRecorder } from './verbose.js';
+import { Breaker, lruSet } from '@equational-applications/ct-wisdom-core';
+import { dshVerboseRecorder, namedLogger } from './verbose.js';
 import type { MemoRecord } from './wisdom-live/adapter.js';
 import { expandHome } from '../scripts/ct_env.js';
 
@@ -330,9 +330,12 @@ export function apply(ctx: Context, config: Config): void {
   // the first pre-step call whose claimed `messages` batch carries new user
   // input for this turn. We track (agent.id, turn) pairs: multi-step turns
   // and model-retry re-entries of the SAME step must not deliver twice.
+  // The plugin's named logger, resolved once on first use and shared by the
+  // verbose notices and the activity debug lines.
+  const logger = namedLogger(ctx);
   const adapter = new DshWisdomAdapter({
     env: wisdomEnv,
-    recordVerbose: dshVerboseRecorder(ctx, process.env),
+    recordVerbose: dshVerboseRecorder(ctx, process.env, logger),
   });
   const breaker = new Breaker();
   // Autonomous-work delivery shares the adapter (ledger, capability latch,
@@ -341,12 +344,7 @@ export function apply(ctx: Context, config: Config): void {
     adapter,
     breaker,
     beforeLedger: (agentId) => noteMemoBlock(agentId, liveMemoBlockFor(agentId)),
-    log: (line) => {
-      const factory = (ctx as { logger?: unknown }).logger;
-      if (typeof factory !== 'function') return;
-      const named = (factory as (n: string) => { debug?: (m: string) => void } | undefined).call(ctx, 'curated-thoughts');
-      named?.debug?.(line);
-    },
+    log: (line) => logger.debug(line),
   });
   // Memo-record parity (N5): the live ledger needs the v1 bootstrap ids. The
   // section's memo is module state; mirror it here by recording ids whenever
@@ -390,12 +388,7 @@ export function apply(ctx: Context, config: Config): void {
         let userTurnRan = false;
         if (!liveTurns.has(turnKey)) {
           userTurnRan = true;
-          liveTurns.add(turnKey);
-          while (liveTurns.size > 512) {
-            const oldest = liveTurns.values().next();
-            if (oldest.done) break;
-            liveTurns.delete(oldest.value);
-          }
+          lruSet(liveTurns, turnKey, true, 512);
           // Snapshot the derived session log BEFORE the engine runs: the m5
           // ledger rule rebuilds from what the NEXT trigger reads — the
           // persisted log — never from the pre-step decision itself (its
@@ -501,7 +494,7 @@ export function apply(ctx: Context, config: Config): void {
       }
     },
   );
-  const liveTurns = new Set<string>();
+  const liveTurns = new Map<string, true>();
 
   // Autonomous-work prefetch — `tools/pre-execute` (waterfall). The first
   // call of a step with a new activity key starts the step's one CT match so
