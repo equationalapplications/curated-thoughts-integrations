@@ -11,6 +11,8 @@
 //   ct wisdom match --json --max N [--exclude=<id>…] -- <query>
 //        → {"entries": $CT_STUB_MATCH minus excluded ids (unless
 //           CT_STUB_IGNORE_EXCLUDE=1), first N, "corrections": []}
+//   CT_STUB_MATCH_ACTIVITY, when set, answers the autonomous-work calls
+//        (`--max 1`) instead of CT_STUB_MATCH (same exclude rule).
 //   CT_STUB_MATCH_TIMEOUT=1 makes `wisdom match` hang (timeout path).
 // Every invocation appends one JSON line {argv} to $CT_STUB_LOG when set.
 import { appendFileSync } from 'node:fs';
@@ -53,7 +55,7 @@ if (argv[0] === 'wisdom' && argv[1] === 'match') {
     const maxAt = argv.indexOf('--max');
     const max = maxAt >= 0 ? Number(argv[maxAt + 1]) : 2;
     const exclude = new Set(argv.filter((a) => a.startsWith('--exclude=')).map((a) => a.slice('--exclude='.length)));
-    let entries = json('CT_STUB_MATCH', []);
+    let entries = max === 1 && process.env.CT_STUB_MATCH_ACTIVITY ? json('CT_STUB_MATCH_ACTIVITY', []) : json('CT_STUB_MATCH', []);
     if (process.env.CT_STUB_IGNORE_EXCLUDE !== '1') entries = entries.filter((e) => !exclude.has(e.id));
     process.stdout.write(JSON.stringify({ entries: entries.slice(0, max), corrections: [] }));
     process.exit(0);
