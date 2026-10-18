@@ -190,8 +190,8 @@ export class OpenClawActivity {
 
       const toolName = e.toolName;
       if (toolName === META_TOOL) {
-        // A CT recall through the `tool_call` meta tool: N3 cannot stub it,
-        // but its facts are in context now. Unreadable → fail closed.
+        // A CT recall through the `tool_call` meta tool (N3 already ran on it in
+        // index.ts): its facts are in context now. Unreadable → fail closed.
         const ids = metaRecallIds(e.args, result);
         if (ids === 'unreadable') this.adapter.markBlind(sessionKey, 'meta_unreadable', runId);
         else if (ids !== null) this.adapter.noteRunIds(sessionKey, runId, ids);

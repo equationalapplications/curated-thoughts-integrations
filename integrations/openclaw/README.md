@@ -165,10 +165,6 @@ Since 0.3.0, on the embedded runtime (spec:
   wait up to 3 s. The breaker is shared with live delivery.
 - **Where:** main sessions, subagents, cron and heartbeat runs. Not on the
   Codex app-server or Copilot runtimes.
-- **Known limit:** a `curated_recall_context` call the model makes through
-  OpenClaw's `tool_call` meta tool is not stubbed by the recall dedup (a
-  recall can then show a fact the agent already has). Its facts still join
-  the run's record, so autonomous-work delivery never repeats them.
 
 ## Cache safety
 
