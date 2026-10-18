@@ -11,9 +11,9 @@
  * Pure; never throws.
  */
 
-import { scanIds, validId } from '@equational-applications/ct-wisdom-core';
+import { onToolResult, scanIds, validId } from '@equational-applications/ct-wisdom-core';
 
-import { STRUCTURED_PREFIX, isRecallToolName, partTexts } from './adapter.js';
+import { STRUCTURED_PREFIX, isRecallToolName, partTexts, type OpenClawWisdomAdapter } from './adapter.js';
 
 const WRAP_START = '\n---\n';
 const WRAP_END = '<<<END_EXTERNAL_UNTRUSTED_CONTENT';
@@ -137,4 +137,28 @@ export function metaRecallIds(args: unknown, result: unknown): string[] | 'unrea
   // JSON (a shape we do not know); all-JSON parts without one carry no facts.
   if (found !== null) return found;
   return nonJson ? 'unreadable' : [];
+}
+
+/**
+ * N3 for a `tool_call` CT recall: run the core's dedup on each text part's
+ * inner `result` and rewrap it. Returns the same object when nothing changed;
+ * other parts, part fields and `details` pass through untouched.
+ */
+export function metaToolResult(adapter: OpenClawWisdomAdapter, sessionKey: string, result: unknown): unknown {
+  const outer = obj(result);
+  if (outer === null || !Array.isArray(outer.content)) return result;
+  let content: unknown[] | null = null;
+  outer.content.forEach((part, index) => {
+    const p = obj(part);
+    if (p === null || p.type !== 'text' || typeof p.text !== 'string') return;
+    const parts = unwrapMeta(p.text);
+    if (parts === null) return;
+    const standIn = { content: parts.outer.result.content };
+    const rewritten = obj(onToolResult(adapter, { id: sessionKey }, standIn));
+    if (rewritten === null || rewritten === standIn || !Array.isArray(rewritten.content)) return;
+    parts.outer.result = { ...parts.outer.result, content: rewritten.content };
+    content ??= [...(outer.content as unknown[])];
+    content[index] = { ...p, text: rewrapMeta(parts) };
+  });
+  return content === null ? result : { ...outer, content };
 }
