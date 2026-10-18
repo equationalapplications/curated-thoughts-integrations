@@ -7,7 +7,7 @@
 
 import { describe, it, expect } from 'vitest';
 
-import { nodeSpawnFn, spawnOutcomeOf, windowsTreeKill } from '../src/spawn.js';
+import { DEFAULT_KILL_GRACE_MS, nodeSpawnFn, spawnOutcomeOf, windowsTreeKill } from '../src/spawn.js';
 
 describe('nodeSpawnFn (real binding, fake binary)', { timeout: 30_000 }, () => {
   it.skipIf(process.platform === 'win32')('passes the argument LIST to a shell-less spawn and captures stdout', async () => {
@@ -94,6 +94,80 @@ describe('nodeSpawnFn abort (real process tree)', { timeout: 30_000 }, () => {
     };
     return { script, grandchild, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
   }
+
+  /** Windows fake ct: node.exe runs a script that starts a sleeping node grandchild, writes its pid, and hangs. */
+  async function hangingCtWin() {
+    const { mkdtempSync, writeFileSync, rmSync, readFileSync, existsSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const dir = mkdtempSync(join(tmpdir(), 'ct-spawn-win-'));
+    const pidFile = join(dir, 'grandchild.pid');
+    const script = join(dir, 'ct.cjs');
+    writeFileSync(
+      script,
+      "const { spawn } = require('child_process');\n"
+        + "const fs = require('fs');\n"
+        + "const g = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30000)'], { stdio: 'ignore', windowsHide: true });\n"
+        + `fs.writeFileSync(${JSON.stringify(pidFile)}, String(g.pid));\n`
+        + 'setTimeout(() => {}, 30000);\n',
+    );
+    const grandchild = async (): Promise<number> => {
+      await waitFor(() => existsSync(pidFile) && readFileSync(pidFile, 'utf8').trim() !== '', 10_000);
+      return Number(readFileSync(pidFile, 'utf8').trim());
+    };
+    return { command: process.execPath, args: [script, 'wisdom', 'match'], grandchild, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
+  }
+
+  it.runIf(process.platform === 'win32')('Windows: an abort kills the child AND its grandchild, and settles within the deadline', async () => {
+    const ct = await hangingCtWin();
+    try {
+      const abort = new AbortController();
+      const pending = nodeSpawnFn()({ command: ct.command, args: ct.args, timeoutMs: 30_000, signal: abort.signal });
+      const gpid = await ct.grandchild();
+      expect(alive(gpid)).toBe(true);
+      const abortedAt = Date.now();
+      abort.abort();
+      const out = await pending;
+      expect(out.aborted).toBe(true);
+      expect(Date.now() - abortedAt).toBeLessThan(DEFAULT_KILL_GRACE_MS + 1500);
+      expect(await waitFor(() => !alive(gpid), 5000)).toBe(true);
+    } finally {
+      ct.cleanup();
+    }
+  });
+
+  it.runIf(process.platform === 'win32')('Windows: the timeout kills the grandchild too', async () => {
+    const ct = await hangingCtWin();
+    try {
+      const pending = nodeSpawnFn()({ command: ct.command, args: ct.args, timeoutMs: 3000 });
+      const gpid = await ct.grandchild();
+      const out = await pending;
+      expect(out.timedOut).toBe(true);
+      expect(await waitFor(() => !alive(gpid), 5000)).toBe(true);
+    } finally {
+      ct.cleanup();
+    }
+  });
+
+  it.runIf(process.platform === 'win32')('Windows: with SystemRoot unusable, the direct-kill fallback still ends the child and the call settles', async () => {
+    const ct = await hangingCtWin();
+    const saved = process.env.SystemRoot;
+    let gpid = 0;
+    try {
+      process.env.SystemRoot = 'not-absolute';
+      const abort = new AbortController();
+      const pending = nodeSpawnFn()({ command: ct.command, args: ct.args, timeoutMs: 30_000, signal: abort.signal });
+      gpid = await ct.grandchild();
+      abort.abort();
+      const out = await pending;
+      expect(out.aborted).toBe(true);
+    } finally {
+      process.env.SystemRoot = saved;
+      // The fallback reaches only the child: end the orphaned grandchild here.
+      if (gpid > 0 && alive(gpid)) process.kill(gpid);
+      ct.cleanup();
+    }
+  });
 
   it.skipIf(process.platform === 'win32')('an abort kills the child AND its grandchild and reports aborted', async () => {
     const ct = await hangingCt();
