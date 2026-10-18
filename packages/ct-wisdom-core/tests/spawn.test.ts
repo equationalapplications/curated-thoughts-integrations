@@ -95,7 +95,13 @@ describe('nodeSpawnFn abort (real process tree)', { timeout: 30_000 }, () => {
     return { script, grandchild, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
   }
 
-  /** Windows fake ct: node.exe runs a script that starts a sleeping node grandchild, writes its pid, and hangs. */
+  /**
+   * Windows fake ct: node.exe runs a script that starts a sleeping node
+   * grandchild, writes its pid, and hangs. The grandchild is DETACHED: libuv
+   * puts a non-detached child in its parent's job object (kill on job close),
+   * so it would die with the fake ct even under the old direct kill. Detached,
+   * it sits outside that job and only taskkill's parent-pid walk (/T) reaches it.
+   */
   async function hangingCtWin() {
     const { mkdtempSync, writeFileSync, rmSync, readFileSync, existsSync } = await import('node:fs');
     const { tmpdir } = await import('node:os');
@@ -107,7 +113,8 @@ describe('nodeSpawnFn abort (real process tree)', { timeout: 30_000 }, () => {
       script,
       "const { spawn } = require('child_process');\n"
         + "const fs = require('fs');\n"
-        + "const g = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30000)'], { stdio: 'ignore', windowsHide: true });\n"
+        + "const g = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30000)'], { stdio: 'ignore', windowsHide: true, detached: true });\n"
+        + 'g.unref();\n'
         + `fs.writeFileSync(${JSON.stringify(pidFile)}, String(g.pid));\n`
         + 'setTimeout(() => {}, 30000);\n',
     );
@@ -162,8 +169,12 @@ describe('nodeSpawnFn abort (real process tree)', { timeout: 30_000 }, () => {
       abort.abort();
       const out = await pending;
       expect(out.aborted).toBe(true);
+      // Negative control: the direct kill must NOT reach the detached
+      // grandchild (so the abort/timeout tests above prove /T, not the job).
+      expect(alive(gpid)).toBe(true);
     } finally {
-      process.env.SystemRoot = saved;
+      if (saved === undefined) delete process.env.SystemRoot;
+      else process.env.SystemRoot = saved;
       // The fallback reaches only the child: end the orphaned grandchild here.
       if (gpid > 0 && alive(gpid)) process.kill(gpid);
       ct.cleanup();
