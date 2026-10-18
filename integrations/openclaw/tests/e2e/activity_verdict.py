@@ -115,20 +115,28 @@ for m in last['messages']:
             counts[fid] = counts.get(fid, 0) + 1
 dupes = {k: v for k, v in counts.items() if v > 1}
 check('exactly once: no fact marker twice in the final request', not dupes, repr(dupes) if dupes else repr(sorted(counts)))
-recall_stub = any('"in_context": true' in t or '"in_context":true' in t for r in tool_results(last).values() for t in texts([r]))
-# At openclaw 2026.10.3 the model may reach MCP tools through the `tool_call`
-# meta tool (args.id = "mcp:<server>:<tool>"); the middleware then sees
-# toolName `tool_call` and an external-content-wrapped envelope, so the N3
-# recall dedup (which keys on the projected MCP tool name) does not apply.
-# That is a pre-existing limit of the 0.2.x N3 path, reported, not counted.
+def has_stub(t):
+    """True when `t` holds an N3 stub, raw or JSON-escaped (inside a tool_call body)."""
+    return '"in_context": true' in t or '"in_context":true' in t or '\\"in_context\\":true' in t
+
+
+recall_stub = any(has_stub(t) for r in tool_results(last).values() for t in texts([r]))
 via_meta = any(
     p.get('type') == 'tool_use' and p.get('name') == 'tool_call' and 'curated_recall_context' in json.dumps(p.get('input'))
     for m in last['messages'] if isinstance(m.get('content'), list) for p in m['content'] if isinstance(p, dict)
 )
-if via_meta and not recall_stub:
-    print('KNOWN N3: the recall went through the `tool_call` meta tool; the N3 dedup does not see it (pre-existing, follow-up)')
-else:
-    check('N3: the recall result stubs a fact already in context', recall_stub)
+print('recall route:', 'tool_call meta tool' if via_meta else 'direct')
+check('N3: the recall result stubs a fact already in context', recall_stub)
+def stub_inside_wrapper(t):
+    """True when the stub sits between the first start marker and the LAST end marker."""
+    start = t.find('<<<EXTERNAL_UNTRUSTED_CONTENT')
+    end = t.rfind('<<<END_EXTERNAL_UNTRUSTED_CONTENT')
+    return 0 <= start < end and has_stub(t[start:end])
+
+
+if via_meta:
+    wrapped_stub = any(stub_inside_wrapper(t) for r in tool_results(last).values() for t in texts([r]))
+    check('N3 via tool_call: the stub sits inside the external-content wrapper', wrapped_stub)
 
 # --- verbose -----------------------------------------------------------------
 vlog = os.path.join(WORK, 'state', 'logs', 'ct-wisdom-verbose.jsonl')

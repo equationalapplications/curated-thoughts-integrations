@@ -6,6 +6,12 @@
 
 - Fixed: on Windows, stopping `ct` (timeout, cancel or output cap) now also stops the processes it started, using Windows' own `taskkill /T /F` by its full system path; if that fails, the old direct stop is used. No change on macOS or Linux.
 
+## 0.3.5 — 2026-10-17
+
+- Fixed: a CT recall the agent makes through OpenClaw's `tool_call` meta tool now gets the same recall dedup as a direct call — facts already in context come back as "already in context" stubs, and new facts carry their marker. Only the JSON inside OpenClaw's external-content wrapper changes; a result in any shape other than the verified one is left as it is. A result whose inner recall JSON is not in canonical form (for example, it holds a `\u` escape that a rewrite would decode into a new character) is left alone and delivered as OpenClaw sent it; an error in this dedup no longer stops the recalled facts from joining the run ledger.
+- Fixed: facts from a `tool_call` recall result that is left alone now still count as in context, so a later recall in the same run stubs them instead of repeating them.
+- Changed: a `tool_call` text with an end marker but no start marker now reads as unreadable, and activity delivery stops for the rest of the run. OpenClaw always writes both markers.
+
 ## 0.3.4 — 2026-10-17
 
 - Internal: the pre-flight census tests get a 20 s timeout (they ran past 5 s on Windows CI). No behavior change.

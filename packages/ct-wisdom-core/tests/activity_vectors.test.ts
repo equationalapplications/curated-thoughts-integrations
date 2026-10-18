@@ -180,7 +180,8 @@ describe('shared activity-target vectors (Hermes parity, privacy amendments 4 an
     }
   });
 
-  it('every vector: query and label', () => {
+  // ~290 vectors each build a scratch tree; windows-latest takes 6-7 s.
+  it('every vector: query and label', { timeout: 30_000 }, () => {
     let skipped = 0;
     for (const c of load()) {
       const { tmp, built } = buildIn(c);
