@@ -37,6 +37,7 @@ export interface MetaParts {
   tail: string;
 }
 
+/** `value` as a plain object (not null, not an array), or null. */
 export function obj(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
 }
@@ -197,6 +198,10 @@ export function metaToolResult(adapter: OpenClawWisdomAdapter, sessionKey: strin
     const p = obj(part);
     if (p === null || p.type !== 'text' || typeof p.text !== 'string') return;
     const parts = unwrapMeta(p.text);
+    // A refused part (these two returns) goes out unchanged, so the model sees
+    // its full entries. On purpose, its ids still count as in context:
+    // activity.process notes them in the run ledger, which drops the turn's
+    // N3 cache, so a later recall of the same fact is stubbed.
     if (parts === null || parts.outer.tool.id !== target) return;
     if (!recallBlocksCanonical(parts.outer.result.content)) return;
     const standIn = { content: parts.outer.result.content };

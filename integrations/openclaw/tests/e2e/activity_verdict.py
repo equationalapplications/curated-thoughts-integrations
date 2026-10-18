@@ -116,6 +116,7 @@ for m in last['messages']:
 dupes = {k: v for k, v in counts.items() if v > 1}
 check('exactly once: no fact marker twice in the final request', not dupes, repr(dupes) if dupes else repr(sorted(counts)))
 def has_stub(t):
+    """True when `t` holds an N3 stub, raw or JSON-escaped (inside a tool_call body)."""
     return '"in_context": true' in t or '"in_context":true' in t or '\\"in_context\\":true' in t
 
 
@@ -127,7 +128,7 @@ via_meta = any(
 print('recall route:', 'tool_call meta tool' if via_meta else 'direct')
 check('N3: the recall result stubs a fact already in context', recall_stub)
 def stub_inside_wrapper(t):
-    # The stub must sit between the start marker and the LAST end marker.
+    """True when the stub sits between the first start marker and the LAST end marker."""
     start = t.find('<<<EXTERNAL_UNTRUSTED_CONTENT')
     end = t.rfind('<<<END_EXTERNAL_UNTRUSTED_CONTENT')
     return 0 <= start < end and has_stub(t[start:end])
