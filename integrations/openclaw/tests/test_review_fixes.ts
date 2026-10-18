@@ -120,7 +120,9 @@ describe('3. the 3 s budget covers only the match', () => {
     const p = nodeSpawnFn(process.env)({ command: process.execPath, args: ['-e', 'setInterval(() => {}, 1000)'], timeoutMs: 20_000, signal: ac.signal });
     setTimeout(() => ac.abort(), 50);
     const r = await p;
-    expect(r.code).toBeNull();
+    // A child ended by `taskkill /F` on Windows exits with code 1, not null.
+    if (process.platform === 'win32') expect(r.code).not.toBe(0);
+    else expect(r.code).toBeNull();
     expect(r.aborted).toBe(true);
     expect(r.timedOut).toBe(false);
     const pre = new AbortController();

@@ -24,10 +24,25 @@ class FakeChild extends EventEmitter {
   }
 }
 
-const state: { next: FakeChild | undefined } = { next: undefined };
+const state: { next: FakeChild | undefined; taskkillCode: number; taskkill: FakeChild | undefined } = {
+  next: undefined,
+  taskkillCode: 1,
+  taskkill: undefined,
+};
 
 vi.mock('node:child_process', () => ({
-  spawn: () => state.next,
+  // On Windows a kill first spawns taskkill.exe: give that its own fake that
+  // exits asynchronously with state.taskkillCode (default 1 = failed, so the
+  // binding falls back to the direct child.kill).
+  spawn: (command: string) => {
+    if (typeof command === 'string' && /taskkill\.exe$/i.test(command)) {
+      const tk = new FakeChild(2 ** 30 + 9);
+      state.taskkill = tk;
+      setTimeout(() => tk.emit('exit', state.taskkillCode, null), 5);
+      return tk;
+    }
+    return state.next;
+  },
 }));
 
 const { nodeSpawnFn } = await import('../src/spawn.js');
@@ -35,6 +50,8 @@ const { nodeSpawnFn } = await import('../src/spawn.js');
 describe("nodeSpawnFn 'error' handling (mocked child)", () => {
   beforeEach(() => {
     state.next = undefined;
+    state.taskkillCode = 1;
+    state.taskkill = undefined;
   });
 
   it("an 'error' after a successful start is ignored; exit/close settle with the real code", async () => {
@@ -102,6 +119,22 @@ describe("nodeSpawnFn 'error' handling (mocked child)", () => {
       expect(child.kill).toHaveBeenCalled();
       // The surviving child must not keep the host's event loop alive.
       expect(child.unref).toHaveBeenCalled();
+    });
+
+    it.runIf(process.platform === 'win32')('Windows: a taskkill that exits 0 means no direct kill, and the call still settles as timedOut within the deadline', { timeout: 3000 }, async () => {
+      const child = stuckChild();
+      state.next = child;
+      state.taskkillCode = 0;
+      const started = Date.now();
+      const pending = nodeSpawnFn({}, { killGraceMs: 100 })({ command: 'ct', args: [], timeoutMs: 100 });
+      child.stdout.emit('data', Buffer.from('partial'));
+      const out = await pending;
+      expect(Date.now() - started).toBeLessThan(200 + 800);
+      expect(out.timedOut).toBe(true);
+      expect(out.spawnError).toBe(false);
+      expect(out.stdout).toBe('partial');
+      expect(state.taskkill).toBeDefined();
+      expect(child.kill).not.toHaveBeenCalled();
     });
 
     it('abort: settles within the kill deadline as aborted', { timeout: 3000 }, async () => {
