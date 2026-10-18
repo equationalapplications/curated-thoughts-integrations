@@ -21,7 +21,7 @@
 - No new dependency, process, file or network call.
 - Work in `integrations/openclaw/`; run tests with `./node_modules/.bin/vitest run <file>` from there (suites already use a scratch HOME via `tests/setup-home.ts`).
 - Never touch the live brain; the live e2e uses isolated `HOME`, `USERPROFILE`, `OPENCLAW_STATE_DIR`, `CURATED_BRAIN_DIR`.
-- Branch: `feat/openclaw-meta-recall-n3` off `main`. Never commit to `main`.
+- Branch: `feat/openclaw-meta-recall-n3` off `docs/openclaw-meta-recall-n3-spec` (which holds the spec and this plan). Never commit to `main`.
 - Commit messages end with `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`.
 
 ---
@@ -48,7 +48,7 @@
 
 ```bash
 cd /Users/equationalapplications/code/src/github.com/equationalapplications/curated-thoughts-integrations
-git checkout main && git pull && git checkout -b feat/openclaw-meta-recall-n3
+git checkout docs/openclaw-meta-recall-n3-spec && git pull && git checkout -b feat/openclaw-meta-recall-n3
 ```
 
 - [ ] **Step 2: Write the failing tests**
