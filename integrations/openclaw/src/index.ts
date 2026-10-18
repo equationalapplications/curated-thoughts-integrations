@@ -399,8 +399,15 @@ export function createPlugin(deps: PluginDeps = {}, holder: StateHolder = {}) {
               result = onToolResult(adapter, { id: sessionKey }, result);
             } else if (event.toolName === META_TOOL && event.isError !== true && isMetaRecallCall(event.args)) {
               // A CT recall through the `tool_call` meta tool (spec 2026-10-17
-              // meta-recall N3): same dedup, inside the unchanged wrapper.
-              result = metaToolResult(adapter, sessionKey, event.args, result);
+              // meta-recall N3): same dedup, inside the unchanged wrapper. Its
+              // own try: an adapter throw keeps the result as it is and must
+              // not skip activity.process, which records the recalled ids (or
+              // marks the run meta_unreadable).
+              try {
+                result = metaToolResult(adapter, sessionKey, event.args, result);
+              } catch (error) {
+                warn('tool_call recall dedup failed', error);
+              }
             }
             result = await activity.process(event, ctx, result);
             if (result === event.result) return undefined;

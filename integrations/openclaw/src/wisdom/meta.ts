@@ -10,7 +10,7 @@
  * re-serialise byte for byte (compact, truncated, an unknown shape) is refused.
  * Pure and never throws, except `metaToolResult`: it runs the core's N3, which
  * writes the ledger cache through the adapter. It does not throw itself; an
- * adapter error is caught by the middleware's try (src/index.ts).
+ * adapter error is caught by the middleware's own try around it (src/index.ts).
  */
 
 import { onToolResult, scanIds, validId } from '@equational-applications/ct-wisdom-core';
@@ -21,38 +21,6 @@ const WRAP_START = '\n---\n';
 const WRAP_END = '<<<END_EXTERNAL_UNTRUSTED_CONTENT';
 /** N3 marker lines after a rewritten envelope (adapter.rewriteEnvelopeStub). */
 const TRAILER_RE = /(?:\n<!-- ct-fact:[^\s>]+ -->)+$/;
-
-/*
- * Boundary guard (final review F1). OpenClaw sanitises the `tool_call` text
- * BEFORE this middleware runs. The rewrite re-serialises the inner envelope,
- * so a JSON `\uXXXX` (or `\/`) escape in a kept entry, which the sanitiser saw
- * as plain ASCII, comes out as the literal character. A part whose rewritten
- * JSON body holds any marker look-alike or LLM special token is refused. Both lists mirror openclaw 2026.10.3 external-content
- * (`MARKER_CHAR_FOLDS` + `replaceMarkers`, `LLM_SPECIAL_TOKEN_PATTERN`).
- */
-const ZERO_WIDTH_RE = /[\u200b\u200c\u200d\u2060\ufeff\u00ad]/g;
-const ANGLE_OPEN_RE = /[\u2329\u3008\u2039\u27e8\ufe64\u00ab\u300a\u27ea\u27ec\u27ee\u276c\u276e\u02c2\uff1c]/g;
-const ANGLE_CLOSE_RE = /[\u232a\u3009\u203a\u27e9\ufe65\u00bb\u300b\u27eb\u27ed\u27ef\u276d\u276f\u02c3\uff1e]/g;
-/** The phrase `replaceMarkers` gates on, and the start of the markers it replaces. */
-const MARKER_WORD_RE = /external[\s_]+untrusted[\s_]+content/gi;
-const MARKER_RE = /<<<\s*(?:END[\s_]+)?EXTERNAL[\s_]+UNTRUSTED[\s_]+CONTENT/gi;
-const SPECIAL_TOKENS = [
-  '<|im_start|>', '<|im_end|>', '<|endoftext|>', '<|begin_of_text|>', '<|end_of_text|>',
-  '<|start_header_id|>', '<|end_header_id|>', '<|eot_id|>', '<|python_tag|>', '<|eom_id|>',
-  '[INST]', '[/INST]', '<<SYS>>', '<</SYS>>', '<s>', '</s>',
-  '<|channel|>', '<|message|>', '<|return|>', '<|call|>', '<start_of_turn>', '<end_of_turn>',
-];
-const SPECIAL_TOKEN_RE = new RegExp(
-  [...SPECIAL_TOKENS.map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')), /<\|reserved_special_token_\d+\|>/.source].join('|'),
-  'g',
-);
-
-/** Marker look-alikes plus LLM special tokens in `text`, after OpenClaw-style folding (and NFKC). */
-export function boundaryHits(text: string): number {
-  const folded = text.replace(ZERO_WIDTH_RE, '').replace(ANGLE_OPEN_RE, '<').replace(ANGLE_CLOSE_RE, '>').normalize('NFKC');
-  const count = (re: RegExp) => folded.match(re)?.length ?? 0;
-  return count(MARKER_WORD_RE) + count(MARKER_RE) + count(SPECIAL_TOKEN_RE);
-}
 
 export interface MetaOuter {
   tool: Record<string, unknown>;
@@ -68,25 +36,39 @@ export interface MetaParts {
   tail: string;
 }
 
-function obj(value: unknown): Record<string, unknown> | null {
+export function obj(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
+}
+
+interface MetaSplit {
+  head: string;
+  mid: string;
+  tail: string;
+}
+
+/**
+ * Split a `tool_call` text into the M4 wrapper head, the middle and the
+ * wrapper tail. The end marker is stripped only when a head was found, so a
+ * bare body that quotes the end marker inside a string keeps it. Strict
+ * (`unwrapMeta`) refuses one marker without the other: a bare 2-space JSON
+ * body holds neither unless OpenClaw did not sanitise it (not our shape).
+ */
+function splitMeta(text: string, strict: boolean): MetaSplit | null {
+  const at = text.indexOf(WRAP_START);
+  const end = text.lastIndexOf(WRAP_END);
+  const from = at + WRAP_START.length;
+  if (at >= 0 && end > at) return { head: text.slice(0, from), mid: text.slice(from, end), tail: text.slice(end) };
+  if (strict && (at >= 0 || end >= 0)) return null;
+  if (at >= 0) return { head: text.slice(0, from), mid: text.slice(from), tail: '' };
+  return { head: '', mid: text, tail: '' };
 }
 
 /** Split a `tool_call` text part, or null when it is not the verified shape. */
 export function unwrapMeta(text: string): MetaParts | null {
   try {
-    const at = text.indexOf(WRAP_START);
-    const end = text.lastIndexOf(WRAP_END);
-    const wrapped = at >= 0 && end > at;
-    if (!wrapped && (at >= 0 || end >= 0)) {
-      // One marker without the other is not the M4 layout. A bare 2-space
-      // JSON body can hold neither: JSON escapes newlines, and an end marker
-      // inside a string means OpenClaw did not sanitize it (not our shape).
-      return null;
-    }
-    const head = wrapped ? text.slice(0, at + WRAP_START.length) : '';
-    const tail = wrapped ? text.slice(end) : '';
-    const mid = wrapped ? text.slice(head.length, end) : text;
+    const split = splitMeta(text, true);
+    if (split === null) return null;
+    const { head, mid, tail } = split;
     const lead = /^\s*/.exec(mid)![0];
     const trail = /\s*$/.exec(mid.slice(lead.length))![0];
     const body = mid.slice(lead.length, mid.length - trail.length);
@@ -107,9 +89,12 @@ export function unwrapMeta(text: string): MetaParts | null {
   }
 }
 
-/** Reassemble a part split by `unwrapMeta`. */
-export function rewrapMeta(parts: MetaParts): string {
-  return parts.head + parts.lead + JSON.stringify(parts.outer, null, 2) + parts.trail + parts.tail;
+/**
+ * Reassemble a part split by `unwrapMeta`. `body` is the 2-space JSON of
+ * `parts.outer` when the caller already has it (serialised once).
+ */
+export function rewrapMeta(parts: MetaParts, body: string = JSON.stringify(parts.outer, null, 2)): string {
+  return parts.head + parts.lead + body + parts.trail + parts.tail;
 }
 
 /** True when `tool_call`'s `args.id` (`mcp:<server>:<tool>`) names the CT recall tool. */
@@ -135,11 +120,7 @@ export function metaRecallIds(args: unknown, result: unknown): string[] | 'unrea
     if (parts !== null) inner = parts.outer.result.content;
     else {
       // Not byte-exact (compact, or a shape we only read): still read its ids.
-      let body = text;
-      const at = body.indexOf(WRAP_START);
-      if (at >= 0) body = body.slice(at + WRAP_START.length);
-      const end = body.lastIndexOf(WRAP_END);
-      if (end >= 0) body = body.slice(0, end);
+      const body = splitMeta(text, false)!.mid;
       try {
         const content = obj(obj(JSON.parse(body.trim()))?.result)?.content;
         if (Array.isArray(content)) inner = content;
@@ -174,11 +155,37 @@ export function metaRecallIds(args: unknown, result: unknown): string[] | 'unrea
 }
 
 /**
+ * True when every recall block of `content` (a text part that, without an
+ * optional STRUCTURED_PREFIX, parses to an object with an array
+ * `wiki_entries`) is canonical JSON: `JSON.stringify(JSON.parse(json))`
+ * gives back the same bytes. The N3 rewrite re-serialises each block, so only
+ * then does a kept entry come out as exactly the bytes OpenClaw already
+ * sanitised; a `\uXXXX` or `\/` escape would come out decoded as new text.
+ */
+function recallBlocksCanonical(content: unknown[]): boolean {
+  for (const part of content) {
+    const p = obj(part);
+    if (p === null || p.type !== 'text' || typeof p.text !== 'string') continue;
+    const json = p.text.startsWith(STRUCTURED_PREFIX) ? p.text.slice(STRUCTURED_PREFIX.length) : p.text;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(json);
+    } catch {
+      continue;
+    }
+    if (!Array.isArray(obj(parsed)?.wiki_entries)) continue;
+    if (JSON.stringify(parsed) !== json) return false;
+  }
+  return true;
+}
+
+/**
  * N3 for a `tool_call` CT recall: run the core's dedup on each text part's
  * inner `result` and rewrap it. Returns the same object when nothing changed;
  * other parts, part fields and `details` pass through untouched. A part is
- * left as it is when its inner `tool.id` is not the call's `args.id`, or when
- * the rewritten body holds any boundary marker or special token (`boundaryHits`).
+ * left as it is, and the core is not run on it, when its inner `tool.id` is
+ * not the call's `args.id`, or when an inner recall block is not canonical
+ * JSON (`recallBlocksCanonical`, the inner byte-exact gate).
  */
 export function metaToolResult(adapter: OpenClawWisdomAdapter, sessionKey: string, args: unknown, result: unknown): unknown {
   const target = obj(args)?.id;
@@ -190,15 +197,14 @@ export function metaToolResult(adapter: OpenClawWisdomAdapter, sessionKey: strin
     if (p === null || p.type !== 'text' || typeof p.text !== 'string') return;
     const parts = unwrapMeta(p.text);
     if (parts === null || parts.outer.tool.id !== target) return;
+    if (!recallBlocksCanonical(parts.outer.result.content)) return;
     const standIn = { content: parts.outer.result.content };
     const rewritten = obj(onToolResult(adapter, { id: sessionKey }, standIn));
     if (rewritten === null || rewritten === standIn || !Array.isArray(rewritten.content)) return;
     parts.outer.result = { ...parts.outer.result, content: rewritten.content };
-    // Refuse on ANY hit in the rewritten body (not head/tail, whose wrapper
-    // markers always match): a net count could be offset by a stubbed repeat.
-    if (boundaryHits(JSON.stringify(parts.outer, null, 2)) > 0) return;
+    const body = JSON.stringify(parts.outer, null, 2);
     content ??= [...(outer.content as unknown[])];
-    content[index] = { ...p, text: rewrapMeta(parts) };
+    content[index] = { ...p, text: rewrapMeta(parts, body) };
   });
   return content === null ? result : { ...outer, content };
 }

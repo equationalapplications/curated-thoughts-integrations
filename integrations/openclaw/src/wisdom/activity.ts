@@ -43,18 +43,12 @@ import {
 } from '@equational-applications/ct-wisdom-core';
 
 import { partTexts, type OpenClawWisdomAdapter } from './adapter.js';
-import { metaRecallIds } from './meta.js';
+import { metaRecallIds, obj } from './meta.js';
 
 export { metaRecallIds };
 
 /** The host's per-result block limit (tool-result-middleware MAX_MIDDLEWARE_CONTENT_BLOCKS). */
 export const MIDDLEWARE_MAX_BLOCKS = 200;
-
-function obj(value: unknown): Record<string, unknown> | null {
-  return value !== null && typeof value === 'object' && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : null;
-}
 
 const firstString = (...values: unknown[]): unknown => values.find((v) => typeof v === 'string') ?? values[0];
 
