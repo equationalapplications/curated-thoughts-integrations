@@ -174,8 +174,8 @@ as OpenClaw sent it, with no dedup for that result.
 - **Rule 4 (fail quietly):** any doubt leaves the result unchanged; the middleware never throws.
 - **"Where a host can't, its spec says why":** OpenClaw's known limit 9 (parent spec) is removed.
 
-**Departure from INTENT.md (rule 1), narrowed but not closed** (PR #79 review, 2026-10-18; needs the
-user's approval). A part the binding leaves alone (a refused shape, a non-canonical inner block, or a
+**Departure from INTENT.md (rule 1), narrowed but not closed** (PR #79 review; approved by the user, 2026-10-18).
+A part the binding leaves alone (a refused shape, a non-canonical inner block, or a
 dedup throw) is still delivered in full. It may then repeat a fact already in context, and it carries no
 `ct-fact` markers, so a later run can deliver its facts again. Before 0.3.5 every `tool_call` recall
 behaved this way. Why not close it: changing a refused part would mean re-encoding bytes the gate cannot
