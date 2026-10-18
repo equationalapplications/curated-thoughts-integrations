@@ -50,7 +50,10 @@ rules, the grace, the hard deadline, the abort and cap paths) is unchanged. POSI
 
 - **Program:** an absolute path, never a `PATH` lookup: `<SystemRoot>\System32\taskkill.exe`, where `SystemRoot` is read
   from the host's own `process.env` (not the env handed to `ct`, which may be minimal). It is used only if it is an
-  absolute local Windows path (`/^[A-Za-z]:\\/`) with no `..` segment; otherwise the taskkill step is skipped and the
+  absolute local Windows path (`/^[A-Za-z]:\\/`) with no `..` segment, split on `\` and `/`. Because Win32 strips
+  trailing dots and spaces from a path segment, a segment made only of dots or spaces, or ending in a dot or a space, is
+  refused too (implementation review). A bare drive root (`C:\`) is accepted as it stands, with `C:\` as the cwd; a
+  wrong root only makes taskkill fail to start, which falls back. Otherwise the taskkill step is skipped and the
   fallback runs.
 - **Arguments:** an argument list `['/PID', String(pid), '/T', '/F']`. No shell (`shell: false`), so nothing is parsed by
   `cmd.exe`; the pid is an integer from Node.
@@ -70,6 +73,11 @@ rules, the grace, the hard deadline, the abort and cap paths) is unchanged. POSI
 The hard deadline is armed at the first `killTree()`, before taskkill starts, so the call still settles within
 `killGraceMs` whatever taskkill does. A slow taskkill finishes in the background (it is `unref`'d). The post-exit grace
 still bounds the wait for `'close'`.
+
+On Windows the call can therefore settle while taskkill is still starting or running (its cold start can take longer
+than the 250 ms default deadline). The host may then start its next `ct` while the old tree is still being ended. That
+overlap is short (taskkill's own 2 s bound), and before this change the old descendants were never ended at all
+(PR #80 review).
 
 ### A pure helper for tests
 
@@ -102,7 +110,8 @@ No departure from INTENT.md.
 
 ## Known limitations
 
-- **Pid reuse window [U].** Between the "not exited" check and taskkill opening the process (tens of milliseconds),
+- **Pid reuse window [U].** Between the "not exited" check and taskkill opening the process (this includes
+  taskkill.exe's own start-up, typically tens to a few hundred milliseconds; PR #80 review),
   `ct` could exit and Windows could hand its pid to an unrelated process, which `/T /F` would then end with its
   children. Windows does not reuse a pid while a handle to the process is open, and Node holds one until it reports the
   exit, so the window is only the time between Node seeing the exit and taskkill running. No cheap mitigation exists

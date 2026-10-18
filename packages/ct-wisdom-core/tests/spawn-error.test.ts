@@ -28,8 +28,12 @@ interface TaskkillCall { command: string; args: string[]; options: Record<string
 
 const state: {
   next: FakeChild | undefined;
-  /** An exit code, or 'hang': the fake taskkill never emits 'exit' or 'error'. */
-  taskkillCode: number | 'hang';
+  /**
+   * An exit code; 'hang': the fake taskkill never emits 'exit' or 'error';
+   * 'error': it emits 'error' (a failed start); 'throw': spawn() throws.
+   */
+  taskkillCode: number | 'hang' | 'error' | 'throw';
+  taskkillSpawns: number;
   taskkill: FakeChild | undefined;
   taskkillCall: TaskkillCall | undefined;
 } = {
@@ -37,6 +41,7 @@ const state: {
   taskkillCode: 1,
   taskkill: undefined,
   taskkillCall: undefined,
+  taskkillSpawns: 0,
 };
 
 vi.mock('node:child_process', () => ({
@@ -45,11 +50,14 @@ vi.mock('node:child_process', () => ({
   // binding falls back to the direct child.kill), or never ends ('hang').
   spawn: (command: string, args: string[], options: Record<string, unknown>) => {
     if (typeof command === 'string' && /taskkill\.exe$/i.test(command)) {
+      state.taskkillSpawns++;
+      if (state.taskkillCode === 'throw') throw new Error('spawn EMFILE');
       const tk = new FakeChild(2 ** 30 + 9);
       state.taskkill = tk;
       state.taskkillCall = { command, args, options };
       const code = state.taskkillCode;
-      if (code !== 'hang') setTimeout(() => tk.emit('exit', code, null), 5);
+      if (code === 'error') setTimeout(() => tk.emit('error', new Error('spawn taskkill.exe ENOENT')), 5);
+      else if (typeof code === 'number') setTimeout(() => tk.emit('exit', code, null), 5);
       return tk;
     }
     return state.next;
@@ -64,6 +72,7 @@ describe("nodeSpawnFn 'error' handling (mocked child)", () => {
     state.taskkillCode = 1;
     state.taskkill = undefined;
     state.taskkillCall = undefined;
+    state.taskkillSpawns = 0;
   });
 
   it("an 'error' after a successful start is ignored; exit/close settle with the real code", async () => {
@@ -223,6 +232,66 @@ describe("nodeSpawnFn 'error' handling (mocked child)", () => {
         expect(child.kill).toHaveBeenCalledTimes(1);
         expect(child.kill).toHaveBeenCalledWith('SIGKILL');
         expect(killSpy).not.toHaveBeenCalled();
+      });
+
+      // PR #80 Haiku review m5: the remaining fallback and guard paths.
+      it.each([
+        ["emits 'error'", 'error' as const],
+        ['cannot be spawned (spawn throws)', 'throw' as const],
+      ])('a taskkill that %s falls back to the direct kill once, and the call settles', { timeout: 3000 }, async (_name, mode) => {
+        const child = stuckChild();
+        state.next = child;
+        state.taskkillCode = mode;
+        const started = Date.now();
+        const out = await nodeSpawnFn({}, { killGraceMs: 100 })({ command: 'ct', args: [], timeoutMs: 100 });
+        await new Promise((r) => setTimeout(r, 50)); // let an async 'error' land
+        expect(Date.now() - started).toBeLessThan(200 + 800);
+        expect(out.timedOut).toBe(true);
+        expect(state.taskkillSpawns).toBe(1);
+        expect(child.kill).toHaveBeenCalledTimes(1);
+        expect(child.kill).toHaveBeenCalledWith('SIGKILL');
+        expect(killSpy).not.toHaveBeenCalled();
+      });
+
+      it.each([
+        ['a relative path', 'Windows'],
+        ['a UNC path', '\\\\host\\share'],
+        ['a .. segment', 'C:\\Windows\\..\\x'],
+      ])('a SystemRoot that is %s skips taskkill and uses the direct kill', { timeout: 3000 }, async (_name, root) => {
+        process.env.SystemRoot = root;
+        const child = stuckChild();
+        state.next = child;
+        const out = await nodeSpawnFn({}, { killGraceMs: 100 })({ command: 'ct', args: [], timeoutMs: 100 });
+        expect(out.timedOut).toBe(true);
+        expect(state.taskkillSpawns).toBe(0);
+        expect(child.kill).toHaveBeenCalledTimes(1);
+      });
+
+      it('two kills of one child (abort, then an output overflow): taskkill runs once', { timeout: 3000 }, async () => {
+        const child = stuckChild();
+        state.next = child;
+        state.taskkillCode = 'hang';
+        const abort = new AbortController();
+        const pending = nodeSpawnFn({}, { killGraceMs: 100, capBytes: 4 })({ command: 'ct', args: [], timeoutMs: 60_000, signal: abort.signal });
+        abort.abort();
+        child.stdout.emit('data', Buffer.from('too long'));
+            await pending;
+        expect(state.taskkillSpawns).toBe(1);
+        expectTaskkillCall();
+        expect(child.kill).not.toHaveBeenCalled(); // taskkill is still running
+      });
+
+      it('a child that already exited is never taskkilled', { timeout: 3000 }, async () => {
+        const child = new FakeChild(FAKE_PID);
+        state.next = child;
+        const abort = new AbortController();
+        const pending = nodeSpawnFn({}, { killGraceMs: 100 })({ command: 'ct', args: [], timeoutMs: 60_000, signal: abort.signal });
+        child.emit('exit', 0, null);
+        abort.abort();
+        child.emit('close', 0, null);
+        await pending;
+        expect(state.taskkillSpawns).toBe(0);
+        expect(child.kill).not.toHaveBeenCalled();
       });
 
       it('a taskkill that never exits is killed by its own unref\'d timer, then the direct kill runs; the call settles within the kill deadline', { timeout: TASKKILL_TIMEOUT_MS + 3000 }, async () => {

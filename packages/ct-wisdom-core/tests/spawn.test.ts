@@ -101,6 +101,8 @@ describe('nodeSpawnFn abort (real process tree)', { timeout: 30_000 }, () => {
    * puts a non-detached child in its parent's job object (kill on job close),
    * so it would die with the fake ct even under the old direct kill. Detached,
    * it sits outside that job and only taskkill's parent-pid walk (/T) reaches it.
+   * The negative control below is what proves this on the runner: with taskkill
+   * skipped, the grandchild must survive the direct kill.
    */
   async function hangingCtWin() {
     const { mkdtempSync, writeFileSync, rmSync, readFileSync, existsSync } = await import('node:fs');
