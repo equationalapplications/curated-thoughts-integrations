@@ -7,7 +7,7 @@
 
 import { describe, it, expect } from 'vitest';
 
-import { nodeSpawnFn, spawnOutcomeOf } from '../src/spawn.js';
+import { nodeSpawnFn, spawnOutcomeOf, windowsTreeKill } from '../src/spawn.js';
 
 describe('nodeSpawnFn (real binding, fake binary)', { timeout: 30_000 }, () => {
   it.skipIf(process.platform === 'win32')('passes the argument LIST to a shell-less spawn and captures stdout', async () => {
@@ -406,5 +406,34 @@ describe('nodeSpawnFn (every OS)', { timeout: 30_000 }, () => {
       expect(pid).toBeGreaterThan(0);
       try { if (pid > 0) process.kill(pid); } catch { /* gone */ }
     }
+  });
+});
+
+describe('windowsTreeKill (pure; every platform)', () => {
+  it('builds the absolute System32 taskkill call with an argument list', () => {
+    expect(windowsTreeKill(4242, { SystemRoot: 'C:\\Windows' })).toEqual({
+      command: 'C:\\Windows\\System32\\taskkill.exe',
+      args: ['/PID', '4242', '/T', '/F'],
+      cwd: 'C:\\Windows',
+    });
+  });
+
+  it('accepts another drive and a trailing backslash', () => {
+    expect(windowsTreeKill(7, { SystemRoot: 'D:\\WINDOWS\\' })?.command).toBe('D:\\WINDOWS\\System32\\taskkill.exe');
+  });
+
+  it.each([
+    ['missing', {}],
+    ['empty', { SystemRoot: '' }],
+    ['relative', { SystemRoot: 'Windows' }],
+    ['UNC', { SystemRoot: '\\\\server\\share\\Windows' }],
+    ['dot-dot segment', { SystemRoot: 'C:\\Windows\\..\\Temp' }],
+    ['POSIX path', { SystemRoot: '/usr/bin' }],
+  ])('returns null for a %s SystemRoot', (_name, env) => {
+    expect(windowsTreeKill(4242, env as NodeJS.ProcessEnv)).toBeNull();
+  });
+
+  it.each([0, -1, 1.5, Number.NaN])('returns null for pid %s', (pid) => {
+    expect(windowsTreeKill(pid, { SystemRoot: 'C:\\Windows' })).toBeNull();
   });
 });

@@ -6,9 +6,10 @@
  * Argument LIST (never a shell string), no shell, cwd home, windowsHide,
  * SIGKILL, a POSIX process group so a kill takes the tree down, bounded byte
  * accumulation (the async spawn has no maxBuffer). `spec.signal` aborts: on
- * POSIX the child's process group is killed; on Windows only the direct
- * child. Every end path settles: once the child has exited (for any
- * reason), 'close' gets at most a short grace, then the pipes are destroyed
+ * POSIX the child's process group is killed; on Windows `taskkill /T /F` ends
+ * the child and its descendants, with the direct kill as the fallback.
+ * Every end path settles: once the child has exited (for any reason),
+ * 'close' gets at most a short grace, then the pipes are destroyed
  * and the real exit code is reported; after a kill of a running child, the
  * call settles within the same grace even if the kill failed.
  */
@@ -42,8 +43,8 @@ export function spawnOutcomeOf(raw: {
  * The default for `killGraceMs`, which bounds two waits:
  * - after ANY exit (normal or killed), how long to wait for 'close'. A
  *   descendant that inherited stdout can hold the pipe open long after the
- *   child is gone (a background helper, Windows killing only the direct
- *   child, a process that left the group);
+ *   child is gone (a background helper, a taskkill that has not finished
+ *   yet, a process that left the group);
  * - after a kill of a child that has not exited, the hard deadline by which
  *   the call settles even if the kill failed and no 'exit' ever comes.
  * A promise that never settles would leak the plan, skip the budget miss,
@@ -51,6 +52,31 @@ export function spawnOutcomeOf(raw: {
  */
 export const DEFAULT_KILL_GRACE_MS = 250;
 export const DEFAULT_CAP_BYTES = 4 * 1024 * 1024;
+
+/** taskkill's own bound: it must never become a hung process of its own. */
+export const TASKKILL_TIMEOUT_MS = 2000;
+
+export interface WindowsTreeKill {
+  command: string;
+  args: string[];
+  cwd: string;
+}
+
+/**
+ * The Windows tree kill (spec 2026-10-17-windows-kill-tree-design.md):
+ * `<SystemRoot>\System32\taskkill.exe /PID <pid> /T /F`, by absolute path
+ * (never a PATH lookup) with an argument list (never a shell). Null when
+ * SystemRoot is not an absolute local path or the pid is not a positive
+ * integer; the caller then falls back to the direct kill.
+ */
+export function windowsTreeKill(pid: number, env: NodeJS.ProcessEnv): WindowsTreeKill | null {
+  if (!Number.isInteger(pid) || pid <= 0) return null;
+  const root = env.SystemRoot;
+  if (typeof root !== 'string' || !/^[A-Za-z]:\\/.test(root)) return null;
+  if (root.split('\\').includes('..')) return null;
+  const base = root.replace(/\\+$/, '');
+  return { command: `${base}\\System32\\taskkill.exe`, args: ['/PID', String(pid), '/T', '/F'], cwd: base };
+}
 
 export interface NodeSpawnOptions {
   /**
@@ -113,6 +139,7 @@ export function nodeSpawnFn(
       let settled = false;
       let exitCode: number | null = null;
       let exited = false;
+      let treeKillStarted = false;
       let grace: ReturnType<typeof setTimeout> | undefined;
       let deadline: ReturnType<typeof setTimeout> | undefined;
       /** Pipes may be held by a descendant: destroy them and settle with what is known. */
@@ -130,12 +157,21 @@ export function nodeSpawnFn(
         }
         finish(exited ? exitCode : null, false);
       }
+      /** Today's direct kill: the one process (Windows fallback, POSIX group gone). */
+      function directKill(): void {
+        try {
+          child.kill('SIGKILL');
+        } catch {
+          /* a kill that throws is bounded by the deadline above */
+        }
+      }
       /**
        * The one kill path (timeout, abort, overflow). POSIX: the process
        * group (negative pid), falling back to the direct child when the
-       * group is gone; Windows: the direct child only. A child that never
-       * started has no pid and is never signalled: `child.kill()` on a
-       * failed spawn signals pid 0, i.e. OUR OWN process group.
+       * group is gone; Windows: taskkill /T /F, direct kill as the
+       * fallback. A child that never started has no pid and is never
+       * signalled: `child.kill()` on a failed spawn signals pid 0, i.e. OUR OWN
+       * process group.
        */
       function killTree(): void {
         const pid = child.pid;
@@ -158,11 +194,47 @@ export function nodeSpawnFn(
           } catch {
             /* group gone — fall through to the direct kill */
           }
+          directKill();
+          return;
         }
+        // win32: no process groups. taskkill /T walks the tree from the
+        // child's pid, so it must run while the child is alive — before the
+        // direct kill, which is only the fallback. Once per child.
+        if (treeKillStarted) return;
+        treeKillStarted = true;
+        const call = windowsTreeKill(pid, process.env);
+        if (call === null) {
+          directKill();
+          return;
+        }
+        let tk: ReturnType<typeof spawn>;
         try {
-          child.kill('SIGKILL');
+          tk = spawn(call.command, call.args, {
+            cwd: call.cwd,
+            stdio: 'ignore',
+            shell: false,
+            windowsHide: true,
+            timeout: TASKKILL_TIMEOUT_MS,
+            killSignal: 'SIGKILL' as NodeJS.Signals,
+          });
         } catch {
-          /* a kill that throws is bounded by the deadline above */
+          directKill();
+          return;
+        }
+        let fellBack = false;
+        const fallback = () => {
+          if (fellBack) return;
+          fellBack = true;
+          if (!exited) directKill();
+        };
+        tk.on('error', fallback);
+        tk.on('exit', (code) => {
+          if (code !== 0) fallback();
+        });
+        try {
+          tk.unref();
+        } catch {
+          /* nothing more to do */
         }
       }
       // Cleared at exit, so `timedOut` means the timer fired BEFORE exit.
