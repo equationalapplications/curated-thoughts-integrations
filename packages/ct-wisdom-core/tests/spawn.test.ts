@@ -154,10 +154,11 @@ describe('nodeSpawnFn abort (real process tree)', { timeout: 30_000 }, () => {
     const saved = process.env.SystemRoot;
     let gpid = 0;
     try {
-      process.env.SystemRoot = 'not-absolute';
       const abort = new AbortController();
       const pending = nodeSpawnFn()({ command: ct.command, args: ct.args, timeoutMs: 30_000, signal: abort.signal });
       gpid = await ct.grandchild();
+      // Break SystemRoot only now: the child needs it to start, the kill reads it at kill time.
+      process.env.SystemRoot = 'not-absolute';
       abort.abort();
       const out = await pending;
       expect(out.aborted).toBe(true);
