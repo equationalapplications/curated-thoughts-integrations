@@ -65,7 +65,8 @@ type Msg = Record<string, unknown>;
 
 interface Pending { text: string; idempotencyKey?: string; metadata?: unknown }
 
-function deliveries(transcript: Msg[], bootIds: string[]): Map<string, number> {
+/** `unreadable` collects a tool_call recall result the oracle cannot read (final review F2): never skip it silently. */
+function deliveries(transcript: Msg[], bootIds: string[], unreadable: string[]): Map<string, number> {
   const counts = new Map<string, number>();
   const bump = (id: string) => counts.set(id, (counts.get(id) ?? 0) + 1);
   bootIds.forEach(bump);
@@ -75,11 +76,13 @@ function deliveries(transcript: Msg[], bootIds: string[]): Map<string, number> {
       for (const match of delivered(proj)) bump(match[1]);
     } else if (m.role === 'toolResult') {
       const content = m.content as Array<{ text: string }>;
-      const recallText = m.toolName === RECALL_TOOL
-        ? content[0]?.text ?? ''
-        : m.toolName === 'tool_call'
-          ? (((unwrapMeta(content[0]?.text ?? '')?.outer.result.content[0]) as { text?: string } | undefined)?.text ?? '')
-          : null;
+      let recallText: string | null = null;
+      if (m.toolName === RECALL_TOOL) recallText = content[0]?.text ?? '';
+      else if (m.toolName === 'tool_call') {
+        const parts = unwrapMeta(content[0]?.text ?? '');
+        if (parts === null) unreadable.push('unreadable tool_call result');
+        else recallText = ((parts.outer.result.content[0]) as { text?: string } | undefined)?.text ?? '';
+      }
       if (recallText) {
         const inner = JSON.parse(recallText.split('\n')[0]) as { wiki_entries: Array<{ id: string; in_context?: boolean }> };
         for (const e of inner.wiki_entries) if (!e.in_context) bump(e.id);
@@ -258,7 +261,10 @@ async function runSession(seed: number, turns: number, stats: Stats): Promise<{ 
     }
 
     const bootIds = (result?.prependSystemContext ?? '').match(MARKER_RE) ? BOOT.map((b) => b.id) : [];
-    for (const [id, n] of deliveries(transcript, bootIds)) {
+    const unreadable: string[] = [];
+    const counts = deliveries(transcript, bootIds, unreadable);
+    for (const u of unreadable) violations.push(`seed ${seed} turn ${t}: ${u}`);
+    for (const [id, n] of counts) {
       if (n > 1) violations.push(`seed ${seed} turn ${t}: ${id} delivered ${n}x in the visible window`);
       if (n > 1 && process.env.CT_EO_DEBUG === String(seed)) {
         console.log(id, JSON.stringify(transcript.map((m) => [m.role, m.toolName, JSON.stringify(m.role === 'user' ? (m.__openclaw as { modelPromptProjection: { text: string } }).modelPromptProjection.text : m.content).includes(`ct-fact:${id}`)])), JSON.stringify(transcript.filter((m) => JSON.stringify(m).includes(`ct-fact:${id}`) || JSON.stringify(m).includes(`"id":"${id}"`))).slice(0, 3000));

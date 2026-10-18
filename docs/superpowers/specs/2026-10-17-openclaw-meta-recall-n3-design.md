@@ -76,7 +76,7 @@ puts the rewritten inner result back in the same place. Only bytes inside the JS
 Anything this code is not sure about stays exactly as OpenClaw produced it, which is today's
 behavior.
 
-### `meta.ts` (pure, never throws)
+### `meta.ts` (pure, never throws; `metaToolResult` writes the ledger cache through the adapter)
 
 - `unwrapMeta(text: string): MetaParts | null`
   - Head: if the text contains `"\n---\n"`, everything up to and including its first occurrence;
@@ -130,7 +130,20 @@ recall block, and a blind or unknown view stubs nothing.
 - Bytes outside the JSON body (OpenClaw's warning, the random marker id, the metadata and the end marker)
   are never changed (M4, M6).
 - All this code adds is stub objects and `<!-- ct-fact:<id> -->` lines, and only for ids that pass
-  `validId`. Neither can form an `EXTERNAL_UNTRUSTED_CONTENT` marker or an LLM special token.
+  `validId`. Neither can form an `EXTERNAL_UNTRUSTED_CONTENT` marker or an LLM special token. That
+  covers only what we add, not what we re-encode (see the review amendment below).
+- Boundary guard: the rewrite re-serialises the inner envelope, so a JSON `\uXXXX` or `\/` escape in a
+  kept entry, which OpenClaw's sanitiser saw as plain ASCII, would come out as the literal character.
+  `metaToolResult` counts marker look-alikes (after OpenClaw's character folding and NFKC) and LLM
+  special tokens (the list mirrors openclaw 2026.10.3 `LLM_SPECIAL_TOKEN_PATTERN`) in the original
+  part and in the rewritten one. When the rewritten part has more, that part is left unchanged.
+- A part is rewritten only when its inner `tool.id` equals the call's `args.id`.
+
+**Review amendment (final review, 2026-10-17).** The earlier Safety claim covered only the stubs and
+marker lines this code adds. Re-serialising a kept entry can decode escapes that passed OpenClaw's
+sanitiser, which could forge an end marker or a special token after the sanitiser ran. The boundary
+guard above closes that hole. It fails quiet: a refused part is delivered as OpenClaw sent it, with no
+dedup for that result.
 - No new process, file, network call or dependency.
 - Size: a stub is usually shorter than the entry it replaces; each new id adds one marker line
   (about 30 characters), as on the direct path. OpenClaw's 20 000-character bound runs before the
@@ -178,3 +191,8 @@ No departure from INTENT.md.
   stores, not what the model sees.
 - Truncated or compact bodies: they are never rewritten (their ids still join the ledger, or the run
   goes blind, as today).
+- On this route the inner `result.details` (`mcpServer`, `mcpTool`, and `structuredContent` if any) is
+  serialised into the model-visible text. CT returns text only today. If CT ever emits
+  `structuredContent`, it would carry full entries unstubbed. That is no worse than before this change.
+- The live e2e does not yet assert that the full entry is absent next to the stub. That check will be
+  added on the next live run. The property and unit tests cover it.

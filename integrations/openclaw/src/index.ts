@@ -400,7 +400,7 @@ export function createPlugin(deps: PluginDeps = {}, holder: StateHolder = {}) {
             } else if (event.toolName === META_TOOL && event.isError !== true && isMetaRecallCall(event.args)) {
               // A CT recall through the `tool_call` meta tool (spec 2026-10-17
               // meta-recall N3): same dedup, inside the unchanged wrapper.
-              result = metaToolResult(adapter, sessionKey, result);
+              result = metaToolResult(adapter, sessionKey, event.args, result);
             }
             result = await activity.process(event, ctx, result);
             if (result === event.result) return undefined;

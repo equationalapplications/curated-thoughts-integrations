@@ -8,7 +8,9 @@
  * split that text so the N3 dedup can rewrite the inner recall result, and put
  * it back with every byte outside the JSON body unchanged. A body that does not
  * re-serialise byte for byte (compact, truncated, an unknown shape) is refused.
- * Pure; never throws.
+ * Pure and never throws, except `metaToolResult`: it runs the core's N3, which
+ * writes the ledger cache through the adapter. It does not throw itself; an
+ * adapter error is caught by the middleware's try (src/index.ts).
  */
 
 import { onToolResult, scanIds, validId } from '@equational-applications/ct-wisdom-core';
@@ -19,6 +21,39 @@ const WRAP_START = '\n---\n';
 const WRAP_END = '<<<END_EXTERNAL_UNTRUSTED_CONTENT';
 /** N3 marker lines after a rewritten envelope (adapter.rewriteEnvelopeStub). */
 const TRAILER_RE = /(?:\n<!-- ct-fact:[^\s>]+ -->)+$/;
+
+/*
+ * Boundary guard (final review F1). OpenClaw sanitises the `tool_call` text
+ * BEFORE this middleware runs. The rewrite re-serialises the inner envelope,
+ * so a JSON `\uXXXX` (or `\/`) escape in a kept entry, which the sanitiser saw
+ * as plain ASCII, comes out as the literal character. A rewritten part that
+ * holds more marker look-alikes or LLM special tokens than the original is
+ * refused. Both lists mirror openclaw 2026.10.3 external-content
+ * (`MARKER_CHAR_FOLDS` + `replaceMarkers`, `LLM_SPECIAL_TOKEN_PATTERN`).
+ */
+const ZERO_WIDTH_RE = /[\u200b\u200c\u200d\u2060\ufeff\u00ad]/g;
+const ANGLE_OPEN_RE = /[\u2329\u3008\u2039\u27e8\ufe64\u00ab\u300a\u27ea\u27ec\u27ee\u276c\u276e\u02c2\uff1c]/g;
+const ANGLE_CLOSE_RE = /[\u232a\u3009\u203a\u27e9\ufe65\u00bb\u300b\u27eb\u27ed\u27ef\u276d\u276f\u02c3\uff1e]/g;
+/** The phrase `replaceMarkers` gates on, and the start of the markers it replaces. */
+const MARKER_WORD_RE = /external[\s_]+untrusted[\s_]+content/gi;
+const MARKER_RE = /<<<\s*(?:END[\s_]+)?EXTERNAL[\s_]+UNTRUSTED[\s_]+CONTENT/gi;
+const SPECIAL_TOKENS = [
+  '<|im_start|>', '<|im_end|>', '<|endoftext|>', '<|begin_of_text|>', '<|end_of_text|>',
+  '<|start_header_id|>', '<|end_header_id|>', '<|eot_id|>', '<|python_tag|>', '<|eom_id|>',
+  '[INST]', '[/INST]', '<<SYS>>', '<</SYS>>', '<s>', '</s>',
+  '<|channel|>', '<|message|>', '<|return|>', '<|call|>', '<start_of_turn>', '<end_of_turn>',
+];
+const SPECIAL_TOKEN_RE = new RegExp(
+  [...SPECIAL_TOKENS.map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')), /<\|reserved_special_token_\d+\|>/.source].join('|'),
+  'g',
+);
+
+/** Marker look-alikes plus LLM special tokens in `text`, after OpenClaw-style folding (and NFKC). */
+export function boundaryHits(text: string): number {
+  const folded = text.replace(ZERO_WIDTH_RE, '').replace(ANGLE_OPEN_RE, '<').replace(ANGLE_CLOSE_RE, '>').normalize('NFKC');
+  const count = (re: RegExp) => folded.match(re)?.length ?? 0;
+  return count(MARKER_WORD_RE) + count(MARKER_RE) + count(SPECIAL_TOKEN_RE);
+}
 
 export interface MetaOuter {
   tool: Record<string, unknown>;
@@ -142,23 +177,28 @@ export function metaRecallIds(args: unknown, result: unknown): string[] | 'unrea
 /**
  * N3 for a `tool_call` CT recall: run the core's dedup on each text part's
  * inner `result` and rewrap it. Returns the same object when nothing changed;
- * other parts, part fields and `details` pass through untouched.
+ * other parts, part fields and `details` pass through untouched. A part is
+ * left as it is when its inner `tool.id` is not the call's `args.id`, or when
+ * the rewrite would add a boundary marker or special token (`boundaryHits`).
  */
-export function metaToolResult(adapter: OpenClawWisdomAdapter, sessionKey: string, result: unknown): unknown {
+export function metaToolResult(adapter: OpenClawWisdomAdapter, sessionKey: string, args: unknown, result: unknown): unknown {
+  const target = obj(args)?.id;
   const outer = obj(result);
-  if (outer === null || !Array.isArray(outer.content)) return result;
+  if (typeof target !== 'string' || outer === null || !Array.isArray(outer.content)) return result;
   let content: unknown[] | null = null;
   outer.content.forEach((part, index) => {
     const p = obj(part);
     if (p === null || p.type !== 'text' || typeof p.text !== 'string') return;
     const parts = unwrapMeta(p.text);
-    if (parts === null) return;
+    if (parts === null || parts.outer.tool.id !== target) return;
     const standIn = { content: parts.outer.result.content };
     const rewritten = obj(onToolResult(adapter, { id: sessionKey }, standIn));
     if (rewritten === null || rewritten === standIn || !Array.isArray(rewritten.content)) return;
     parts.outer.result = { ...parts.outer.result, content: rewritten.content };
+    const text = rewrapMeta(parts);
+    if (boundaryHits(text) > boundaryHits(p.text)) return;
     content ??= [...(outer.content as unknown[])];
-    content[index] = { ...p, text: rewrapMeta(parts) };
+    content[index] = { ...p, text };
   });
   return content === null ? result : { ...outer, content };
 }
