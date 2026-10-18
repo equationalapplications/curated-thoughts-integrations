@@ -126,11 +126,15 @@ via_meta = any(
 )
 print('recall route:', 'tool_call meta tool' if via_meta else 'direct')
 check('N3: the recall result stubs a fact already in context', recall_stub)
+def stub_inside_wrapper(t):
+    # The stub must sit between the start marker and the LAST end marker.
+    start = t.find('<<<EXTERNAL_UNTRUSTED_CONTENT')
+    end = t.rfind('<<<END_EXTERNAL_UNTRUSTED_CONTENT')
+    return 0 <= start < end and has_stub(t[start:end])
+
+
 if via_meta:
-    wrapped_stub = any(
-        has_stub(t) and '<<<EXTERNAL_UNTRUSTED_CONTENT' in t and t.rstrip().endswith('>>>')
-        for r in tool_results(last).values() for t in texts([r])
-    )
+    wrapped_stub = any(stub_inside_wrapper(t) for r in tool_results(last).values() for t in texts([r]))
     check('N3 via tool_call: the stub sits inside the external-content wrapper', wrapped_stub)
 
 # --- verbose -----------------------------------------------------------------
