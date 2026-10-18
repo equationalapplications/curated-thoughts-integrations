@@ -1,6 +1,6 @@
 # Intuitive Wisdom: recall dedup (N3) for CT recalls through OpenClaw's `tool_call` — design
 
-**Date:** 2026-10-17 · **Status:** Draft for user review · **Branch:** `docs/openclaw-meta-recall-n3-spec` ·
+**Date:** 2026-10-17 · **Status:** Approved (user, 2026-10-17) · **Branch:** `docs/openclaw-meta-recall-n3-spec` ·
 **Base:** `origin/main` @ `0b7729c`
 **Release:** openclaw 0.3.4 → 0.3.5 (host pin `openclaw@2026.10.3`, unchanged)
 **Builds on:** [`2026-10-17-openclaw-autonomous-work-wisdom-design.md`](2026-10-17-openclaw-autonomous-work-wisdom-design.md)
