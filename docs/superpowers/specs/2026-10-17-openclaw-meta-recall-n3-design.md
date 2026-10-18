@@ -82,12 +82,15 @@ behavior.
   - Head: if the text contains `"\n---\n"`, everything up to and including its first occurrence;
     else `""`. Tail: if the text contains `"<<<END_EXTERNAL_UNTRUSTED_CONTENT"` after the head, from
     its last occurrence to the end; else `""`. A head without a tail, or a tail without a head, is
-    `null` (not the M4 layout).
+    `null` (not the M4 layout). One split helper serves both `unwrapMeta` (strict, as above) and
+    the `metaRecallIds` fallback (lenient: a head without a tail is read). Both strip the end marker
+    only when a head was found, so a bare body that quotes the end marker inside a fact keeps it.
   - Body: the rest, minus its leading and trailing whitespace, which are kept as `lead` and `trail`.
   - `null` unless the body parses as JSON, **`JSON.stringify(parsed, null, 2) === body`**, `parsed` is
     an object with an object `tool` and `result.content` an array.
   - Returns `{head, lead, outer: parsed, trail, tail}`.
-- `rewrapMeta(parts: MetaParts): string` is `head + lead + JSON.stringify(outer, null, 2) + trail + tail`.
+- `rewrapMeta(parts: MetaParts, body?: string): string` is `head + lead + body + trail + tail`, where
+  `body` defaults to `JSON.stringify(outer, null, 2)`; `metaToolResult` serialises once and passes it.
 - `metaRecallIds` moves here from `activity.ts` (re-exported there, so imports keep working) and
   uses `unwrapMeta` for the outer layer. Its "unreadable" rule is unchanged. It also accepts an inner
   envelope followed by N3 marker lines (an inner text whose JSON prefix parses once trailing
@@ -102,7 +105,8 @@ Next to the existing N3 branch, before `activity.process`:
 
 - **When:** `event.toolName === 'tool_call'`, `event.isError !== true`, and `event.args.id` is a
   string whose last `:`-segment passes `isRecallToolName` (the test `metaRecallIds` already uses).
-- **What:** for each `content` part of `event.result` that is a text part and unwraps, build the stand-in
+- **What:** for each `content` part of `event.result` that is a text part, unwraps and passes the inner
+  byte-exact gate (Safety), build the stand-in
   result `{content: outer.result.content}` and run `onToolResult(adapter, {id: sessionKey}, stand-in)`.
   If it returns a different object, set `outer.result.content` to its `content` and replace that part's
   text with `rewrapMeta(parts)`. Parts are processed in order; the core's ledger cache makes a second
@@ -111,8 +115,10 @@ Next to the existing N3 branch, before `activity.process`:
   projection strips tool-result `details`, parity-leg fact F9 [V], and the direct N3 path leaves
   `details` alone too), and any part that does not
   unwrap.
-- **Errors:** the existing `try` around the middleware body still applies; on a throw the original
-  `event.result` is returned (rule 4).
+- **Errors:** the `metaToolResult` call has its own `try`: on a throw (for example from the adapter's
+  ledger cache) it warns and keeps the result unchanged, so `activity.process` still runs and records
+  the recalled ids, or marks the run `meta_unreadable`. The existing `try` around the middleware body
+  still applies; on any other throw the original `event.result` is returned (rule 4).
 
 Everything else comes unchanged from the core and the adapter: repeats become `{id, in_context: true,
 note: "already in context: ct-fact:<id>"}`, new ids get one marker line each after the JSON of the first
@@ -132,13 +138,14 @@ recall block, and a blind or unknown view stubs nothing.
 - All this code adds is stub objects and `<!-- ct-fact:<id> -->` lines, and only for ids that pass
   `validId`. Neither can form an `EXTERNAL_UNTRUSTED_CONTENT` marker or an LLM special token. That
   covers only what we add, not what we re-encode (see the review amendment below).
-- Boundary guard: the rewrite re-serialises the inner envelope, so a JSON `\uXXXX` or `\/` escape in a
-  kept entry, which OpenClaw's sanitiser saw as plain ASCII, would come out as the literal character.
-  `metaToolResult` refuses whenever the rewritten body contains any marker look-alike or special token
-  after folding (OpenClaw's character folding, then NFKC; the token list mirrors openclaw 2026.10.3
-  `LLM_SPECIAL_TOKEN_PATTERN`). Only the JSON body is checked, not the head or tail, whose wrapper
-  markers always match. The bare layout's body is the whole text. A refused part is left unchanged. The
-  accepted cost: a recall whose text holds such a phrase stays unstubbed, as before 0.3.5.
+- Inner byte-exact gate: the rewrite re-serialises each inner recall block, so a JSON `\uXXXX` or `\/`
+  escape in a kept entry, which OpenClaw's sanitiser saw as plain ASCII, would come out as the literal
+  character. Before running the core on a part, `metaToolResult` checks every inner recall block of
+  `outer.result.content` (a text part that, without an optional `structuredContent:\n` prefix, parses to
+  an object with an array `wiki_entries`) and requires `JSON.stringify(JSON.parse(json)) === json`. If
+  any block fails, the whole part is left unchanged and the core is not run on it (so the ledger cache
+  gets nothing from that part). A kept entry then re-serialises to exactly the bytes OpenClaw already
+  sanitised, and the only new text is the stubs and marker lines.
 - A part is rewritten only when its inner `tool.id` equals the call's `args.id`.
 - No new process, file, network call or dependency.
 - Size: a stub is usually shorter than the entry it replaces; each new id adds one marker line
@@ -147,11 +154,16 @@ recall block, and a blind or unknown view stubs nothing.
 
 **Review amendment (final review, 2026-10-17).** The earlier Safety claim covered only the stubs and
 marker lines this code adds. Re-serialising a kept entry can decode escapes that passed OpenClaw's
-sanitiser, which could forge an end marker or a special token after the sanitiser ran. A first guard
-compared hit counts before and after the rewrite. A stubbed repeat whose text held a hit could offset a
-decoded one, so the guard now refuses on any hit in the rewritten body. A rewrite therefore never adds
-a marker or special token, and none can be hidden behind one already in the body. It fails quiet: a
-refused part is delivered as OpenClaw sent it, with no dedup for that result.
+sanitiser, which could forge an end marker or a special token after the sanitiser ran. The first fix
+was a boundary guard that refused a part whose rewritten body held any marker look-alike or special
+token, using copies of OpenClaw's fold tables and token list.
+
+**Review amendment (PR #79 code review, 2026-10-17).** The boundary guard was replaced by the inner
+byte-exact gate above. It copied OpenClaw internals (fold tables, token list) that can drift, and it
+refused too often: it counted the bare marker phrase and half-markers, and it folded before matching
+special tokens, so a kept `«s»` read as `<s>`. The gate removes the cause instead: a canonical inner
+block re-serialises byte for byte, so nothing is decoded. It fails quiet: a refused part is delivered
+as OpenClaw sent it, with no dedup for that result.
 
 ## Alignment with INTENT.md
 
@@ -175,6 +187,11 @@ No departure from INTENT.md.
   of the same fact stubs the second; two `tool_call` recalls in one run stub the second; a blind run
   (after compaction) stubs nothing; a refused shape is returned as the same object; `details` is
   untouched; a second middleware pass over the same result is still a no-op.
+  Inner gate: inner blocks with `\u` or `\/` escapes (escaped markers, escaped special tokens,
+  harmless escapes, smuggle-style pairs) come back unchanged and never reach the core; canonical blocks
+  holding the marker phrase, `«s»` or a literal fullwidth `<s>` look-alike, and a sidecar-shaped
+  envelope (non-ASCII, quotes, newline, raw U+2028), are stubbed. A throw in the dedup still lets
+  activity record the recalled ids.
 - **Exactly-once (`tests/test_exactly_once.test.ts`):** the randomized sessions also route some recalls
   through `tool_call` (wrapped and bare); no fact id appears as a full entry twice in one run's view.
 - **Live e2e (`tests/e2e/run_activity.sh`):** add a second `tool_call` recall whose stub-CT reply repeats
@@ -193,6 +210,9 @@ No departure from INTENT.md.
 - Other hosts: none has a meta-tool route.
 - `details`: it holds the raw call result for OpenClaw's own use; rewriting it would change what OpenClaw
   stores, not what the model sees.
+- A part we leave alone (refused shape, non-canonical inner block, or a dedup throw) carries no
+  `ct-fact` markers, so the next run's snapshot does not see its facts as delivered. Same as before
+  0.3.5.
 - Truncated or compact bodies: they are never rewritten (their ids still join the ledger, or the run
   goes blind, as today).
 - On this route the inner `result.details` (`mcpServer`, `mcpTool`, and `structuredContent` if any) is
