@@ -1,6 +1,6 @@
 # Windows: a `ct` kill takes the whole process tree down — design
 
-**Date:** 2026-10-17 · **Status:** Draft for user review · **Branch:** `docs/windows-kill-tree-spec` ·
+**Date:** 2026-10-17 · **Status:** Approved (user, 2026-10-17) · **Branch:** `docs/windows-kill-tree-spec` ·
 **Base:** `origin/main` @ `0b7729c`
 **Scope:** `packages/ct-wisdom-core/src/spawn.ts` (the one Node spawn binding), and through it the hosts that
 vendor the core: deepseek, opencode, openclaw.
