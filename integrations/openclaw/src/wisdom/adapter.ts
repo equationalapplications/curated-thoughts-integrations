@@ -257,8 +257,12 @@ export class OpenClawWisdomAdapter implements HostAdapter {
     const run = this.run(sessionId, runId);
     if (run === null) return;
     const base = this.bases.get(sessionId)?.set;
+    const cached = this.cache.get(sessionId)?.ledger;
     for (const id of ids) {
       if (!validId(id) || base?.has(id)) continue; // the snapshot already shows it
+      // An id the turn cache lacks (a refused tool_call part, PR #79 review)
+      // drops the cache, so the next N3 rebuilds from the run ledger.
+      if (cached !== undefined && !cached.has(id)) this.cache.delete(sessionId);
       if (run.set.has(id)) run.ids.splice(run.ids.indexOf(id), 1);
       run.ids.unshift(id);
       run.set.add(id);

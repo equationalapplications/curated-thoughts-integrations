@@ -391,7 +391,7 @@ tool result and prompt result is byte-identical (tested).
 6. **Process-local run ledger:** a gateway restart mid-run gives `no_ledger` until the next run.
 7. **[U]** subagent, cron and heartbeat runs are inferred from the hook shapes, not exercised live.
 8. **One trigger per step:** other new keys in the same step stay unseen and can trigger later.
-9. **Recalls through `tool_call`** bypass the N3 dedup (see "Implementation findings"); pre-existing.
+9. ~~**Recalls through `tool_call`** bypass the N3 dedup~~ — closed in openclaw 0.3.5 by [2026-10-17-openclaw-meta-recall-n3-design.md](2026-10-17-openclaw-meta-recall-n3-design.md).
 
 ## Testing
 
