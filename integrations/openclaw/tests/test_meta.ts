@@ -101,6 +101,11 @@ describe('one split helper: the end marker is stripped only after a head (PR #79
     expect(metaRecallIds(ARGS, result(compact))).toEqual(['w-e']);
   });
 
+  it('an end marker with no head is not stripped: the text reads as unreadable (fails closed)', () => {
+    const tailOnly = `${body(env([{ id: 'w-9', text: 'x' }]))}\n<<<END_EXTERNAL_UNTRUSTED_CONTENT id="z">>>`;
+    expect(metaRecallIds(ARGS, result(tailOnly))).toBe('unreadable');
+  });
+
   it('unwrapMeta still refuses a bare body holding an end marker (strict)', () => {
     expect(unwrapMeta(body(env([QUOTED])))).toBeNull();
   });

@@ -8,9 +8,10 @@
  * split that text so the N3 dedup can rewrite the inner recall result, and put
  * it back with every byte outside the JSON body unchanged. A body that does not
  * re-serialise byte for byte (compact, truncated, an unknown shape) is refused.
- * Pure and never throws, except `metaToolResult`: it runs the core's N3, which
- * writes the ledger cache through the adapter. It does not throw itself; an
- * adapter error is caught by the middleware's own try around it (src/index.ts).
+ * Every helper here is pure and never throws, except `metaToolResult`: it runs
+ * the core's N3, which writes the ledger cache through the adapter, so an
+ * adapter error can propagate out of it. The middleware's own try around it
+ * (src/index.ts) catches that.
  */
 
 import { onToolResult, scanIds, validId } from '@equational-applications/ct-wisdom-core';

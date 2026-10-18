@@ -10,6 +10,7 @@ import { ACTIVITY_HEADING, BREAKER_FAILS, EXCLUDE_MAX, nodeSpawnFn, type SpawnFn
 import { createPlugin } from '../src/index.js';
 import { OpenClawWisdomAdapter } from '../src/wisdom/adapter.js';
 import { CtLocator } from '../src/wisdom/discover.js';
+import { metaRecallIds } from '../src/wisdom/meta.js';
 import { FakeApi, FakeCt, boot, ok, type Fact } from './fake_host.js';
 
 const PROJECT = realpathSync(mkdtempSync(join(tmpdir(), 'ocl-rev-')));
@@ -391,6 +392,52 @@ describe('5. recalls through the `tool_call` meta tool', () => {
     await h.tool('r1', 'tool_call', { id: 'mcp:github:github__search', args: {} }, { content: [{ type: 'text', text: 'opaque' }] });
     h.step('r1', 2);
     expect(h.block(await h.tool('r1', 'read', { path: 'a.ts' }))).toContain('ct-fact:fa');
+  });
+
+  // PR #79 Haiku review M1: ids that join the run ledger outside the core's
+  // N3 (a refused tool_call part, an activity block) must also reach a turn
+  // cache built before them, or a later direct recall repeats the fact.
+  const DIRECT = 'curated-thoughts__curated_recall_context';
+  const directRecall = (entries: Array<Record<string, unknown>>) => ({ content: [{ type: 'text', text: ENV(entries) }] });
+
+  it('a refused tool_call part, then a direct recall of one of its ids: the repeat is stubbed', async () => {
+    const h = setup();
+    await h.prompt('r1', { trigger: 'cron' });
+    await h.tool('r1', DIRECT, {}, directRecall([{ id: 'w1', text: 'x' }])); // builds the turn cache
+    const refused = metaResult(ESCAPED_INNER('\\u003cb\\u003e')); // ids old, new1; delivered in full
+    expect(await h.tool('r1', 'tool_call', args, refused)).toBe(refused);
+    const out = await h.tool('r1', DIRECT, {}, directRecall([{ id: 'new1', text: 'y' }]));
+    expect(out.content[0].text).toContain('"in_context":true');
+  });
+
+  it('the ids read back from a rewritten result are the ids recalled', async () => {
+    const h = setup();
+    await h.prompt('r1', { trigger: 'cron', messages: OLD_SNAPSHOT });
+    const raw = metaResult(ENV([{ id: 'old', text: 'x' }, { id: 'new1', text: 'y' }]));
+    const out = await h.tool('r1', 'tool_call', args, raw);
+    expect(out).not.toBe(raw);
+    expect(metaRecallIds(args, out)).toEqual(['old', 'new1']);
+  });
+
+  it('two text parts in one tool_call result: the second sees the first part\'s ids', async () => {
+    const h = setup();
+    await h.prompt('r1', { trigger: 'cron' });
+    const one = wrapped(ENV([{ id: 'p1', text: 'x' }]));
+    const out = await h.tool('r1', 'tool_call', args, { content: [{ type: 'text', text: one }, { type: 'text', text: one }] });
+    expect(out.content[0].text).toContain('<!-- ct-fact:p1 -->');
+    expect(out.content[0].text).not.toContain('\\"in_context\\":true');
+    expect(out.content[1].text).toContain('\\"in_context\\":true');
+  });
+
+  it('an activity block, then a direct recall of its fact: the repeat is stubbed', async () => {
+    const h = setup();
+    h.facts.set('a.ts', [FACT('fa')]);
+    await h.prompt('r1', { trigger: 'cron' });
+    await h.tool('r1', DIRECT, {}, directRecall([{ id: 'w1', text: 'x' }])); // builds the turn cache
+    h.step('r1', 1);
+    expect(h.block(await h.tool('r1', 'read', { path: 'a.ts' }))).toContain('ct-fact:fa');
+    const out = await h.tool('r1', DIRECT, {}, directRecall([{ id: 'fa', text: 'body fa' }]));
+    expect(out.content[0].text).toContain('"in_context":true');
   });
 });
 

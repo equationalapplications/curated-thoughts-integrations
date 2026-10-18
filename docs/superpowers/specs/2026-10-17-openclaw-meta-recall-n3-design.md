@@ -1,6 +1,6 @@
 # Intuitive Wisdom: recall dedup (N3) for CT recalls through OpenClaw's `tool_call` — design
 
-**Date:** 2026-10-17 · **Status:** Approved (user, 2026-10-17) · **Branch:** `docs/openclaw-meta-recall-n3-spec` ·
+**Date:** 2026-10-17 · **Status:** Approved (user, 2026-10-17) · **Branch:** `feat/openclaw-meta-recall-n3` ·
 **Base:** `origin/main` @ `0b7729c`
 **Release:** openclaw 0.3.4 → 0.3.5 (host pin `openclaw@2026.10.3`, unchanged)
 **Builds on:** [`2026-10-17-openclaw-autonomous-work-wisdom-design.md`](2026-10-17-openclaw-autonomous-work-wisdom-design.md)
@@ -174,7 +174,19 @@ as OpenClaw sent it, with no dedup for that result.
 - **Rule 4 (fail quietly):** any doubt leaves the result unchanged; the middleware never throws.
 - **"Where a host can't, its spec says why":** OpenClaw's known limit 9 (parent spec) is removed.
 
-No departure from INTENT.md.
+**Departure from INTENT.md (rule 1), narrowed but not closed** (PR #79 review, 2026-10-18; needs the
+user's approval). A part the binding leaves alone (a refused shape, a non-canonical inner block, or a
+dedup throw) is still delivered in full. It may then repeat a fact already in context, and it carries no
+`ct-fact` markers, so a later run can deliver its facts again. Before 0.3.5 every `tool_call` recall
+behaved this way. Why not close it: changing a refused part would mean re-encoding bytes the gate cannot
+prove safe, and dropping it would hide the recall the agent asked for. In the same run, its ids still
+join the run ledger and drop the turn's N3 cache, so a later recall stubs them.
+
+How often the real sidecar is refused: `curated_recall_context` returns `serde_json::to_string` of a
+`serde_json::json!` map. That output is compact, has sorted keys and keeps non-ASCII raw, so it is
+canonical by `JSON.stringify(JSON.parse(s))`. The exception is an `f32` `score` that the two encoders
+print differently: a whole value (`1.0` vs `1`) or a very small one, where one encoder uses an exponent and the other does not (around `1e-6`). Such a result is
+refused and delivered as before. This is from reading the CT source, not measured on a live brain.
 
 ## Testing
 

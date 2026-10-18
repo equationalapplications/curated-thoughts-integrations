@@ -27,7 +27,6 @@ import { join } from 'node:path';
 import { describe, it, expect } from 'vitest';
 import { ACTIVITY_HEADING, MAX_PER_TURN } from '@equational-applications/ct-wisdom-core';
 import { createPlugin } from '../src/index.js';
-import { unwrapMeta } from '../src/wisdom/meta.js';
 import { FakeApi, FakeCt, type Fact, userCtx } from './fake_host.js';
 
 function mulberry32(seed: number): () => number {
@@ -65,6 +64,29 @@ type Msg = Record<string, unknown>;
 
 interface Pending { text: string; idempotencyKey?: string; metadata?: unknown }
 
+/**
+ * The oracle's own reading of a tool_call text (not the production
+ * unwrapMeta, so a bug there cannot hide here, PR #79 Haiku review m6):
+ * the body sits after the first "\n---\n" and before the last end marker
+ * when wrapped, or is the whole text when bare. Returns the inner recall
+ * text, or null when the body is not JSON of that shape.
+ */
+function metaInner(text: string): string | null {
+  let body = text;
+  if (text.includes('<<<EXTERNAL_UNTRUSTED_CONTENT')) {
+    const from = text.indexOf('\n---\n');
+    const to = text.lastIndexOf('\n<<<END_EXTERNAL_UNTRUSTED_CONTENT');
+    if (from < 0 || to < from) return null;
+    body = text.slice(from + 5, to);
+  }
+  try {
+    const t = (JSON.parse(body) as { result?: { content?: Array<{ text?: unknown }> } }).result?.content?.[0]?.text;
+    return typeof t === 'string' ? t : null;
+  } catch {
+    return null;
+  }
+}
+
 /** `unreadable` collects a tool_call recall result the oracle cannot read (final review F2): never skip it silently. */
 function deliveries(transcript: Msg[], bootIds: string[], unreadable: string[]): Map<string, number> {
   const counts = new Map<string, number>();
@@ -79,9 +101,9 @@ function deliveries(transcript: Msg[], bootIds: string[], unreadable: string[]):
       let recallText: string | null = null;
       if (m.toolName === RECALL_TOOL) recallText = content[0]?.text ?? '';
       else if (m.toolName === 'tool_call') {
-        const parts = unwrapMeta(content[0]?.text ?? '');
-        if (parts === null) unreadable.push('unreadable tool_call result');
-        else recallText = ((parts.outer.result.content[0]) as { text?: string } | undefined)?.text ?? '';
+        const inner = metaInner(content[0]?.text ?? '');
+        if (inner === null) unreadable.push('unreadable tool_call result');
+        else recallText = inner;
       }
       if (recallText) {
         const inner = JSON.parse(recallText.split('\n')[0]) as { wiki_entries: Array<{ id: string; in_context?: boolean }> };
