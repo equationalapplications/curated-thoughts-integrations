@@ -2,7 +2,7 @@
 # openclaw@2026.10.3 — tests/host/compatibility.json).
 id: openclaw
 name: Curated Thoughts for OpenClaw
-version: 0.3.5
+version: 0.3.6
 language: node
 status: implemented
 requires_sidecar: ">=2.5"

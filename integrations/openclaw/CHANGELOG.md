@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.3.6 — 2026-10-18
+
+- Fixed: on Windows, stopping `ct` (timeout, cancel or output cap) now also stops the processes it started, using Windows' own `taskkill /T /F` by its full system path; if that fails, the old direct stop is used. No change on macOS or Linux.
+
 ## 0.3.5 — 2026-10-17
 
 - Fixed: a CT recall the agent makes through OpenClaw's `tool_call` meta tool now gets the same recall dedup as a direct call — facts already in context come back as "already in context" stubs, and new facts carry their marker. Only the JSON inside OpenClaw's external-content wrapper changes; a result in any shape other than the verified one is left as it is. A result whose inner recall JSON is not in canonical form (for example, it holds a `\u` escape that a rewrite would decode into a new character) is left alone and delivered as OpenClaw sent it; an error in this dedup no longer stops the recalled facts from joining the run ledger.
