@@ -429,8 +429,21 @@ describe('windowsTreeKill (pure; every platform)', () => {
     ['UNC', { SystemRoot: '\\\\server\\share\\Windows' }],
     ['dot-dot segment', { SystemRoot: 'C:\\Windows\\..\\Temp' }],
     ['POSIX path', { SystemRoot: '/usr/bin' }],
+    ['mixed-separator dot-dot', { SystemRoot: 'C:\\Windows/../x' }],
+    ['trailing dot-dot', { SystemRoot: 'C:\\Windows\\x/..' }],
+    ['dot-dot with space', { SystemRoot: 'C:\\Windows\\.. \\x' }],
+    ['trailing space', { SystemRoot: 'C:\\Windows ' }],
+    ['trailing dot', { SystemRoot: 'C:\\Windows.' }],
   ])('returns null for a %s SystemRoot', (_name, env) => {
     expect(windowsTreeKill(4242, env as NodeJS.ProcessEnv)).toBeNull();
+  });
+
+  it('uses a drive-absolute cwd for a drive-root SystemRoot', () => {
+    expect(windowsTreeKill(7, { SystemRoot: 'C:\\' })).toEqual({
+      command: 'C:\\System32\\taskkill.exe',
+      args: ['/PID', '7', '/T', '/F'],
+      cwd: 'C:\\',
+    });
   });
 
   it.each([0, -1, 1.5, Number.NaN])('returns null for pid %s', (pid) => {

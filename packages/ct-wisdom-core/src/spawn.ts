@@ -73,9 +73,18 @@ export function windowsTreeKill(pid: number, env: NodeJS.ProcessEnv): WindowsTre
   if (!Number.isInteger(pid) || pid <= 0) return null;
   const root = env.SystemRoot;
   if (typeof root !== 'string' || !/^[A-Za-z]:\\/.test(root)) return null;
-  if (root.split('\\').includes('..')) return null;
+  // Win32 strips trailing dots and spaces from a segment, so `.. ` acts as
+  // `..`: refuse any segment of only dots/whitespace or ending in one.
+  for (const seg of root.split(/[\\/]/)) {
+    if (seg === '' || /^[A-Za-z]:$/.test(seg)) continue;
+    if (/^[.\s]+$/.test(seg) || /[.\s]$/.test(seg)) return null;
+  }
   const base = root.replace(/\\+$/, '');
-  return { command: `${base}\\System32\\taskkill.exe`, args: ['/PID', String(pid), '/T', '/F'], cwd: base };
+  return {
+    command: `${base}\\System32\\taskkill.exe`,
+    args: ['/PID', String(pid), '/T', '/F'],
+    cwd: /^[A-Za-z]:$/.test(base) ? `${base}\\` : base,
+  };
 }
 
 export interface NodeSpawnOptions {
@@ -214,8 +223,6 @@ export function nodeSpawnFn(
             stdio: 'ignore',
             shell: false,
             windowsHide: true,
-            timeout: TASKKILL_TIMEOUT_MS,
-            killSignal: 'SIGKILL' as NodeJS.Signals,
           });
         } catch {
           directKill();
@@ -227,8 +234,23 @@ export function nodeSpawnFn(
           fellBack = true;
           if (!exited) directKill();
         };
-        tk.on('error', fallback);
+        // Own bound, unref'd: Node's spawn `timeout` is a referenced timer
+        // that would hold the host's event loop open.
+        const t = setTimeout(() => {
+          try {
+            tk.kill('SIGKILL');
+          } catch {
+            /* nothing more to do */
+          }
+          fallback();
+        }, TASKKILL_TIMEOUT_MS);
+        t.unref?.();
+        tk.on('error', () => {
+          clearTimeout(t);
+          fallback();
+        });
         tk.on('exit', (code) => {
+          clearTimeout(t);
           if (code !== 0) fallback();
         });
         try {
