@@ -26,9 +26,8 @@ const TRAILER_RE = /(?:\n<!-- ct-fact:[^\s>]+ -->)+$/;
  * Boundary guard (final review F1). OpenClaw sanitises the `tool_call` text
  * BEFORE this middleware runs. The rewrite re-serialises the inner envelope,
  * so a JSON `\uXXXX` (or `\/`) escape in a kept entry, which the sanitiser saw
- * as plain ASCII, comes out as the literal character. A rewritten part that
- * holds more marker look-alikes or LLM special tokens than the original is
- * refused. Both lists mirror openclaw 2026.10.3 external-content
+ * as plain ASCII, comes out as the literal character. A part whose rewritten
+ * JSON body holds any marker look-alike or LLM special token is refused. Both lists mirror openclaw 2026.10.3 external-content
  * (`MARKER_CHAR_FOLDS` + `replaceMarkers`, `LLM_SPECIAL_TOKEN_PATTERN`).
  */
 const ZERO_WIDTH_RE = /[\u200b\u200c\u200d\u2060\ufeff\u00ad]/g;
@@ -179,7 +178,7 @@ export function metaRecallIds(args: unknown, result: unknown): string[] | 'unrea
  * inner `result` and rewrap it. Returns the same object when nothing changed;
  * other parts, part fields and `details` pass through untouched. A part is
  * left as it is when its inner `tool.id` is not the call's `args.id`, or when
- * the rewrite would add a boundary marker or special token (`boundaryHits`).
+ * the rewritten body holds any boundary marker or special token (`boundaryHits`).
  */
 export function metaToolResult(adapter: OpenClawWisdomAdapter, sessionKey: string, args: unknown, result: unknown): unknown {
   const target = obj(args)?.id;
@@ -195,10 +194,11 @@ export function metaToolResult(adapter: OpenClawWisdomAdapter, sessionKey: strin
     const rewritten = obj(onToolResult(adapter, { id: sessionKey }, standIn));
     if (rewritten === null || rewritten === standIn || !Array.isArray(rewritten.content)) return;
     parts.outer.result = { ...parts.outer.result, content: rewritten.content };
-    const text = rewrapMeta(parts);
-    if (boundaryHits(text) > boundaryHits(p.text)) return;
+    // Refuse on ANY hit in the rewritten body (not head/tail, whose wrapper
+    // markers always match): a net count could be offset by a stubbed repeat.
+    if (boundaryHits(JSON.stringify(parts.outer, null, 2)) > 0) return;
     content ??= [...(outer.content as unknown[])];
-    content[index] = { ...p, text };
+    content[index] = { ...p, text: rewrapMeta(parts) };
   });
   return content === null ? result : { ...outer, content };
 }

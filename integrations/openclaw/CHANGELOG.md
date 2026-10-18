@@ -4,7 +4,7 @@
 
 ## 0.3.5 — 2026-10-17
 
-- Fixed: a CT recall the agent makes through OpenClaw's `tool_call` meta tool now gets the same recall dedup as a direct call — facts already in context come back as "already in context" stubs, and new facts carry their marker. Only the JSON inside OpenClaw's external-content wrapper changes; a result in any shape other than the verified one is left as it is. A rewrite that would turn an escaped character in a kept entry into an external-content marker or an LLM special token is refused, and the result is delivered as OpenClaw sent it.
+- Fixed: a CT recall the agent makes through OpenClaw's `tool_call` meta tool now gets the same recall dedup as a direct call — facts already in context come back as "already in context" stubs, and new facts carry their marker. Only the JSON inside OpenClaw's external-content wrapper changes; a result in any shape other than the verified one is left as it is. A rewrite whose new body would contain anything that looks like an external-content marker or an LLM special token (for example, from an escaped character in a kept entry) is refused, and the result is delivered as OpenClaw sent it.
 
 ## 0.3.4 — 2026-10-17
 

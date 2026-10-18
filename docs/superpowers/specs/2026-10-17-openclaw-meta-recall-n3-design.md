@@ -134,20 +134,24 @@ recall block, and a blind or unknown view stubs nothing.
   covers only what we add, not what we re-encode (see the review amendment below).
 - Boundary guard: the rewrite re-serialises the inner envelope, so a JSON `\uXXXX` or `\/` escape in a
   kept entry, which OpenClaw's sanitiser saw as plain ASCII, would come out as the literal character.
-  `metaToolResult` counts marker look-alikes (after OpenClaw's character folding and NFKC) and LLM
-  special tokens (the list mirrors openclaw 2026.10.3 `LLM_SPECIAL_TOKEN_PATTERN`) in the original
-  part and in the rewritten one. When the rewritten part has more, that part is left unchanged.
+  `metaToolResult` refuses whenever the rewritten body contains any marker look-alike or special token
+  after folding (OpenClaw's character folding, then NFKC; the token list mirrors openclaw 2026.10.3
+  `LLM_SPECIAL_TOKEN_PATTERN`). Only the JSON body is checked, not the head or tail, whose wrapper
+  markers always match. The bare layout's body is the whole text. A refused part is left unchanged. The
+  accepted cost: a recall whose text holds such a phrase stays unstubbed, as before 0.3.5.
 - A part is rewritten only when its inner `tool.id` equals the call's `args.id`.
-
-**Review amendment (final review, 2026-10-17).** The earlier Safety claim covered only the stubs and
-marker lines this code adds. Re-serialising a kept entry can decode escapes that passed OpenClaw's
-sanitiser, which could forge an end marker or a special token after the sanitiser ran. The boundary
-guard above closes that hole. It fails quiet: a refused part is delivered as OpenClaw sent it, with no
-dedup for that result.
 - No new process, file, network call or dependency.
 - Size: a stub is usually shorter than the entry it replaces; each new id adds one marker line
   (about 30 characters), as on the direct path. OpenClaw's 20 000-character bound runs before the
   middleware (M3), so a rewritten text may exceed it by those lines.
+
+**Review amendment (final review, 2026-10-17).** The earlier Safety claim covered only the stubs and
+marker lines this code adds. Re-serialising a kept entry can decode escapes that passed OpenClaw's
+sanitiser, which could forge an end marker or a special token after the sanitiser ran. A first guard
+compared hit counts before and after the rewrite. A stubbed repeat whose text held a hit could offset a
+decoded one, so the guard now refuses on any hit in the rewritten body. A rewrite therefore never adds
+a marker or special token, and none can be hidden behind one already in the body. It fails quiet: a
+refused part is delivered as OpenClaw sent it, with no dedup for that result.
 
 ## Alignment with INTENT.md
 
