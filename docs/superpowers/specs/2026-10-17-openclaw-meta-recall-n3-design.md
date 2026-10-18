@@ -59,7 +59,7 @@ too. It feeds the run ledger or marks the run blind (`meta_unreadable`). N3 runs
 
 **M6. Re-serialising is byte-exact for the verified shape [V prototype].** A scratchpad prototype
 split a wrapped fixture into head, body and tail. `JSON.stringify(JSON.parse(body), null, 2)`
-returned the body byte for byte, including non-ASCII, ` ` and quotes inside fact text, so the
+returned the body byte for byte, including non-ASCII, U+2028 (line separator) and quotes inside fact text, so the
 no-op rewrap was byte-identical. After stubbing one entry and appending a marker, the head and tail
 were unchanged and `scanIds` over the outer text found both ids (markers survive JSON string
 escaping: `<!-- ct-fact:<id> -->` has no character JSON escapes). A compact body failed the
@@ -151,7 +151,7 @@ No departure from INTENT.md.
 
 - **Unit (`tests/test_meta.ts`):** `unwrapMeta`/`rewrapMeta` on wrapped and bare texts (byte-identical
   no-op round trip); refusals: compact body, truncated body (`[truncated]`), non-JSON, head without tail,
-  wrong shape (`result` missing, `content` not an array); fact text with quotes, non-ASCII and ` `.
+  wrong shape (`result` missing, `content` not an array); fact text with quotes, non-ASCII and U+2028 (line separator).
   `metaRecallIds` reads the same ids before and after a rewrite.
 - **Middleware (`tests/test_review_fixes.ts` §5, extended):** a repeat through `tool_call` comes back
   stubbed inside an unchanged wrapper; a new fact gets a marker; a direct recall then a `tool_call` recall
