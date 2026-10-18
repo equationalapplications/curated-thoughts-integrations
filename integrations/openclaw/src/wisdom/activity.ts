@@ -37,13 +37,15 @@ import {
   scanIds,
   settleWithin,
   startActivity,
-  validId,
   type ActivityEnv,
   type ActivitySpec,
   type Breaker,
 } from '@equational-applications/ct-wisdom-core';
 
-import { STRUCTURED_PREFIX, isRecallToolName, partTexts, type OpenClawWisdomAdapter } from './adapter.js';
+import { partTexts, type OpenClawWisdomAdapter } from './adapter.js';
+import { metaRecallIds } from './meta.js';
+
+export { metaRecallIds };
 
 /** The host's per-result block limit (tool-result-middleware MAX_MIDDLEWARE_CONTENT_BLOCKS). */
 export const MIDDLEWARE_MAX_BLOCKS = 200;
@@ -290,58 +292,6 @@ function resultIds(result: unknown): string[] {
 
 /** OpenClaw's deferred-tool meta tool (`args.id = "mcp:<server>:<tool>"`, live-verified). */
 export const META_TOOL = 'tool_call';
-const WRAP_START = '\n---\n';
-const WRAP_END = '<<<END_EXTERNAL_UNTRUSTED_CONTENT';
 /** Bound on waiting for a first-use locate + probe (separate from the match budget). */
 export const READY_WAIT_MS = 2_000;
 
-/**
- * Fact ids of a CT recall made through the `tool_call` meta tool: null when
- * the call is not a CT recall; 'unreadable' when it is but the result shape
- * is not the verified one (an external-content wrapper around
- * `{tool, result: {content: [{text: <recall envelope>}]}}`).
- */
-export function metaRecallIds(args: unknown, result: unknown): string[] | 'unreadable' | null {
-  const target = obj(args)?.id;
-  if (typeof target !== 'string') return null;
-  const name = target.slice(target.lastIndexOf(':') + 1);
-  if (!isRecallToolName(name)) return null;
-  let found: string[] | null = null;
-  let nonJson = false;
-  for (const text of partTexts(obj(result)?.content)) {
-    let outer: Record<string, unknown> | null;
-    try {
-      let body = text;
-      const at = body.indexOf(WRAP_START);
-      if (at >= 0) body = body.slice(at + WRAP_START.length);
-      const end = body.lastIndexOf(WRAP_END);
-      if (end >= 0) body = body.slice(0, end);
-      outer = obj(JSON.parse(body.trim()));
-    } catch {
-      nonJson = true;
-      continue;
-    }
-    const inner = obj(outer?.result)?.content;
-    if (!Array.isArray(inner)) continue;
-    for (const t of partTexts(inner)) {
-      let env: Record<string, unknown> | null;
-      try {
-        env = obj(JSON.parse(t.startsWith(STRUCTURED_PREFIX) ? t.slice(STRUCTURED_PREFIX.length) : t));
-      } catch {
-        continue;
-      }
-      const entries = env?.wiki_entries;
-      if (!Array.isArray(entries)) continue;
-      found ??= [];
-      for (const entry of entries) {
-        const id = obj(entry)?.id;
-        if (validId(id) && !found.includes(id)) found.push(id);
-      }
-      for (const id of scanIds(t)) if (!found.includes(id)) found.push(id);
-    }
-  }
-  // Unreadable only when NO part yields an envelope AND some part was not
-  // JSON (a shape we do not know); all-JSON parts without one carry no facts.
-  if (found !== null) return found;
-  return nonJson ? 'unreadable' : [];
-}
