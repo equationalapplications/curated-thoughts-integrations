@@ -75,9 +75,10 @@ export function windowsTreeKill(pid: number, env: NodeJS.ProcessEnv): WindowsTre
   if (typeof root !== 'string' || !/^[A-Za-z]:\\/.test(root)) return null;
   // Win32 strips trailing dots and spaces from a segment, so `.. ` acts as
   // `..`: refuse any segment of only dots/whitespace or ending in one.
-  for (const seg of root.split(/[\\/]/)) {
-    if (seg === '' || /^[A-Za-z]:$/.test(seg)) continue;
-    if (/^[.\s]+$/.test(seg) || /[.\s]$/.test(seg)) return null;
+  // Only the first segment is the drive; a colon anywhere else is refused.
+  for (const seg of root.split(/[\\/]/).slice(1)) {
+    if (seg === '') continue;
+    if (seg.includes(':') || /^[.\s]+$/.test(seg) || /[.\s]$/.test(seg)) return null;
   }
   const base = root.replace(/\\+$/, '');
   return {

@@ -110,11 +110,13 @@ describe('nodeSpawnFn abort (real process tree)', { timeout: 30_000 }, () => {
     const { join } = await import('node:path');
     const dir = mkdtempSync(join(tmpdir(), 'ct-spawn-win-'));
     const pidFile = join(dir, 'grandchild.pid');
+    const selfFile = join(dir, 'child.pid');
     const script = join(dir, 'ct.cjs');
     writeFileSync(
       script,
       "const { spawn } = require('child_process');\n"
         + "const fs = require('fs');\n"
+        + `fs.writeFileSync(${JSON.stringify(selfFile)}, String(process.pid));\n`
         + "const g = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30000)'], { stdio: 'ignore', windowsHide: true, detached: true });\n"
         + 'g.unref();\n'
         + `fs.writeFileSync(${JSON.stringify(pidFile)}, String(g.pid));\n`
@@ -124,7 +126,11 @@ describe('nodeSpawnFn abort (real process tree)', { timeout: 30_000 }, () => {
       await waitFor(() => existsSync(pidFile) && readFileSync(pidFile, 'utf8').trim() !== '', 10_000);
       return Number(readFileSync(pidFile, 'utf8').trim());
     };
-    return { command: process.execPath, args: [script, 'wisdom', 'match'], grandchild, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
+    const child = async (): Promise<number> => {
+      await waitFor(() => existsSync(selfFile) && readFileSync(selfFile, 'utf8').trim() !== '', 10_000);
+      return Number(readFileSync(selfFile, 'utf8').trim());
+    };
+    return { command: process.execPath, args: [script, 'wisdom', 'match'], grandchild, child, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
   }
 
   it.runIf(process.platform === 'win32')('Windows: an abort kills the child AND its grandchild, and settles within the deadline', async () => {
@@ -150,6 +156,7 @@ describe('nodeSpawnFn abort (real process tree)', { timeout: 30_000 }, () => {
     try {
       const pending = nodeSpawnFn()({ command: ct.command, args: ct.args, timeoutMs: 3000 });
       const gpid = await ct.grandchild();
+      expect(alive(gpid)).toBe(true);
       const out = await pending;
       expect(out.timedOut).toBe(true);
       expect(await waitFor(() => !alive(gpid), 5000)).toBe(true);
@@ -166,11 +173,15 @@ describe('nodeSpawnFn abort (real process tree)', { timeout: 30_000 }, () => {
       const abort = new AbortController();
       const pending = nodeSpawnFn()({ command: ct.command, args: ct.args, timeoutMs: 30_000, signal: abort.signal });
       gpid = await ct.grandchild();
+      const cpid = await ct.child();
+      expect(alive(cpid)).toBe(true);
       // Break SystemRoot only now: the child needs it to start, the kill reads it at kill time.
       process.env.SystemRoot = 'not-absolute';
       abort.abort();
       const out = await pending;
       expect(out.aborted).toBe(true);
+      // The fallback's direct kill ended the child itself (review 2, m3).
+      expect(await waitFor(() => !alive(cpid), 5000)).toBe(true);
       // Negative control: the direct kill must NOT reach the detached
       // grandchild (so the abort/timeout tests above prove /T, not the job).
       expect(alive(gpid)).toBe(true);
@@ -471,8 +482,9 @@ describe('nodeSpawnFn (every OS)', { timeout: 30_000 }, () => {
 
   it('settles after abort and after timeout even when a detached grandchild holds the pipes', async () => {
     // The child starts a detached grandchild that inherits stdout/stderr and
-    // outlives it, then idles: a kill reaches the child (on Windows only the
-    // child), the grandchild keeps the pipes open, so 'close' may never fire.
+    // outlives it, then idles: on POSIX the group kill does not reach a
+    // detached grandchild, so it keeps the pipes open and 'close' may never
+    // fire (on Windows taskkill /T ends it too; the call settles either way).
     const child = [
       "const { spawn } = require('node:child_process');",
       "const g = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 20000)'], { detached: true, stdio: ['ignore', 'inherit', 'inherit'] });",
@@ -522,6 +534,7 @@ describe('windowsTreeKill (pure; every platform)', () => {
     ['dot-dot with space', { SystemRoot: 'C:\\Windows\\.. \\x' }],
     ['trailing space', { SystemRoot: 'C:\\Windows ' }],
     ['trailing dot', { SystemRoot: 'C:\\Windows.' }],
+    ['drive letter in a later segment', { SystemRoot: 'C:\\Windows\\D:\\x' }],
   ])('returns null for a %s SystemRoot', (_name, env) => {
     expect(windowsTreeKill(4242, env as NodeJS.ProcessEnv)).toBeNull();
   });

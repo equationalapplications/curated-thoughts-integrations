@@ -200,7 +200,7 @@ describe("nodeSpawnFn 'error' handling (mocked child)", () => {
         expect('timeout' in call!.options).toBe(false);
       }
 
-      it('a taskkill that exits 0 means no direct kill, and the call still settles as timedOut within the deadline', { timeout: 3000 }, async () => {
+      it('a taskkill that exits 0 means no direct kill, and the call still settles as timedOut within the deadline', { timeout: TASKKILL_TIMEOUT_MS + 3000 }, async () => {
         const child = stuckChild();
         state.next = child;
         state.taskkillCode = 0;
@@ -216,6 +216,9 @@ describe("nodeSpawnFn 'error' handling (mocked child)", () => {
         expectTaskkillCall();
         expect(child.kill).not.toHaveBeenCalled();
         expect(killSpy).not.toHaveBeenCalled();
+        // A clean exit clears taskkill's own bound: no direct kill later either (review 2, n4).
+        await new Promise((r) => setTimeout(r, TASKKILL_TIMEOUT_MS + 300));
+        expect(child.kill).not.toHaveBeenCalled();
       });
 
       it('a taskkill that fails (exit 1) falls back to the direct kill, after taskkill, and settles within the deadline', { timeout: 3000 }, async () => {
@@ -275,19 +278,20 @@ describe("nodeSpawnFn 'error' handling (mocked child)", () => {
         const pending = nodeSpawnFn({}, { killGraceMs: 100, capBytes: 4 })({ command: 'ct', args: [], timeoutMs: 60_000, signal: abort.signal });
         abort.abort();
         child.stdout.emit('data', Buffer.from('too long'));
-            await pending;
+        await pending;
         expect(state.taskkillSpawns).toBe(1);
         expectTaskkillCall();
         expect(child.kill).not.toHaveBeenCalled(); // taskkill is still running
       });
 
-      it('a child that already exited is never taskkilled', { timeout: 3000 }, async () => {
+      // The exit handler drops the abort listener, so only a late output
+      // overflow can reach killTree after 'exit' (PR #80 review 2, m1).
+      it('a child that already exited is never taskkilled, even when late output overflows the cap', { timeout: 3000 }, async () => {
         const child = new FakeChild(FAKE_PID);
         state.next = child;
-        const abort = new AbortController();
-        const pending = nodeSpawnFn({}, { killGraceMs: 100 })({ command: 'ct', args: [], timeoutMs: 60_000, signal: abort.signal });
+        const pending = nodeSpawnFn({}, { killGraceMs: 100, capBytes: 4 })({ command: 'ct', args: [], timeoutMs: 60_000 });
         child.emit('exit', 0, null);
-        abort.abort();
+        child.stdout.emit('data', Buffer.from('too long'));
         child.emit('close', 0, null);
         await pending;
         expect(state.taskkillSpawns).toBe(0);

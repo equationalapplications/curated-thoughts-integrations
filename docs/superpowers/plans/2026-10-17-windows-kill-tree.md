@@ -192,6 +192,8 @@ and add, just above `killTree`, the direct kill it shares with the POSIX fallbac
 
 Keep the existing first lines of `killTree` unchanged (the pid check, `if (exited) return;`, and arming `deadline`), so the deadline is armed before taskkill starts. Note: a taskkill killed by its own `timeout` exits with `code === null`, which is `!== 0`, so it falls back.
 
+> **Superseded during execution (commit 3ba2f9e):** do not pass Node's spawn `timeout`/`killSignal`. Node arms a referenced timer for them, which holds the host's event loop open. The shipped code bounds taskkill with its own `unref`'d `setTimeout(TASKKILL_TIMEOUT_MS)` that kills taskkill and falls back; see `spawn.ts`.
+
 - [ ] **Step 7: Update the comments**
 
 - `spawn.ts` header: replace "on POSIX the child's process group is killed; on Windows only the direct child." with "on POSIX the child's process group is killed; on Windows `taskkill /T /F` ends the child and its descendants, with the direct kill as the fallback."

@@ -52,7 +52,7 @@ rules, the grace, the hard deadline, the abort and cap paths) is unchanged. POSI
   from the host's own `process.env` (not the env handed to `ct`, which may be minimal). It is used only if it is an
   absolute local Windows path (`/^[A-Za-z]:\\/`) with no `..` segment, split on `\` and `/`. Because Win32 strips
   trailing dots and spaces from a path segment, a segment made only of dots or spaces, or ending in a dot or a space, is
-  refused too (implementation review). A bare drive root (`C:\`) is accepted as it stands, with `C:\` as the cwd; a
+  refused too (implementation review), and only the first segment may hold a drive colon (PR #80 review 2). A bare drive root (`C:\`) is accepted as it stands, with `C:\` as the cwd; a
   wrong root only makes taskkill fail to start, which falls back. Otherwise the taskkill step is skipped and the
   fallback runs.
 - **Arguments:** an argument list `['/PID', String(pid), '/T', '/F']`. No shell (`shell: false`), so nothing is parsed by
@@ -96,8 +96,8 @@ binding uses it; unit tests check it on every platform.
   falls back to today's direct kill, all errors are swallowed, and the call's settle bound is unchanged.
 - **Rule 7 (integrations only read):** unaffected; taskkill acts only on the `ct` process tree this binding started,
   never on the brain.
-- **Goal "every host should reach every step":** the three TypeScript hosts now stop `ct` the same way on Windows as on
-  POSIX.
+- **Goal "every host should reach every step":** the three TypeScript hosts now take `ct`'s process tree down on Windows
+  too, as they take its process group down on POSIX. The two differ at the edges (see Known limitations).
 
 No departure from INTENT.md.
 
@@ -110,14 +110,16 @@ No departure from INTENT.md.
 
 ## Known limitations
 
-- **Pid reuse window [U].** Between the "not exited" check and taskkill opening the process (this includes
-  taskkill.exe's own start-up, typically tens to a few hundred milliseconds; PR #80 review),
-  `ct` could exit and Windows could hand its pid to an unrelated process, which `/T /F` would then end with its
-  children. Windows does not reuse a pid while a handle to the process is open, and Node holds one until it reports the
-  exit, so the window is only the time between Node seeing the exit and taskkill running. No cheap mitigation exists
-  without native code; carried as a limitation.
+- **Pid reuse window [U].** `ct` could exit while taskkill is starting, and Windows could hand its pid to an unrelated
+  process, which `/T /F` would then end with its children. Windows does not reuse a pid while a handle to the process is
+  open, and Node holds one until it reports the exit, so the window is the time between Node seeing the exit and
+  taskkill opening the process. That includes taskkill.exe's own start-up, typically tens to a few hundred
+  milliseconds (PR #80 review). No cheap mitigation exists without native code; carried as a limitation.
 - **A descendant that already left the tree** (its parent exited earlier, so it is no longer reachable from `ct`'s pid)
   survives, as on POSIX for a process that left the group.
+- **The reverse edge (PR #80 review 2):** taskkill `/T` follows parent pids, so it also ends a descendant `ct` started
+  detached. The POSIX group kill does not reach a detached or `setsid` descendant. `ct wisdom match` starts no such
+  helper today, so this changes nothing in practice.
 - **Python hosts (F6):** Hermes, Claude Code and Docker Agent kill only the direct child on timeout, on every platform.
   That is a separate change in the Python ecosystem; out of scope here.
 
