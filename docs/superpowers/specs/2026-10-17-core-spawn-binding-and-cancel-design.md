@@ -212,7 +212,7 @@ and DSH drops its internal side channel with no behavior change.
 ## Known limitations
 
 - On Windows a kill reaches only the direct child; descendants survive. The grace bounds the wait. `taskkill /T` is a
-  possible follow-up, out of scope here.
+  possible follow-up, out of scope here — closed by [2026-10-17-windows-kill-tree-design.md](2026-10-17-windows-kill-tree-design.md).
 - The core job's Windows run adds CI time to every core change.
 
 ## Out of scope

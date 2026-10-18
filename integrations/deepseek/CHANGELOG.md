@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.6.6 — 2026-10-17
+
+- Fixed: on Windows, stopping `ct` (timeout, cancel or output cap) now also stops the processes it started, using Windows' own `taskkill /T /F` by its full system path; if that fails, the old direct stop is used. No change on macOS or Linux.
+
 ## 0.6.5 — 2026-10-17
 
 - Internal: the e2e harness builds with `pnpm run` (newer pnpm rejects `pnpm -s`), and the pre-flight census tests get a 20 s timeout (they ran past 5 s on Windows CI). No behavior change.
