@@ -428,3 +428,4 @@ export function createPlugin(deps: PluginDeps = {}, holder: StateHolder = {}) {
 // The process-wide holder: every module instance the host loads shares one state.
 const plugin = createPlugin({}, processStateHolder());
 export default plugin;
+// reviewer claim-at-start smoke test (aws-cloud-agent PR #65) — throwaway, do not merge
