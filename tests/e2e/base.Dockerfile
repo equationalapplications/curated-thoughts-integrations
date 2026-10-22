@@ -8,7 +8,16 @@
 # The sidecar links WebKit/GTK (it is the Tauri app binary built with the
 # mcp-server feature), so install the whole .deb and let apt pull its
 # dependencies. It runs headless; no display is needed for --mcp.
-FROM node:24-bookworm-slim
+#
+# Node is pinned by digest (the multi-arch index of node:24-bookworm-slim =
+# 24.22.1, the October 2026 security release) so every machine builds the same
+# runtime the compatibility records name. To bump: read the new tag's index
+# digest from Docker Hub, replace it here, update "node" in
+# integrations/deepseek/tests/host/compatibility.json and "e2eBaseNode" in
+# integrations/opencode/tests/host/compatibility.json, then re-run the
+# deepseek, opencode and hermes tests/e2e/run.sh.
+ARG NODE_IMAGE=node:24-bookworm-slim@sha256:55fb5f5a527ea2c5c4a95f963e48ef90aa38c7b346054fdc8ee9957a2b55d205
+FROM ${NODE_IMAGE}
 
 ARG CT_VERSION=2.12.1
 
