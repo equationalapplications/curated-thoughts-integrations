@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.6.7 — 2026-10-22
+
+- Internal: CI also tests the patched Node 22 line (`22.x`) beside the `22.19` floor, and the e2e harness base image is pinned to Node 24.22.1 by digest (the October 2026 Node.js security releases). No behavior change.
+
 ## 0.6.6 — 2026-10-18
 
 - Fixed: on Windows, stopping `ct` (timeout, cancel or output cap) now also stops the processes it started, using Windows' own `taskkill /T /F` by its full system path; if that fails, the old direct stop is used. No change on macOS or Linux.
