@@ -122,4 +122,7 @@ Verified 2026-10-22 on darwin-x64. Every item passed; nothing was stopped under 
   `ct-e2e-base`, `ct-opencode-e2e` and `ct-hermes-e2e`.
 - **D4:** opencode-ai 1.18.35 and bun 1.4.2 installed under Node 22.23.4 (throwaway HOME and prefix in the session
   scratchpad); `tests/host/contract.test.ts` 7 pass / 0 fail, 85 expects.
+- **Release:** `integrations/deepseek/integration.yaml` is a shipped file, so the repo's version policy requires a
+  release; deepseek goes 0.6.6 -> 0.6.7 (CHANGELOG "Internal", no behavior change). The other edits are docs and tests,
+  which the policy exempts. deepseek's `verifiedWith.date` is 2026-10-22, the day of the D2/D3 run.
 - **Pending:** CI on the PR (Verification step 4).

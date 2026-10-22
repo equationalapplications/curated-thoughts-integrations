@@ -8,7 +8,7 @@
     "ctSidecar": "2.12.1 (.deb)",
     "ctCli": "3.5.1 (ct_3.5.1_linux_amd64.tar.gz; live delivery needs >= 3.3.0)",
     "command": "integrations/deepseek/tests/e2e/run.sh",
-    "date": "2026-10-16",
+    "date": "2026-10-22",
     "note": "Live-verified at dsh 0.2.0-rc.2 with GLM-5.3-FLASH (spec AC 10 / m6): agent/pre-step delivery persisted verbatim as a user/message, exactly-once across --session-id continuations, agent/created health refresh. The session log is session.v4.jsonl.zstd at this pin (v3 at 0.1.5-rc.2). CT's relevance gate is fixtured in the container (no embedding backend); a real ct 3.5.1 wisdom match answers gate=uncalibrated, entries=[] there."
   }
 }
