@@ -171,13 +171,14 @@ the payload directory, the `curated-thoughts` `mcp` entry from
 - **Platforms:** macOS, Linux, Windows (covered by the CI matrix).
 - **Tested host versions** (from `tests/host/compatibility.json`; v0
   findings first verified 2026-09-17, the 1.18.35 pin and the wisdom
-  live-delivery contract verified 2026-10-16 on darwin-x64; Linux is covered
-  by the CI host job):
+  live-delivery contract verified 2026-10-16 on darwin-x64, and re-run on
+  2026-10-22 with the patched Node 22.23.4 fallback; Linux is covered by the
+  CI host job):
   - OpenCode `1.18.35` (npm package `opencode-ai@1.18.35`)
   - `@opencode-ai/plugin` `1.18.35`
   - `bun` `1.4.2` (test runner); host-embedded runtime as seen by the
     plugin: bun `1.3.14` / node `24.3.0`
-  - Node fallback `22.23.2`
+  - Node fallback `22.23.4`
 
 ## Requirements
 
