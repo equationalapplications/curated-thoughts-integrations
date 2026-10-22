@@ -1,0 +1,9 @@
+version: 2
+updates:
+  # The e2e harness base image (tests/e2e/base.Dockerfile), pinned by digest.
+  # A bump PR also needs the compatibility records updated and the deepseek,
+  # opencode and hermes e2e harnesses re-run (see that file's header).
+  - package-ecosystem: "docker"
+    directory: "/tests/e2e"
+    schedule:
+      interval: "weekly"
