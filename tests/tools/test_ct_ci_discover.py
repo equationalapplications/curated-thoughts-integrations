@@ -45,9 +45,10 @@ class TestSelect(unittest.TestCase):
 
     def test_matrix_is_the_flat_os_x_interpreter_cross_product(self):
         entries = ct_ci_discover.select(REPO, base_ref=None, all_=True)
-        # claude-code/deepseek/docker-agent/hermes/opencode: 3 os x 2 interpreters each;
+        # claude-code/docker-agent/hermes/opencode: 3 os x 2 interpreters each;
+        # deepseek: 3 os x 3 (its 22.19 floor plus the patched 22.x and 24.x);
         # openclaw: 3 os x node 24.x (OpenClaw's engine floor is Node 24.16).
-        self.assertEqual(len(entries), 33)
+        self.assertEqual(len(entries), 36)
         oses = ("ubuntu-latest", "macos-latest", "windows-latest")
         triples = {
             "claude-code": {
@@ -63,7 +64,7 @@ class TestSelect(unittest.TestCase):
             triples["claude-code"], {(os_name, v) for os_name in oses for v in ("3.9", "3.13")}
         )
         self.assertEqual(
-            triples["deepseek"], {(os_name, v) for os_name in oses for v in ("22.19", "24.x")}
+            triples["deepseek"], {(os_name, v) for os_name in oses for v in ("22.19", "22.x", "24.x")}
         )
         self.assertEqual(
             triples["hermes"], {(os_name, v) for os_name in oses for v in ("3.9", "3.13")}
@@ -119,7 +120,7 @@ class TestCli(unittest.TestCase):
             capture_output=True, text=True, check=True,
         ).stdout
         entries = json.loads(out)
-        self.assertEqual(len(entries), 33)
+        self.assertEqual(len(entries), 36)
         self.assertEqual(
             {e["id"] for e in entries},
             {"claude-code", "deepseek", "docker-agent", "hermes", "openclaw", "opencode"},
