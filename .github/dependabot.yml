@@ -7,3 +7,7 @@ updates:
     directory: "/tests/e2e"
     schedule:
       interval: "weekly"
+    cooldown:
+      # Supply-chain SOP: no version adopted until its upstream release is
+      # >= 14 days old (only CRITICAL security is exempt, by hand).
+      default-days: 14
