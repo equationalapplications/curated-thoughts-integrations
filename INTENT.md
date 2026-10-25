@@ -255,8 +255,8 @@ that something is *true*. Three cases always reach the owner, whatever the
 rungs say: a brand-new claim with nothing verified to check it against, a
 contradiction with verified knowledge, and moving a fact from one team's
 section into a shared one. For a promotion, the parent reviews first and the
-owner decides (rule 12). Apart from these, the owner sees only what no rung
-can settle. A team asking the executive for wisdom climbs the same ladder: the
+owner decides (rule 12). Apart from these, the owner is asked to decide only
+what no rung can settle. A team asking the executive for wisdom climbs the same ladder: the
 executive's knowledge answers first, its attention only when that fails.
 
 *Why:* the human should be the final judge, not a clerk with a long queue.
