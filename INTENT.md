@@ -88,13 +88,14 @@ where each question goes (rule 13). The pattern should suit a household, a
   department's filing cabinet in a shared office.
 - **Door** — a permitted way through a wall: asking the executive for one
   fact, being allowed to read a named neighbor's section, or handing a task
-  to a neighbor (rule 17) (the handoff is derived).
+  to a neighbor, per rule 17.
 - **Seed** — the starting knowledge a parent gives a new team, like an
   onboarding binder.
 - **Verified knowledge** — the owner's original source documents, and
   recorded facts a person has confirmed.
-- **Escalation ladder** — the steps (**rungs**) a question climbs: cheap AI
-  models first, more capable ones next, a person last.
+- **Escalation ladder** — the steps (**rungs**) a question climbs: a fixed
+  non-AI check first, then cheap AI models, then more capable ones, a
+  person last.
 - **Schema** — the agreed shape of the company's records, like the printed
   headings on a form.
 - **Role pack** — an installable bundle of roles, starter knowledge and
@@ -106,7 +107,7 @@ where each question goes (rule 13). The pattern should suit a household, a
 
 ## The rules
 
-Rules 1–9 are standing rules for delivering facts to an agent. Rules 10–18
+Rules 1–9 govern delivering facts to one agent. Rules 10–18
 extend them to teams and restate rulings from the decision log (see "How
 changes are made"). Anything this file adds beyond those rulings is marked
 **derived**.
@@ -181,9 +182,10 @@ CT's own deposit tools; that's CT's write path, not ours.
 
 *Why:* CT's Librarian is the single gatekeeper for what becomes a fact.
 
-*Open decision (derived):* seeds (rule 12) and tasks (rule 17) must reach the
-brain. Either agents write them through CT's own tools, or this rule is
-amended to let integration code ask CT to write them.
+*Open decision (derived):* seeds (rule 12), tasks (rule 17), and the
+ladder's verdicts (rule 13) must reach the brain. Whether agents write them
+through CT's own tools, or this rule is amended to let integration code ask
+CT to write them, is still to be decided.
 
 ### 8. Relevance is CT's job
 
@@ -219,8 +221,8 @@ the ladder stay invisible until used.
 Each team's memory sits in its own walled-off section of one shared brain.
 Every agent gets the facts about its own work and nothing else. Walls have
 doors: an agent may ask the executive for one fact, be allowed to read a
-named neighbor, or hand a task to a neighbor (rule 17; the handoff is
-derived). A team's memory moves to its own storage or machine only when
+named neighbor, or hand a task to a neighbor (rule 17). A team's memory
+moves to its own storage or machine only when
 a gauge shows it must, never on a hunch or a head count.
 
 *Why:* an agent buried in other teams' facts is distracted; one sealed off
@@ -252,8 +254,9 @@ hold? does it fit the schema? is it ready to share upward?) and never rules
 that something is *true*. Three cases always reach a person, whatever the
 rungs say: a brand-new claim with nothing verified to check it against, a
 contradiction with verified knowledge, and moving a fact from one team's
-section into a shared one. Only what no rung can settle beyond those reaches
-a person. A team asking the executive for wisdom climbs the same ladder: the
+section into a shared one. For a promotion, the parent reviews first and a
+person decides (rule 12). Apart from these, a person sees only what no rung
+can settle. A team asking the executive for wisdom climbs the same ladder: the
 executive's knowledge answers first, its attention only when that fails.
 
 *Why:* the human should be the final judge, not a clerk with a long queue.
@@ -289,9 +292,9 @@ pattern is generic, not a developer tool in disguise.
 Each team also remembers its own code: its structure, what connects to what,
 and its words. It finds code by exact words and real connections, not by
 "sounds-like" matching (similarity search). Similarity search is left out of
-the first version; adding it later would need its own decision and a gauge
-showing the need. It waits until the system can reliably recognize the same
-piece of code after it changes.
+the first version; adding it later would need its own decision backed by a
+gauge. Code memory itself waits until the system can reliably recognize the
+same piece of code after it changes.
 
 *Why:* exact memory stays small and checkable. Memory that loses track of
 code through an edit would attach facts to the wrong code.
@@ -310,8 +313,8 @@ This repo provides the truth, never the picture.
 First measure. Then two prerequisites: a Librarian (in CT) that stops
 re-reading unchanged memory, and reliable code identity. Then a small
 dogfood on a few of our own repos, then packs. Moving a team's memory to its
-own machine comes last — teams already reach the shared brain across
-machines today. Code memory reaches every repository in stages, each gated
+own machine comes last; teams on other machines can use the shared brain
+without it. Code memory reaches every repository in stages, each gated
 on the gauges.
 
 *Why:* each stage rests on the one before; skipping ahead builds on guesses.
@@ -348,7 +351,7 @@ The process for turning intent into specs, code and releases is in
 intent, so it lives there.
 
 How the team intent (rules 10–18) was decided is recorded in decision log
-D1–D21 in the company's knowledge vault, at
+D1–D22 in the company's knowledge vault, at
 `immutable-source-files/agents/projects/agent-team-hierarchy-decision-log.md`,
 with the consultation material beside it. This file states the outcome; the
 log keeps the reasoning and every earlier version.
