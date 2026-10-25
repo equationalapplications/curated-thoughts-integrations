@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.4.8 — 2026-10-25
+
+- Internal: bump the `vitest` dev dependency to 4.1.12 (carries `@vitest/mocker` 4.1.12) to clear Dependabot security alerts #24-#25; test-tooling scope. No behavior change.
+
 ## 0.4.7 — 2026-10-25
 
 - Internal: bump the `vite` dev dependency to 6.4.4 (exact pin) to clear Dependabot security alerts #19-#23; all dev-server/test-tooling scope. No behavior change.
