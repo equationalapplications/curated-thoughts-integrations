@@ -233,7 +233,7 @@ to show for it.
 
 The executive gives each new team a curated seed: its goals, requirements and
 vocabulary, and keeps that seed current. The team writes what it learns into
-its own memory. The Librarian distills it, and a person approves what
+its own memory. The Librarian distills it, and the owner approves what
 automation can't settle. The parent reviews anything a team wants promoted
 to shared knowledge, and the owner can spot-check samples of what the
 Librarian approved on its own and read reports on it. Over time each team
@@ -251,11 +251,11 @@ runs every model rung. Every rung must answer
 **only from verified knowledge**, never from its own general knowledge. A
 rung checks *consistency* (a duplicate? a contradiction? does the evidence
 hold? does it fit the schema? is it ready to share upward?) and never rules
-that something is *true*. Three cases always reach a person, whatever the
+that something is *true*. Three cases always reach the owner, whatever the
 rungs say: a brand-new claim with nothing verified to check it against, a
 contradiction with verified knowledge, and moving a fact from one team's
-section into a shared one. For a promotion, the parent reviews first and a
-person decides (rule 12). Apart from these, a person sees only what no rung
+section into a shared one. For a promotion, the parent reviews first and the
+owner decides (rule 12). Apart from these, the owner sees only what no rung
 can settle. A team asking the executive for wisdom climbs the same ladder: the
 executive's knowledge answers first, its attention only when that fails.
 
@@ -268,9 +268,10 @@ confident guesses into company rules.
 ### 14. The owner decides how much reaches them
 
 There is no fixed approval chart. At any time the CEO can say "tell me more"
-or "tell me less", and what reaches them changes to match. However little
-they choose to see, the full trail — audit logs and reports — is always
-there when they want it.
+or "tell me less", and what reaches them changes to match. Turning the dial
+never suppresses the cases rule 13 sends to the owner — those always come.
+However little they choose to see, the full trail — audit logs and reports —
+is always there when they want it.
 
 *Why:* the right amount of oversight shifts with trust, stakes and workload.
 
@@ -279,8 +280,8 @@ there when they want it.
 The pattern ships as role packs that a household, a 30-person software shop
 or, one day, an enterprise can install. The first is **Software Factory in a
 Box**: an executive, a product manager and a developer, with starter
-knowledge and settings; a later pack for the household (working name Home
-Manager) follows. A pack never carries its own copy of the schema; it
+knowledge and settings; a pack for the household follows. A pack never
+carries its own copy of the schema; it
 follows the company's, fixed to a named version so installs stay
 predictable. A household pack must install with no software vocabulary.
 
@@ -312,7 +313,8 @@ This repo provides the truth, never the picture.
 
 First measure. Then two prerequisites: a Librarian (in CT) that stops
 re-reading unchanged memory, and reliable code identity. Then a small
-dogfood on a few of our own repos, then packs. Moving a team's memory to its
+dogfood on a few of our own repos, then software packs; a household pack
+needs none of the code work. Moving a team's memory to its
 own machine comes last; teams on other machines can use the shared brain
 without it. Code memory reaches every repository in stages, each gated
 on the gauges.
