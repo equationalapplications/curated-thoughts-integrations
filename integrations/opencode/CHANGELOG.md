@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.4.9 — 2026-10-25
+
+- Internal: pin `toml` to 5.0.1 via pnpm override to clear Dependabot security alerts #27-#28 (quadratic-complexity DoS in `toml.parse()`); config-parsing tooling scope. No behavior change.
+
 ## 0.4.8 — 2026-10-25
 
 - Internal: bump the `vitest` dev dependency to 4.1.12 (carries `@vitest/mocker` 4.1.12) to clear Dependabot security alerts #24-#25; test-tooling scope. No behavior change.
