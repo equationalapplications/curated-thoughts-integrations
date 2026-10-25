@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.4.10 — 2026-10-25
+
+- Internal: refresh the transitive `undici` (via node-gyp) to 6.29.1 to clear Dependabot security alert #35; dev-tooling scope. No behavior change.
+
 ## 0.4.9 — 2026-10-25
 
 - Internal: pin `toml` to 5.0.1 via pnpm override to clear Dependabot security alerts #27-#28 (quadratic-complexity DoS in `toml.parse()`); config-parsing tooling scope. No behavior change.
