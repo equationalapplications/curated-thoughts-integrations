@@ -42,11 +42,23 @@ steps:
 The same rules apply at every step. Every host should reach every step; where
 a host can't, its spec says why and what the user loses.
 
+**From one agent to a team.** The same idea grows into a company that
+largely runs itself: a few agent **teams**, one per product, working in
+parallel, each remembering everything about its own product. An **executive
+agent** manages the teams and talks to the human
+owner, the **CEO**. Only the biggest questions reach the CEO, so the owner
+carries less and guides more. The standard is unchanged: each agent knows
+the right fact about *its own* work at the moment it is relevant. CT stores
+the knowledge and checks answers against it; this repo coordinates, deciding
+where each question goes (rule 13). The pattern should suit a household, a
+30-person software shop, and one day an enterprise.
+
 ## Glossary
 
 - **CT** — Curated Thoughts, the separate repo and app that owns the brain.
 - **Brain** — CT's database of facts.
 - **Wisdom layer** — the curated facts that integrations deliver.
+- **Librarian** — CT's automated curator, which distills deposits into facts.
 - **Harness** / **host** — the agent program an integration plugs into.
 - **Injection** — adding facts to the agent's context without the agent asking.
 - **Block** — the section of injected facts added to the system prompt at
@@ -62,12 +74,43 @@ a host can't, its spec says why and what the user loses.
   superseded after it was shown.
 - **Provenance** — where a fact came from (for example, stated by a person or
   inferred by the Librarian), from a fixed list CT owns.
-- **System One** — CT's small, fast judging models. They live in CT only.
+- **System One** — CT's small, fast judging models. They live in CT only;
+  they are not the escalation ladder's models (rule 13), which this repo
+  chooses and runs.
 - **`ct recall`** / **`ct wisdom match`** — CT's read-only commands.
   Session-start injection uses `recall`. Live delivery uses `wisdom match`,
   which applies CT's relevance cutoff.
+- **Team** — the agents working on one product, with their own memory.
+- **Executive agent** — manages the teams and talks to the CEO; the
+  **parent** of the teams, which are its **children**.
+- **CEO** / **owner** — the human in charge; every chain of questions ends here.
+- **Namespace** — one team's walled-off section of the shared brain, like a
+  department's filing cabinet in a shared office.
+- **Door** — a permitted way through a wall: asking the executive for one
+  fact, being allowed to read a named neighbor's section, or handing a task
+  to a neighbor, per rule 17.
+- **Seed** — the starting knowledge a parent gives a new team, like an
+  onboarding binder.
+- **Verified knowledge** — the owner's original source documents, and
+  recorded facts a person has confirmed.
+- **Escalation ladder** — the steps (**rungs**) a question climbs: a fixed
+  non-AI check first, then cheap AI models, then more capable ones, a
+  person last.
+- **Schema** — the agreed shape of the company's records, like the printed
+  headings on a form.
+- **Role pack** — an installable bundle of roles, starter knowledge and
+  settings, like a franchise kit.
+- **Code memory** / **code identity** — a team's memory of its own code;
+  recognizing the same piece of code after it is edited, moved or renamed.
+- **Gauge** — a measurement we watch: memory size, speed, noise, backlog.
+- **Dogfood** — trying the product on our own work first.
 
 ## The rules
+
+Rules 1–9 govern delivering facts to one agent. Rules 10–18
+extend them to teams and restate rulings from the decision log (see "How
+changes are made"). Anything this file adds beyond those rulings is marked
+**derived**.
 
 ### 1. A fact appears at most once in the agent's context
 
@@ -139,12 +182,19 @@ CT's own deposit tools; that's CT's write path, not ours.
 
 *Why:* CT's Librarian is the single gatekeeper for what becomes a fact.
 
+*Open decision (derived):* seeds (rule 12), tasks (rule 17), and the
+ladder's verdicts (rule 13) must reach the brain. Whether agents write them
+through CT's own tools, or this rule is amended to let integration code ask
+CT to write them, is still to be decided.
+
 ### 8. Relevance is CT's job
 
 Integrations don't score, rank, threshold, or judge facts, and they never call
 System One. CT decides what is relevant. The integration only delivers what CT
 returns. If CT matches too little or too much, fix it in CT, never work around
-it here.
+it here. The one exception is rule 13: this repo runs the escalation ladder,
+which checks consistency, not relevance or truth. Its first rung is a fixed,
+non-AI check owned by CT; every model rung is called from here.
 
 *Why:* every harness then gets the same quality, and it improves in one place.
 
@@ -159,20 +209,151 @@ a call ran, it sends nothing.
 *Why:* CT and its embedding provider should learn no more than they need to
 find a relevant fact, and a refusal must mean nothing left the machine.
 
+### 10. One agent alone must work perfectly
+
+A single agent that installs nothing gets the full product. Teams, packs and
+the ladder stay invisible until used.
+
+*Why:* most users have one agent and must not pay for features they don't use.
+
+### 11. Each team has its own memory, with walls that have doors
+
+Each team's memory sits in its own walled-off section of one shared brain.
+Every agent gets the facts about its own work and nothing else. Walls have
+doors: an agent may ask the executive for one fact, be allowed to read a
+named neighbor, or hand a task to a neighbor (rule 17). A team's memory
+moves to its own storage or machine only when
+a gauge shows it must, never on a hunch or a head count.
+
+*Why:* an agent buried in other teams' facts is distracted; one sealed off
+from a fact it needs is uninformed. Splitting early adds cost with nothing
+to show for it.
+
+### 12. The parent seeds, the children learn, the Librarian curates
+
+The executive gives each new team a curated seed: its goals, requirements and
+vocabulary, and keeps that seed current. The team writes what it learns into
+its own memory. The Librarian distills it, and the owner approves what
+automation can't settle. The parent reviews anything a team wants promoted
+to shared knowledge, and the owner can spot-check samples of what the
+Librarian approved on its own and read reports on it. Over time each team
+owns more of its own memory.
+
+*Why:* teams don't relearn the basics, and the executive's load doesn't grow
+with every new team.
+
+### 13. Questions climb a ladder, and the human is the last rung
+
+A question or proposal goes first to a fixed, non-AI check owned by CT, then
+to a cheap AI model, then to more capable ones. CT owns that first rung, and
+its approval process must never depend on this repo being present; this repo
+runs every model rung. Every rung must answer
+**only from verified knowledge**, never from its own general knowledge. A
+rung checks *consistency* (a duplicate? a contradiction? does the evidence
+hold? does it fit the schema? is it ready to share upward?) and never rules
+that something is *true*. Three cases always reach the owner, whatever the
+rungs say: a brand-new claim with nothing verified to check it against, a
+contradiction with verified knowledge, and moving a fact from one team's
+section into a shared one. For a promotion, the parent reviews first and the
+owner decides (rule 12). Apart from these, the owner is asked to decide only
+what no rung can settle. A team asking the executive for wisdom climbs the same ladder: the
+executive's knowledge answers first, its attention only when that fails.
+
+*Why:* the human should be the final judge, not a clerk with a long queue.
+Curation asks only "is this consistent with what we have verified?" and
+never "is this true?" for a specific reason: AI models hallucinate and are
+overconfident, so a model allowed to declare things true would turn
+confident guesses into company rules.
+
+### 14. The owner decides how much reaches them
+
+There is no fixed approval chart. At any time the CEO can say "tell me more"
+or "tell me less", and what reaches them changes to match. Turning the dial
+never suppresses the cases rule 13 sends to the owner — those always come.
+However little they choose to see, the full trail — audit logs and reports —
+is always there when they want it.
+
+*Why:* the right amount of oversight shifts with trust, stakes and workload.
+
+### 15. Role packs are generic, and a household can install one
+
+The pattern ships as role packs that a household, a 30-person software shop
+or, one day, an enterprise can install. The first is **Software Factory in a
+Box**: an executive, a product manager and a developer, with starter
+knowledge and settings; a pack for the household follows. A pack never
+carries its own copy of the schema; it
+follows the company's, fixed to a named version so installs stay
+predictable. A household pack must install with no software vocabulary.
+
+*Why:* a private copy of the schema drifts. The household test proves the
+pattern is generic, not a developer tool in disguise.
+
+### 16. Code memory is light and exact
+
+Each team also remembers its own code: its structure, what connects to what,
+and its words. It finds code by exact words and real connections, not by
+"sounds-like" matching (similarity search). Similarity search is left out of
+the first version; adding it later would need its own decision backed by a
+gauge. Code memory itself waits until the system can reliably recognize the
+same piece of code after it changes.
+
+*Why:* exact memory stays small and checkable. Memory that loses track of
+code through an edit would attach facts to the wrong code.
+
+### 17. Tasks live in the brain; the board is the user's own app
+
+A task is a record in the brain: it has a name, a state, an owning team, it
+may belong to a larger task, and it can link to facts. Handing work between
+agents is a message. The visual board is whatever app the user already uses.
+This repo provides the truth, never the picture.
+
+*Why:* one record of the work means no one argues from two lists.
+
+### 18. Measure first, then roll out in stages
+
+First measure. Then two prerequisites: a Librarian (in CT) that stops
+re-reading unchanged memory, and reliable code identity. Then a small
+dogfood on a few of our own repos, then software packs; a household pack
+needs none of the code work. Moving a team's memory to its
+own machine comes last; teams on other machines can use the shared brain
+without it. Code memory reaches every repository in stages, each gated
+on the gauges.
+
+*Why:* each stage rests on the one before; skipping ahead builds on guesses.
+
 ## Out of scope (don't build these here)
 
 - A general-purpose CT client library. Bind thinly to each host's extension
-  points.
-- Recall quality: scoring, ranking, query expansion, judges. That belongs in CT.
-- Human review or attestation screens. Those belong in the CT app.
+  points. *Prevents:* a second, drifting copy of CT's interface.
+- Recall quality: scoring, ranking, query expansion, judges. That belongs in
+  CT. *Prevents:* each harness getting a different quality of answer.
+- Human review or attestation screens, including approving what the
+  Librarian can't settle. Those belong in the CT app. *Prevents:* two places
+  to approve the same fact.
 - Following graph links during session-start injection. Graph traversal stays
   in on-demand tools like `wiki_context`, and adding it would need a CT
-  decision first.
+  decision first. *Prevents:* a bloated, slow session start.
 - Harnesses without the extension points we need: a stable system-prompt
-  region and a way to run a read-only CT command.
+  region and a way to run a read-only CT command. *Prevents:* fragile hacks
+  that break rules 2 and 7.
+- A task board or any other picture of the work. *Prevents:* a second view
+  that drifts from the record (rule 17).
+- Any step where a model rules a fact true. *Prevents:* guesses becoming
+  company rules (rule 13).
+- Separate storage per team from day one. *Prevents:* cost and complexity no
+  gauge asked for (rule 11).
+- Similarity search over code in the first version. *Prevents:* heavy, fuzzy
+  code memory (rule 16). Adding it later is a decision plus a gauge, not an
+  extension of this one.
 
 ## How changes are made
 
 The process for turning intent into specs, code and releases is in
 [CONTRIBUTING.md](CONTRIBUTING.md#how-changes-are-made). It is process, not
 intent, so it lives there.
+
+How the team intent (rules 10–18) was decided is recorded in decision log
+D1–D22 in the company's knowledge vault, at
+`immutable-source-files/agents/projects/agent-team-hierarchy-decision-log.md`,
+with the consultation material beside it. This file states the outcome; the
+log keeps the reasoning and every earlier version.
