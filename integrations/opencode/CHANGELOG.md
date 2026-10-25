@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.4.7 — 2026-10-25
+
+- Internal: bump the `vite` dev dependency to 6.4.4 (exact pin) to clear Dependabot security alerts #19-#23; all dev-server/test-tooling scope. No behavior change.
+
 ## 0.4.6 — 2026-10-18
 
 - Fixed: on Windows, stopping `ct` (timeout, cancel or output cap) now also stops the processes it started, using Windows' own `taskkill /T /F` by its full system path; if that fails, the old direct stop is used. No change on macOS or Linux.
