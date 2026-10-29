@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.6.10 — 2026-10-25
+
+- Internal: refresh the transitive `undici` (via node-gyp) to 6.29.1 to clear Dependabot security alert #32; dev-tooling scope. No behavior change.
+
 ## 0.6.9 — 2026-10-25
 
 - Internal: bump the `vitest` dev dependency to 4.1.12 (carries `@vitest/mocker` 4.1.12) to clear Dependabot security alerts #17-#18; test-tooling scope. No behavior change.
