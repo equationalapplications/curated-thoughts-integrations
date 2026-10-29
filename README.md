@@ -6,6 +6,22 @@ Open-source integrations connecting [Curated Thoughts](https://github.com/equati
 to AI agent harnesses. One installable integration per harness, sharing a
 common architecture.
 
+## What is Curated Thoughts?
+
+[Curated Thoughts](https://github.com/equationalapplications/curated-thoughts)
+is a privacy-first, local-first desktop second brain (Tauri, React, Rust).
+Drop documents into a vault and the Active Librarian indexes them, synthesizes
+wiki facts, and waits for your human approval before anything is committed to
+long-term memory. The app binary doubles as a standard
+[MCP](https://modelcontextprotocol.io/) server (`--mcp`), so an agent sees your
+vault as native tools: semantic recall, wiki search and graph traversal, plus
+write paths for vault notes and append-only agent wisdom deposits.
+
+Installers for macOS, Linux, and Windows are on the
+[Releases page](https://github.com/equationalapplications/curated-thoughts/releases).
+These integrations connect that brain to your harness — if you don't have
+Curated Thoughts installed yet, start there.
+
 ## Integrations
 
 | Harness | Directory | Status | Version |
@@ -385,4 +401,4 @@ that the two agree. See [`docs/ci.md`](docs/ci.md).
 
 ## License
 
-MIT — identical to the main Curated Thoughts repository.
+MIT — identical to the main Curated Thoughts repository. [Curated Thoughts](https://github.com/equationalapplications/curated-thoughts) and its integrations are built by [Equational Applications LLC](https://equationalapplications.com/).
