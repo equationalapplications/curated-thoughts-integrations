@@ -10,9 +10,11 @@ common architecture.
 
 [Curated Thoughts](https://github.com/equationalapplications/curated-thoughts)
 is a privacy-first, local-first desktop second brain (Tauri, React, Rust).
-Drop documents into a vault and the Active Librarian indexes them, synthesizes
-wiki facts, and waits for your human approval before anything is committed to
-long-term memory. The app binary doubles as a standard
+Drop documents into a vault and the Active Librarian indexes them and
+synthesizes wiki proposals, which wait for your human approval before they are
+committed to long-term memory. (Agent wisdom deposits are the documented
+exception: they are appended with agent provenance and processed by the
+librarian, without the proposal gate.) The app binary doubles as a standard
 [MCP](https://modelcontextprotocol.io/) server (`--mcp`), so an agent sees your
 vault as native tools: semantic recall, wiki search and graph traversal, plus
 write paths for vault notes and append-only agent wisdom deposits.
