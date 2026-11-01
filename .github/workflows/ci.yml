@@ -115,7 +115,10 @@ jobs:
     name: ${{ matrix.entry.id }} (${{ matrix.entry.os }}, ${{ matrix.entry.python || matrix.entry.node }})
     needs: discover
     if: needs.discover.outputs.empty == 'false'
-    runs-on: ${{ matrix.entry.os }}
+    # ubuntu-latest is Ubuntu 26.04 since 2026-11, where setup-python no
+    # longer offers 3.9 (the integrations' support floor). Pin the ubuntu
+    # legs to 24.04 until the python matrix is modernized.
+    runs-on: ${{ matrix.entry.os == 'ubuntu-latest' && 'ubuntu-24.04' || matrix.entry.os }}
     strategy:
       fail-fast: false
       matrix:
@@ -350,6 +353,13 @@ jobs:
           ]
           print("plugin entry point OK")
           PY
+
+      - name: Tag drift check (warning-only)
+        # Warns iff the exact tag <id>-v<version> does not exist for an
+        # implemented integration's manifest version. Skipped on pull_request
+        # events (a bump PR is untagged until merged). Always exits 0.
+        if: github.event_name != 'pull_request'
+        run: python tools/check_tag_drift.py
 
   host-contract:
     # OpenCode's plugin API is pinned by real-binary verification
