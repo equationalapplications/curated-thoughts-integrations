@@ -355,8 +355,10 @@ jobs:
           PY
 
       - name: Tag drift check (warning-only)
-        # Prints a WARN per integration whose manifest version has no matching
-        # <id>-v<version> tag yet. Always exits 0; never fails CI.
+        # Warns iff the exact tag <id>-v<version> does not exist for an
+        # implemented integration's manifest version. Skipped on pull_request
+        # events (a bump PR is untagged until merged). Always exits 0.
+        if: github.event_name != 'pull_request'
         run: python tools/check_tag_drift.py
 
   host-contract:

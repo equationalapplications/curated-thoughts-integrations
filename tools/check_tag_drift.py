@@ -1,75 +1,65 @@
-"""Warn when an integration's manifest version is ahead of its newest tag.
+"""Warn when an integration's manifest version has no release tag.
 
-Releases are annotated tags named <id>-v<semver>. A bump merge that lands
-without its tag leaves main "unreleased"; this prints one WARN line per such
-integration. Warning-only: it always exits 0 and never fails CI.
+Releases are tags named <id>-v<version>. The rule: warn iff the exact tag
+<id>-v<version> does not exist for the version in main's integration.yaml. A
+bump merge that lands without its tag leaves main "unreleased". Only
+implemented integrations with a SemVer version are checked. Warning-only: it
+always exits 0 and never fails CI.
 """
-from __future__ import annotations
-
-import re
+import os
 import subprocess
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-SEMVER = re.compile(r"^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$")
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import ct_ci_manifest  # noqa: E402
 
 
-def version_key(text):
-    """Sortable key for a semver string, or None if it is not one.
-
-    A pre-release (0.2.1-rc.1) sorts below its release (0.2.1); numeric
-    pre-release identifiers compare as numbers, below alphanumeric ones.
-    """
-    m = SEMVER.match(text)
-    if not m:
-        return None
-    core = tuple(int(p) for p in m.groups()[:3])
-    if m.group(4) is None:
-        return core, (1,)
-    ids = tuple(
-        (0, int(p), "") if p.isdigit() else (1, 0, p) for p in m.group(4).split(".")
-    )
-    return core, (0, ids)
-
-
-def manifest_field(text, name):
-    m = re.search(rf"^{name}:\s*['\"]?([^\s'\"#]+)", text, re.MULTILINE)
-    return m.group(1) if m else None
-
-
-def newest_tag_version(integration_id):
-    out = subprocess.run(
-        ["git", "tag", "--list", f"{integration_id}-v*"],
+def list_tags():
+    """All tag names in the repo."""
+    return set(subprocess.run(
+        ["git", "tag", "--list"],
         cwd=ROOT, capture_output=True, text=True, check=True,
-    ).stdout.split()
-    prefix = f"{integration_id}-v"
-    best = None
-    for tag in out:
-        ver = tag[len(prefix):]
-        key = version_key(ver)
-        if key is not None and (best is None or key > best[0]):
-            best = (key, ver)
-    return best[1] if best else None
+    ).stdout.split())
 
 
-def main():
-    for manifest in sorted((ROOT / "integrations").glob("*/integration.yaml")):
-        text = manifest.read_text(encoding="utf-8")
-        integration_id = manifest_field(text, "id")
-        version = manifest_field(text, "version")
-        if not integration_id or not version:
-            print(f"WARN: {manifest.parent.name} integration.yaml lacks id/version")
+def check(manifests, tags):
+    """Return (annotation lines, summary lines) for manifests lacking a tag."""
+    lines = []
+    for data in manifests:
+        if not isinstance(data, dict) or data.get("status") != "implemented":
             continue
+        integration_id = data.get("id")
+        version = str(data.get("version"))
+        if not ct_ci_manifest.SEMVER_RE.match(version):
+            lines.append((f"WARN: {integration_id} version {version} is not SemVer", None))
+            continue
+        tag = f"{integration_id}-v{version}"
+        if tag not in tags:
+            msg = f"{integration_id} main {version} unreleased (no tag {tag})"
+            lines.append((f"::warning title=tag drift::{msg}", msg))
+    return lines
+
+
+def main(tags=None):
+    if tags is None:
         try:
-            tagged = newest_tag_version(integration_id)
+            tags = list_tags()
         except (subprocess.CalledProcessError, OSError) as exc:
-            print(f"WARN: {integration_id} could not list tags ({exc})")
-            continue
-        if tagged is None:
-            print(f"WARN: {integration_id} main {version} unreleased (no {integration_id}-v* tag)")
-        elif version_key(version) != version_key(tagged):
-            print(f"WARN: {integration_id} main {version} unreleased (latest tag {integration_id}-v{tagged})")
+            print(f"WARN: could not list tags ({exc})")
+            return 0
+    manifests = [
+        ct_ci_manifest.load_manifest(path)
+        for path in sorted((ROOT / "integrations").glob("*/integration.yaml"))
+    ]
+    summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
+    for line, summary in check(manifests, tags):
+        print(line)
+        if summary and summary_path:
+            with open(summary_path, "a", encoding="utf-8") as handle:
+                handle.write(f"- {summary}\n")
     return 0
 
 
