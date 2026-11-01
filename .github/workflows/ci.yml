@@ -351,6 +351,11 @@ jobs:
           print("plugin entry point OK")
           PY
 
+      - name: Tag drift check (warning-only)
+        # Prints a WARN per integration whose manifest version has no matching
+        # <id>-v<version> tag yet. Always exits 0; never fails CI.
+        run: python tools/check_tag_drift.py
+
   host-contract:
     # OpenCode's plugin API is pinned by real-binary verification
     # (tests/host/contract.test.ts + tests/host/compatibility.json). That test
