@@ -98,7 +98,11 @@ jobs:
   verify:
     name: ${{ needs.identify.outputs.id }} (${{ matrix.os }}, ${{ needs.identify.outputs.language }} ${{ matrix.interpreter }})
     needs: identify
-    runs-on: ${{ matrix.os }}
+    # Same remap as ci.yml's integration matrix: ubuntu-latest is Ubuntu 26.04
+    # since 2026-11, where setup-python no longer offers 3.9 (the integrations'
+    # support floor). Without this, the next Python-integration tag fails the
+    # verify job and fail-fast cancels the release.
+    runs-on: ${{ matrix.os == 'ubuntu-latest' && 'ubuntu-24.04' || matrix.os }}
     strategy:
       fail-fast: true
       matrix:
