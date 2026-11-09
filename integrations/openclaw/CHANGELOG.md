@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 0.3.7 — 2026-11-09
+
+- Internal: enforce the 14-day dependency release-age gate (pnpm minimumReleaseAge) in this integration's project config; no behavior change.
+
+
 ## 0.3.6 — 2026-10-18
 
 - Fixed: on Windows, stopping `ct` (timeout, cancel or output cap) now also stops the processes it started, using Windows' own `taskkill /T /F` by its full system path; if that fails, the old direct stop is used. No change on macOS or Linux.
