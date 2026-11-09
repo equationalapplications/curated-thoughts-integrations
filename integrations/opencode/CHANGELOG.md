@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 0.4.11 — 2026-11-09
+
+- Internal: enforce the 14-day dependency release-age gate (pnpm minimumReleaseAge) in this integration's project config; no behavior change.
+
+
 ## 0.4.10 — 2026-10-25
 
 - Internal: refresh the transitive `undici` (via node-gyp) to 6.29.1 to clear Dependabot security alert #35; dev-tooling scope. No behavior change.

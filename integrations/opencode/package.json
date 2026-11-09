@@ -1,6 +1,6 @@
 {
   "name": "@equational-applications/opencode-curated-thoughts",
-  "version": "0.4.10",
+  "version": "0.4.11",
   "description": "Curated Thoughts memory integration for OpenCode",
   "license": "MIT",
   "type": "module",

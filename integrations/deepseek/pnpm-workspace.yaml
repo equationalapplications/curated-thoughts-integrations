@@ -1,0 +1,7 @@
+packages: []
+# Supply-chain rule: never resolve a package version published less than
+# 14 days ago (pnpm >= 10.16). First-party Equational packages are exempt:
+# we publish them ourselves and adopt them on release.
+minimumReleaseAge: 20160
+minimumReleaseAgeExclude:
+  - "@equational-applications/*"
