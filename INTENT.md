@@ -95,7 +95,7 @@ where each question goes (rule 13). The pattern should suit a household, a
   recorded facts a person has confirmed.
 - **Escalation ladder** — the steps (**rungs**) a question climbs: a fixed
   non-AI check first, then cheap AI models, then more capable ones, a
-  person last.
+  person last, only for what no rung can settle.
 - **Schema** — the agreed shape of the company's records, like the printed
   headings on a form.
 - **Role pack** — an installable bundle of roles, starter knowledge and
@@ -259,26 +259,31 @@ hold? does it fit the schema? is it ready to share upward?) and never rules
 that something is *true*. Two cases are always reported to the owner,
 whatever the rungs say: a contradiction with verified knowledge, and moving
 a fact from one team's section into a shared one. A model only detects the
-case; fixed rules decide it at once, and the owner gets a report they can
-reverse from. Nothing waits for the owner by default. Approval is primarily
-for accountability. It may also put quality questions to a person where
-that is appropriate: strict mode is a setting on one brain that names the
-kinds of statement needing a signature before delivery. The default path
-never relies on a person reviewing items one by one. When statements
-conflict, fixed rules decide automatically: the date decides, and only a
-correction the person makes directly outranks it. In strict mode, a
-statement a person has signed cannot be retired by one no person has
-signed. *Signed* means signed in the CT app, never that the source text
-attributes it to someone. For a promotion, the parent reviews first and the
-owner decides (rule 12). Apart from these, the owner is asked to decide only
+case; CT's fixed rules decide it at once, and the owner gets a report they
+can reverse from. Nothing waits for the owner by default. For a promotion,
+the parent reviews first; CT's fixed rules then decide it, and the owner
+gets a report they can reverse from (rule 12). Apart from these, the owner
+is asked to decide only
 what no rung can settle. A team asking the executive for wisdom climbs the same ladder: the
 executive's knowledge answers first, its attention only when that fails.
+
+Approval is primarily for accountability. It may also put quality questions
+to a person where that is appropriate: strict mode is a setting on one brain
+that names the kinds of statement needing a signature before delivery. The
+default path never relies on a person reviewing items one by one. When
+statements conflict, CT's fixed rules decide automatically: the date decides
+(the newer statement wins), and only a correction a person makes directly
+outranks it. In strict mode, a statement a person has signed cannot be
+retired by one no person has signed. *Signed* means signed in the CT app,
+never that the source text attributes it to someone.
 
 *Why:* the human should be the final judge, not a clerk with a long queue.
 Curation asks only "is this consistent with what we have verified?" and
 never "is this true?" for a specific reason: AI models hallucinate and are
 overconfident, so a model allowed to declare things true would turn
-confident guesses into company rules.
+confident guesses into company rules. In default mode a newer statement can
+retire a verified one; the reversible report to the owner is the safety net,
+and strict mode is the guard where that is not acceptable.
 
 ### 14. The owner decides how much reaches them
 
@@ -369,7 +374,7 @@ The process for turning intent into specs, code and releases is in
 intent, so it lives there.
 
 How the team intent (rules 10–18) was decided is recorded in decision log
-D1–D22 in the company's knowledge vault, at
+D1–D24 in the company's knowledge vault, at
 `immutable-source-files/agents/projects/agent-team-hierarchy-decision-log.md`,
 with the consultation material beside it. This file states the outcome; the
 log keeps the reasoning and every earlier version.
