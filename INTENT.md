@@ -178,9 +178,14 @@ Integration code never writes to the brain and never opens its database
 directly. It reads only through `ct recall`, `ct wisdom match`, and CT's
 read-only sidecar tools. It never reads vault files that CT hasn't ingested
 yet. Agents running *inside* the harness may still deposit knowledge through
-CT's own deposit tools; that's CT's write path, not ours.
+CT's own deposit tools; that's CT's write path, not ours. A role pack may
+set CT's settings at install, through CT's own commands. It configures the
+Librarian; it never replaces or bypasses it.
 
 *Why:* CT's Librarian is the single gatekeeper for what becomes a fact.
+Settings are not the brain: a pack installing its choices through CT's own
+commands configures CT's own behavior, and the harness plugins stay
+read-only while an agent runs.
 
 *Open decision (derived):* seeds (rule 12), tasks (rule 17), and the
 ladder's verdicts (rule 13) must reach the brain. Whether agents write them
@@ -251,10 +256,20 @@ runs every model rung. Every rung must answer
 **only from verified knowledge**, never from its own general knowledge. A
 rung checks *consistency* (a duplicate? a contradiction? does the evidence
 hold? does it fit the schema? is it ready to share upward?) and never rules
-that something is *true*. Three cases always reach the owner, whatever the
-rungs say: a brand-new claim with nothing verified to check it against, a
-contradiction with verified knowledge, and moving a fact from one team's
-section into a shared one. For a promotion, the parent reviews first and the
+that something is *true*. Two cases are always reported to the owner,
+whatever the rungs say: a contradiction with verified knowledge, and moving
+a fact from one team's section into a shared one. A model only detects the
+case; fixed rules decide it at once, and the owner gets a report they can
+reverse from. Nothing waits for the owner by default. Approval is primarily
+for accountability. It may also put quality questions to a person where
+that is appropriate: strict mode is a setting on one brain that names the
+kinds of statement needing a signature before delivery. The default path
+never relies on a person reviewing items one by one. When statements
+conflict, fixed rules decide automatically: the date decides, and only a
+correction the person makes directly outranks it. In strict mode, a
+statement a person has signed cannot be retired by one no person has
+signed. *Signed* means signed in the CT app, never that the source text
+attributes it to someone. For a promotion, the parent reviews first and the
 owner decides (rule 12). Apart from these, the owner is asked to decide only
 what no rung can settle. A team asking the executive for wisdom climbs the same ladder: the
 executive's knowledge answers first, its attention only when that fails.
@@ -269,7 +284,8 @@ confident guesses into company rules.
 
 There is no fixed approval chart. At any time the CEO can say "tell me more"
 or "tell me less", and what reaches them changes to match. Turning the dial
-never suppresses the cases rule 13 sends to the owner — those always come.
+changes how much of the report the owner sees, but it never suppresses the
+cases rule 13 reports — those always come.
 However little they choose to see, the full trail — audit logs and reports —
 is always there when they want it.
 
