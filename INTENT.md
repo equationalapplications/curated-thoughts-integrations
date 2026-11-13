@@ -240,7 +240,8 @@ The executive gives each new team a curated seed: its goals, requirements and
 vocabulary, and keeps that seed current. The team writes what it learns into
 its own memory. The Librarian distills it, and the owner approves what
 automation can't settle. The parent reviews anything a team wants promoted
-to shared knowledge, and the owner can spot-check samples of what the
+to shared knowledge; the promotion is decided by CT's fixed rules and
+reported to the owner (rule 13), and the owner can spot-check samples of what the
 Librarian approved on its own and read reports on it. Over time each team
 owns more of its own memory.
 
@@ -260,14 +261,15 @@ that something is *true*. Two cases are always reported to the owner,
 whatever the rungs say: a contradiction with verified knowledge, and moving
 a fact from one team's section into a shared one. A model only detects the
 case; CT's fixed rules decide it at once, and the owner gets a report they
-can reverse from. Nothing waits for the owner by default. For a promotion,
-the parent reviews first; CT's fixed rules then decide it, and the owner
-gets a report they can reverse from (rule 12). Apart from these, the owner
-is asked to decide only
-what no rung can settle. A team asking the executive for wisdom climbs the same ladder: the
+can reverse from. For a promotion, the parent reviews first; if the parent
+approves and no contradiction is found, CT's fixed rules promote it at once
+and the owner gets a report they can reverse from (rule 12) *(derived)*.
+Nothing waits for the owner by default; the one exception is what no rung
+can settle, which is still asked to the owner as before *(derived)*. A team asking the executive for wisdom climbs the same ladder: the
 executive's knowledge answers first, its attention only when that fails.
 
-Approval is primarily for accountability. It may also put quality questions
+Approval — a signature in the CT app, or a reversal from a report — is
+primarily for accountability. It may also put quality questions
 to a person where that is appropriate: strict mode is a setting on one brain
 that names the kinds of statement needing a signature before delivery. The
 default path never relies on a person reviewing items one by one. When
@@ -284,6 +286,8 @@ overconfident, so a model allowed to declare things true would turn
 confident guesses into company rules. In default mode a newer statement can
 retire a verified one; the reversible report to the owner is the safety net,
 and strict mode is the guard where that is not acceptable.
+*Open decision (derived):* whether an owner's original source document can
+be retired this way is left to CT's precedence design.
 
 ### 14. The owner decides how much reaches them
 
@@ -373,7 +377,8 @@ The process for turning intent into specs, code and releases is in
 [CONTRIBUTING.md](CONTRIBUTING.md#how-changes-are-made). It is process, not
 intent, so it lives there.
 
-How the team intent (rules 10–18) was decided is recorded in decision log
+How the team intent (rules 10–18) was decided, and the later amendments to
+rules 7 and 13–14, is recorded in decision log
 D1–D24 in the company's knowledge vault, at
 `immutable-source-files/agents/projects/agent-team-hierarchy-decision-log.md`,
 with the consultation material beside it. This file states the outcome; the
