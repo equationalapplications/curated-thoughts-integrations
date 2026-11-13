@@ -283,9 +283,9 @@ confident guesses into company rules.
 ### 14. The owner decides how much reaches them
 
 There is no fixed approval chart. At any time the CEO can say "tell me more"
-or "tell me less", and what reaches them changes to match. Turning the dial
-changes how much of the report the owner sees, but it never suppresses the
-cases rule 13 reports — those always come.
+or "tell me less", and what reaches them changes to match. At every dial
+setting, the cases rule 13 reports still come; the dial only changes how
+much of the rest of the report the owner sees.
 However little they choose to see, the full trail — audit logs and reports —
 is always there when they want it.
 
