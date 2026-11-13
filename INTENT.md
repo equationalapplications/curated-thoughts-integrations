@@ -257,19 +257,22 @@ runs every model rung. Every rung must answer
 **only from verified knowledge**, never from its own general knowledge. A
 rung checks *consistency* (a duplicate? a contradiction? does the evidence
 hold? does it fit the schema? is it ready to share upward?) and never rules
-that something is *true*. Two cases are always reported to the owner,
-whatever the rungs say: a contradiction with verified knowledge, and moving
-a fact from one team's section into a shared one. A model only detects the
-case; CT's fixed rules decide it at once, and the owner gets a report they
-can reverse from. For a promotion, the parent reviews first; if the parent
-approves and no contradiction is found, CT's fixed rules promote it at once
-and the owner gets a report they can reverse from (rule 12) *(derived)*.
-Nothing waits for the owner by default; the one exception is what no rung
-can settle, which is still asked to the owner as before *(derived)*. A team asking the executive for wisdom climbs the same ladder: the
+that something is *true*. Two cases are always reported to the owner once
+detected: a contradiction with verified knowledge, and moving a fact from
+one team's section into a shared one. CT detects the case (a ladder rung
+may also flag it); CT's fixed rules decide it at once, and the owner gets
+a report they can reverse from *(derived)*. For a promotion, the parent
+reviews first *(derived)*; if the parent approves and no contradiction is
+found, CT's fixed rules promote it at once; if a contradiction is found,
+it is handled as a contradiction case above. The owner gets a report they
+can reverse from either way (rule 12). Nothing waits for the owner by
+default; the one exception is what no rung can settle, which is still
+asked to the owner *(derived)*. A team asking the executive for wisdom climbs the same ladder: the
 executive's knowledge answers first, its attention only when that fails.
 
-Approval — a signature in the CT app, or a reversal from a report — is
-primarily for accountability. It may also put quality questions
+These owner actions — a signature in the CT app, or a reversal from a
+report in the CT app — are primarily for accountability *(derived)*. They
+may also put quality questions
 to a person where that is appropriate: strict mode is a setting on one brain
 that names the kinds of statement needing a signature before delivery. The
 default path never relies on a person reviewing items one by one. When
@@ -293,8 +296,9 @@ be retired this way is left to CT's precedence design.
 
 There is no fixed approval chart. At any time the CEO can say "tell me more"
 or "tell me less", and what reaches them changes to match. At every dial
-setting, the cases rule 13 reports still come; the dial only changes how
-much of the rest of the report the owner sees.
+setting, the cases rule 13 reports still come and questions only the owner
+can settle are always asked; the dial only changes how much of the rest of
+the report the owner sees.
 However little they choose to see, the full trail — audit logs and reports —
 is always there when they want it.
 
@@ -378,7 +382,7 @@ The process for turning intent into specs, code and releases is in
 intent, so it lives there.
 
 How the team intent (rules 10–18) was decided, and the later amendments to
-rules 7 and 13–14, is recorded in decision log
+rules 7 and 12–14 and the glossary, is recorded in decision log
 D1–D24 in the company's knowledge vault, at
 `immutable-source-files/agents/projects/agent-team-hierarchy-decision-log.md`,
 with the consultation material beside it. This file states the outcome; the
