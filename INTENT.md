@@ -172,7 +172,7 @@ arrives. Never raise a limit to make up for weak matching.
 
 *Why:* a flood of loosely related facts is noise, not wisdom.
 
-### 7. Integrations only read, and only through CT's commands
+### 7. Integrations never write to the brain, and only use CT's commands
 
 Integration code never writes to the brain and never opens its database
 directly. It reads only through `ct recall`, `ct wisdom match`, and CT's
