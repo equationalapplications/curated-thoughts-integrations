@@ -1,6 +1,6 @@
 # ct_doctor: resolve the Claude Code user-scope config path like Claude Code — design
 
-**Date:** 2026-11-14 · **Status:** Draft (awaiting owner approval) · **Branch:** `fix/ct-doctor-claude-config-path` · **Issue:** #93
+**Date:** 2026-11-14 · **Status:** Approved (owner, Discord 2026-11-14) · **Branch:** `fix/ct-doctor-claude-config-path` · **Issue:** #93
 
 ## Problem
 
