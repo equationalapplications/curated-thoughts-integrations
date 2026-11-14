@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - Verdict contract unchanged: no registration at all stays FAIL; unparseable config stays WARN (spec, rejected alternatives).
-- `CLAUDE_CONFIG_PATH` stays a test-only override of just the `.claude.json` file; `CLAUDE_CONFIG_DIR` still relocates the whole config (both files) — existing documented semantics, pinned by Task 1's third test.
+- `CLAUDE_CONFIG_PATH` stays a test-only override of just the `.claude.json` file; `CLAUDE_CONFIG_DIR` still relocates the whole config (both files) — existing documented semantics; Task 1's third test pins the `.claude.json` side only (the `settings.json` relocation is unchanged behavior, not newly pinned).
 - `settings.json` resolution unchanged (`~/.claude/settings.json`, or `$CLAUDE_CONFIG_DIR/settings.json`).
 - No new dependency; stdlib only (INTENT rule 6, spec alignment).
 - Version bump lands in this PR at merge time: `integration.yaml` `version:` and `.claude-plugin/plugin.json` `"version"` must both be `0.4.4` (the CI policy gate "versions" enforces the `version_mirror` pair).
@@ -97,8 +97,10 @@ with:
         )
 
     def test_claude_config_dir_relocates_the_config(self):
-        # Pin the existing CLAUDE_CONFIG_DIR semantics: the whole config
-        # moves, so .claude.json follows into the custom directory.
+        # Pin the existing CLAUDE_CONFIG_DIR semantics for the user-scope
+        # config: .claude.json follows into the custom directory. (The
+        # settings.json relocation is unchanged existing behavior and is
+        # not re-pinned here.)
         self.patch_env("CLAUDE_CONFIG_PATH", None)
         custom = self.fake_home / "custom"
         custom.mkdir()
@@ -127,6 +129,10 @@ with:
 
 Run: `python3 integrations/claude-code/tests/test_ct_doctor.py`
 Expected: FAIL/error — `AttributeError: module 'ct_doctor' has no attribute '_claude_config_path'` (fixture calls the function before it exists). Read the output; do not assume.
+
+Sanity sub-step (TDD evidence — the AttributeError alone doesn't demonstrate the bug): temporarily stub the resolver to the OLD expression
+(`def _claude_config_path(): return Path.home() / ".claude" / ".claude.json"`),
+re-run, and confirm tests 1 and 2 now FAIL on their path assertions while test 3 still passes; then remove the stub. This proves the new tests actually catch the HOME-root defect.
 
 - [ ] **Step 3: Implement the resolver (minimal GREEN)**
 
@@ -164,6 +170,14 @@ def _claude_config_path():
 
 CLAUDE_CONFIG = _claude_config_path()
 ```
+
+Also, in the same edit: (a) trim the now-duplicated comment block at lines ~76–78
+("User-scope MCP servers: ... in production.") to a one-line pointer at the new
+docstring, and (b) append one sentence to the `_claude_config_path()` docstring:
+an empty `CLAUDE_CONFIG_DIR` or `CLAUDE_CONFIG_PATH` counts as unset here,
+while `_claude_config_dir()` treats any value (including empty) as set — a
+harmless asymmetry on a value no real Claude Code install ever sets (review
+cycle 1, MINOR 4).
 
 And rewrite the harness-config comment block above `_claude_config_dir()` (lines ~50–67): keep the `CLAUDE_CONFIG_DIR` relocation and ambient-env-at-import paragraphs, replace the last sentence ("Without CLAUDE_CONFIG_DIR set, the directory is ~/.claude, the same default Claude Code uses.") with: without `CLAUDE_CONFIG_DIR` the config *directory* defaults to `~/.claude` for `settings.json` and plugin data, while `.claude.json` itself sits in the HOME root — that split is what `_claude_config_path()` encodes (issue #93).
 
@@ -220,5 +234,5 @@ git commit -m "chore(release): bump claude-code 0.4.4 — ct_doctor HOME-root co
 ### Task 3: Verify, flip ready, merge-lane handoff
 
 - [ ] **Step 1: Push and confirm CI fully green on the PR head** (`gh pr checks --watch` until every required check passes; read the final state, do not assume).
-- [ ] **Step 2: Flip the spec's Status line from "Draft (awaiting owner approval)" to "Approved (owner, Discord 2026-11-14)"** and update the PR body's Spec section (approved + implementation landed).
+- [ ] **Step 2: Update the PR body's Spec section** (spec approved; implementation landed).
 - [ ] **Step 3: Independent review pass per the review ladder, then request Kurt's review-and-merge approval.** Merge is a merge commit (repo forbids squash/rebase). After merge: close #93, add the delivery-board row, write the vault session record, and re-run the release-drift audit — the new 0.4.4 bump adds a fourth untagged ladder (claude-code) to the deferred tag batch.

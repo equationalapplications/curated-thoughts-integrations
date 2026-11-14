@@ -57,7 +57,8 @@ with no message edits.
   default resolution (see test plan).
 - `integrations/claude-code/integration.yaml` — version bump 0.4.3 → 0.4.4 at
   merge time (repo release model).
-- `integrations/claude-code/package.json` — same version bump.
+- `integrations/claude-code/.claude-plugin/plugin.json` — same version bump
+  (the `version_mirror` target; this integration has no `package.json`).
 - `integrations/claude-code/CHANGELOG.md` — new 0.4.4 section.
 
 ## Test plan
