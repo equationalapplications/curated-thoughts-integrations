@@ -95,7 +95,7 @@ where each question goes (rule 13). The pattern should suit a household, a
   recorded facts a person has confirmed.
 - **Escalation ladder** — the steps (**rungs**) a question climbs: a fixed
   non-AI check first, then cheap AI models, then more capable ones, a
-  person last.
+  person last, only for what no rung can settle.
 - **Schema** — the agreed shape of the company's records, like the printed
   headings on a form.
 - **Role pack** — an installable bundle of roles, starter knowledge and
@@ -172,15 +172,20 @@ arrives. Never raise a limit to make up for weak matching.
 
 *Why:* a flood of loosely related facts is noise, not wisdom.
 
-### 7. Integrations only read, and only through CT's commands
+### 7. Integrations never write to the brain, and only use CT's commands
 
 Integration code never writes to the brain and never opens its database
 directly. It reads only through `ct recall`, `ct wisdom match`, and CT's
 read-only sidecar tools. It never reads vault files that CT hasn't ingested
 yet. Agents running *inside* the harness may still deposit knowledge through
-CT's own deposit tools; that's CT's write path, not ours.
+CT's own deposit tools; that's CT's write path, not ours. A role pack may
+set CT's settings at install, through CT's own commands. It configures the
+Librarian; it never replaces or bypasses it.
 
 *Why:* CT's Librarian is the single gatekeeper for what becomes a fact.
+Settings are not the brain: a pack installing its choices through CT's own
+commands configures CT's own behavior, and the harness plugins stay
+read-only while an agent runs.
 
 *Open decision (derived):* seeds (rule 12), tasks (rule 17), and the
 ladder's verdicts (rule 13) must reach the brain. Whether agents write them
@@ -235,7 +240,8 @@ The executive gives each new team a curated seed: its goals, requirements and
 vocabulary, and keeps that seed current. The team writes what it learns into
 its own memory. The Librarian distills it, and the owner approves what
 automation can't settle. The parent reviews anything a team wants promoted
-to shared knowledge, and the owner can spot-check samples of what the
+to shared knowledge; the promotion is decided by CT's fixed rules and
+reported to the owner (rule 13), and the owner can spot-check samples of what the
 Librarian approved on its own and read reports on it. Over time each team
 owns more of its own memory.
 
@@ -251,25 +257,48 @@ runs every model rung. Every rung must answer
 **only from verified knowledge**, never from its own general knowledge. A
 rung checks *consistency* (a duplicate? a contradiction? does the evidence
 hold? does it fit the schema? is it ready to share upward?) and never rules
-that something is *true*. Three cases always reach the owner, whatever the
-rungs say: a brand-new claim with nothing verified to check it against, a
-contradiction with verified knowledge, and moving a fact from one team's
-section into a shared one. For a promotion, the parent reviews first and the
-owner decides (rule 12). Apart from these, the owner is asked to decide only
-what no rung can settle. A team asking the executive for wisdom climbs the same ladder: the
+that something is *true*. Two cases are always reported to the owner once
+detected: a contradiction with verified knowledge, and moving a fact from
+one team's section into a shared one. CT detects the case (a ladder rung
+may also flag it); CT's fixed rules decide it at once, and the owner gets
+a report they can reverse from *(derived)*. For a promotion, the parent
+reviews first *(derived)*; if the parent approves and no contradiction is
+found, CT's fixed rules promote it at once; if a contradiction is found,
+it is handled as a contradiction case above. The owner gets a report they
+can reverse from either way (rule 12). Nothing waits for the owner by
+default; the one exception is what no rung can settle, which is still
+asked to the owner *(derived)*. A team asking the executive for wisdom climbs the same ladder: the
 executive's knowledge answers first, its attention only when that fails.
+
+These owner actions — a signature in the CT app, or a reversal from a
+report in the CT app — are primarily for accountability *(derived)*. They
+may also put quality questions
+to a person where that is appropriate: strict mode is a setting on one brain
+that names the kinds of statement needing a signature before delivery. The
+default path never relies on a person reviewing items one by one. When
+statements conflict, CT's fixed rules decide automatically: the date decides
+(the newer statement wins), and only a correction a person makes directly
+outranks it. In strict mode, a statement a person has signed cannot be
+retired by one no person has signed. *Signed* means signed in the CT app,
+never that the source text attributes it to someone.
 
 *Why:* the human should be the final judge, not a clerk with a long queue.
 Curation asks only "is this consistent with what we have verified?" and
 never "is this true?" for a specific reason: AI models hallucinate and are
 overconfident, so a model allowed to declare things true would turn
-confident guesses into company rules.
+confident guesses into company rules. In default mode a newer statement can
+retire a verified one; the reversible report to the owner is the safety net,
+and strict mode is the guard where that is not acceptable.
+*Open decision (derived):* whether an owner's original source document can
+be retired this way is left to CT's precedence design.
 
 ### 14. The owner decides how much reaches them
 
 There is no fixed approval chart. At any time the CEO can say "tell me more"
-or "tell me less", and what reaches them changes to match. Turning the dial
-never suppresses the cases rule 13 sends to the owner — those always come.
+or "tell me less", and what reaches them changes to match. At every dial
+setting, the cases rule 13 reports still come and questions only the owner
+can settle are always asked; the dial only changes how much of the rest of
+the report the owner sees.
 However little they choose to see, the full trail — audit logs and reports —
 is always there when they want it.
 
@@ -352,8 +381,9 @@ The process for turning intent into specs, code and releases is in
 [CONTRIBUTING.md](CONTRIBUTING.md#how-changes-are-made). It is process, not
 intent, so it lives there.
 
-How the team intent (rules 10–18) was decided is recorded in decision log
-D1–D22 in the company's knowledge vault, at
+How the team intent (rules 10–18) was decided, and the later amendments to
+rules 7 and 12–14 and the glossary, is recorded in decision log
+D1–D24 in the company's knowledge vault, at
 `immutable-source-files/agents/projects/agent-team-hierarchy-decision-log.md`,
 with the consultation material beside it. This file states the outcome; the
 log keeps the reasoning and every earlier version.
