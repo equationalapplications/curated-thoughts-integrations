@@ -3,6 +3,3 @@ __pycache__/
 .ruff_cache/
 dist/
 .fastembed_cache/
-
-# SDD session scratch (gitignored by standing rule)
-.superpowers/
