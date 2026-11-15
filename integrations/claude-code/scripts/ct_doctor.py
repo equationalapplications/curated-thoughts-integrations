@@ -57,7 +57,9 @@ HARNESS_LABEL = "Claude Code"
 # CLAUDE_CONFIG_PATH is a test-only escape hatch that redirects just the
 # .claude.json path — useful for hermetic tests that need the two files in
 # separate places, not a real Claude Code behavior. Without CLAUDE_CONFIG_DIR
-# set, the directory is ~/.claude, the same default Claude Code uses.
+# the config *directory* defaults to ~/.claude for settings.json and plugin
+# data, while .claude.json itself sits in the HOME root — that split is what
+# _claude_config_path() encodes (issue #93).
 #
 # Ambient env enters here ONCE, at import, and that is deliberate — the same
 # rule Hermes documents for HERMES_CONFIG (issue #29 review, GLM 2026-10-06):
@@ -72,15 +74,30 @@ def _claude_config_dir():
     )
 
 
-# User-scope MCP servers: `claude mcp add --scope user` writes them into
-# .claude.json under `mcpServers`. CLAUDE_CONFIG_PATH overrides this single
-# file for tests; CLAUDE_CONFIG_DIR relocates the whole directory in
-# production.
-CLAUDE_CONFIG = Path(
-    os.environ.get(
-        "CLAUDE_CONFIG_PATH", str(_claude_config_dir() / ".claude.json")
-    )
-)
+# User-scope MCP servers live in .claude.json; see _claude_config_path().
+def _claude_config_path():
+    """The .claude.json Claude Code actually reads and writes.
+
+    Claude Code keeps user-scope `mcpServers` in `.claude.json`. With
+    CLAUDE_CONFIG_DIR set, that file is `$CLAUDE_CONFIG_DIR/.claude.json`.
+    Without it, Claude Code writes `~/.claude.json` in the HOME root —
+    `~/.claude/` holds settings.json and plugin data, never `.claude.json`
+    (issue #93). CLAUDE_CONFIG_PATH remains a test-only override of just
+    this file. An empty CLAUDE_CONFIG_DIR or CLAUDE_CONFIG_PATH counts as
+    unset here, while `_claude_config_dir()` treats any value (including
+    empty) as set — a harmless asymmetry on a value no real Claude Code
+    install ever sets.
+    """
+    override = os.environ.get("CLAUDE_CONFIG_PATH")
+    if override:
+        return Path(override)
+    config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+    if config_dir:
+        return Path(config_dir) / ".claude.json"
+    return Path.home() / ".claude.json"
+
+
+CLAUDE_CONFIG = _claude_config_path()
 # Plugin enablement lives in settings.json — same directory as the .claude.json
 # above, so CLAUDE_CONFIG_DIR relocates it too. CLAUDE_SETTINGS_PATH is the
 # test-only override.
