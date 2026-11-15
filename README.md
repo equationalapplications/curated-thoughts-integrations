@@ -32,7 +32,7 @@ Curated Thoughts installed yet, start there.
 | DeepSeek Harness | [`integrations/deepseek/`](integrations/deepseek/) | implemented | [0.6.11](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=deepseek) |
 | OpenCode | [`integrations/opencode/`](integrations/opencode/) | implemented | [0.4.11](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=opencode) |
 | OpenClaw | [`integrations/openclaw/`](integrations/openclaw/) | implemented | [0.3.7](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=openclaw) |
-| Claude Code | [`integrations/claude-code/`](integrations/claude-code/) | implemented | [0.4.3](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=claude-code) |
+| Claude Code | [`integrations/claude-code/`](integrations/claude-code/) | implemented | [0.4.4](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=claude-code) |
 | [Docker Agent](https://github.com/docker/docker-agent) | [`integrations/docker-agent/`](integrations/docker-agent/) | implemented | [0.1.3](https://github.com/equationalapplications/curated-thoughts-integrations/releases?q=docker-agent) |
 
 Each version links to that integration's releases.
