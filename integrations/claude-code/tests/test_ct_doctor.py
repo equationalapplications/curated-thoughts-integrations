@@ -831,32 +831,8 @@ class RegistrationTests(DoctorTestCase):
         self.patch_env("CLAUDE_CONFIG_PATH", None)
         self.patch_env("CLAUDE_SETTINGS_PATH", None)
         self.patch_env("CLAUDE_CONFIG_DIR", str(alt_dir))
-        ct_doctor.CLAUDE_CONFIG = Path(
-            os.environ.get(
-                "CLAUDE_CONFIG_PATH",
-                str(
-                    Path(
-                        os.environ.get(
-                            "CLAUDE_CONFIG_DIR", str(Path.home() / ".claude")
-                        )
-                    )
-                    / ".claude.json"
-                ),
-            )
-        )
-        ct_doctor.CLAUDE_SETTINGS = Path(
-            os.environ.get(
-                "CLAUDE_SETTINGS_PATH",
-                str(
-                    Path(
-                        os.environ.get(
-                            "CLAUDE_CONFIG_DIR", str(Path.home() / ".claude")
-                        )
-                    )
-                    / "settings.json"
-                ),
-            )
-        )
+        ct_doctor.CLAUDE_CONFIG = ct_doctor._claude_config_path()
+        ct_doctor.CLAUDE_SETTINGS = ct_doctor._claude_config_dir() / "settings.json"
         try:
             r = ct_doctor.check_claude_code_registration(cwd=self.fake_home)
         finally:
