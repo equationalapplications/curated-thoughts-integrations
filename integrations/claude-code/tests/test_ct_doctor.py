@@ -729,6 +729,22 @@ class RegistrationTests(DoctorTestCase):
             str(self.fake_home / ".claude" / ".claude.json"), r.detail
         )
 
+    def test_empty_claude_config_dir_counts_as_unset(self):
+        # An empty CLAUDE_CONFIG_DIR must resolve the same as an unset one
+        # for BOTH config files. _claude_config_path() already treats it
+        # as unset; _claude_config_dir() used to treat it as set, yielding
+        # Path("") — a cwd-relative settings.json (follow-up to #93).
+        self.patch_env("CLAUDE_CONFIG_PATH", None)
+        self.patch_env("CLAUDE_SETTINGS_PATH", None)
+        self.patch_env("CLAUDE_CONFIG_DIR", "")
+        self.assertEqual(
+            ct_doctor._claude_config_path(), self.fake_home / ".claude.json"
+        )
+        self.assertEqual(
+            ct_doctor._claude_config_dir() / "settings.json",
+            self.fake_home / ".claude" / "settings.json",
+        )
+
     def test_claude_config_dir_relocates_the_config(self):
         # Pin the existing CLAUDE_CONFIG_DIR semantics for the user-scope
         # config: .claude.json follows into the custom directory. (The

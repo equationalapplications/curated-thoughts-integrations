@@ -69,8 +69,12 @@ HARNESS_LABEL = "Claude Code"
 # different Claude Code install. check_claude_code_registration therefore
 # reads ambient by design; every other check resolves through _merged_env.
 def _claude_config_dir():
+    # `or`, not a default argument: an empty CLAUDE_CONFIG_DIR counts as
+    # unset, same as in _claude_config_path() — `Path("")` would make
+    # settings.json cwd-relative, which is never where Claude Code reads
+    # it (follow-up to issue #93).
     return Path(
-        os.environ.get("CLAUDE_CONFIG_DIR", str(Path.home() / ".claude"))
+        os.environ.get("CLAUDE_CONFIG_DIR") or str(Path.home() / ".claude")
     )
 
 
@@ -84,9 +88,8 @@ def _claude_config_path():
     `~/.claude/` holds settings.json and plugin data, never `.claude.json`
     (issue #93). CLAUDE_CONFIG_PATH remains a test-only override of just
     this file. An empty CLAUDE_CONFIG_DIR or CLAUDE_CONFIG_PATH counts as
-    unset here, while `_claude_config_dir()` treats any value (including
-    empty) as set — a harmless asymmetry on a value no real Claude Code
-    install ever sets.
+    unset here, and _claude_config_dir() treats empty the same way — the
+    two helpers agree on every value of CLAUDE_CONFIG_DIR.
     """
     override = os.environ.get("CLAUDE_CONFIG_PATH")
     if override:
