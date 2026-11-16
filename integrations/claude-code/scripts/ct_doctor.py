@@ -57,7 +57,9 @@ HARNESS_LABEL = "Claude Code"
 # CLAUDE_CONFIG_PATH is a test-only escape hatch that redirects just the
 # .claude.json path — useful for hermetic tests that need the two files in
 # separate places, not a real Claude Code behavior. Without CLAUDE_CONFIG_DIR
-# set, the directory is ~/.claude, the same default Claude Code uses.
+# the config *directory* defaults to ~/.claude for settings.json and plugin
+# data, while .claude.json itself sits in the HOME root — that split is what
+# _claude_config_path() encodes (issue #93).
 #
 # Ambient env enters here ONCE, at import, and that is deliberate — the same
 # rule Hermes documents for HERMES_CONFIG (issue #29 review, GLM 2026-10-06):
@@ -67,23 +69,41 @@ HARNESS_LABEL = "Claude Code"
 # different Claude Code install. check_claude_code_registration therefore
 # reads ambient by design; every other check resolves through _merged_env.
 def _claude_config_dir():
+    # `or`, not a default argument: an empty CLAUDE_CONFIG_DIR counts as
+    # unset, same as in _claude_config_path() — `Path("")` would make
+    # settings.json cwd-relative, which is never where Claude Code reads
+    # it (follow-up to issue #93).
     return Path(
-        os.environ.get("CLAUDE_CONFIG_DIR", str(Path.home() / ".claude"))
+        os.environ.get("CLAUDE_CONFIG_DIR") or str(Path.home() / ".claude")
     )
 
 
-# User-scope MCP servers: `claude mcp add --scope user` writes them into
-# .claude.json under `mcpServers`. CLAUDE_CONFIG_PATH overrides this single
-# file for tests; CLAUDE_CONFIG_DIR relocates the whole directory in
-# production.
-CLAUDE_CONFIG = Path(
-    os.environ.get(
-        "CLAUDE_CONFIG_PATH", str(_claude_config_dir() / ".claude.json")
-    )
-)
-# Plugin enablement lives in settings.json — same directory as the .claude.json
-# above, so CLAUDE_CONFIG_DIR relocates it too. CLAUDE_SETTINGS_PATH is the
-# test-only override.
+# User-scope MCP servers live in .claude.json; see _claude_config_path().
+def _claude_config_path():
+    """The .claude.json Claude Code actually reads and writes.
+
+    Claude Code keeps user-scope `mcpServers` in `.claude.json`. With
+    CLAUDE_CONFIG_DIR set, that file is `$CLAUDE_CONFIG_DIR/.claude.json`.
+    Without it, Claude Code writes `~/.claude.json` in the HOME root —
+    `~/.claude/` holds settings.json and plugin data, never `.claude.json`
+    (issue #93). CLAUDE_CONFIG_PATH remains a test-only override of just
+    this file. An empty CLAUDE_CONFIG_DIR or CLAUDE_CONFIG_PATH counts as
+    unset here, and _claude_config_dir() treats empty the same way — the
+    two helpers agree on every value of CLAUDE_CONFIG_DIR.
+    """
+    override = os.environ.get("CLAUDE_CONFIG_PATH")
+    if override:
+        return Path(override)
+    config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+    if config_dir:
+        return Path(config_dir) / ".claude.json"
+    return Path.home() / ".claude.json"
+
+
+CLAUDE_CONFIG = _claude_config_path()
+# Plugin enablement lives in settings.json, inside the config directory
+# (~/.claude by default, or $CLAUDE_CONFIG_DIR) — unlike .claude.json, it is
+# never at the HOME root. CLAUDE_SETTINGS_PATH is the test-only override.
 CLAUDE_SETTINGS = Path(
     os.environ.get(
         "CLAUDE_SETTINGS_PATH", str(_claude_config_dir() / "settings.json")

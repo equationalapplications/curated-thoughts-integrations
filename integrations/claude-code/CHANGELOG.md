@@ -6,6 +6,18 @@ heading format below is load-bearing: `## <version> — <date>`.
 
 ## Unreleased
 
+## 0.4.4 — 2026-11-15
+
+- Fixed: `ct_doctor.py check` no longer reports a false
+  `claude-code-registration` FAIL on healthy installs. With
+  `CLAUDE_CONFIG_DIR` unset the doctor now reads the user-scope config
+  from `~/.claude.json` in the HOME root — where Claude Code actually
+  writes it — instead of `~/.claude/.claude.json` (#93).
+- Fixed: an empty `CLAUDE_CONFIG_DIR` (set but blank) now resolves the
+  same as unset everywhere — previously `_claude_config_dir()` treated
+  it as set, making the settings.json path cwd-relative (follow-up to
+  #93).
+
 ## 0.4.3 — 2026-10-17
 
 - Internal: the shared `ct_wisdom_activity.py` no longer carries the Hermes-only

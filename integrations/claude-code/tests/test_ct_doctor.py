@@ -213,7 +213,7 @@ class DoctorTestCase(unittest.TestCase):
         self.patch_env("OLLAMA_HOST", "http://127.0.0.1:1")  # nothing listens
         # Re-resolve module-level paths against the fake home: both were
         # computed at import time, against the real one.
-        ct_doctor.CLAUDE_CONFIG = Path(os.environ["CLAUDE_CONFIG_PATH"])
+        ct_doctor.CLAUDE_CONFIG = ct_doctor._claude_config_path()
         ct_doctor.CLAUDE_SETTINGS = self.fake_home / ".claude" / "settings.json"
         self.addCleanup(self._cleanup)
         # Issue #28 precondition (ported from Hermes): the mock MUST be what
@@ -238,11 +238,7 @@ class DoctorTestCase(unittest.TestCase):
                 os.environ.pop(key, None)
             else:
                 os.environ[key] = value
-        ct_doctor.CLAUDE_CONFIG = Path(
-            os.environ.get(
-                "CLAUDE_CONFIG_PATH", str(Path.home() / ".claude.json")
-            )
-        )
+        ct_doctor.CLAUDE_CONFIG = ct_doctor._claude_config_path()
         ct_doctor.CLAUDE_SETTINGS = Path.home() / ".claude" / "settings.json"
         self._tmp.cleanup()
 
@@ -704,6 +700,79 @@ class RegistrationTests(DoctorTestCase):
         self.assertEqual(r.status, ct_doctor.PASS, r.detail)
         self.assertIn("local scope", r.detail)
 
+    def _use_default_config_resolution(self):
+        """Drop the fixture's CLAUDE_CONFIG_PATH override; re-resolve."""
+        self.patch_env("CLAUDE_CONFIG_PATH", None)
+        self.patch_env("CLAUDE_CONFIG_DIR", None)
+        ct_doctor.CLAUDE_CONFIG = ct_doctor._claude_config_path()
+
+    def test_default_config_resolution_is_the_home_root_file(self):
+        # Issue #93: with no CLAUDE_CONFIG_DIR, Claude Code writes
+        # user-scope mcpServers into ~/.claude.json at the HOME root,
+        # never ~/.claude/.claude.json. The doctor must look there.
+        self._use_default_config_resolution()
+        self.assertEqual(
+            ct_doctor.CLAUDE_CONFIG, self.fake_home / ".claude.json"
+        )
+        self.write_config()
+        self.write_settings()
+        r = self.check()
+        self.assertEqual(r.status, ct_doctor.PASS, r.detail)
+        self.assertIn(str(self.fake_home / ".claude.json"), r.detail)
+
+    def test_default_fail_names_the_home_root_path(self):
+        self._use_default_config_resolution()
+        r = self.check()
+        self.assertEqual(r.status, ct_doctor.FAIL)
+        self.assertIn(str(self.fake_home / ".claude.json"), r.detail)
+        self.assertNotIn(
+            str(self.fake_home / ".claude" / ".claude.json"), r.detail
+        )
+
+    def test_empty_claude_config_dir_counts_as_unset(self):
+        # An empty CLAUDE_CONFIG_DIR must resolve the same as an unset one
+        # for BOTH config files. _claude_config_path() already treats it
+        # as unset; _claude_config_dir() used to treat it as set, yielding
+        # Path("") — a cwd-relative settings.json (follow-up to #93).
+        self.patch_env("CLAUDE_CONFIG_PATH", None)
+        self.patch_env("CLAUDE_SETTINGS_PATH", None)
+        self.patch_env("CLAUDE_CONFIG_DIR", "")
+        self.assertEqual(
+            ct_doctor._claude_config_path(), self.fake_home / ".claude.json"
+        )
+        self.assertEqual(
+            ct_doctor._claude_config_dir() / "settings.json",
+            self.fake_home / ".claude" / "settings.json",
+        )
+
+    def test_claude_config_dir_relocates_the_config(self):
+        # Pin the existing CLAUDE_CONFIG_DIR semantics for the user-scope
+        # config: .claude.json follows into the custom directory. (The
+        # settings.json relocation is unchanged existing behavior and is
+        # not re-pinned here.)
+        self.patch_env("CLAUDE_CONFIG_PATH", None)
+        custom = self.fake_home / "custom"
+        custom.mkdir()
+        self.patch_env("CLAUDE_CONFIG_DIR", str(custom))
+        ct_doctor.CLAUDE_CONFIG = ct_doctor._claude_config_path()
+        self.assertEqual(ct_doctor.CLAUDE_CONFIG, custom / ".claude.json")
+        (custom / ".claude.json").write_text(
+            json.dumps(
+                {
+                    "mcpServers": {
+                        "curated-thoughts": {
+                            "command": str(self.mock_path),
+                            "args": ["--mcp"],
+                        }
+                    }
+                }
+            )
+        )
+        self.write_settings()
+        r = self.check()
+        self.assertEqual(r.status, ct_doctor.PASS, r.detail)
+        self.assertIn(str(custom / ".claude.json"), r.detail)
+
     def test_local_scope_under_a_different_cwd_does_not_count(self):
         # The local-scope key is the cwd at registration time; a doctor
         # run from a different cwd must not pick up someone else's
@@ -778,32 +847,8 @@ class RegistrationTests(DoctorTestCase):
         self.patch_env("CLAUDE_CONFIG_PATH", None)
         self.patch_env("CLAUDE_SETTINGS_PATH", None)
         self.patch_env("CLAUDE_CONFIG_DIR", str(alt_dir))
-        ct_doctor.CLAUDE_CONFIG = Path(
-            os.environ.get(
-                "CLAUDE_CONFIG_PATH",
-                str(
-                    Path(
-                        os.environ.get(
-                            "CLAUDE_CONFIG_DIR", str(Path.home() / ".claude")
-                        )
-                    )
-                    / ".claude.json"
-                ),
-            )
-        )
-        ct_doctor.CLAUDE_SETTINGS = Path(
-            os.environ.get(
-                "CLAUDE_SETTINGS_PATH",
-                str(
-                    Path(
-                        os.environ.get(
-                            "CLAUDE_CONFIG_DIR", str(Path.home() / ".claude")
-                        )
-                    )
-                    / "settings.json"
-                ),
-            )
-        )
+        ct_doctor.CLAUDE_CONFIG = ct_doctor._claude_config_path()
+        ct_doctor.CLAUDE_SETTINGS = ct_doctor._claude_config_dir() / "settings.json"
         try:
             r = ct_doctor.check_claude_code_registration(cwd=self.fake_home)
         finally:
