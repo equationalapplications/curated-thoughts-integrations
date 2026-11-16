@@ -236,3 +236,18 @@ git commit -m "chore(release): bump claude-code 0.4.4 — ct_doctor HOME-root co
 - [ ] **Step 1: Push and confirm CI fully green on the PR head** (`gh pr checks --watch` until every required check passes; read the final state, do not assume).
 - [ ] **Step 2: Update the PR body's Spec section** (spec approved; implementation landed).
 - [ ] **Step 3: Independent review pass per the review ladder, then request Kurt's review-and-merge approval.** Merge is a merge commit (repo forbids squash/rebase). After merge: close #93, add the delivery-board row, write the vault session record, and re-run the release-drift audit — the new 0.4.4 bump adds a fourth untagged ladder (claude-code) to the deferred tag batch.
+
+---
+
+### Addendum — 2026-11-15 (owner ruling, merge-ask option 3)
+
+Owner ruled in-thread 2026-11-15 that the carried review finding (empty
+`CLAUDE_CONFIG_DIR` treated as set by `_claude_config_dir()`, deferral
+confirmed by 3 review rungs) lands INSIDE this PR instead of a follow-up
+issue. That supersedes this plan's "`_claude_config_dir()` ... untouched"
+constraint and its "harmless asymmetry" documentation line: commit
+`aaaa415` adds the `or`-default to `_claude_config_dir()`, pins it with
+`test_empty_claude_config_dir_counts_as_unset` (a fourth test), and the
+0.4.4 CHANGELOG carries the entry. The 0.4.4 CHANGELOG date is the ship
+date (2026-11-15), not this plan's freeze date — that split is the
+standing ruling, not a date error.

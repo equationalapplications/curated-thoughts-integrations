@@ -103,8 +103,7 @@ def _claude_config_path():
 CLAUDE_CONFIG = _claude_config_path()
 # Plugin enablement lives in settings.json, inside the config directory
 # (~/.claude by default, or $CLAUDE_CONFIG_DIR) — unlike .claude.json, it is
-# never at the HOME root. CLAUDE_SETTINGS_PATH is the
-# test-only override.
+# never at the HOME root. CLAUDE_SETTINGS_PATH is the test-only override.
 CLAUDE_SETTINGS = Path(
     os.environ.get(
         "CLAUDE_SETTINGS_PATH", str(_claude_config_dir() / "settings.json")

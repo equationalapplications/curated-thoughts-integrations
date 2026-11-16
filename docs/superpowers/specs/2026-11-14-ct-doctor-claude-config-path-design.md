@@ -101,3 +101,10 @@ CI green on the PR.
   failing healthy installs, which is what it exists to verify.
 - The doctor is install-verification tooling, not delivery behavior; no
   delivery rule changes. **No departure from INTENT.md.**
+
+## Addendum — 2026-11-15 (owner ruling, merge-ask option 3)
+
+Owner ruled that the deferred empty-`CLAUDE_CONFIG_DIR` finding is fixed
+inside this PR: `_claude_config_dir()` now treats an empty value as
+unset (`or`-default), matching `_claude_config_path()`. The "untouched"
+wording above is superseded; see the plan addendum and commit `aaaa415`.
