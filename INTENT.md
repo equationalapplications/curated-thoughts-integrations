@@ -177,7 +177,14 @@ arrives. Never raise a limit to make up for weak matching.
 Integration code never writes to the brain and never opens its database
 directly. It reads only through `ct recall`, `ct wisdom match`, and CT's
 read-only sidecar tools. It never reads vault files that CT hasn't ingested
-yet. Agents running *inside* the harness may still deposit knowledge through
+yet. Where this file says a state name or lifecycle verb (forgotten,
+superseded, and the like), or "erased" (the verified outcome of
+`erase()`, not a state), it means what CT's memory engine's
+glossary means; "compaction" here means harness context compaction only,
+never an engine lifecycle state. One exception to read-only:
+`ct_preflight` never writes to the brain, but may write its own small
+cache file on the machine. Agents running *inside* the
+harness may still deposit knowledge through
 CT's own deposit tools; that's CT's write path, not ours. A role pack may
 set CT's settings at install, through CT's own commands. It configures the
 Librarian; it never replaces or bypasses it.
